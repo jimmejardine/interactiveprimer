@@ -123,14 +123,14 @@ test("validateGraph flags cycles", () => {
 test("validateGraph flags orphans unreachable from a root", () => {
   /** @type {Concept[]} */
   const cs = [
-    { id: "math/counting", title: "Counting", prerequisites: [], root: true, declaredLevel: 0 },
+    { id: "arithmetic/counting", title: "Counting", prerequisites: [], root: true, declaredLevel: 0 },
     // A stray island: foo is not a root, and bar only depends on foo.
-    { id: "physics/foo", title: "Foo", prerequisites: [] },
-    { id: "physics/bar", title: "Bar", prerequisites: ["physics/foo"] },
+    { id: "stray/foo", title: "Foo", prerequisites: [] },
+    { id: "stray/bar", title: "Bar", prerequisites: ["stray/foo"] },
   ];
   const { diagnostics } = validateGraph(cs);
   const orphans = diagnostics.filter((d) => d.code === "orphan").map((d) => d.concept);
-  assert.deepEqual(new Set(orphans), new Set(["physics/foo", "physics/bar"]));
+  assert.deepEqual(new Set(orphans), new Set(["stray/foo", "stray/bar"]));
 });
 
 test("validateGraph errors when there are no roots", () => {

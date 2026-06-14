@@ -3,10 +3,10 @@
 ## Overview
 
 Welcome to the Interactive Primer. It is an open-source collection of "smart web
-pages" that teaches the entirety of mathematics, physics and computer science from
-the age of 6 to 66. It starts with age-appropriate concepts, slowly working through
-a tree of knowledge of increasingly difficult ideas. For the keenest of learners it
-will cover the most advanced topics in these three subjects (beyond PhD level). The
+pages" that teach the whole of human knowledge from the age of 6 to 66. It starts
+with age-appropriate concepts, slowly working through a tree of knowledge of
+increasingly difficult ideas. For the keenest of learners it will cover the most
+advanced topics imaginable (beyond PhD level). The
 primer keeps track of your progress, both through "self-attested" confidence on each
 concept's page, and via randomly generated "multiple choice test" pages.
 
@@ -51,7 +51,7 @@ Levels give learners that sense of altitude: before starting concepts at a given
 one should be comfortable with the concepts of the levels below it.
 
 Every concept is identified by its **full path** in the tree (e.g.
-`mathematics/arithmetic/addition`), which is also where its page lives under `concepts/`.
+`arithmetic/addition`), which is also where its page lives under `concepts/`.
 Prerequisites are referenced by these same full-path ids.
 
 ## Technology
@@ -63,7 +63,7 @@ time — **there is no build step**. The toolchain:
   [`js/boot.js`](js/boot.js) injects the CSS and the **import map** (which loads
   dependencies straight from a CDN) and loads the renderer. See
   [`docs/import-map.md`](docs/import-map.md) for the full authoring template.
-- **[KaTeX](https://katex.org/)** typesets mathematics; **[manim-web](https://github.com/maloyan/manim-web)**
+- **[KaTeX](https://katex.org/)** typesets mathematical notation; **[manim-web](https://github.com/maloyan/manim-web)**
   (a TypeScript port of Manim) renders animations. Both are imported as pre-built ESM.
 - **Web Components** in [`js/components/`](js/components/) give every page a consistent
   look-and-feel. Authors write content as `<primer-card>` cards using `<primer-math>`,
@@ -108,7 +108,7 @@ npm run serve      # static file server; open /index.html
 
 Type-checking, tests and graph validation need no compilation; they are *checks*, not a
 build. Authoring a new concept is just adding an `.html` page (copy
-`concepts/mathematics/arithmetic/counting.html`) — its `concept-meta` id must match the new
+`concepts/arithmetic/counting.html`) — its `concept-meta` id must match the new
 file's path under `concepts/` — plus an optional `*.quiz.json` bank.
 
 

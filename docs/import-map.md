@@ -23,9 +23,9 @@ custom-element registration, and the page shell) is handled by
     <!-- 2) The concept's metadata (see below). -->
     <script type="application/json" class="concept-meta">
       {
-        "id": "mathematics/arithmetic/addition",
+        "id": "arithmetic/addition",
         "title": "Addition",
-        "prerequisites": ["mathematics/arithmetic/counting"]
+        "prerequisites": ["arithmetic/counting"]
       }
     </script>
   </head>
@@ -40,8 +40,8 @@ custom-element registration, and the page shell) is handled by
 ```
 
 `boot.js` injects the CSS and import map and loads the renderer, which reads the
-`concept-meta` block and wraps your cards in the page shell (header with subject,
-level badge and prerequisite links; the title; a self-attested confidence control;
+`concept-meta` block and wraps your cards in the page shell (header with the level
+badge and prerequisite links; the title; a self-attested confidence control;
 and a footer). You write only the cards — no `<primer-page>`/`<primer-concept>`
 wrappers.
 
@@ -54,9 +54,9 @@ concept's place in the knowledge tree. Its `id` must equal the page's path under
 ```html
 <script type="application/json" class="concept-meta">
   {
-    "id": "mathematics/arithmetic/addition",
+    "id": "arithmetic/addition",
     "title": "Addition",
-    "prerequisites": ["mathematics/arithmetic/counting"],
+    "prerequisites": ["arithmetic/counting"],
     "declaredLevel": 2.5,
     "root": false
   }

@@ -5,8 +5,8 @@
  *
  * The model mirrors README.md:
  *  - The knowledge structure is a DAG (we call it the "tree").
- *  - Each concept has a full-path id (e.g. "mathematics/arithmetic/addition") and
- *    its prerequisites are referenced by those same full-path ids (the DAG edges).
+ *  - Each concept has a full-path id (e.g. "arithmetic/addition") and its
+ *    prerequisites are referenced by those same full-path ids (the DAG edges).
  *  - A concept MAY declare a numeric level; a declared level propagates downstream
  *    to every concept that depends on it (directly or transitively).
  *  - A concept MAY mark itself a `root` (an entry point with no prerequisites).
@@ -25,7 +25,7 @@
  * The authored metadata for one concept (the inline `concept-meta` JSON block on a
  * page, and the unit of the knowledge graph).
  * @typedef {object} ConceptMeta
- * @property {string} id            Full-path id, e.g. "mathematics/arithmetic/addition".
+ * @property {string} id            Full-path id, e.g. "arithmetic/addition".
  * @property {string} title         Human-readable title, e.g. "Addition".
  * @property {string[]} prerequisites  Full-path ids of concepts required first (DAG edges).
  * @property {Level} [declaredLevel]   Optional numeric level explicitly declared.
@@ -88,8 +88,9 @@
  */
 
 /**
- * The learner's self-attested confidence for a concept, 0 (none) to 3 (mastered).
- * @typedef {0 | 1 | 2 | 3} Confidence
+ * The learner's self-attested confidence for a concept, as a number of stars from
+ * 0 (none) to 10 (complete mastery). An integer in the range [0, 10].
+ * @typedef {number} Confidence
  */
 
 export {};

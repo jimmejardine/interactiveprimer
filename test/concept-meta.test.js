@@ -5,15 +5,15 @@ import { parseConceptMeta } from "../js/concept-meta.js";
 
 test("parseConceptMeta accepts a full, valid concept", () => {
   const meta = parseConceptMeta({
-    id: "mathematics/arithmetic/addition",
+    id: "arithmetic/addition",
     title: "Addition",
-    prerequisites: ["mathematics/arithmetic/counting"],
+    prerequisites: ["arithmetic/counting"],
     declaredLevel: 2.5,
     root: false,
   });
-  assert.equal(meta.id, "mathematics/arithmetic/addition");
+  assert.equal(meta.id, "arithmetic/addition");
   assert.equal(meta.declaredLevel, 2.5);
-  assert.deepEqual(meta.prerequisites, ["mathematics/arithmetic/counting"]);
+  assert.deepEqual(meta.prerequisites, ["arithmetic/counting"]);
 });
 
 test("parseConceptMeta defaults prerequisites to an empty array", () => {
