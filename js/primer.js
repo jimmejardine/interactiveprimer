@@ -13,6 +13,7 @@
 // Registering side effects: each module defines its custom element on import.
 import "./components/primer-page.js";
 import "./components/primer-concept.js";
+import "./components/primer-card.js";
 import "./components/primer-math.js";
 import "./components/primer-manim.js";
 import "./components/primer-quiz.js";
@@ -20,7 +21,7 @@ import "./components/primer-quiz.js";
 // Re-exports for page scripts.
 export { registerScene, getScene } from "./scenes.js";
 export { parseConceptMeta, getConceptMeta } from "./concept-meta.js";
-export { BASE_LEVEL, LEVEL_BANDS, maxLevel, levelBand, formatLevel } from "./levels.js";
+export { BASE_LEVEL, maxLevel, formatLevel } from "./levels.js";
 export {
   indexConcepts,
   findRoots,

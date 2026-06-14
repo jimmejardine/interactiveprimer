@@ -4,7 +4,7 @@
 
 Welcome to the Interactive Primer. It is an open-source collection of "smart web
 pages" that teaches the entirety of mathematics, physics and computer science from
-the age of 3 to 103. It starts with age-appropriate concepts, slowly working through
+the age of 6 to 66. It starts with age-appropriate concepts, slowly working through
 a tree of knowledge of increasingly difficult ideas. For the keenest of learners it
 will cover the most advanced topics in these three subjects (beyond PhD level). The
 primer keeps track of your progress, both through "self-attested" confidence on each
@@ -35,10 +35,10 @@ already be understood.
 
 As one rises higher up the tree, sub-branches might rely on entire collections of other
 sub-branches. To keep this navigable, every concept has a **level** — a *real number*.
-It is usually a whole number that roughly equates to a stage of education (an early
-school-age band, a later school-age band, an undergraduate university level, and so on up
-to the most advanced research-level material), but fractional values are allowed so a new
-concept can be squeezed in between two existing ones (e.g. level 2.5).
+It is usually a whole number that roughly tracks how far up the tree a concept sits —
+lower numbers for the earliest ideas, higher numbers for the most advanced material — but
+fractional values are allowed so a new concept can be squeezed in between two existing
+ones (e.g. level 2.5).
 
 Levels **implicitly start at 0** and a page need not declare one. But when a page **does**
 declare a level, that level flows downstream through the tree: every later concept that
@@ -59,14 +59,18 @@ Prerequisites are referenced by these same full-path ids.
 Each "smart web page" is a plain `.html` file that pulls in everything it needs at load
 time — **there is no build step**. The toolchain:
 
-- **Native ES modules + import maps** load dependencies straight from a CDN. See
-  [`docs/import-map.md`](docs/import-map.md) for the block every page includes.
+- **One include per page.** A page adds a single `<script src="/js/boot.js"></script>`;
+  [`js/boot.js`](js/boot.js) injects the CSS and the **import map** (which loads
+  dependencies straight from a CDN) and loads the renderer. See
+  [`docs/import-map.md`](docs/import-map.md) for the full authoring template.
 - **[KaTeX](https://katex.org/)** typesets mathematics; **[manim-web](https://github.com/maloyan/manim-web)**
   (a TypeScript port of Manim) renders animations. Both are imported as pre-built ESM.
 - **Web Components** in [`js/components/`](js/components/) give every page a consistent
-  look-and-feel: `<primer-page>`, `<primer-concept>`, `<primer-math>`, `<primer-manim>`,
-  and `<primer-quiz>`. They are registered by importing the single [`js/primer.js`](js/primer.js)
-  module.
+  look-and-feel. Authors write content as `<primer-card>` cards using `<primer-math>`,
+  `<primer-manim>`, and `<primer-quiz>`; the page shell (`<primer-page>` header/footer
+  and `<primer-concept>` title + confidence control) is built automatically by
+  [`js/render.js`](js/render.js) from the page's metadata block. All elements are
+  registered by the single [`js/primer.js`](js/primer.js) module.
 - **Typed JavaScript + JSDoc** (no `.ts` authoring). Code runs raw in the browser and in
   Node, yet is fully type-checked by `tsc` against the libraries' own type definitions.
 - The knowledge-tree logic — prerequisite resolution and downstream **level propagation** —
@@ -106,3 +110,8 @@ Type-checking, tests and graph validation need no compilation; they are *checks*
 build. Authoring a new concept is just adding an `.html` page (copy
 `concepts/mathematics/arithmetic/counting.html`) — its `concept-meta` id must match the new
 file's path under `concepts/` — plus an optional `*.quiz.json` bank.
+
+
+## Acknowledgements
+
+- https://www.svgrepo.com

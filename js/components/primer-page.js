@@ -17,7 +17,7 @@
 
 import { attachShared } from "./shared.js";
 import { getConceptMeta } from "../concept-meta.js";
-import { levelBand, formatLevel } from "../levels.js";
+import { formatLevel } from "../levels.js";
 
 export class PrimerPage extends HTMLElement {
   connectedCallback() {
@@ -30,7 +30,7 @@ export class PrimerPage extends HTMLElement {
 
     const badge =
       declared !== undefined
-        ? `<span class="badge" title="Declared level">Level ${formatLevel(declared)} · ${levelBand(declared)}</span>`
+        ? `<span class="badge" title="Declared level">Level ${formatLevel(declared)}</span>`
         : "";
 
     const prereqList = prereqs.length
