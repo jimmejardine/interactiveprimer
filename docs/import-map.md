@@ -107,6 +107,20 @@ import just works:
 </script>
 ```
 
+A scene can also narrate aloud with `speak(text)` (re-exported from `primer`), which
+uses the browser's built-in speech and resolves when the phrase finishes — so it can
+be awaited in lockstep with `scene.play(...)`. Speech only starts on the Play click
+(per browser autoplay rules) and is silently skipped where unsupported; replaying
+cancels any in-progress narration.
+
+```js
+import { registerScene, speak } from "primer";
+registerScene("countOne", async (host, manim) => {
+  const scene = new manim.Scene(host);
+  await Promise.all([scene.play(/* … */), speak("one")]);
+});
+```
+
 ## Notes
 
 - **Versions are pinned in one place** — [`js/boot.js`](../js/boot.js) holds the

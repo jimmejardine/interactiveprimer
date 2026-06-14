@@ -14,6 +14,7 @@
 
 import { attachShared } from "./shared.js";
 import { getScene } from "../scenes.js";
+import { cancelSpeech } from "../speech.js";
 
 export class PrimerManim extends HTMLElement {
   /** @type {boolean} */
@@ -53,7 +54,9 @@ export class PrimerManim extends HTMLElement {
     playBtn.textContent = "Playing…";
     try {
       const manim = await import("manim-web");
-      // Clear any previous render so replaying doesn't stack a second, larger scene.
+      // Clear any previous render (and stop any prior narration) so replaying doesn't
+      // stack a second scene or overlap the old voice with the new run.
+      cancelSpeech();
       stage.replaceChildren();
       await builder(stage, manim);
       playBtn.textContent = "↻ Replay";

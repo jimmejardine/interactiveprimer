@@ -20,6 +20,7 @@ import "./components/primer-quiz.js";
 
 // Re-exports for page scripts.
 export { registerScene, getScene } from "./scenes.js";
+export { speak, cancelSpeech } from "./speech.js";
 export { parseConceptMeta, getConceptMeta } from "./concept-meta.js";
 export { BASE_LEVEL, maxLevel, formatLevel } from "./levels.js";
 export {
