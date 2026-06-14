@@ -1,10 +1,18 @@
 // @ts-check
 /**
- * <primer-quiz src="addition.quiz.json" count="3"> — a randomly generated
- * multiple-choice test. Questions are loaded from a JSON bank (an array of
- * QuizQuestion), then `count` are selected and their options shuffled via the
- * pure logic in js/quiz.js. Question prompts and options may contain LaTeX, which
- * is typeset with KaTeX.
+ * <primer-quiz count="3"> — a randomly generated multiple-choice test. The question
+ * bank is authored inline, as a child `<script type="application/json">` holding an
+ * array of QuizQuestion:
+ *
+ *   <primer-quiz count="3">
+ *     <script type="application/json">
+ *       [ { "prompt": "What is $2 + 3$?", "options": [ ... ] }, ... ]
+ *     </script>
+ *   </primer-quiz>
+ *
+ * From that bank `count` questions are selected and their options shuffled via the
+ * pure logic in js/quiz.js. Prompts and options may contain LaTeX (wrapped in $…$),
+ * which is typeset with KaTeX.
  * @module
  */
 
@@ -16,31 +24,29 @@ import { generateQuiz } from "../quiz.js";
 /** @typedef {import("../types/domain.js").GeneratedQuiz} GeneratedQuiz */
 
 export class PrimerQuiz extends HTMLElement {
-  async connectedCallback() {
+  connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
-    const src = this.getAttribute("src");
     const count = Number(this.getAttribute("count") ?? "3");
-    root.innerHTML = `<div class="card"><p class="meta">Loading test…</p></div>`;
 
-    if (!src) {
-      root.innerHTML = `<div class="card"><p class="meta">No quiz source provided.</p></div>`;
+    // The question bank is authored inline, as a child <script type="application/json">.
+    const bankEl = this.querySelector(':scope > script[type="application/json"]');
+    if (!bankEl || !bankEl.textContent) {
+      root.innerHTML = `<div class="card"><p class="meta">No quiz questions provided.</p></div>`;
       return;
     }
 
-    /** @type {QuizQuestion[]} */
-    let bank;
+    /** @type {GeneratedQuiz} */
+    let quiz;
     try {
-      const res = await fetch(src);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      bank = await res.json();
+      const bank = /** @type {QuizQuestion[]} */ (JSON.parse(bankEl.textContent));
+      quiz = generateQuiz(bank, count, Math.random);
     } catch (err) {
-      root.innerHTML = `<div class="card"><p class="meta">Couldn't load the test (${
+      root.innerHTML = `<div class="card"><p class="meta">Couldn't build the test (${
         err instanceof Error ? err.message : String(err)
       }).</p></div>`;
       return;
     }
 
-    const quiz = generateQuiz(bank, count, Math.random);
     this.#render(root, quiz);
   }
 
@@ -115,19 +121,28 @@ export class PrimerQuiz extends HTMLElement {
 }
 
 /**
- * Render a string that may contain LaTeX. For simplicity the whole string is
- * treated as inline math when wrapped in $...$, otherwise as plain text.
+ * Render a string that may contain inline LaTeX spans delimited by $…$. Each math
+ * span is typeset with KaTeX; the text around the spans is escaped as plain text. So
+ * "What is $2 + 3$?" renders the "2 + 3" as math and leaves the rest as prose.
  * @param {string} text
  * @returns {string}
  */
 function tex(text) {
-  const m = text.match(/^\$(.*)\$$/s);
-  if (!m) return escapeHtml(text);
-  try {
-    return katex.renderToString(m[1], { throwOnError: false });
-  } catch {
-    return escapeHtml(text);
+  const re = /\$([^$]+)\$/g;
+  let out = "";
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    out += escapeHtml(text.slice(last, m.index));
+    try {
+      out += katex.renderToString(m[1], { throwOnError: false });
+    } catch {
+      out += escapeHtml(m[0]);
+    }
+    last = re.lastIndex;
   }
+  out += escapeHtml(text.slice(last));
+  return out;
 }
 
 /**
