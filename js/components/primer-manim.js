@@ -25,7 +25,7 @@ export class PrimerManim extends HTMLElement {
     const caption = this.getAttribute("caption") ?? "";
     root.innerHTML = `
       <div class="card">
-        <div class="stage" part="stage" style="min-height: 12rem; display: grid; place-items: center;"></div>
+        <div class="stage" part="stage" style="min-height: 24rem; display: grid; place-items: center;"></div>
         <div class="controls" style="margin-top: 0.75rem; display: flex; gap: 0.75rem; align-items: center;">
           <button type="button" class="play">▶ Play animation</button>
           ${caption ? `<span class="meta">${caption}</span>` : ""}
