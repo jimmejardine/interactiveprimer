@@ -31,7 +31,7 @@
 
   // Pinned dependency URLs — the single source of truth for versions.
   const KATEX_VERSION = "0.16.11";
-  const MANIM_VERSION = "0.3.18";
+  const MANIM_VERSION = "0.3.22";
   const KATEX_CSS = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VERSION}/dist/katex.min.css`;
   const KATEX_MJS = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VERSION}/dist/katex.mjs`;
   const MANIM_JS = `https://cdn.jsdelivr.net/npm/manim-web@${MANIM_VERSION}/dist/manim-web.browser.js`;
