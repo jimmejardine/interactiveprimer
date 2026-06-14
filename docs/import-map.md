@@ -70,6 +70,27 @@ both read this block.
 Author content as one or more `<primer-card>` cards. Inside a card you can use the
 Primer custom elements: `<primer-math>`, `<primer-manim>`, `<primer-quiz>`.
 
+A quiz is authored inline — its question bank is a child
+`<script type="application/json">`, an array of questions. `count` of them are
+chosen at random and their options shuffled; prompts and option text may contain
+inline math wrapped in `$…$`:
+
+```html
+<primer-quiz count="3">
+  <script type="application/json">
+    [
+      {
+        "prompt": "What is $2 + 3$?",
+        "options": [
+          { "text": "$5$", "correct": true },
+          { "text": "$6$", "correct": false }
+        ]
+      }
+    ]
+  </script>
+</primer-quiz>
+```
+
 A page that shows an animation registers a manim-web scene with one inline module
 script, then references it from a `<primer-manim scene="…">`. Because `boot.js` is
 first in the body, the import map is already present, so the scene's bare `"primer"`
