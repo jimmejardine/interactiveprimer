@@ -17,14 +17,25 @@
  *
  * <primer-page> and <primer-concept> read everything they need from the page's
  * `concept-meta` block (see js/concept-meta.js), so no attributes are required here.
+ * This module also sets the document title from that block (boot.js can't: it runs
+ * first, before the block is parsed).
  * @module
  */
 
 import "primer";
+import { getConceptMeta } from "./concept-meta.js";
 
 /** Build the page shell once the DOM is ready. */
 function render() {
   const body = document.body;
+
+  // Title from the concept metadata (the page writes no <head>/<title>).
+  try {
+    const meta = getConceptMeta();
+    if (meta) document.title = `${meta.title} — Interactive Primer`;
+  } catch {
+    /* malformed metadata — the components surface the error on the page */
+  }
 
   // The content is every direct element child of <body> that isn't a <script>:
   // this leaves the `concept-meta` JSON block and any inline scene script in place.

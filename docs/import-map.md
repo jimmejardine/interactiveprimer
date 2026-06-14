@@ -1,23 +1,21 @@
 # The per-page toolchain (one include)
 
 Every concept page is a plain `.html` file that loads the Primer toolchain at
-runtime — **no build step**. A page needs only **one** script tag plus its concept
-metadata; everything else (stylesheets, the
+runtime — **no build step**. A page has **no `<head>` at all**: just the concept
+metadata, the content cards, and one script tag. Everything the head used to hold —
+the title, viewport, stylesheets, the
 [import map](https://developer.mozilla.org/docs/Web/HTML/Element/script/type/importmap),
-custom-element registration, and the page shell) is handled by
-[`/js/boot.js`](../js/boot.js).
+custom-element registration, and the page shell — is handled by
+[`/js/boot.js`](../js/boot.js). (The charset comes from the server's
+`Content-Type: text/html; charset=utf-8` header.)
 
 ## Authoring a page
 
 ```html
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Addition — Interactive Primer</title>
-
-    <!-- 1) The whole toolchain, in one tag. -->
+  <body>
+    <!-- 1) The whole toolchain, in one tag — always first in the body. -->
     <script src="/js/boot.js"></script>
 
     <!-- 2) The concept's metadata (see below). -->
@@ -28,8 +26,7 @@ custom-element registration, and the page shell) is handled by
         "prerequisites": ["arithmetic/counting"]
       }
     </script>
-  </head>
-  <body>
+
     <!-- 3) The content, as one or more cards. -->
     <primer-card>
       <p>Addition combines two amounts into one total …</p>
@@ -39,11 +36,11 @@ custom-element registration, and the page shell) is handled by
 </html>
 ```
 
-`boot.js` injects the CSS and import map and loads the renderer, which reads the
-`concept-meta` block and wraps your cards in the page shell (header with the level
-badge and prerequisite links; the title; a self-attested confidence control;
-and a footer). You write only the cards — no `<primer-page>`/`<primer-concept>`
-wrappers.
+`boot.js` injects the viewport, the CSS, and the import map, and loads the renderer.
+The renderer reads the `concept-meta` block, sets the document title, and wraps your
+cards in the page shell (header with the level badge and prerequisite links; the
+title; a self-attested confidence control; and a footer). You write only the metadata
+and the cards — no `<head>`, no `<primer-page>`/`<primer-concept>` wrappers.
 
 ## The metadata block
 
@@ -74,7 +71,9 @@ Author content as one or more `<primer-card>` cards. Inside a card you can use t
 Primer custom elements: `<primer-math>`, `<primer-manim>`, `<primer-quiz>`.
 
 A page that shows an animation registers a manim-web scene with one inline module
-script, then references it from a `<primer-manim scene="…">`:
+script, then references it from a `<primer-manim scene="…">`. Because `boot.js` is
+first in the body, the import map is already present, so the scene's bare `"primer"`
+import just works:
 
 ```html
 <primer-card>
@@ -82,7 +81,6 @@ script, then references it from a `<primer-manim scene="…">`:
 </primer-card>
 
 <script type="module">
-  // The bare "primer" specifier resolves against the import map boot.js injected.
   import { registerScene } from "primer";
   registerScene("addNumberLine", async (host, manim) => { /* … */ });
 </script>
@@ -94,9 +92,10 @@ script, then references it from a `<primer-manim scene="…">`:
   pinned `katex` and `manim-web` versions. Bump them there; pages never mention them.
 - **Self-hosting later** is a drop-in change: copy the pinned bundles under
   `/vendor/` and point the URLs in `js/boot.js` there. No page changes required.
-- **`boot.js` is a classic, render-blocking script on purpose.** It runs in `<head>`
-  before the parser reaches the body, so the import map is in place before any module
-  script (including an inline scene script) resolves its bare imports.
+- **`boot.js` is a classic, render-blocking script on purpose.** Put it first in the
+  body. It injects the import map synchronously where it sits, so being first
+  guarantees the map is in the DOM before the concept-meta block, the cards, or any
+  inline scene module (`import … from "primer"`) is parsed.
 - **Type-checking** the JS (`npm run typecheck`, i.e. `tsc --noEmit`) reads KaTeX's
   and manim-web's bundled `.d.ts` files, so you get full IntelliSense and checking
   against their APIs even though we author plain `.js`.

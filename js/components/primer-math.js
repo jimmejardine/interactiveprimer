@@ -5,30 +5,30 @@
  *   <primer-math>a^2 + b^2 = c^2</primer-math>            inline
  *   <primer-math display>\int_0^1 x\,dx</primer-math>     display (block)
  *
- * The KaTeX font CSS (katex.min.css) must be linked in the page <head> for glyphs
- * to render correctly; this component only injects the markup.
+ * It renders into the LIGHT DOM (no shadow root) on purpose: KaTeX's output relies on
+ * the page-level `katex.min.css` (fonts + layout, injected by boot.js), and a document
+ * stylesheet cannot reach inside a shadow root. Rendering in the light DOM lets that
+ * CSS apply, so inline math stays inline and the hidden MathML copy is hidden (instead
+ * of showing up as a duplicate of the rendered math).
  * @module
  */
 
 import katex from "katex";
-import { attachShared } from "./shared.js";
 
 export class PrimerMath extends HTMLElement {
+  /** The original LaTeX source, captured once before KaTeX replaces our contents. */
+  #tex = /** @type {string | null} */ (null);
+
   connectedCallback() {
-    const root = this.shadowRoot ?? attachShared(this);
-    const tex = (this.textContent ?? "").trim();
+    // Capture the source on first connect; on later connects (e.g. when the renderer
+    // moves this element into the page shell) our children are already KaTeX output.
+    if (this.#tex === null) this.#tex = (this.textContent ?? "").trim();
     const display = this.hasAttribute("display");
-    let rendered;
     try {
-      rendered = katex.renderToString(tex, {
-        displayMode: display,
-        throwOnError: false,
-      });
-    } catch (err) {
-      rendered = `<code>${tex}</code>`;
+      katex.render(this.#tex, this, { displayMode: display, throwOnError: false });
+    } catch {
+      this.textContent = this.#tex;
     }
-    // KaTeX brings its own font CSS via the page-level link; we just host markup.
-    root.innerHTML = `<span class="math">${rendered}</span>`;
   }
 }
 

@@ -4,15 +4,18 @@
  *
  *   <script src="/js/boot.js"></script>
  *
- * It replaces the per-page boilerplate (two CSS links, the import map, and the
- * `import "primer"` module script) so a page is just this include, its inline
- * `<script class="concept-meta">` JSON block, and the body's <primer-card> content.
+ * Together with the renderer it loads, it replaces the ENTIRE per-page <head>: the
+ * title, the viewport meta, the CSS links, the import map, and the `import "primer"`
+ * module script. So a page is just its inline `<script class="concept-meta">` JSON
+ * block, the body's <primer-card> content, and this one tag. (The charset comes from
+ * the server's `Content-Type: text/html; charset=utf-8` header.)
  *
- * This is deliberately a CLASSIC (non-module) script with no defer/async: the
- * browser pauses parsing in <head> to fetch and run it, so everything it injects
- * lands in the DOM BEFORE the parser reaches any module script in the body. That
- * ordering is what lets a page's inline `import { ... } from "primer"` resolve the
- * bare specifier against the import map injected here.
+ * Placement: put it FIRST in <body>, so it is always in the same place. It is a
+ * CLASSIC (non-module) script with no defer/async, so the browser runs it where it
+ * sits and injects the import map synchronously — before the parser reaches the
+ * concept-meta block, the cards, or any inline scene `<script type="module">`. Being
+ * first, the import map is always present before any bare-specifier module (e.g. a
+ * scene's `import { registerScene } from "primer"`) resolves.
  *
  * The pinned CDN versions live here in ONE place. Self-hosting later is a drop-in:
  * point these URLs at /vendor/ and nothing else changes.
@@ -34,6 +37,16 @@
   const MANIM_JS = `https://cdn.jsdelivr.net/npm/manim-web@${MANIM_VERSION}/dist/manim-web.browser.js`;
 
   const head = document.head;
+
+  // 0) The viewport meta the page no longer writes. (The document title is set from
+  //    the concept-meta block by render.js, which runs after that block is parsed —
+  //    boot.js is first in the body, so the block doesn't exist yet here.)
+  if (!document.querySelector('meta[name="viewport"]')) {
+    const vp = document.createElement("meta");
+    vp.name = "viewport";
+    vp.content = "width=device-width, initial-scale=1";
+    head.appendChild(vp);
+  }
 
   // 1) Stylesheets: the Primer look-and-feel plus KaTeX's font glyph CSS.
   for (const href of ["/css/primer.css", KATEX_CSS]) {

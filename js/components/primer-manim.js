@@ -53,6 +53,8 @@ export class PrimerManim extends HTMLElement {
     playBtn.textContent = "Playing…";
     try {
       const manim = await import("manim-web");
+      // Clear any previous render so replaying doesn't stack a second, larger scene.
+      stage.replaceChildren();
       await builder(stage, manim);
       playBtn.textContent = "↻ Replay";
       playBtn.disabled = false;

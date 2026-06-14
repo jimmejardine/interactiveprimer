@@ -69,7 +69,15 @@ export class PrimerQuiz extends HTMLElement {
       )
       .join("");
 
+    // This KaTeX output lives in the shadow root, which the page-level katex.min.css
+    // can't reach; clone that stylesheet link in so the math is laid out (the fonts
+    // themselves still resolve via the document-level link).
+    const katexHref =
+      /** @type {HTMLLinkElement | null} */ (
+        document.querySelector('link[rel="stylesheet"][href*="katex"]')
+      )?.href ?? "";
     root.innerHTML = `
+      ${katexHref ? `<link rel="stylesheet" href="${katexHref}">` : ""}
       <form class="card quiz">
         <h2 style="margin-top:0;">Quick test</h2>
         <ol class="questions" style="list-style:none; padding:0;">${items}</ol>
