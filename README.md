@@ -47,3 +47,35 @@ altitude, without having to label every single page by hand.
 
 Levels give learners that sense of altitude: before starting concepts at a given level,
 one should be comfortable with the concepts of the levels below it.
+
+## Technology
+
+Each "smart web page" is a plain `.html` file that pulls in everything it needs at load
+time — **there is no build step**. The toolchain:
+
+- **Native ES modules + import maps** load dependencies straight from a CDN. See
+  [`docs/import-map.md`](docs/import-map.md) for the block every page includes.
+- **[KaTeX](https://katex.org/)** typesets mathematics; **[manim-web](https://github.com/maloyan/manim-web)**
+  (a TypeScript port of Manim) renders animations. Both are imported as pre-built ESM.
+- **Web Components** in [`js/components/`](js/components/) give every page a consistent
+  look-and-feel: `<primer-page>`, `<primer-concept>`, `<primer-math>`, `<primer-manim>`,
+  and `<primer-quiz>`. They are registered by importing the single [`js/primer.js`](js/primer.js)
+  module.
+- **Typed JavaScript + JSDoc** (no `.ts` authoring). Code runs raw in the browser and in
+  Node, yet is fully type-checked by `tsc` against the libraries' own type definitions.
+- The knowledge-tree logic — prerequisite resolution and downstream **level propagation** —
+  lives in [`js/graph.js`](js/graph.js) and [`js/levels.js`](js/levels.js); quiz generation
+  in [`js/quiz.js`](js/quiz.js). All are unit-tested.
+
+### Developing
+
+```bash
+npm install        # dev-only: TypeScript + library type definitions
+npm test           # node --test — pure logic, no transpile
+npm run typecheck  # tsc -p jsconfig.json — type-check the JSDoc-typed JS
+npm run serve      # static file server; open /index.html
+```
+
+Type-checking and tests need no compilation; they are *checks*, not a build. Authoring a
+new concept is just adding an `.html` page (copy `concepts/counting.html`) plus an optional
+`*.quiz.json` bank.
