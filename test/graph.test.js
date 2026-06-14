@@ -3,28 +3,34 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   indexConcepts,
+  findRoots,
+  reachableFromRoots,
   resolvePrerequisites,
+  detectCycles,
   effectiveLevel,
   resolveLevels,
+  validateGraph,
 } from "../js/graph.js";
 
 /** @typedef {import("../js/types/domain.js").Concept} Concept */
 
 /**
- * Small example tree:
- *   counting (early-school)
- *     └─ addition
+ * Sample tree with full-path ids:
+ *   counting (root, level 0)
+ *     └─ addition            (inherits 0)
  *          └─ multiplication
- *   sets (undergraduate)        <- a separate, deliberately-levelled milestone
- *     └─ multiplication         (multiplication also depends on sets)
- * @type {Concept[]}
+ *   sets (root, level 6)
+ *     └─ multiplication      (so multiplication inherits max(0, 6) = 6)
+ * @returns {Concept[]}
  */
-const concepts = [
-  { id: "counting", title: "Counting", prerequisites: [], declaredLevel: "early-school" },
-  { id: "addition", title: "Addition", prerequisites: ["counting"] },
-  { id: "sets", title: "Sets", prerequisites: [], declaredLevel: "undergraduate" },
-  { id: "multiplication", title: "Multiplication", prerequisites: ["addition", "sets"] },
-];
+function sample() {
+  return [
+    { id: "math/counting", title: "Counting", prerequisites: [], root: true, declaredLevel: 0 },
+    { id: "math/addition", title: "Addition", prerequisites: ["math/counting"] },
+    { id: "math/sets", title: "Sets", prerequisites: [], root: true, declaredLevel: 6 },
+    { id: "math/multiplication", title: "Multiplication", prerequisites: ["math/addition", "math/sets"] },
+  ];
+}
 
 test("indexConcepts rejects duplicate ids", () => {
   assert.throws(() =>
@@ -35,51 +41,120 @@ test("indexConcepts rejects duplicate ids", () => {
   );
 });
 
-test("indexConcepts rejects edges to unknown concepts", () => {
-  assert.throws(() =>
-    indexConcepts([{ id: "a", title: "A", prerequisites: ["ghost"] }]),
-  );
+test("findRoots returns only concepts marked root", () => {
+  assert.deepEqual(new Set(findRoots(sample())), new Set(["math/counting", "math/sets"]));
 });
 
 test("resolvePrerequisites returns transitive prereqs in dependency order", () => {
-  const byId = indexConcepts(concepts);
-  const pre = resolvePrerequisites("multiplication", byId);
-  // Must include all ancestors, exclude self.
-  assert.deepEqual(new Set(pre), new Set(["counting", "addition", "sets"]));
-  assert.ok(!pre.includes("multiplication"));
-  // counting must come before addition (its dependent).
-  assert.ok(pre.indexOf("counting") < pre.indexOf("addition"));
+  const byId = indexConcepts(sample());
+  const pre = resolvePrerequisites("math/multiplication", byId);
+  assert.deepEqual(new Set(pre), new Set(["math/counting", "math/addition", "math/sets"]));
+  assert.ok(!pre.includes("math/multiplication"));
+  assert.ok(pre.indexOf("math/counting") < pre.indexOf("math/addition"));
 });
 
-test("resolvePrerequisites detects cycles", () => {
+test("reachableFromRoots reaches everything wired to a root", () => {
+  const byId = indexConcepts(sample());
+  const reachable = reachableFromRoots(byId, findRoots(sample()));
+  assert.equal(reachable.size, 4);
+});
+
+test("effectiveLevel propagates declared levels downstream (numeric max)", () => {
+  const byId = indexConcepts(sample());
+  assert.equal(effectiveLevel("math/addition", byId), 0); // inherits counting
+  assert.equal(effectiveLevel("math/multiplication", byId), 6); // max(0, 6)
+});
+
+test("effectiveLevel supports real (fractional) levels", () => {
+  /** @type {Concept[]} */
+  const cs = [
+    { id: "a", title: "A", prerequisites: [], root: true, declaredLevel: 2 },
+    { id: "b", title: "B", prerequisites: ["a"], declaredLevel: 2.5 },
+    { id: "c", title: "C", prerequisites: ["b"] },
+  ];
+  const byId = indexConcepts(cs);
+  assert.equal(effectiveLevel("b", byId), 2.5);
+  assert.equal(effectiveLevel("c", byId), 2.5);
+});
+
+test("resolveLevels defaults ungrounded chains to BASE_LEVEL and flags them", () => {
+  /** @type {Concept[]} */
+  const cs = [
+    { id: "a", title: "A", prerequisites: [], root: true }, // no declaredLevel
+    { id: "b", title: "B", prerequisites: ["a"] },
+  ];
+  const byId = new Map(resolveLevels(cs).map((r) => [r.id, r]));
+  assert.equal(byId.get("a")?.level, 0);
+  assert.equal(byId.get("a")?.levelGrounded, false);
+  assert.equal(byId.get("b")?.level, 0);
+  assert.equal(byId.get("b")?.levelGrounded, false);
+});
+
+test("detectCycles finds a cycle without throwing", () => {
   const byId = indexConcepts([
     { id: "a", title: "A", prerequisites: ["b"] },
     { id: "b", title: "B", prerequisites: ["a"] },
   ]);
-  assert.throws(() => resolvePrerequisites("a", byId), /cycle/i);
+  const cycles = detectCycles(byId);
+  assert.equal(cycles.length, 1);
 });
 
-test("effectiveLevel propagates a declared level downstream", () => {
-  const byId = indexConcepts(concepts);
-  // addition declares nothing but inherits counting's level.
-  assert.equal(effectiveLevel("addition", byId), "early-school");
-  // multiplication inherits the HIGHEST of its ancestors (sets = undergraduate).
-  assert.equal(effectiveLevel("multiplication", byId), "undergraduate");
+test("validateGraph: a healthy tree has no errors", () => {
+  const { diagnostics, resolved } = validateGraph(sample());
+  assert.equal(diagnostics.filter((d) => d.severity === "error").length, 0);
+  assert.equal(resolved.length, 4);
 });
 
-test("effectiveLevel is null when nothing up the chain declares a level", () => {
-  const byId = indexConcepts([
-    { id: "a", title: "A", prerequisites: [] },
+test("validateGraph flags dangling prerequisites", () => {
+  const { diagnostics } = validateGraph([
+    { id: "a", title: "A", prerequisites: ["ghost"], root: true },
+  ]);
+  assert.ok(diagnostics.some((d) => d.code === "dangling-prerequisite"));
+});
+
+test("validateGraph flags cycles", () => {
+  const { diagnostics } = validateGraph([
+    { id: "a", title: "A", prerequisites: ["b"], root: true },
     { id: "b", title: "B", prerequisites: ["a"] },
   ]);
-  assert.equal(effectiveLevel("b", byId), null);
+  assert.ok(diagnostics.some((d) => d.code === "cycle"));
 });
 
-test("resolveLevels resolves the whole tree in one pass", () => {
-  const resolved = resolveLevels(concepts);
-  const byId = new Map(resolved.map((c) => [c.id, c]));
-  assert.equal(byId.get("counting")?.effectiveLevel, "early-school");
-  assert.equal(byId.get("addition")?.effectiveLevel, "early-school");
-  assert.equal(byId.get("sets")?.effectiveLevel, "undergraduate");
-  assert.equal(byId.get("multiplication")?.effectiveLevel, "undergraduate");
+test("validateGraph flags orphans unreachable from a root", () => {
+  /** @type {Concept[]} */
+  const cs = [
+    { id: "math/counting", title: "Counting", prerequisites: [], root: true, declaredLevel: 0 },
+    // A stray island: foo is not a root, and bar only depends on foo.
+    { id: "physics/foo", title: "Foo", prerequisites: [] },
+    { id: "physics/bar", title: "Bar", prerequisites: ["physics/foo"] },
+  ];
+  const { diagnostics } = validateGraph(cs);
+  const orphans = diagnostics.filter((d) => d.code === "orphan").map((d) => d.concept);
+  assert.deepEqual(new Set(orphans), new Set(["physics/foo", "physics/bar"]));
+});
+
+test("validateGraph errors when there are no roots", () => {
+  const { diagnostics } = validateGraph([
+    { id: "a", title: "A", prerequisites: [] },
+  ]);
+  assert.ok(diagnostics.some((d) => d.code === "no-roots"));
+});
+
+test("validateGraph warns when a declared level is below a prerequisite", () => {
+  /** @type {Concept[]} */
+  const cs = [
+    { id: "a", title: "A", prerequisites: [], root: true, declaredLevel: 5 },
+    { id: "b", title: "B", prerequisites: ["a"], declaredLevel: 2 },
+  ];
+  const { diagnostics, resolved } = validateGraph(cs);
+  assert.ok(diagnostics.some((d) => d.code === "declared-below-prerequisite" && d.concept === "b"));
+  // b's level is raised to its prerequisite's level.
+  assert.equal(resolved.find((r) => r.id === "b")?.level, 5);
+});
+
+test("validateGraph warns about ungrounded levels", () => {
+  const { diagnostics } = validateGraph([
+    { id: "a", title: "A", prerequisites: [], root: true },
+  ]);
+  assert.ok(diagnostics.some((d) => d.code === "ungrounded-level"));
 });

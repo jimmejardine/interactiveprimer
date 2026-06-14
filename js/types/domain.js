@@ -1,37 +1,62 @@
 // @ts-check
 /**
  * Core domain types for the Interactive Primer, expressed as JSDoc typedefs so
- * they are checked by `tsc --noEmit` without any build step. Import them with
- * `import("../types/domain.js").Concept` style references in other files.
+ * they are checked by `tsc` without any build step.
  *
  * The model mirrors README.md:
  *  - The knowledge structure is a DAG (we call it the "tree").
- *  - Each concept lists its prerequisite concepts (the DAG edges).
- *  - A concept MAY declare a level; a declared level propagates downstream to
- *    every concept that depends on it (directly or transitively).
+ *  - Each concept has a full-path id (e.g. "mathematics/arithmetic/addition") and
+ *    its prerequisites are referenced by those same full-path ids (the DAG edges).
+ *  - A concept MAY declare a numeric level; a declared level propagates downstream
+ *    to every concept that depends on it (directly or transitively).
+ *  - A concept MAY mark itself a `root` (an entry point with no prerequisites).
  *
  * @module
  */
 
 /**
- * A level key. The ordering of levels is defined in {@link module:js/levels}.
- * @typedef {"early-school" | "later-school" | "undergraduate" | "graduate" | "research"} Level
+ * A level of knowledge. A REAL number — usually an integer that roughly equates to
+ * a stage of education, but fractional values are allowed so concepts can be
+ * squeezed in between existing levels (e.g. 2.5).
+ * @typedef {number} Level
  */
 
 /**
- * A single concept page in the tree.
- * @typedef {object} Concept
- * @property {string} id            Unique, URL-safe identifier (e.g. "addition").
- * @property {string} title         Human-readable title (e.g. "Addition").
- * @property {string[]} prerequisites  Ids of concepts that must be understood first.
- * @property {Level} [declaredLevel]   Optional level explicitly declared by the page.
+ * The authored metadata for one concept (the inline `concept-meta` JSON block on a
+ * page, and the unit of the knowledge graph).
+ * @typedef {object} ConceptMeta
+ * @property {string} id            Full-path id, e.g. "mathematics/arithmetic/addition".
+ * @property {string} title         Human-readable title, e.g. "Addition".
+ * @property {string[]} prerequisites  Full-path ids of concepts required first (DAG edges).
+ * @property {Level} [declaredLevel]   Optional numeric level explicitly declared.
+ * @property {boolean} [root]          Marks an entry point (no prerequisites expected).
  */
+
+/** A concept in the graph. Currently identical to its authored metadata. @typedef {ConceptMeta} Concept */
 
 /**
  * A concept whose effective level has been resolved over the tree.
- * `effectiveLevel` is `null` when neither the concept nor any of its ancestors
- * declared a level.
- * @typedef {Concept & { effectiveLevel: Level | null }} ResolvedConcept
+ *  - `level` is the computed numeric level (max of declared + all prerequisites).
+ *  - `levelGrounded` is false when no level was declared anywhere in its ancestry,
+ *    so `level` fell back to the base (0).
+ * @typedef {Concept & { level: Level, levelGrounded: boolean }} ResolvedConcept
+ */
+
+/**
+ * A validation finding from the graph checker.
+ * @typedef {object} Diagnostic
+ * @property {"error" | "warning"} severity
+ * @property {DiagnosticCode} code
+ * @property {string} message
+ * @property {string} [concept]   The concept id this finding relates to, if any.
+ */
+
+/**
+ * @typedef {(
+ *   "duplicate-id" | "dangling-prerequisite" | "cycle" | "no-roots" |
+ *   "orphan" | "declared-below-prerequisite" | "ungrounded-level" |
+ *   "id-path-mismatch" | "metadata-error"
+ * )} DiagnosticCode
  */
 
 /**

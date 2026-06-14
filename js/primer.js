@@ -19,11 +19,14 @@ import "./components/primer-quiz.js";
 
 // Re-exports for page scripts.
 export { registerScene, getScene } from "./scenes.js";
-export { LEVELS, levelRank, maxLevel, levelLabel } from "./levels.js";
+export { parseConceptMeta, getConceptMeta } from "./concept-meta.js";
+export { BASE_LEVEL, LEVEL_BANDS, maxLevel, levelBand, formatLevel } from "./levels.js";
 export {
   indexConcepts,
+  findRoots,
   resolvePrerequisites,
   effectiveLevel,
   resolveLevels,
+  validateGraph,
 } from "./graph.js";
 export { generateQuiz, generateQuestion, shuffle } from "./quiz.js";

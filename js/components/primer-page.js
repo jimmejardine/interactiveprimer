@@ -1,39 +1,42 @@
 // @ts-check
 /**
- * <primer-page subject="Mathematics" level="early-school" prerequisites="counting">
- *   <primer-concept ...>...</primer-concept>
- * </primer-page>
+ * <primer-page> — the page shell: a consistent header (subject + optional level
+ * badge + prerequisite links), the concept content (slotted), and a footer back to
+ * the tree.
  *
- * The page shell: a consistent header (subject + optional level badge + prerequisite
- * links), the concept content (slotted), and a footer back to the tree. `level` here
- * is the level DECLARED by this page; if omitted, no badge is shown (the page may
- * still inherit a level via its prerequisites — that resolution happens in js/graph.js
- * when the whole tree is processed, not in this presentational component).
+ * Concept data (id, declared level, prerequisites) comes from the page's inline
+ * `<script class="concept-meta">` block — the single source of truth — not from
+ * attributes. The `subject` attribute is optional chrome; if omitted it is derived
+ * from the first segment of the concept's full-path id.
+ *
+ * Note: the badge shows the level DECLARED by this page (if any). The fully
+ * propagated level across the whole tree is computed by the graph build script
+ * (js/graph.js) and consumed by the knowledge explorer, not here.
  * @module
  */
 
-import { attachShared, parseIdList } from "./shared.js";
-import { levelLabel } from "../levels.js";
-
-/** @typedef {import("../types/domain.js").Level} Level */
+import { attachShared } from "./shared.js";
+import { getConceptMeta } from "../concept-meta.js";
+import { levelBand, formatLevel } from "../levels.js";
 
 export class PrimerPage extends HTMLElement {
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
-    const subject = this.getAttribute("subject") ?? "Interactive Primer";
-    const level = /** @type {Level | null} */ (this.getAttribute("level"));
-    const prereqs = parseIdList(this.getAttribute("prerequisites"));
+    const meta = safeMeta();
+    const id = meta?.id ?? "";
+    const subject = this.getAttribute("subject") ?? subjectFromId(id);
+    const declared = meta?.declaredLevel;
+    const prereqs = meta?.prerequisites ?? [];
 
-    const badge = level
-      ? `<span class="badge" title="Declared level">${safeLevelLabel(level)}</span>`
-      : "";
+    const badge =
+      declared !== undefined
+        ? `<span class="badge" title="Declared level">Level ${formatLevel(declared)} · ${levelBand(declared)}</span>`
+        : "";
 
     const prereqList = prereqs.length
       ? `<nav class="prereqs meta" aria-label="Prerequisites">
            Prerequisites:
-           ${prereqs
-             .map((id) => `<a href="./${id}.html">${prettify(id)}</a>`)
-             .join(", ")}
+           ${prereqs.map((pid) => `<a href="/concepts/${pid}.html">${prettify(pid)}</a>`).join(", ")}
          </nav>`
       : `<p class="prereqs meta">No prerequisites — a good place to start.</p>`;
 
@@ -49,27 +52,38 @@ export class PrimerPage extends HTMLElement {
   }
 }
 
+/** @returns {import("../types/domain.js").ConceptMeta | null} */
+function safeMeta() {
+  try {
+    return getConceptMeta();
+  } catch (err) {
+    console.error("Invalid concept-meta block:", err);
+    return null;
+  }
+}
+
 /**
- * Title-case an id like "complex-numbers" → "Complex numbers".
+ * Last path segment of a full-path id, title-cased: "mathematics/arithmetic/addition"
+ * → "Addition".
  * @param {string} id
  * @returns {string}
  */
 function prettify(id) {
-  const words = id.replace(/-/g, " ");
+  const leaf = id.split("/").pop() ?? id;
+  const words = leaf.replace(/-/g, " ");
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 /**
- * Label a level, tolerating an unknown/typo'd attribute value gracefully.
- * @param {string} level
+ * First path segment of a full-path id, title-cased: "mathematics/arithmetic/addition"
+ * → "Mathematics".
+ * @param {string} id
  * @returns {string}
  */
-function safeLevelLabel(level) {
-  try {
-    return levelLabel(/** @type {Level} */ (level));
-  } catch {
-    return level;
-  }
+function subjectFromId(id) {
+  const head = id.split("/")[0] ?? "";
+  if (!head) return "Interactive Primer";
+  return head.charAt(0).toUpperCase() + head.slice(1);
 }
 
 if (!customElements.get("primer-page")) {

@@ -31,6 +31,27 @@ Paste this identical block into the `<head>` of every concept page:
 </script>
 ```
 
+Every concept page must also include a **metadata block** — the single source of
+truth for the concept's place in the knowledge tree. Its `id` must equal the page's
+path under `concepts/` (without `.html`):
+
+```html
+<script type="application/json" class="concept-meta">
+  {
+    "id": "mathematics/arithmetic/addition",
+    "title": "Addition",
+    "prerequisites": ["mathematics/arithmetic/counting"],
+    "declaredLevel": 2.5,
+    "root": false
+  }
+</script>
+```
+
+`prerequisites` defaults to `[]`, `declaredLevel` is optional (levels start at 0 and
+propagate downstream), and `root: true` marks an entry point. The page's Web
+Components and the [`scripts/build-graph.js`](../scripts/build-graph.js) validator
+both read this block.
+
 Then write the page body with the Primer custom elements
 (`<primer-page>`, `<primer-concept>`, `<primer-math>`, `<primer-manim>`,
 `<primer-quiz>`).

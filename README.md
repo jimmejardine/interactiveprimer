@@ -34,19 +34,25 @@ already be understood.
 ## The levels of knowledge
 
 As one rises higher up the tree, sub-branches might rely on entire collections of other
-sub-branches. To keep this navigable, a concept page **may** state the "level" it belongs
-to. A level roughly equates to a stage of education — an early school-age band, a later
-school-age band, an undergraduate university level, and so on up to the most advanced
-research-level material.
+sub-branches. To keep this navigable, every concept has a **level** — a *real number*.
+It is usually a whole number that roughly equates to a stage of education (an early
+school-age band, a later school-age band, an undergraduate university level, and so on up
+to the most advanced research-level material), but fractional values are allowed so a new
+concept can be squeezed in between two existing ones (e.g. level 2.5).
 
-A page is not required to declare a level. But when a page **does** declare one, that
-level flows downstream through the tree: every later concept that depends on it (directly
-or indirectly) is implicitly elevated to at least that level. In this way a handful of
-deliberately levelled "milestone" concepts is enough to give the whole tree a sense of
-altitude, without having to label every single page by hand.
+Levels **implicitly start at 0** and a page need not declare one. But when a page **does**
+declare a level, that level flows downstream through the tree: every later concept that
+depends on it (directly or indirectly) is implicitly elevated to at least that level. So a
+concept's level is `max(its declared level, the level of every prerequisite)`. In this way
+a handful of deliberately levelled "milestone" concepts is enough to give the whole tree a
+sense of altitude, without having to label every single page by hand.
 
 Levels give learners that sense of altitude: before starting concepts at a given level,
 one should be comfortable with the concepts of the levels below it.
+
+Every concept is identified by its **full path** in the tree (e.g.
+`mathematics/arithmetic/addition`), which is also where its page lives under `concepts/`.
+Prerequisites are referenced by these same full-path ids.
 
 ## Technology
 
@@ -66,6 +72,25 @@ time — **there is no build step**. The toolchain:
 - The knowledge-tree logic — prerequisite resolution and downstream **level propagation** —
   lives in [`js/graph.js`](js/graph.js) and [`js/levels.js`](js/levels.js); quiz generation
   in [`js/quiz.js`](js/quiz.js). All are unit-tested.
+- Each concept's graph data (id, title, prerequisites, declared level, root flag) is the
+  inline `<script class="concept-meta">` JSON block on its page — the single source of truth,
+  read both by the page's Web Components and by the graph build script.
+
+### The graph build / validation script
+
+[`scripts/build-graph.js`](scripts/build-graph.js) walks every concept page, validates the
+tree, computes each concept's implicit level, and emits `dist/graph.json` for the knowledge
+explorer to ingest. It is designed to gate CI: it exits non-zero on any error.
+
+```bash
+npm run graph        # validate + write dist/graph.json
+npm run check:graph  # validate only, write nothing (use in CI)
+```
+
+It reports **errors** (fail the build): duplicate ids, an id that doesn't match its file
+path, dangling prerequisite references, prerequisite **cycles**, **orphans** (concepts not
+reachable from any `root`), and missing roots — and **warnings**: a declared level below a
+prerequisite, or a concept with no declared level anywhere in its ancestry.
 
 ### Developing
 
@@ -73,9 +98,11 @@ time — **there is no build step**. The toolchain:
 npm install        # dev-only: TypeScript + library type definitions
 npm test           # node --test — pure logic, no transpile
 npm run typecheck  # tsc -p jsconfig.json — type-check the JSDoc-typed JS
+npm run check      # typecheck + tests + graph validation (the full CI gate)
 npm run serve      # static file server; open /index.html
 ```
 
-Type-checking and tests need no compilation; they are *checks*, not a build. Authoring a
-new concept is just adding an `.html` page (copy `concepts/counting.html`) plus an optional
-`*.quiz.json` bank.
+Type-checking, tests and graph validation need no compilation; they are *checks*, not a
+build. Authoring a new concept is just adding an `.html` page (copy
+`concepts/mathematics/arithmetic/counting.html`) — its `concept-meta` id must match the new
+file's path under `concepts/` — plus an optional `*.quiz.json` bank.

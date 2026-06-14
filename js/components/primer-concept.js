@@ -12,6 +12,7 @@
  */
 
 import { attachShared, slug } from "./shared.js";
+import { getConceptMeta } from "../concept-meta.js";
 
 /** Confidence labels, indexed 0..3 (see Confidence type). */
 const CONFIDENCE_LABELS = ["Not yet", "Shaky", "Comfortable", "Mastered"];
@@ -19,8 +20,11 @@ const CONFIDENCE_LABELS = ["Not yet", "Shaky", "Comfortable", "Mastered"];
 export class PrimerConcept extends HTMLElement {
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
-    const title = this.getAttribute("title") ?? "Untitled concept";
-    const id = this.getAttribute("concept-id") || slug(title);
+    // The inline concept-meta block is the single source of truth; attributes are
+    // only a fallback for quick prototyping.
+    const meta = safeMeta();
+    const title = meta?.title ?? this.getAttribute("title") ?? "Untitled concept";
+    const id = meta?.id ?? (this.getAttribute("concept-id") || slug(title));
     const storageKey = `primer:confidence:${id}`;
 
     root.innerHTML = `
@@ -58,6 +62,15 @@ export class PrimerConcept extends HTMLElement {
         );
       });
     }
+  }
+}
+
+/** @returns {import("../types/domain.js").ConceptMeta | null} */
+function safeMeta() {
+  try {
+    return getConceptMeta();
+  } catch {
+    return null;
   }
 }
 
