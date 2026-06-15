@@ -19,13 +19,13 @@ test("neighborhood returns null for an unknown id", () => {
 test("neighborhood of an isolated root has empty columns and no edges", () => {
   const byId = idx([{ id: "solo" }]);
   const n = neighborhood("solo", byId);
-  assert.deepEqual(n?.ancestors, []);
-  assert.deepEqual(n?.descendants, []);
+  assert.deepEqual(n?.predecessors, []);
+  assert.deepEqual(n?.successors, []);
   assert.deepEqual(n?.peers, []);
   assert.deepEqual(n?.edges, []);
 });
 
-test("neighborhood on the linear chain counting → addition → pythagorean", () => {
+test("neighborhood shows only immediate predecessors/successors", () => {
   const byId = idx([
     { id: "counting", prerequisites: [] },
     { id: "addition", prerequisites: ["counting"] },
@@ -33,19 +33,21 @@ test("neighborhood on the linear chain counting → addition → pythagorean", (
   ]);
 
   const mid = neighborhood("addition", byId);
-  assert.deepEqual(mid?.ancestors, ["counting"]);
-  assert.deepEqual(mid?.descendants, ["pythagorean"]);
+  assert.deepEqual(mid?.predecessors, ["counting"]);
+  assert.deepEqual(mid?.successors, ["pythagorean"]);
   assert.deepEqual(mid?.peers, []); // no siblings/co-parents
   assert.deepEqual(edgeKeys(mid?.edges), new Set(["addition|counting", "addition|pythagorean"]));
 
+  // counting's successor is ONLY addition — pythagorean is two hops away, not shown.
   const root = neighborhood("counting", byId);
-  assert.deepEqual(root?.ancestors, []);
-  assert.deepEqual(new Set(root?.descendants), new Set(["addition", "pythagorean"]));
+  assert.deepEqual(root?.predecessors, []);
+  assert.deepEqual(root?.successors, ["addition"]);
   assert.deepEqual(root?.peers, []);
 
+  // pythagorean's predecessor is ONLY addition — counting is two hops away, not shown.
   const leaf = neighborhood("pythagorean", byId);
-  assert.deepEqual(new Set(leaf?.ancestors), new Set(["counting", "addition"]));
-  assert.deepEqual(leaf?.descendants, []);
+  assert.deepEqual(leaf?.predecessors, ["addition"]);
+  assert.deepEqual(leaf?.successors, []);
   assert.deepEqual(leaf?.peers, []);
 });
 
@@ -56,9 +58,9 @@ test("siblings: two concepts sharing a parent are peers of each other", () => {
     { id: "b", prerequisites: ["p"] },
   ]);
   const n = neighborhood("a", byId);
-  assert.deepEqual(n?.ancestors, ["p"]);
-  assert.deepEqual(n?.descendants, []);
-  assert.deepEqual(n?.peers, ["b"]); // sibling under p, not an ancestor/descendant
+  assert.deepEqual(n?.predecessors, ["p"]);
+  assert.deepEqual(n?.successors, []);
+  assert.deepEqual(n?.peers, ["b"]); // sibling under p
   // a connects to its parent p; the peer b connects to the shared parent p.
   assert.deepEqual(edgeKeys(n?.edges), new Set(["a|p", "b|p"]));
 });
@@ -71,8 +73,8 @@ test("diamond: the other middle node is a peer, all four edges drawn", () => {
     { id: "bottom", prerequisites: ["left", "right"] },
   ]);
   const n = neighborhood("left", byId);
-  assert.deepEqual(n?.ancestors, ["top"]);
-  assert.deepEqual(n?.descendants, ["bottom"]);
+  assert.deepEqual(n?.predecessors, ["top"]);
+  assert.deepEqual(n?.successors, ["bottom"]);
   assert.deepEqual(n?.peers, ["right"]); // co-parent of bottom, sibling under top
   assert.deepEqual(
     edgeKeys(n?.edges),
@@ -80,16 +82,16 @@ test("diamond: the other middle node is a peer, all four edges drawn", () => {
   );
 });
 
-test("a peer already in a column is not double-listed", () => {
-  // b is both a sibling of a (under p) AND a descendant of a — descendant wins.
+test("a peer that is also a direct successor is not double-listed", () => {
+  // b is both a sibling of a (under p) AND a direct successor of a — successor wins.
   const byId = idx([
     { id: "p", prerequisites: [] },
     { id: "a", prerequisites: ["p"] },
     { id: "b", prerequisites: ["p", "a"] },
   ]);
   const n = neighborhood("a", byId);
-  assert.deepEqual(n?.descendants, ["b"]);
-  assert.deepEqual(n?.peers, []); // b excluded from peers because it's a descendant
+  assert.deepEqual(n?.successors, ["b"]);
+  assert.deepEqual(n?.peers, []); // b excluded from peers because it's a direct successor
 });
 
 test("edges are undirected, deduped, and never self-referential", () => {
@@ -115,5 +117,5 @@ test("neighborhood uses a precomputed successors field when present", () => {
     ]),
   );
   const n = neighborhood("x", byId);
-  assert.deepEqual(n?.descendants, ["y"]);
+  assert.deepEqual(n?.successors, ["y"]);
 });

@@ -4,9 +4,9 @@
  * knowledge tree, rendered at the top and bottom of every lesson (inserted by
  * js/render.js). Three columns, centred on the current concept:
  *
- *   column 1: all predecessors (ancestors)
+ *   column 1: immediate predecessors (direct prerequisites)
  *   column 2: peers above, the CURRENT concept in the centre, peers below
- *   column 3: all successors (descendants)
+ *   column 3: immediate successors (direct dependents)
  *
  * with lines connecting concepts that share a prerequisite edge. Every node except
  * the current one links to that concept's page.
@@ -20,7 +20,8 @@
 
 import { attachShared } from "./shared.js";
 import { getConceptMeta } from "../concept-meta.js";
-import { indexConcepts, neighborhood } from "../graph.js";
+import { neighborhood } from "../graph.js";
+import { loadGraph } from "../graph-data.js";
 
 /** @typedef {import("../types/domain.js").ResolvedConcept} ResolvedConcept */
 
@@ -58,24 +59,6 @@ function confidenceColor(id) {
 /** Paint a node element from its concept's rating (clears to the default when unrated). @param {Element} el */
 function paintNode(el) {
   /** @type {HTMLElement} */ (el).style.background = confidenceColor(el.getAttribute("data-id") ?? "") ?? "";
-}
-
-/**
- * Load and index the knowledge graph once for the whole page (both pathway
- * instances share this promise). Rejects on any fetch/parse problem.
- * @returns {Promise<{ raw: any, byId: Map<string, ResolvedConcept> }>}
- */
-function loadGraph() {
-  const w = /** @type {any} */ (window);
-  if (!w.__primerGraphPromise) {
-    w.__primerGraphPromise = fetch("/dist/graph.json")
-      .then((r) => {
-        if (!r.ok) throw new Error(`graph.json HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((raw) => ({ raw, byId: indexConcepts(raw.concepts) }));
-  }
-  return w.__primerGraphPromise;
 }
 
 const STYLE = `
@@ -166,8 +149,8 @@ export class PrimerPathway extends HTMLElement {
           (byId.get(a)?.level ?? 0) - (byId.get(b)?.level ?? 0) || title(a).localeCompare(title(b)),
       );
 
-    const col1 = byLevel(hood.ancestors);
-    const col3 = byLevel(hood.descendants);
+    const col1 = byLevel(hood.predecessors);
+    const col3 = byLevel(hood.successors);
     const peers = byLevel(hood.peers);
     const above = peers.slice(0, Math.ceil(peers.length / 2));
     const below = peers.slice(above.length);

@@ -10,7 +10,8 @@
 
 import { attachShared, slug } from "./shared.js";
 import { getConceptMeta } from "../concept-meta.js";
-import { formatLevel } from "../levels.js";
+import { formatLevel, BASE_LEVEL } from "../levels.js";
+import { loadGraph } from "../graph-data.js";
 
 /** Number of stars in the confidence rating (0 = unrated/none, MAX = full mastery). */
 const MAX_STARS = 10;
@@ -28,6 +29,9 @@ const STAR_CSS = `
     gap: 0.5rem 1rem; flex-wrap: wrap;
   }
   .title-row h1 { margin: 0; }
+  /* Level badge: bold when declared in metadata, normal weight when implicit. */
+  .level-badge { font-weight: 400; }
+  .level-badge.is-declared { font-weight: 700; }
   .stars { display: inline-flex; gap: 0.15rem; }
   .star {
     padding: 0.1rem; border: none; background: none; line-height: 0;
@@ -46,11 +50,15 @@ export class PrimerConcept extends HTMLElement {
     const id = meta?.id ?? (this.getAttribute("concept-id") || slug(title));
     const storageKey = `primer:confidence:${id}`;
 
-    // The declared level sits to the right of the concept's title (if declared).
+    // The level sits to the right of the title on EVERY page: bold when declared in
+    // metadata, normal weight when implicit (inherited from prerequisites). A declared
+    // level is known from the page itself; an implicit level is read asynchronously
+    // from the emitted graph (dist/graph.json) below.
+    const declared = meta?.declaredLevel;
     const levelBadge =
-      meta?.declaredLevel !== undefined
-        ? `<span class="badge" title="Declared level">Level ${formatLevel(meta.declaredLevel)}</span>`
-        : "";
+      declared !== undefined
+        ? `<span class="badge level-badge is-declared" title="Declared level">Level ${formatLevel(declared)}</span>`
+        : `<span class="badge level-badge" title="Implicit level (inherited from prerequisites)" hidden>Level</span>`;
 
     const stars = Array.from(
       { length: MAX_STARS },
@@ -102,6 +110,32 @@ export class PrimerConcept extends HTMLElement {
       star.addEventListener("mouseleave", () => paint(starEls, rating));
       star.addEventListener("blur", () => paint(starEls, rating));
     }
+
+    // For an implicit level, fill the (initially hidden) badge from the emitted graph.
+    if (declared === undefined) void this.#showImplicitLevel(root, id);
+  }
+
+  /**
+   * Fill in the implicit (inherited) level from the emitted graph, then reveal the
+   * badge. Falls back to the base level if the graph can't be loaded, so every page
+   * still shows a level.
+   * @param {ShadowRoot} root
+   * @param {string} id
+   */
+  async #showImplicitLevel(root, id) {
+    let level = BASE_LEVEL;
+    try {
+      const { byId } = await loadGraph();
+      const entry = byId.get(id);
+      if (entry && typeof entry.level === "number") level = entry.level;
+    } catch {
+      /* graph unavailable (e.g. not generated yet) — fall back to the base level */
+    }
+    if (!this.isConnected) return;
+    const badge = root.querySelector(".level-badge");
+    if (!badge) return;
+    badge.textContent = `Level ${formatLevel(level)}`;
+    badge.removeAttribute("hidden");
   }
 }
 
