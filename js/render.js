@@ -78,6 +78,10 @@ async function render() {
   // Title from the (possibly translated) concept title (the page writes no <head>/<title>).
   if (pageTitle) document.title = `${pageTitle} — ${t("app.name")}`;
 
+  // SEO metadata. Concept pages carry no static <head>, so inject it here; crawlers that
+  // render JS (e.g. Googlebot) index the result. See README → SEO.
+  injectSeo(pageTitle ?? meta?.title ?? "", firstText(content), getLocale(), meta?.declaredLevel);
+
   if (content.length === 0) return;
 
   const main = document.createElement("main");
@@ -183,6 +187,80 @@ function safeMeta() {
   } catch {
     return null;
   }
+}
+
+/**
+ * A meta-description from the first non-empty card's text (collapsed, ~155 chars at a
+ * word boundary).
+ * @param {Element[]} content
+ * @returns {string}
+ */
+function firstText(content) {
+  for (const el of content) {
+    const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    if (text.length <= 155) return text;
+    const cut = text.slice(0, 155);
+    const sp = cut.lastIndexOf(" ");
+    return `${(sp > 60 ? cut.slice(0, sp) : cut).replace(/[\s,.;:]+$/, "")}…`;
+  }
+  return "";
+}
+
+/** Set (or replace) a single `<head>` element matched by `selector`, creating it with `make`.
+ * @param {string} selector @param {() => Element} make @returns {Element} */
+function headTag(selector, make) {
+  let el = document.head.querySelector(selector);
+  if (!el) {
+    el = make();
+    document.head.appendChild(el);
+  }
+  return el;
+}
+
+/**
+ * Inject SEO tags into `<head>`: a description, a canonical link, and a LearningResource
+ * JSON-LD. Idempotent (re-running updates the same elements).
+ * @param {string} title
+ * @param {string} description
+ * @param {string} locale
+ * @param {number} [level]
+ */
+function injectSeo(title, description, locale, level) {
+  const canonical = location.origin + location.pathname; // clean URL (drops any ?lang)
+
+  if (description) {
+    headTag('meta[name="description"]', () => {
+      const m = document.createElement("meta");
+      m.setAttribute("name", "description");
+      return m;
+    }).setAttribute("content", description);
+  }
+
+  headTag('link[rel="canonical"]', () => {
+    const l = document.createElement("link");
+    l.setAttribute("rel", "canonical");
+    return l;
+  }).setAttribute("href", canonical);
+
+  /** @type {Record<string, any>} */
+  const ld = {
+    "@context": "https://schema.org",
+    "@type": "LearningResource",
+    name: title,
+    url: canonical,
+    inLanguage: locale,
+    isPartOf: { "@type": "WebSite", name: t("app.name"), url: `${location.origin}/` },
+  };
+  if (description) ld.description = description;
+  if (typeof level === "number") ld.educationalLevel = `Level ${level}`;
+
+  headTag('script.primer-seo[type="application/ld+json"]', () => {
+    const s = document.createElement("script");
+    s.type = "application/ld+json";
+    s.className = "primer-seo";
+    return s;
+  }).textContent = JSON.stringify(ld);
 }
 
 /**

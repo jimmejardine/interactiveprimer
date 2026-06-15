@@ -30,6 +30,7 @@ export default {
   "quiz.empty": "No hay preguntas para esta prueba.",
   "quiz.buildError": "No se pudo construir la prueba ({error}).",
   "quiz.answerPlaceholder": "Escribe tu respuesta",
+  "quiz.correctAnswer": "Respuesta correcta",
 
   "manim.play": "Reproducir animación",
   "manim.pause": "Pausa",

@@ -65,9 +65,10 @@ export class PrimerQuiz extends HTMLElement {
         return `
           <li class="q">
             <p class="prompt">${tex(q.prompt)}</p>
-            <input type="text" class="answer" name="q${qi}" autocomplete="off" inputmode="text"
-              aria-label="${t("quiz.answerPlaceholder")}" placeholder="${t("quiz.answerPlaceholder")}"
-              style="font: inherit; padding: 0.35rem 0.5rem; border: 1px solid var(--primer-border, #ccc); border-radius: 0.4rem; background: var(--primer-surface, #fff); color: var(--primer-ink, #111);">
+            <div class="answer-row">
+              <input type="text" class="answer" name="q${qi}" autocomplete="off" inputmode="text"
+                aria-label="${t("quiz.answerPlaceholder")}" placeholder="${t("quiz.answerPlaceholder")}">
+            </div>
           </li>`;
       }
       return `
@@ -102,6 +103,30 @@ export class PrimerQuiz extends HTMLElement {
         /* Confine the high-score glitter to this panel. */
         .quiz { position: relative; overflow: hidden; }
         .glitter { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; }
+
+        /* Free-text answer box (class state can recolour the border after marking). */
+        .answer-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+        .answer {
+          font: inherit; padding: 0.35rem 0.5rem; border-radius: 0.4rem;
+          border: 1px solid var(--primer-border, #ccc);
+          background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
+        }
+        .answer.right { border-color: var(--primer-ok, #1a8f3c); color: var(--primer-ok, #1a8f3c); background: var(--primer-ok-bg, #e6f6ec); }
+        .answer.wrong { border-color: var(--primer-bad, #c0392b); color: var(--primer-bad, #c0392b); background: var(--primer-bad-bg, #fdecea); }
+
+        /* Result mark beside a text box: green tick if right, red cross if wrong. */
+        .ok-mark { color: var(--primer-ok, #1a8f3c); font-weight: 700; }
+        .bad-mark { color: var(--primer-bad, #c0392b); font-weight: 700; }
+        .correct-answer {
+          font: inherit; padding: 0.35rem 0.5rem; border-radius: 0.4rem;
+          border: 1px solid var(--primer-ok, #1a8f3c); color: var(--primer-ok, #1a8f3c);
+          background: var(--primer-ok-bg, #e6f6ec);
+        }
+
+        /* Multiple-choice feedback after marking. */
+        .option { display: flex; gap: 0.4rem; align-items: center; padding: 0.15rem 0.45rem; border-radius: 0.4rem; }
+        .option.correct { background: var(--primer-ok-bg, #e6f6ec); color: var(--primer-ok, #1a8f3c); box-shadow: inset 0 0 0 1px var(--primer-ok, #1a8f3c); }
+        .option.chosen-wrong { background: var(--primer-bad-bg, #fdecea); color: var(--primer-bad, #c0392b); box-shadow: inset 0 0 0 1px var(--primer-bad, #c0392b); }
       </style>
       <form class="card quiz">
         <h2 style="margin-top:0;">${t("quiz.heading")}</h2>
@@ -140,6 +165,16 @@ export class PrimerQuiz extends HTMLElement {
   #grade(root, quiz) {
     let score = 0;
     let answered = 0; // questions the learner actually responded to
+
+    // Clear any feedback from a previous submission so re-checking is clean.
+    for (const el of root.querySelectorAll(".option.correct, .option.chosen-wrong")) {
+      el.classList.remove("correct", "chosen-wrong");
+    }
+    for (const el of root.querySelectorAll(".answer.right, .answer.wrong")) {
+      el.classList.remove("right", "wrong");
+    }
+    for (const el of root.querySelectorAll(".correct-feedback")) el.remove();
+
     const questionEls = root.querySelectorAll(".q");
     quiz.questions.forEach((q, qi) => {
       let correct = false;
@@ -149,12 +184,46 @@ export class PrimerQuiz extends HTMLElement {
         );
         if (input && input.value.trim() !== "") answered++;
         correct = input !== null && checkAnswer(q.expected, input.value);
+        if (input) {
+          input.classList.toggle("right", correct);
+          input.classList.toggle("wrong", !correct);
+          const row = input.closest(".answer-row");
+          if (row) {
+            // A result mark beside the box: green tick if right, red cross if wrong.
+            const mark = document.createElement("span");
+            mark.className = `${correct ? "ok-mark" : "bad-mark"} correct-feedback`;
+            mark.setAttribute("aria-hidden", "true");
+            mark.textContent = correct ? "✓" : "✗";
+            row.append(mark);
+            // Only reveal the correct answer when they got it wrong.
+            if (!correct) {
+              const ans = document.createElement("input");
+              ans.type = "text";
+              ans.readOnly = true;
+              ans.className = "correct-answer correct-feedback";
+              ans.value = String(q.expected);
+              ans.setAttribute("aria-label", t("quiz.correctAnswer"));
+              ans.title = t("quiz.correctAnswer");
+              row.append(ans);
+            }
+          }
+        }
       } else {
         const chosen = /** @type {HTMLInputElement | null} */ (
           root.querySelector(`input[name="q${qi}"]:checked`)
         );
         if (chosen !== null) answered++;
         correct = chosen !== null && Number(chosen.value) === q.correctIndex;
+        // Green-highlight the correct option; red the chosen-but-wrong one.
+        for (const radio of root.querySelectorAll(`input[name="q${qi}"]`)) {
+          const label = /** @type {HTMLElement | null} */ (radio.closest(".option"));
+          if (!label) continue;
+          if (Number(/** @type {HTMLInputElement} */ (radio).value) === q.correctIndex) {
+            label.classList.add("correct");
+          } else if (radio === chosen) {
+            label.classList.add("chosen-wrong");
+          }
+        }
       }
       if (correct) score++;
       const el = questionEls[qi];

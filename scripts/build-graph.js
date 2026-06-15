@@ -185,6 +185,38 @@ async function main() {
   await mkdir(dirname(OUT), { recursive: true });
   await writeFile(OUT, JSON.stringify(output, null, 2) + "\n", "utf8");
   console.log(`\nWrote ${relative(ROOT, OUT)} (${sorted.length} concepts).`);
+
+  await writeSeoFiles(sorted);
+}
+
+/**
+ * Emit /sitemap.xml and /robots.txt at the repo root for SEO. There's no server build,
+ * so these are committed artifacts refreshed by `npm run graph` (like dist/graph.json).
+ * The production origin is read from the committed CNAME file (single source of truth).
+ * @param {Concept[]} concepts
+ */
+async function writeSeoFiles(concepts) {
+  let origin = "https://interactiveprimer.com";
+  try {
+    const cname = (await readFile(join(ROOT, "CNAME"), "utf8")).trim().split(/\s+/)[0];
+    if (cname) origin = `https://${cname}`;
+  } catch {
+    /* no CNAME (e.g. a fork) — fall back to the default origin */
+  }
+
+  // English URLs only (translations are applied client-side at the same URL).
+  const urls = ["/", ...concepts.map((c) => `/concepts/${c.id}.html`)];
+  const sitemap =
+    `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+    urls.map((u) => `  <url><loc>${origin}${u}</loc></url>`).join("\n") +
+    `\n</urlset>\n`;
+  await writeFile(join(ROOT, "sitemap.xml"), sitemap, "utf8");
+
+  const robots = `User-agent: *\nAllow: /\nSitemap: ${origin}/sitemap.xml\n`;
+  await writeFile(join(ROOT, "robots.txt"), robots, "utf8");
+
+  console.log(`Wrote sitemap.xml (${urls.length} urls) + robots.txt for ${origin}.`);
 }
 
 main().catch((err) => {

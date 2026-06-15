@@ -31,6 +31,7 @@ export default {
   "quiz.empty": "No quiz questions provided.",
   "quiz.buildError": "Couldn't build the test ({error}).",
   "quiz.answerPlaceholder": "Type your answer",
+  "quiz.correctAnswer": "Correct answer",
 
   "manim.play": "Play animation",
   "manim.pause": "Pause",
