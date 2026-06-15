@@ -29,6 +29,26 @@
   if (/** @type {any} */ (window).__primerBooted) return;
   /** @type {any} */ (window).__primerBooted = true;
 
+  // Theme, set synchronously BEFORE the stylesheet is injected so there is no flash of
+  // the wrong palette. js/theme.js (loaded later) reconciles + persists this. Keep this
+  // in step with pickInitialTheme(): stored choice wins, else follow the OS preference.
+  try {
+    let theme = null;
+    try {
+      theme = localStorage.getItem("primer:theme");
+    } catch (e) {
+      /* localStorage blocked */
+    }
+    if (theme !== "light" && theme !== "dark" && theme !== "fun") {
+      theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light";
+    }
+    document.documentElement.dataset.theme = theme;
+  } catch (e) {
+    /* non-fatal: fall back to the :root (light) default */
+  }
+
   // Pinned dependency URLs — the single source of truth for versions.
   const KATEX_VERSION = "0.16.11";
   const MANIM_VERSION = "0.3.22";

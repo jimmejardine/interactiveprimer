@@ -132,7 +132,10 @@ registerScene("countOne", async (host, manim) => {
 - **`boot.js` is a classic, render-blocking script on purpose.** Put it first in the
   body. It injects the import map synchronously where it sits, so being first
   guarantees the map is in the DOM before the concept-meta block, the cards, or any
-  inline scene module (`import … from "primer"`) is parsed.
+  inline scene module (`import … from "primer"`) is parsed. It also sets `data-theme`
+  on `<html>` synchronously (from the saved choice or the OS preference) so there is no
+  flash of the wrong theme, and mounts the top-right theme menu — pages author nothing
+  theme-related.
 - **Type-checking** the JS (`npm run typecheck`, i.e. `tsc --noEmit`) reads KaTeX's
   and manim-web's bundled `.d.ts` files, so you get full IntelliSense and checking
   against their APIs even though we author plain `.js`.

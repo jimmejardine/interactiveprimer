@@ -53,7 +53,12 @@ function confidenceColor(id) {
   if (!Number.isFinite(n)) return null;
   const stars = Math.min(MAX_STARS, Math.max(0, n));
   const hue = (stars / MAX_STARS) * 120; // 0 → red, 60 → yellow, 120 → green
-  return `hsl(${hue}, 70%, 62%)`;
+  // Saturation/lightness are theme-driven so the ramp stays legible against the node
+  // text in every theme (e.g. darker, muted fills in dark mode). See css/primer.css.
+  const s = getComputedStyle(document.documentElement);
+  const sat = s.getPropertyValue("--primer-conf-sat").trim() || "70%";
+  const light = s.getPropertyValue("--primer-conf-light").trim() || "62%";
+  return `hsl(${hue}, ${sat}, ${light})`;
 }
 
 /** Paint a node element from its concept's rating (clears to the default when unrated). @param {Element} el */
@@ -108,6 +113,8 @@ export class PrimerPathway extends HTMLElement {
   #observer = null;
   /** @type {((e: Event) => void) | null} */
   #onConfidence = null;
+  /** @type {(() => void) | null} */
+  #onTheme = null;
 
   async connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
@@ -132,6 +139,8 @@ export class PrimerPathway extends HTMLElement {
     this.#observer = null;
     if (this.#onConfidence) document.removeEventListener("confidence-change", this.#onConfidence);
     this.#onConfidence = null;
+    if (this.#onTheme) document.removeEventListener("theme-change", this.#onTheme);
+    this.#onTheme = null;
   }
 
   /**
@@ -203,6 +212,13 @@ export class PrimerPathway extends HTMLElement {
       if (el) paintNode(el);
     };
     document.addEventListener("confidence-change", this.#onConfidence);
+
+    // Re-paint the rating colours when the theme changes (the fills are inline styles,
+    // so unlike CSS var() they don't update themselves).
+    this.#onTheme = () => {
+      for (const el of nodes) paintNode(el);
+    };
+    document.addEventListener("theme-change", this.#onTheme);
 
     // Hover: emphasise a node's connected nodes + edges and dim the rest.
     /** @type {Map<string, Set<string>>} */

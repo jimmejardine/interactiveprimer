@@ -69,3 +69,25 @@ export function speak(text, opts = {}) {
 export function cancelSpeech() {
   if (supported()) window.speechSynthesis.cancel();
 }
+
+/** Pause any in-progress narration (best-effort; pairs with {@link resumeSpeech}). */
+export function pauseSpeech() {
+  if (supported()) {
+    try {
+      window.speechSynthesis.pause();
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
+/** Resume narration paused by {@link pauseSpeech}. */
+export function resumeSpeech() {
+  if (supported()) {
+    try {
+      window.speechSynthesis.resume();
+    } catch {
+      /* best-effort */
+    }
+  }
+}

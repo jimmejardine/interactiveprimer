@@ -18,9 +18,11 @@ import "./components/primer-math.js";
 import "./components/primer-manim.js";
 import "./components/primer-quiz.js";
 import "./components/primer-pathway.js";
+import "./components/primer-menu.js";
 
 // Re-exports for page scripts.
 export { registerScene, getScene } from "./scenes.js";
+export { THEMES, getTheme, applyTheme, initTheme, vizColors } from "./theme.js";
 export { speak, cancelSpeech } from "./speech.js";
 export { parseConceptMeta, getConceptMeta } from "./concept-meta.js";
 export { BASE_LEVEL, maxLevel, formatLevel } from "./levels.js";

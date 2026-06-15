@@ -37,7 +37,7 @@ const COMPONENT_CSS = `
   .meta { font-family: var(--primer-font-ui, sans-serif); color: var(--primer-ink-soft, #667); }
   .meta a { color: var(--primer-accent, #46e); }
 
-  h1, h2 { line-height: 1.2; }
+  h1, h2 { line-height: 1.2; font-family: var(--primer-font-display, var(--primer-font-body)); }
 
   button {
     font-family: var(--primer-font-ui, sans-serif);

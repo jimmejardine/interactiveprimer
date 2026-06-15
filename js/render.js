@@ -26,10 +26,20 @@
 
 import "primer";
 import { getConceptMeta } from "./concept-meta.js";
+import { initTheme } from "./theme.js";
 
 /** Build the page shell once the DOM is ready. */
 function render() {
   const body = document.body;
+
+  // Reconcile the synchronously-set theme (boot.js) with storage — this also loads the
+  // fun display font when that theme is the saved choice.
+  initTheme();
+
+  // Global page chrome: the top-right hamburger menu (theme switcher), mounted once.
+  if (!body.querySelector("primer-menu")) {
+    body.appendChild(document.createElement("primer-menu"));
+  }
 
   // Title from the concept metadata (the page writes no <head>/<title>).
   try {

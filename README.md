@@ -71,6 +71,13 @@ time — **there is no build step**. The toolchain:
   and `<primer-concept>` title + confidence control) is built automatically by
   [`js/render.js`](js/render.js) from the page's metadata block. All elements are
   registered by the single [`js/primer.js`](js/primer.js) module.
+- **Themes** — light, dark, and a playful **fun** theme for kids. A theme is a value of
+  `data-theme` on `<html>`; palettes are `--primer-*` token blocks in
+  [`css/primer.css`](css/primer.css), so the whole UI re-themes via `var(...)`. The theme
+  is applied with no flash by [`js/boot.js`](js/boot.js), managed by
+  [`js/theme.js`](js/theme.js), and switched from a top-right hamburger menu
+  ([`js/components/primer-menu.js`](js/components/primer-menu.js)). Animations read the
+  theme's palette via `vizColors()`.
 - **Typed JavaScript + JSDoc** (no `.ts` authoring). Code runs raw in the browser and in
   Node, yet is fully type-checked by `tsc` against the libraries' own type definitions.
 - The knowledge-tree logic — prerequisite resolution and downstream **level propagation** —

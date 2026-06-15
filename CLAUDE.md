@@ -99,15 +99,27 @@ by name from a `<primer-manim>`:
 - `speak(text, { rate, pitch, lang })` returns a Promise that resolves when narration
   finishes (silent no-op if the browser lacks speech). `cancelSpeech()` stops it; the
   manim component already cancels speech on replay.
+- **Theme-aware colours:** call `const v = vizColors()` (from `primer`) and use its hex
+  strings — `v.bg`, `v.stroke`, `v.ink`, `v.a`, `v.b`, `v.c`, `v.accent` — instead of
+  manim's named colour constants, so the animation matches the active theme. Fall back to
+  a manim constant if you like (`v.a || BLUE`). A replay after a theme change re-reads them.
 - manim-web is young (v0.3.x): keep scenes simple, and the component shows a friendly
   message if a scene throws, so prefer small, defensive scenes.
 
 ## Helpers re-exported from `primer` (for inline scripts)
 
-`registerScene`, `getScene`, `speak`, `cancelSpeech`, `getConceptMeta`,
-`parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, and the graph helpers
-(`resolveLevels`, `validateGraph`, …). Pinned KaTeX/manim-web versions live in
-`js/boot.js`.
+`registerScene`, `getScene`, `speak`, `cancelSpeech`, `vizColors`, `getConceptMeta`,
+`parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`,
+`getTheme`, `applyTheme`, `initTheme`), and the graph helpers (`resolveLevels`,
+`validateGraph`, …). Pinned KaTeX/manim-web versions live in `js/boot.js`.
+
+## Themes & page chrome (automatic)
+
+You don't author any of this per page. `boot.js` applies the saved theme (light / dark /
+fun) with no flash and mounts a top-right hamburger menu (the theme switcher). Colours come
+from `--primer-*` tokens defined per theme in `css/primer.css`, so headings, cards, the
+explorer and badges re-theme themselves; the only theme-coupled JS is animations (use
+`vizColors()` above). Levels start at 0; a real number that propagates via `max`.
 
 ## Validate & preview
 

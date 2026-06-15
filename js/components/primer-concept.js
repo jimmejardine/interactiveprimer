@@ -32,13 +32,15 @@ const STAR_CSS = `
   /* Level badge: bold when declared in metadata, normal weight when implicit. */
   .level-badge { font-weight: 400; }
   .level-badge.is-declared { font-weight: 700; }
+  /* Centre the prompt and the star row within the confidence card. */
+  .confidence { text-align: center; }
   .stars { display: inline-flex; gap: 0.15rem; }
   .star {
     padding: 0.1rem; border: none; background: none; line-height: 0;
     color: var(--primer-border, #ccc); cursor: pointer;
   }
   .star svg { width: 1.6rem; height: 1.6rem; fill: currentColor; transition: color 0.08s ease; }
-  .star.filled { color: #f5b301; }            /* selected or previewed */
+  .star.filled { color: var(--primer-star, #f5b301); }   /* selected or previewed */
   .star:focus-visible { outline: 2px solid var(--primer-accent, #46e); border-radius: 0.25rem; }
 `;
 
@@ -75,16 +77,13 @@ export class PrimerConcept extends HTMLElement {
         <section class="confidence card" aria-label="Your confidence">
           <p class="meta" id="conf-label" style="margin-top:0;">How confident are you with this concept?</p>
           <div class="stars" role="group" aria-labelledby="conf-label">${stars}</div>
-          <p class="rating-text meta" role="status" aria-live="polite" style="margin-bottom:0;"></p>
         </section>
       </article>`;
 
     const starEls = /** @type {HTMLButtonElement[]} */ ([...root.querySelectorAll(".star")]);
-    const ratingText = /** @type {HTMLElement} */ (root.querySelector(".rating-text"));
 
     let rating = readConfidence(storageKey) ?? 0;
     paint(starEls, rating);
-    setText(ratingText, rating, readConfidence(storageKey) === null);
 
     for (const star of starEls) {
       const value = Number(star.dataset.value);
@@ -93,7 +92,6 @@ export class PrimerConcept extends HTMLElement {
         rating = rating === value ? value - 1 : value;
         writeConfidence(storageKey, rating);
         paint(starEls, rating);
-        setText(ratingText, rating, false);
         this.dispatchEvent(
           // composed so it escapes this shadow root and reaches the pathway widget,
           // which re-colours the matching node live.
@@ -157,15 +155,6 @@ function paint(stars, upto) {
   for (const s of stars) {
     s.classList.toggle("filled", Number(s.dataset.value) <= upto);
   }
-}
-
-/**
- * @param {HTMLElement} el
- * @param {number} rating
- * @param {boolean} unrated
- */
-function setText(el, rating, unrated) {
-  el.textContent = unrated ? "Not yet rated" : `${rating} / ${MAX_STARS} stars`;
 }
 
 /**
