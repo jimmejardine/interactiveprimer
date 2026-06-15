@@ -12,6 +12,7 @@ import { attachShared, slug } from "./shared.js";
 import { getConceptMeta } from "../concept-meta.js";
 import { formatLevel, BASE_LEVEL } from "../levels.js";
 import { loadGraph } from "../graph-data.js";
+import { t } from "../i18n.js";
 
 /** Number of stars in the confidence rating (0 = unrated/none, MAX = full mastery). */
 const MAX_STARS = 10;
@@ -59,14 +60,14 @@ export class PrimerConcept extends HTMLElement {
     const declared = meta?.declaredLevel;
     const levelBadge =
       declared !== undefined
-        ? `<span class="badge level-badge is-declared" title="Declared level">Level ${formatLevel(declared)}</span>`
-        : `<span class="badge level-badge" title="Implicit level (inherited from prerequisites)" hidden>Level</span>`;
+        ? `<span class="badge level-badge is-declared" title="${t("concept.level.declaredTitle")}">${t("concept.level.label", { level: formatLevel(declared) })}</span>`
+        : `<span class="badge level-badge" title="${t("concept.level.implicitTitle")}" hidden>${t("concept.level.word")}</span>`;
 
     const stars = Array.from(
       { length: MAX_STARS },
       (_, i) =>
         `<button type="button" class="star" data-value="${i + 1}" ` +
-        `aria-label="Rate ${i + 1} out of ${MAX_STARS}" title="${i + 1} / ${MAX_STARS}">${STAR_SVG}</button>`,
+        `aria-label="${t("concept.confidence.rate", { n: i + 1, max: MAX_STARS })}" title="${t("concept.confidence.rateTitle", { n: i + 1, max: MAX_STARS })}">${STAR_SVG}</button>`,
     ).join("");
 
     root.innerHTML = `
@@ -74,8 +75,8 @@ export class PrimerConcept extends HTMLElement {
       <article>
         <div class="title-row"><h1>${title}</h1>${levelBadge}</div>
         <div class="body"><slot></slot></div>
-        <section class="confidence card" aria-label="Your confidence">
-          <p class="meta" id="conf-label" style="margin-top:0;">How confident are you with this concept?</p>
+        <section class="confidence card" aria-label="${t("concept.confidence.legend")}">
+          <p class="meta" id="conf-label" style="margin-top:0;">${t("concept.confidence.prompt")}</p>
           <div class="stars" role="group" aria-labelledby="conf-label">${stars}</div>
         </section>
       </article>`;
@@ -132,7 +133,7 @@ export class PrimerConcept extends HTMLElement {
     if (!this.isConnected) return;
     const badge = root.querySelector(".level-badge");
     if (!badge) return;
-    badge.textContent = `Level ${formatLevel(level)}`;
+    badge.textContent = t("concept.level.label", { level: formatLevel(level) });
     badge.removeAttribute("hidden");
   }
 }

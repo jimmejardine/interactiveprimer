@@ -10,6 +10,7 @@
  */
 
 import { attachShared } from "./shared.js";
+import { t } from "../i18n.js";
 
 export class PrimerPage extends HTMLElement {
   connectedCallback() {
@@ -17,7 +18,7 @@ export class PrimerPage extends HTMLElement {
     root.innerHTML = `
       <slot></slot>
       <footer class="page-foot meta" style="margin-top:2rem;">
-        <a href="/index.html">↑ Back to the tree of knowledge</a>
+        <a href="/index.html">${t("page.backToTree")}</a>
       </footer>`;
   }
 }

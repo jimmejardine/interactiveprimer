@@ -32,6 +32,7 @@
  * @property {boolean} [root]          Marks an entry point (no prerequisites expected).
  * @property {string} [completedDate]    Optional ISO date "YYYY-MM-DD" — when the lesson content was finished.
  * @property {string} [needsReviewDate]  Optional ISO date "YYYY-MM-DD" — when this concept was flagged as needing review.
+ * @property {string} [sourceHash]       Set only on translation overlays: hash of the English source's translatable surface this was translated from (see scripts/i18n-check.js).
  */
 
 /** A concept in the graph. Currently identical to its authored metadata. @typedef {ConceptMeta} Concept */
@@ -43,7 +44,10 @@
  *    so `level` fell back to the base (0).
  *  - `successors` are the ids of concepts that list this one as a direct prerequisite
  *    (the immediate mirror of `prerequisites`), computed when the graph is emitted.
- * @typedef {Concept & { level: Level, levelGrounded: boolean, successors?: string[] }} ResolvedConcept
+ *  - `titles` maps a non-default locale to that concept's translated title, harvested
+ *    from the per-locale overlays so the explorer can label nodes in the active language
+ *    (falling back to the English `title`). Absent when no translation exists.
+ * @typedef {Concept & { level: Level, levelGrounded: boolean, successors?: string[], titles?: Record<string, string> }} ResolvedConcept
  */
 
 /**

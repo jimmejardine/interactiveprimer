@@ -49,6 +49,37 @@
     /* non-fatal: fall back to the :root (light) default */
   }
 
+  // Locale, set synchronously BEFORE first paint so chrome renders in the right language
+  // with no flash. Mirrors pickInitialLocale() in js/i18n.js (loaded later, which reconciles
+  // + persists): a valid stored choice wins, else the first matching browser language, else
+  // English. Keep SUPPORTED in step with LOCALES in js/i18n.js.
+  try {
+    const SUPPORTED = ["en", "es"];
+    let locale = "";
+    try {
+      locale = localStorage.getItem("primer:locale") || "";
+    } catch (e) {
+      /* localStorage blocked */
+    }
+    if (SUPPORTED.indexOf(locale) === -1) {
+      const langs =
+        navigator.languages && navigator.languages.length
+          ? navigator.languages
+          : [navigator.language || "en"];
+      locale = "en";
+      for (const tag of langs) {
+        const base = String(tag || "").toLowerCase().split("-")[0];
+        if (SUPPORTED.indexOf(base) !== -1) {
+          locale = base;
+          break;
+        }
+      }
+    }
+    document.documentElement.lang = locale;
+  } catch (e) {
+    /* non-fatal: keep the authored lang="en" */
+  }
+
   // Pinned dependency URLs — the single source of truth for versions.
   const KATEX_VERSION = "0.16.11";
   const MANIM_VERSION = "0.3.22";

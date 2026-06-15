@@ -19,6 +19,7 @@
 import katex from "katex";
 import { attachShared } from "./shared.js";
 import { generateQuiz } from "../quiz.js";
+import { t } from "../i18n.js";
 
 /** @typedef {import("../types/domain.js").QuizQuestion} QuizQuestion */
 /** @typedef {import("../types/domain.js").GeneratedQuiz} GeneratedQuiz */
@@ -31,7 +32,7 @@ export class PrimerQuiz extends HTMLElement {
     // The question bank is authored inline, as a child <script type="application/json">.
     const bankEl = this.querySelector(':scope > script[type="application/json"]');
     if (!bankEl || !bankEl.textContent) {
-      root.innerHTML = `<div class="card"><p class="meta">No quiz questions provided.</p></div>`;
+      root.innerHTML = `<div class="card"><p class="meta">${t("quiz.empty")}</p></div>`;
       return;
     }
 
@@ -41,9 +42,8 @@ export class PrimerQuiz extends HTMLElement {
       const bank = /** @type {QuizQuestion[]} */ (JSON.parse(bankEl.textContent));
       quiz = generateQuiz(bank, count, Math.random);
     } catch (err) {
-      root.innerHTML = `<div class="card"><p class="meta">Couldn't build the test (${
-        err instanceof Error ? err.message : String(err)
-      }).</p></div>`;
+      const error = err instanceof Error ? err.message : String(err);
+      root.innerHTML = `<div class="card"><p class="meta">${t("quiz.buildError", { error })}</p></div>`;
       return;
     }
 
@@ -85,9 +85,9 @@ export class PrimerQuiz extends HTMLElement {
     root.innerHTML = `
       ${katexHref ? `<link rel="stylesheet" href="${katexHref}">` : ""}
       <form class="card quiz">
-        <h2 style="margin-top:0;">Quick test</h2>
+        <h2 style="margin-top:0;">${t("quiz.heading")}</h2>
         <ol class="questions" style="list-style:none; padding:0;">${items}</ol>
-        <button type="submit">Check answers</button>
+        <button type="submit">${t("quiz.check")}</button>
         <p class="result meta" role="status" aria-live="polite"></p>
       </form>`;
 
@@ -116,7 +116,7 @@ export class PrimerQuiz extends HTMLElement {
       el?.classList.toggle("wrong", !correct);
     });
     const result = /** @type {HTMLElement} */ (root.querySelector(".result"));
-    result.textContent = `You scored ${score} / ${quiz.questions.length}.`;
+    result.textContent = t("quiz.score", { score, total: quiz.questions.length });
   }
 }
 

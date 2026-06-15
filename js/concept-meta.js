@@ -67,6 +67,15 @@ export function parseConceptMeta(raw) {
     meta.needsReviewDate = validateDate(obj.needsReviewDate, "needsReviewDate", id);
   }
 
+  // Set only on translation overlays: the hash of the English source's translatable
+  // surface this translation was made from (see scripts/i18n-check.js).
+  if (obj.sourceHash !== undefined) {
+    if (typeof obj.sourceHash !== "string" || obj.sourceHash.trim() === "") {
+      throw new Error(`concept "${id}" \`sourceHash\` must be a non-empty string`);
+    }
+    meta.sourceHash = obj.sourceHash;
+  }
+
   return meta;
 }
 

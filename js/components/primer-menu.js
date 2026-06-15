@@ -1,15 +1,20 @@
 // @ts-check
 /**
- * <primer-menu> — a fixed top-right hamburger button that opens a small menu. For now
- * its only item is the theme switcher (Light / Dark / Fun). It is mounted once per page
- * (by js/render.js on concept pages, and by index.html on the landing page).
+ * <primer-menu> — a fixed top-right hamburger button that opens a small menu with the
+ * Theme switcher (Light / Dark / Fun) and the Language switcher. It is mounted once per
+ * page (by js/render.js on concept pages, and by index.html on the landing page).
+ *
+ * Its own labels are localized via i18n's `t(...)`; the language options use each locale's
+ * endonym (e.g. "Español"), which is conventionally not translated.
  * @module
  */
 
 import { attachShared } from "./shared.js";
 import { THEMES, getTheme, applyTheme } from "../theme.js";
+import { LOCALES, getLocale, applyLocale, t } from "../i18n.js";
 
 /** @typedef {import("../theme.js").ThemeId} ThemeId */
+/** @typedef {import("../i18n.js").LocaleId} LocaleId */
 
 const HAMBURGER_SVG =
   '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" width="20" height="20">' +
@@ -39,14 +44,15 @@ const STYLE = `
   }
   .panel.open { display: block; }
 
+  .group + .group { margin-top: 0.75rem; }
   .group-label {
     font-family: var(--primer-font-ui, sans-serif);
     font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em;
     color: var(--primer-ink-soft, #667);
     margin: 0 0 0.4rem;
   }
-  .themes { display: flex; flex-direction: column; gap: 0.35rem; }
-  .themes button { text-align: left; }
+  .choices { display: flex; flex-direction: column; gap: 0.35rem; }
+  .choices button { text-align: left; }
 `;
 
 export class PrimerMenu extends HTMLElement {
@@ -61,29 +67,43 @@ export class PrimerMenu extends HTMLElement {
     const root = this.shadowRoot ?? attachShared(this);
 
     const themeButtons = THEMES.map(
-      (t) =>
-        `<button type="button" class="theme" data-theme-id="${t.id}" aria-pressed="false">${t.label}</button>`,
+      (th) =>
+        `<button type="button" class="theme" data-theme-id="${th.id}" aria-pressed="false">${t(
+          "theme." + th.id,
+        )}</button>`,
+    ).join("");
+
+    const langButtons = LOCALES.map(
+      (l) =>
+        `<button type="button" class="lang" data-locale-id="${l.id}" aria-pressed="false">${l.label}</button>`,
     ).join("");
 
     root.innerHTML = `
       <style>${STYLE}</style>
-      <button class="toggle" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Menu">
+      <button class="toggle" type="button" aria-haspopup="true" aria-expanded="false" aria-label="${t("menu.label")}">
         ${HAMBURGER_SVG}
       </button>
       <div class="panel" role="menu">
-        <p class="group-label" id="theme-label">Theme</p>
-        <div class="themes" role="group" aria-labelledby="theme-label">${themeButtons}</div>
+        <div class="group">
+          <p class="group-label" id="theme-label">${t("menu.theme")}</p>
+          <div class="choices" role="group" aria-labelledby="theme-label">${themeButtons}</div>
+        </div>
+        <div class="group">
+          <p class="group-label" id="lang-label">${t("menu.language")}</p>
+          <div class="choices" role="group" aria-labelledby="lang-label">${langButtons}</div>
+        </div>
       </div>`;
 
     const toggle = /** @type {HTMLButtonElement} */ (root.querySelector(".toggle"));
     const panel = /** @type {HTMLElement} */ (root.querySelector(".panel"));
     const themeEls = /** @type {HTMLButtonElement[]} */ ([...root.querySelectorAll(".theme")]);
+    const langEls = /** @type {HTMLButtonElement[]} */ ([...root.querySelectorAll(".lang")]);
 
     const reflect = () => {
-      const current = getTheme();
-      for (const b of themeEls) {
-        b.setAttribute("aria-pressed", String(b.dataset.themeId === current));
-      }
+      const theme = getTheme();
+      for (const b of themeEls) b.setAttribute("aria-pressed", String(b.dataset.themeId === theme));
+      const locale = getLocale();
+      for (const b of langEls) b.setAttribute("aria-pressed", String(b.dataset.localeId === locale));
     };
     reflect();
 
@@ -100,6 +120,14 @@ export class PrimerMenu extends HTMLElement {
         applyTheme(/** @type {ThemeId} */ (b.dataset.themeId));
         reflect();
         setOpen(false);
+      });
+    }
+
+    // Switching language persists the choice and reloads, so the page re-resolves its
+    // translation overlay + chrome strings (applyLocale handles the reload).
+    for (const b of langEls) {
+      b.addEventListener("click", () => {
+        applyLocale(/** @type {LocaleId} */ (b.dataset.localeId));
       });
     }
 
