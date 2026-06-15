@@ -69,10 +69,24 @@ function paintNode(el) {
 
 const STYLE = `
   :host { display: block; }
-  .pathway { position: relative; margin: 1.25rem 0; }
+  /* Scroll viewport: on a narrow screen the (nowrap) node pills make the 3-column grid
+     wider than the page, so we scroll the whole map horizontally instead of widening the
+     page or squashing pills. #render centres this on the current concept after layout. */
+  .scroll {
+    overflow-x: auto; overflow-y: hidden; max-width: 100%; margin: 1.25rem 0;
+    scrollbar-width: thin; overscroll-behavior-x: contain;
+  }
+  /* The scrolled CONTENT (carries the wires overlay): width is auto, so it fills the
+     viewport and the columns compress (pills ellipsize) as it narrows. The min-width is the
+     floor below which it stops crushing and the .scroll parent shows a scrollbar instead.
+     Keep this element the wires' offset parent so #drawWires keeps aligning and the wires
+     scroll with the nodes. */
+  .pathway { position: relative; margin: 0; min-width: 26rem; }
   .cols {
     position: relative; z-index: 1;
-    display: grid; grid-template-columns: 1fr 1fr 1fr;
+    /* minmax(0, 1fr) lets a track shrink below its pill's text so the pill can ellipsize
+       (rather than forcing the whole grid wider than the page). */
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
     align-items: center; gap: 0.5rem;
   }
   .col { display: flex; flex-direction: column; gap: 0.4rem; justify-content: center; }
@@ -189,21 +203,36 @@ export class PrimerPathway extends HTMLElement {
 
     root.innerHTML = `
       <style>${STYLE}</style>
-      <nav class="pathway" aria-label="${t("pathway.label")}">
-        <div class="cols">
-          ${column("col1", col1)}
-          ${col2}
-          ${column("col3", col3)}
-        </div>
-        <svg class="wires" aria-hidden="true"></svg>
-      </nav>`;
+      <div class="scroll">
+        <nav class="pathway" aria-label="${t("pathway.label")}">
+          <div class="cols">
+            ${column("col1", col1)}
+            ${col2}
+            ${column("col3", col3)}
+          </div>
+          <svg class="wires" aria-hidden="true"></svg>
+        </nav>
+      </div>`;
 
+    const scroll = /** @type {HTMLElement} */ (root.querySelector(".scroll"));
     const pathway = /** @type {HTMLElement} */ (root.querySelector(".pathway"));
     const svg = /** @type {SVGSVGElement} */ (root.querySelector(".wires"));
     const draw = () => this.#drawWires(pathway, svg, hood.edges);
 
-    // Draw after layout, then on every resize (ResizeObserver fires once on observe).
-    requestAnimationFrame(draw);
+    // Scroll the strip so the current concept starts centred (only meaningful when the map
+    // is wider than the viewport; on a wide screen it's already centred so this is ~0).
+    const centerOnCurrent = () => {
+      const cur = /** @type {HTMLElement | null} */ (root.querySelector(".node--current"));
+      if (!cur) return;
+      scroll.scrollLeft = Math.max(0, cur.offsetLeft + cur.offsetWidth / 2 - scroll.clientWidth / 2);
+    };
+
+    // Draw + centre after first layout; redraw wires on resize (don't re-centre, so we
+    // don't fight a learner who has scrolled). ResizeObserver fires once on observe.
+    requestAnimationFrame(() => {
+      draw();
+      centerOnCurrent();
+    });
     this.#observer = new ResizeObserver(draw);
     this.#observer.observe(pathway);
 
