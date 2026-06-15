@@ -32,14 +32,17 @@
   // Theme, set synchronously BEFORE the stylesheet is injected so there is no flash of
   // the wrong palette. js/theme.js (loaded later) reconciles + persists this. Keep this
   // in step with pickInitialTheme(): stored choice wins, else follow the OS preference.
+  let theme = "light";
   try {
-    let theme = null;
+    let stored = null;
     try {
-      theme = localStorage.getItem("primer:theme");
+      stored = localStorage.getItem("primer:theme");
     } catch (e) {
       /* localStorage blocked */
     }
-    if (theme !== "light" && theme !== "dark" && theme !== "fun") {
+    if (stored === "light" || stored === "dark" || stored === "fun") {
+      theme = stored;
+    } else {
       theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
         ? "dark"
         : "light";
@@ -47,7 +50,47 @@
     document.documentElement.dataset.theme = theme;
   } catch (e) {
     /* non-fatal: fall back to the :root (light) default */
+    document.documentElement.dataset.theme = theme;
   }
+
+  // Anti-FOUC. This page has no <head>, so the stylesheet is injected by JS below and
+  // does NOT block the first paint — the raw cards would otherwise flash unstyled, then
+  // the shell builds and restyles. Instead: keep the content hidden until the stylesheet
+  // has loaded AND render.js has built the shell (see `reveal`), then fade it in.
+  //
+  // `color-scheme` makes the browser's DEFAULT page background follow the theme, so the
+  // brief hidden phase is dark in dark mode (no white flash) and the scrollbars/form
+  // controls match — without hardcoding any colour here. css/primer.css paints the exact
+  // --primer-bg once it loads. Only `dark` is a dark theme; this mirrors the per-theme
+  // `scheme` in js/theme.js (which applyTheme uses authoritatively, incl. on theme change).
+  document.documentElement.style.colorScheme = theme === "dark" ? "dark" : "light";
+  const critical = document.createElement("style");
+  critical.textContent =
+    "body{opacity:0}html.primer-ready body{opacity:1;transition:opacity .18s ease}";
+  document.head.appendChild(critical);
+
+  // Reveal once BOTH the stylesheet has loaded and the shell is built — or a fallback
+  // timeout, so a CSS/render failure never leaves the page blank.
+  let cssReady = false;
+  let domReady = false;
+  let revealed = false;
+  function reveal() {
+    if (revealed) return;
+    revealed = true;
+    document.documentElement.classList.add("primer-ready");
+  }
+  function maybeReveal() {
+    if (cssReady && domReady) reveal();
+  }
+  document.addEventListener(
+    "primer:rendered",
+    () => {
+      domReady = true;
+      maybeReveal();
+    },
+    { once: true },
+  );
+  setTimeout(reveal, 2500);
 
   // Locale, set synchronously BEFORE first paint so chrome renders in the right language
   // with no flash. Mirrors pickInitialLocale() in js/i18n.js (loaded later, which reconciles
@@ -99,11 +142,21 @@
     head.appendChild(vp);
   }
 
-  // 1) Stylesheets: the Primer look-and-feel plus KaTeX's font glyph CSS.
+  // 1) Stylesheets: the Primer look-and-feel plus KaTeX's font glyph CSS. The local
+  //    primer.css gates the anti-FOUC reveal (treat an error as "ready" too, so a
+  //    failed stylesheet never leaves the page hidden).
   for (const href of ["/css/primer.css", KATEX_CSS]) {
     const link = document.createElement("link");
     link.rel = "stylesheet";
     link.href = href;
+    if (href === "/css/primer.css") {
+      const onCss = () => {
+        cssReady = true;
+        maybeReveal();
+      };
+      link.addEventListener("load", onCss);
+      link.addEventListener("error", onCss);
+    }
     head.appendChild(link);
   }
 

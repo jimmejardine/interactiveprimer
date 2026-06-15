@@ -13,11 +13,17 @@
 
 /** @typedef {"light" | "dark" | "fun"} ThemeId */
 
-/** Available themes, in display order. @type {ReadonlyArray<{ id: ThemeId, label: string }>} */
+/**
+ * Available themes, in display order. `scheme` is the light/dark nature of the palette
+ * (the dark mode `--primer-bg` is dark, the others light) — the single source of truth
+ * for `color-scheme`, applied in {@link applyTheme} and mirrored by js/boot.js so the
+ * browser's default canvas + scrollbars match the theme before css/primer.css loads.
+ * @type {ReadonlyArray<{ id: ThemeId, label: string, scheme: "light" | "dark" }>}
+ */
 export const THEMES = [
-  { id: "light", label: "Light" },
-  { id: "dark", label: "Dark" },
-  { id: "fun", label: "Fun" },
+  { id: "light", label: "Light", scheme: "light" },
+  { id: "dark", label: "Dark", scheme: "dark" },
+  { id: "fun", label: "Fun", scheme: "light" },
 ];
 
 export const STORAGE_KEY = "primer:theme";
@@ -56,6 +62,10 @@ export function getTheme() {
 export function applyTheme(id) {
   if (!VALID.has(id)) id = "light";
   document.documentElement.dataset.theme = id;
+  // color-scheme makes the browser's default background, scrollbars and form controls
+  // match the theme. Taken from the theme's own `scheme` (the source of truth).
+  document.documentElement.style.colorScheme =
+    THEMES.find((th) => th.id === id)?.scheme ?? "light";
   try {
     localStorage.setItem(STORAGE_KEY, id);
   } catch {

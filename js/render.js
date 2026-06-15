@@ -185,8 +185,16 @@ function safeMeta() {
   }
 }
 
+/**
+ * Run render and, however it settles (success, empty-content early return, or error),
+ * announce it so boot.js can lift the anti-FOUC veil and fade the page in.
+ */
+function start() {
+  render().finally(() => document.dispatchEvent(new Event("primer:rendered")));
+}
+
 if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", () => void render(), { once: true });
+  document.addEventListener("DOMContentLoaded", start, { once: true });
 } else {
-  void render();
+  start();
 }
