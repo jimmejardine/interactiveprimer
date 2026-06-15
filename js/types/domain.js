@@ -30,6 +30,8 @@
  * @property {string[]} prerequisites  Full-path ids of concepts required first (DAG edges).
  * @property {Level} [declaredLevel]   Optional numeric level explicitly declared.
  * @property {boolean} [root]          Marks an entry point (no prerequisites expected).
+ * @property {string} [completedDate]    Optional ISO date "YYYY-MM-DD" — when the lesson content was finished.
+ * @property {string} [needsReviewDate]  Optional ISO date "YYYY-MM-DD" — when this concept was flagged as needing review.
  */
 
 /** A concept in the graph. Currently identical to its authored metadata. @typedef {ConceptMeta} Concept */
@@ -39,7 +41,9 @@
  *  - `level` is the computed numeric level (max of declared + all prerequisites).
  *  - `levelGrounded` is false when no level was declared anywhere in its ancestry,
  *    so `level` fell back to the base (0).
- * @typedef {Concept & { level: Level, levelGrounded: boolean }} ResolvedConcept
+ *  - `successors` are the ids of concepts that list this one as a direct prerequisite
+ *    (the immediate mirror of `prerequisites`), computed when the graph is emitted.
+ * @typedef {Concept & { level: Level, levelGrounded: boolean, successors?: string[] }} ResolvedConcept
  */
 
 /**

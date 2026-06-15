@@ -22,7 +22,7 @@ import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseConceptMeta } from "../js/concept-meta.js";
-import { validateGraph } from "../js/graph.js";
+import { validateGraph, indexConcepts, buildDependents } from "../js/graph.js";
 
 /** @typedef {import("../js/types/domain.js").Concept} Concept */
 /** @typedef {import("../js/types/domain.js").Diagnostic} Diagnostic */
@@ -123,7 +123,15 @@ async function main() {
     process.exit(1);
   }
 
-  const sorted = [...resolved].sort((a, b) => (a.level - b.level) || a.id.localeCompare(b.id));
+  // Attach each concept's immediate successors (the direct mirror of prerequisites)
+  // so the reverse direction is first-class data for the navigation pathway widget.
+  const dependents = buildDependents(indexConcepts(resolved));
+  const withSuccessors = resolved.map((r) => ({
+    ...r,
+    successors: [...(dependents.get(r.id) ?? [])].sort(),
+  }));
+
+  const sorted = withSuccessors.sort((a, b) => (a.level - b.level) || a.id.localeCompare(b.id));
   const output = {
     version: 1,
     conceptCount: sorted.length,

@@ -24,8 +24,21 @@ export class PrimerManim extends HTMLElement {
     const root = this.shadowRoot ?? attachShared(this);
     const caption = this.getAttribute("caption") ?? "";
     root.innerHTML = `
+      <style>
+        /* manim-web renders into a 14×8 world frame (aspect 7:4), and the canvas is
+           sized from this container's box. So the stage MUST carry that same aspect
+           ratio: on a mismatched box the frame is squashed/clipped and every mobject's
+           position and shape comes out wrong. Keep 7/4 in sync with manim's frame. */
+        .stage {
+          width: 100%;
+          aspect-ratio: 7 / 4;
+          display: grid;
+          place-items: center;
+        }
+        .stage canvas { width: 100%; height: 100%; display: block; }
+      </style>
       <div class="card">
-        <div class="stage" part="stage" style="min-height: 24rem; display: grid; place-items: center;"></div>
+        <div class="stage" part="stage"></div>
         <div class="controls" style="margin-top: 0.75rem; display: flex; gap: 0.75rem; align-items: center;">
           <button type="button" class="play">▶ Play animation</button>
           ${caption ? `<span class="meta">${caption}</span>` : ""}

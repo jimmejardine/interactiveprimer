@@ -42,3 +42,26 @@ test("parseConceptMeta rejects non-numeric or non-finite levels", () => {
 test("parseConceptMeta rejects non-string prerequisites", () => {
   assert.throws(() => parseConceptMeta({ id: "a/b", title: "B", prerequisites: [1, 2] }));
 });
+
+test("parseConceptMeta accepts optional curation dates", () => {
+  const meta = parseConceptMeta({
+    id: "a/b",
+    title: "B",
+    completedDate: "2026-06-15",
+    needsReviewDate: "2027-01-01",
+  });
+  assert.equal(meta.completedDate, "2026-06-15");
+  assert.equal(meta.needsReviewDate, "2027-01-01");
+});
+
+test("parseConceptMeta leaves curation dates undefined when absent", () => {
+  const meta = parseConceptMeta({ id: "a/b", title: "B" });
+  assert.equal(meta.completedDate, undefined);
+  assert.equal(meta.needsReviewDate, undefined);
+});
+
+test("parseConceptMeta rejects malformed or non-string dates", () => {
+  assert.throws(() => parseConceptMeta({ id: "a/b", title: "B", completedDate: "15-06-2026" }));
+  assert.throws(() => parseConceptMeta({ id: "a/b", title: "B", completedDate: "2026-13-40" }));
+  assert.throws(() => parseConceptMeta({ id: "a/b", title: "B", needsReviewDate: 20260615 }));
+});

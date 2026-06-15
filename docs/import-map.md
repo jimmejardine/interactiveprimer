@@ -61,9 +61,10 @@ concept's place in the knowledge tree. Its `id` must equal the page's path under
 ```
 
 `prerequisites` defaults to `[]`, `declaredLevel` is optional (levels start at 0 and
-propagate downstream), and `root: true` marks an entry point. The page's Web
-Components and the [`scripts/build-graph.js`](../scripts/build-graph.js) validator
-both read this block.
+propagate downstream), and `root: true` marks an entry point. Two further optional
+fields aid curation and are surfaced by the graph tool: `completedDate` and
+`needsReviewDate`, each an ISO `YYYY-MM-DD` string. The page's Web Components and the
+[`scripts/build-graph.js`](../scripts/build-graph.js) validator both read this block.
 
 ## Inside the body
 

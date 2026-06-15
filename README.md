@@ -76,8 +76,9 @@ time — **there is no build step**. The toolchain:
 - The knowledge-tree logic — prerequisite resolution and downstream **level propagation** —
   lives in [`js/graph.js`](js/graph.js) and [`js/levels.js`](js/levels.js); quiz generation
   in [`js/quiz.js`](js/quiz.js). All are unit-tested.
-- Each concept's graph data (id, title, prerequisites, declared level, root flag) is the
-  inline `<script class="concept-meta">` JSON block on its page — the single source of truth,
+- Each concept's graph data (id, title, prerequisites, declared level, root flag, and
+  optional `completedDate` / `needsReviewDate` curation dates) is the inline
+  `<script class="concept-meta">` JSON block on its page — the single source of truth,
   read both by the page's Web Components and by the graph build script.
 
 ### The graph build / validation script

@@ -17,6 +17,7 @@ import "./components/primer-card.js";
 import "./components/primer-math.js";
 import "./components/primer-manim.js";
 import "./components/primer-quiz.js";
+import "./components/primer-pathway.js";
 
 // Re-exports for page scripts.
 export { registerScene, getScene } from "./scenes.js";
@@ -30,5 +31,6 @@ export {
   effectiveLevel,
   resolveLevels,
   validateGraph,
+  neighborhood,
 } from "./graph.js";
 export { generateQuiz, generateQuestion, shuffle } from "./quiz.js";

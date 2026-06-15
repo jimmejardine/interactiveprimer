@@ -44,6 +44,8 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
 | `prerequisites` | no (default `[]`) | Array of full-path ids (the DAG edges). |
 | `declaredLevel` | no | Real number. Levels start at 0 and propagate downstream via `max(declared, all prerequisite levels)`. Fractions allowed (e.g. `2.5`). |
 | `root` | no | `true` marks an entry point (no prerequisites). **Base concepts must set this** or they fail validation as orphans. |
+| `completedDate` | no | ISO date `YYYY-MM-DD` — when the lesson content was finished. Surfaced by the graph tool; omit on stubs. |
+| `needsReviewDate` | no | ISO date `YYYY-MM-DD` — when this concept was flagged as needing review (the date the flag was raised, not a deadline). |
 
 ## Authoring elements (use inside `<primer-card>`)
 

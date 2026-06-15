@@ -9,9 +9,11 @@
  *
  *   <main class="primer-shell">
  *     <primer-page>          header (level badge + prerequisites) + footer
+ *       <primer-pathway>     navigation map (top)
  *       <primer-concept>     <h1> title + slotted body + confidence control
  *         ...the cards...
  *       </primer-concept>
+ *       <primer-pathway>     navigation map (bottom)
  *     </primer-page>
  *   </main>
  *
@@ -51,7 +53,12 @@ function render() {
 
   // Move the authored content into the concept body (it slots into <primer-concept>).
   concept.append(...content);
-  page.appendChild(concept);
+
+  // A navigation pathway at the top and bottom of the lesson; both slot into
+  // <primer-page>'s single <slot> in order. Each fetches the graph and renders itself.
+  const topPathway = document.createElement("primer-pathway");
+  const bottomPathway = document.createElement("primer-pathway");
+  page.append(topPathway, concept, bottomPathway);
   main.appendChild(page);
   body.appendChild(main);
 }

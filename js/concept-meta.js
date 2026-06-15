@@ -60,7 +60,33 @@ export function parseConceptMeta(raw) {
     meta.root = obj.root;
   }
 
+  if (obj.completedDate !== undefined) {
+    meta.completedDate = validateDate(obj.completedDate, "completedDate", id);
+  }
+  if (obj.needsReviewDate !== undefined) {
+    meta.needsReviewDate = validateDate(obj.needsReviewDate, "needsReviewDate", id);
+  }
+
   return meta;
+}
+
+/**
+ * Validate an optional curation date: an ISO "YYYY-MM-DD" string for a real calendar
+ * date. Throws a clear error otherwise.
+ * @param {unknown} value
+ * @param {string} field
+ * @param {string} id
+ * @returns {string}
+ */
+function validateDate(value, field, id) {
+  if (
+    typeof value !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(value) ||
+    Number.isNaN(Date.parse(value))
+  ) {
+    throw new Error(`concept "${id}" \`${field}\` must be an ISO date string "YYYY-MM-DD"`);
+  }
+  return value;
 }
 
 /**
