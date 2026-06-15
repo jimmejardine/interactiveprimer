@@ -29,6 +29,37 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 /** Most nodes to show in any one column before collapsing the rest into a "+k more" chip. */
 const MAX_PER_COL = 6;
 
+/** Confidence (star) storage — mirrors js/components/primer-concept.js. */
+const CONFIDENCE_PREFIX = "primer:confidence:";
+const MAX_STARS = 10;
+
+/**
+ * A node's colour from its self-attested star rating: a RED→YELLOW→GREEN hue ramp
+ * proportional to the rating (0 stars = red, half = yellow, full = green). Returns
+ * null when the concept hasn't been rated, so the node keeps its default white look.
+ * @param {string} id
+ * @returns {string | null}
+ */
+function confidenceColor(id) {
+  let raw;
+  try {
+    raw = localStorage.getItem(CONFIDENCE_PREFIX + id);
+  } catch {
+    return null; // localStorage unavailable (private mode, file://)
+  }
+  if (raw === null) return null; // not yet rated → white
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  const stars = Math.min(MAX_STARS, Math.max(0, n));
+  const hue = (stars / MAX_STARS) * 120; // 0 → red, 60 → yellow, 120 → green
+  return `hsl(${hue}, 70%, 62%)`;
+}
+
+/** Paint a node element from its concept's rating (clears to the default when unrated). @param {Element} el */
+function paintNode(el) {
+  /** @type {HTMLElement} */ (el).style.background = confidenceColor(el.getAttribute("data-id") ?? "") ?? "";
+}
+
 /**
  * Load and index the knowledge graph once for the whole page (both pathway
  * instances share this promise). Rejects on any fetch/parse problem.
@@ -71,25 +102,29 @@ const STYLE = `
     color: var(--primer-ink, #111);
     text-decoration: none;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    transition: border-color .1s, box-shadow .1s, opacity .12s;
   }
-  a.node:hover { border-color: var(--primer-accent, #46e); color: var(--primer-accent, #46e); }
-  .node--current {
-    background: var(--primer-accent, #46e);
-    color: var(--primer-accent-ink, #fff);
-    border-color: transparent;
-    font-weight: 600;
-  }
+  .node--current { border: 2px solid var(--primer-accent, #46e); font-weight: 600; }
   .more { font-size: 0.72rem; color: var(--primer-ink-soft, #667); padding: 0.15rem 0.4rem; }
+
+  /* Hover emphasis: bolder connected nodes + edges, dimmed rest. */
+  .node.is-hot { border-color: var(--primer-accent, #46e); box-shadow: 0 0 0 2px var(--primer-accent, #46e); font-weight: 600; }
+  .node.is-dim { opacity: 0.4; }
 
   .wires {
     position: absolute; inset: 0; width: 100%; height: 100%;
     pointer-events: none; z-index: 0; overflow: visible;
   }
+  .wires line { stroke: var(--primer-border, #ccc); stroke-width: 1.5; transition: stroke .1s, stroke-width .1s, opacity .12s; }
+  .wires line.is-hot { stroke: var(--primer-accent, #46e); stroke-width: 3; }
+  .wires line.is-dim { opacity: 0.2; }
 `;
 
 export class PrimerPathway extends HTMLElement {
   /** @type {ResizeObserver | null} */
   #observer = null;
+  /** @type {((e: Event) => void) | null} */
+  #onConfidence = null;
 
   async connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
@@ -112,6 +147,8 @@ export class PrimerPathway extends HTMLElement {
   disconnectedCallback() {
     this.#observer?.disconnect();
     this.#observer = null;
+    if (this.#onConfidence) document.removeEventListener("confidence-change", this.#onConfidence);
+    this.#onConfidence = null;
   }
 
   /**
@@ -170,6 +207,52 @@ export class PrimerPathway extends HTMLElement {
     requestAnimationFrame(draw);
     this.#observer = new ResizeObserver(draw);
     this.#observer.observe(pathway);
+
+    const nodes = /** @type {HTMLElement[]} */ ([...root.querySelectorAll(".node")]);
+
+    // Colour each node from its rating, and re-colour live when the learner changes
+    // their stars on this page (primer-concept dispatches a composed confidence-change).
+    for (const el of nodes) paintNode(el);
+    this.#onConfidence = (e) => {
+      const id = /** @type {any} */ (e).detail?.conceptId;
+      if (!id) return;
+      const el = root.querySelector(`.node[data-id="${cssEscape(id)}"]`);
+      if (el) paintNode(el);
+    };
+    document.addEventListener("confidence-change", this.#onConfidence);
+
+    // Hover: emphasise a node's connected nodes + edges and dim the rest.
+    /** @type {Map<string, Set<string>>} */
+    const adj = new Map();
+    /** @param {string} x @param {string} y */
+    const linkAdj = (x, y) => {
+      let s = adj.get(x);
+      if (!s) adj.set(x, (s = new Set()));
+      s.add(y);
+    };
+    for (const { a, b } of hood.edges) {
+      linkAdj(a, b);
+      linkAdj(b, a);
+    }
+    /** @param {string} id @param {boolean} on */
+    const setHot = (id, on) => {
+      const hot = new Set([id, ...(adj.get(id) ?? [])]);
+      for (const el of nodes) {
+        const nid = el.getAttribute("data-id") ?? "";
+        el.classList.toggle("is-hot", on && hot.has(nid));
+        el.classList.toggle("is-dim", on && !hot.has(nid));
+      }
+      for (const ln of svg.querySelectorAll("line")) {
+        const incident = ln.getAttribute("data-a") === id || ln.getAttribute("data-b") === id;
+        ln.classList.toggle("is-hot", on && incident);
+        ln.classList.toggle("is-dim", on && !incident);
+      }
+    };
+    for (const el of nodes) {
+      const id = el.getAttribute("data-id") ?? "";
+      el.addEventListener("mouseenter", () => setHot(id, true));
+      el.addEventListener("mouseleave", () => setHot(id, false));
+    }
   }
 
   /**
@@ -201,8 +284,8 @@ export class PrimerPathway extends HTMLElement {
       line.setAttribute("y1", String(p.y));
       line.setAttribute("x2", String(q.x));
       line.setAttribute("y2", String(q.y));
-      line.setAttribute("stroke", "var(--primer-border, #ccc)");
-      line.setAttribute("stroke-width", "1.5");
+      line.setAttribute("data-a", a);
+      line.setAttribute("data-b", b);
       svg.appendChild(line);
     }
   }

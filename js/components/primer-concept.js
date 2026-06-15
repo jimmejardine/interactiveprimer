@@ -10,6 +10,7 @@
 
 import { attachShared, slug } from "./shared.js";
 import { getConceptMeta } from "../concept-meta.js";
+import { formatLevel } from "../levels.js";
 
 /** Number of stars in the confidence rating (0 = unrated/none, MAX = full mastery). */
 const MAX_STARS = 10;
@@ -20,8 +21,13 @@ const STAR_SVG =
   '<path d="M12 .587l3.668 7.431 8.2 1.193-5.934 5.787 1.401 8.169L12 18.896l-7.335 3.868 1.401-8.169L.132 9.211l8.2-1.193z"/>' +
   "</svg>";
 
-/** Scoped styles for the star control (lives in the component's shadow root). */
+/** Scoped styles for the concept header + star control (in the shadow root). */
 const STAR_CSS = `
+  .title-row {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 0.5rem 1rem; flex-wrap: wrap;
+  }
+  .title-row h1 { margin: 0; }
   .stars { display: inline-flex; gap: 0.15rem; }
   .star {
     padding: 0.1rem; border: none; background: none; line-height: 0;
@@ -40,6 +46,12 @@ export class PrimerConcept extends HTMLElement {
     const id = meta?.id ?? (this.getAttribute("concept-id") || slug(title));
     const storageKey = `primer:confidence:${id}`;
 
+    // The declared level sits to the right of the concept's title (if declared).
+    const levelBadge =
+      meta?.declaredLevel !== undefined
+        ? `<span class="badge" title="Declared level">Level ${formatLevel(meta.declaredLevel)}</span>`
+        : "";
+
     const stars = Array.from(
       { length: MAX_STARS },
       (_, i) =>
@@ -50,7 +62,7 @@ export class PrimerConcept extends HTMLElement {
     root.innerHTML = `
       <style>${STAR_CSS}</style>
       <article>
-        <h1>${title}</h1>
+        <div class="title-row"><h1>${title}</h1>${levelBadge}</div>
         <div class="body"><slot></slot></div>
         <section class="confidence card" aria-label="Your confidence">
           <p class="meta" id="conf-label" style="margin-top:0;">How confident are you with this concept?</p>
@@ -75,7 +87,13 @@ export class PrimerConcept extends HTMLElement {
         paint(starEls, rating);
         setText(ratingText, rating, false);
         this.dispatchEvent(
-          new CustomEvent("confidence-change", { detail: { conceptId: id, value: rating }, bubbles: true }),
+          // composed so it escapes this shadow root and reaches the pathway widget,
+          // which re-colours the matching node live.
+          new CustomEvent("confidence-change", {
+            detail: { conceptId: id, value: rating },
+            bubbles: true,
+            composed: true,
+          }),
         );
       });
       // Hover/focus preview, reverting to the committed rating on leave.

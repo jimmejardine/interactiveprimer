@@ -8,9 +8,9 @@
  * the pages used to spell out by hand:
  *
  *   <main class="primer-shell">
- *     <primer-page>          header (level badge + prerequisites) + footer
+ *     <primer-page>          footer back to the tree
  *       <primer-pathway>     navigation map (top)
- *       <primer-concept>     <h1> title + slotted body + confidence control
+ *       <primer-concept>     <h1> title (+ level badge) + slotted body + confidence control
  *         ...the cards...
  *       </primer-concept>
  *       <primer-pathway>     navigation map (bottom)

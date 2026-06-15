@@ -38,9 +38,10 @@ custom-element registration, and the page shell — is handled by
 
 `boot.js` injects the viewport, the CSS, and the import map, and loads the renderer.
 The renderer reads the `concept-meta` block, sets the document title, and wraps your
-cards in the page shell (header with the level badge and prerequisite links; the
-title; a self-attested confidence control; and a footer). You write only the metadata
-and the cards — no `<head>`, no `<primer-page>`/`<primer-concept>` wrappers.
+cards in the page shell (the title with its level badge to the right; a self-attested
+confidence control; and a footer). Prerequisites are not shown on the page — the
+knowledge graph surfaces them. You write only the metadata and the cards — no
+`<head>`, no `<primer-page>`/`<primer-concept>` wrappers.
 
 ## The metadata block
 

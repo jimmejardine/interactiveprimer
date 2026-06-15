@@ -1,72 +1,25 @@
 // @ts-check
 /**
- * <primer-page> — the page shell: a consistent header (an optional level badge and
- * prerequisite links), the concept content (slotted), and a footer back to the tree.
+ * <primer-page> — the page shell: the concept content (slotted) and a footer back to
+ * the tree.
  *
- * Concept data (id, declared level, prerequisites) comes from the page's inline
- * `<script class="concept-meta">` block — the single source of truth — not from
- * attributes.
- *
- * Note: the badge shows the level DECLARED by this page (if any). The fully
- * propagated level across the whole tree is computed by the graph build script
- * (js/graph.js) and consumed by the knowledge explorer, not here.
+ * It no longer renders a header. Prerequisites are surfaced by the knowledge graph /
+ * navigation pathway widget, and the declared level now sits beside the concept title
+ * (see js/components/primer-concept.js).
  * @module
  */
 
 import { attachShared } from "./shared.js";
-import { getConceptMeta } from "../concept-meta.js";
-import { formatLevel } from "../levels.js";
 
 export class PrimerPage extends HTMLElement {
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
-    const meta = safeMeta();
-    const declared = meta?.declaredLevel;
-    const prereqs = meta?.prerequisites ?? [];
-
-    const badge =
-      declared !== undefined
-        ? `<span class="badge" title="Declared level">Level ${formatLevel(declared)}</span>`
-        : "";
-
-    const prereqList = prereqs.length
-      ? `<nav class="prereqs meta" aria-label="Prerequisites">
-           Prerequisites:
-           ${prereqs.map((pid) => `<a href="/concepts/${pid}.html">${prettify(pid)}</a>`).join(", ")}
-         </nav>`
-      : `<p class="prereqs meta">No prerequisites — a good place to start.</p>`;
-
     root.innerHTML = `
-      <header class="page-head">
-        ${badge ? `<p class="meta" style="margin-bottom:0.25rem;">${badge}</p>` : ""}
-        ${prereqList}
-      </header>
       <slot></slot>
       <footer class="page-foot meta" style="margin-top:2rem;">
         <a href="/index.html">↑ Back to the tree of knowledge</a>
       </footer>`;
   }
-}
-
-/** @returns {import("../types/domain.js").ConceptMeta | null} */
-function safeMeta() {
-  try {
-    return getConceptMeta();
-  } catch (err) {
-    console.error("Invalid concept-meta block:", err);
-    return null;
-  }
-}
-
-/**
- * Last path segment of a full-path id, title-cased: "arithmetic/addition" → "Addition".
- * @param {string} id
- * @returns {string}
- */
-function prettify(id) {
-  const leaf = id.split("/").pop() ?? id;
-  const words = leaf.replace(/-/g, " ");
-  return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 if (!customElements.get("primer-page")) {
