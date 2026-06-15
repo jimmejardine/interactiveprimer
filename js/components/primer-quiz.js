@@ -21,6 +21,8 @@ import { attachShared } from "./shared.js";
 import { generateQuiz } from "../quiz.js";
 import { checkAnswer } from "../quiz-vars.js";
 import { t } from "../i18n.js";
+import { glitter, glitterIntensity } from "../glitter.js";
+import { playSound } from "../sounds.js";
 
 /** @typedef {import("../types/domain.js").AuthoredQuestion} AuthoredQuestion */
 /** @typedef {import("../types/domain.js").GeneratedQuiz} GeneratedQuiz */
@@ -95,14 +97,36 @@ export class PrimerQuiz extends HTMLElement {
       )?.href ?? "";
     root.innerHTML = `
       ${katexHref ? `<link rel="stylesheet" href="${katexHref}">` : ""}
+      <style>
+        .quiz button[type="submit"][disabled] { opacity: 0.5; cursor: not-allowed; }
+        /* Confine the high-score glitter to this panel. */
+        .quiz { position: relative; overflow: hidden; }
+        .glitter { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; }
+      </style>
       <form class="card quiz">
         <h2 style="margin-top:0;">${t("quiz.heading")}</h2>
         <ol class="questions" style="list-style:none; padding:0;">${items}</ol>
-        <button type="submit">${t("quiz.check")}</button>
+        <button type="submit" disabled>${t("quiz.check")}</button>
         <p class="result meta" role="status" aria-live="polite"></p>
       </form>`;
 
     const form = /** @type {HTMLFormElement} */ (root.querySelector("form"));
+    const submit = /** @type {HTMLButtonElement} */ (root.querySelector('button[type="submit"]'));
+
+    // "Check answers" is enabled only once the learner has answered something — so a blank
+    // submission (and its "0 / N") can never happen. Any checked option or non-empty text box
+    // counts; clearing them all disables it again.
+    const anyAnswered = () =>
+      root.querySelector('input[type="radio"]:checked') !== null ||
+      [...root.querySelectorAll("input.answer")].some(
+        (el) => /** @type {HTMLInputElement} */ (el).value.trim() !== "",
+      );
+    const syncSubmit = () => {
+      submit.disabled = !anyAnswered();
+    };
+    form.addEventListener("input", syncSubmit);
+    form.addEventListener("change", syncSubmit);
+
     form.addEventListener("submit", (e) => {
       e.preventDefault();
       this.#grade(root, quiz);
@@ -115,6 +139,7 @@ export class PrimerQuiz extends HTMLElement {
    */
   #grade(root, quiz) {
     let score = 0;
+    let answered = 0; // questions the learner actually responded to
     const questionEls = root.querySelectorAll(".q");
     quiz.questions.forEach((q, qi) => {
       let correct = false;
@@ -122,11 +147,13 @@ export class PrimerQuiz extends HTMLElement {
         const input = /** @type {HTMLInputElement | null} */ (
           root.querySelector(`input[name="q${qi}"]`)
         );
+        if (input && input.value.trim() !== "") answered++;
         correct = input !== null && checkAnswer(q.expected, input.value);
       } else {
         const chosen = /** @type {HTMLInputElement | null} */ (
           root.querySelector(`input[name="q${qi}"]:checked`)
         );
+        if (chosen !== null) answered++;
         correct = chosen !== null && Number(chosen.value) === q.correctIndex;
       }
       if (correct) score++;
@@ -134,8 +161,35 @@ export class PrimerQuiz extends HTMLElement {
       el?.classList.toggle("right", correct);
       el?.classList.toggle("wrong", !correct);
     });
+    const total = quiz.questions.length;
     const result = /** @type {HTMLElement} */ (root.querySelector(".result"));
-    result.textContent = t("quiz.score", { score, total: quiz.questions.length });
+    result.textContent = t("quiz.score", { score, total });
+
+    // Announce the grade so <primer-concept> can fold it into the confidence stars — but
+    // only when the learner actually answered something. A blank submission is ignored, so
+    // it never drags the stars down to 0%. Composed + bubbling so it escapes this shadow
+    // root and reaches the document listener.
+    if (answered > 0) {
+      const fraction = total ? score / total : 0;
+      this.dispatchEvent(
+        new CustomEvent("quiz-graded", {
+          detail: { fraction, score, total, answered },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      // Pass/fail sound: pass from 50%, glitter from 70% (so a decent score sounds positive
+      // even before it earns the celebration sparkle).
+      playSound(fraction >= 0.5 ? "quiz-pass" : "quiz-fail");
+
+      // Celebrate a high score (>= 70%) with glitter confined to this quiz card — more
+      // extreme the closer to 100%.
+      const gi = glitterIntensity(fraction);
+      if (gi > 0) {
+        const card = /** @type {HTMLElement} */ (root.querySelector(".quiz"));
+        if (card) glitter(card, gi);
+      }
+    }
   }
 }
 

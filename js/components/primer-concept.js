@@ -13,6 +13,7 @@ import { getConceptMeta } from "../concept-meta.js";
 import { formatLevel, BASE_LEVEL } from "../levels.js";
 import { loadGraph } from "../graph-data.js";
 import { t } from "../i18n.js";
+import { combineRating } from "../confidence.js";
 
 /** Number of stars in the confidence rating (0 = unrated/none, MAX = full mastery). */
 const MAX_STARS = 10;
@@ -35,17 +36,24 @@ const STAR_CSS = `
   .level-badge.is-declared { font-weight: 700; }
   /* Centre the prompt and the star row within the confidence card. */
   .confidence { text-align: center; }
-  .stars { display: inline-flex; gap: 0.15rem; }
+  /* A centred row of stars at their natural size; they shrink together to fit narrow
+     screens (flex-shrink) instead of overflowing, and never stretch edge-to-edge. */
+  .stars { display: flex; justify-content: center; gap: 0.2rem; width: 100%; }
   .star {
-    padding: 0.1rem; border: none; background: none; line-height: 0;
+    flex: 0 1 1.7rem; min-width: 0; aspect-ratio: 1 / 1;
+    display: grid; place-items: center;
+    padding: 0; border: none; background: none; line-height: 0;
     color: var(--primer-border, #ccc); cursor: pointer;
   }
-  .star svg { width: 1.6rem; height: 1.6rem; fill: currentColor; transition: color 0.08s ease; }
+  .star svg { width: 100%; height: 100%; fill: currentColor; transition: color 0.08s ease; }
   .star.filled { color: var(--primer-star, #f5b301); }   /* selected or previewed */
   .star:focus-visible { outline: 2px solid var(--primer-accent, #46e); border-radius: 0.25rem; }
 `;
 
 export class PrimerConcept extends HTMLElement {
+  /** @type {((e: Event) => void) | null} */
+  #onQuizGraded = null;
+
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
     const meta = safeMeta();
@@ -110,8 +118,32 @@ export class PrimerConcept extends HTMLElement {
       star.addEventListener("blur", () => paint(starEls, rating));
     }
 
+    // A graded quiz folds its result into the stars: the new rating is the average of the
+    // current stars and the test percentage, or just the percentage when there are no stars
+    // (rating 0). Re-emit confidence-change so the explorer recolours, exactly like a click.
+    this.#onQuizGraded = (e) => {
+      const fraction = /** @type {any} */ (e).detail?.fraction;
+      if (typeof fraction !== "number") return;
+      rating = combineRating(rating, fraction, MAX_STARS);
+      writeConfidence(storageKey, rating);
+      paint(starEls, rating);
+      this.dispatchEvent(
+        new CustomEvent("confidence-change", {
+          detail: { conceptId: id, value: rating },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    };
+    document.addEventListener("quiz-graded", this.#onQuizGraded);
+
     // For an implicit level, fill the (initially hidden) badge from the emitted graph.
     if (declared === undefined) void this.#showImplicitLevel(root, id);
+  }
+
+  disconnectedCallback() {
+    if (this.#onQuizGraded) document.removeEventListener("quiz-graded", this.#onQuizGraded);
+    this.#onQuizGraded = null;
   }
 
   /**

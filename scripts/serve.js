@@ -46,6 +46,9 @@ const MIME = {
   ".woff": "font/woff",
   ".woff2": "font/woff2",
   ".ttf": "font/ttf",
+  ".wav": "audio/wav",
+  ".mp3": "audio/mpeg",
+  ".ogg": "audio/ogg",
   ".map": "application/json; charset=utf-8",
   ".txt": "text/plain; charset=utf-8",
 };
