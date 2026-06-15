@@ -30,6 +30,7 @@ export default {
   "quiz.score": "You scored {score} / {total}.",
   "quiz.empty": "No quiz questions provided.",
   "quiz.buildError": "Couldn't build the test ({error}).",
+  "quiz.answerPlaceholder": "Type your answer",
 
   "manim.play": "Play animation",
   "manim.pause": "Pause",

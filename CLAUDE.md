@@ -54,7 +54,8 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
   `display` attribute. e.g. `<primer-math display>\int_0^1 x\,dx</primer-math>`.
 - `<primer-manim scene="name" caption="…">` — plays a registered animation on a Play
   button (lazy-loads manim-web; supports replay). See scenes below.
-- `<primer-quiz count="3">` — a random multiple-choice test. Author the bank inline:
+- `<primer-quiz count="3">` — a random test. Author the bank inline as a JSON array.
+  A question is **multiple-choice** (has `options`) or **free-text** (has `answer`):
 
   ```html
   <primer-quiz count="3">
@@ -64,14 +65,29 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
           "options": [
             { "text": "$5$", "correct": true },
             { "text": "$6$", "correct": false }
-          ] }
+          ] },
+        { "prompt": "What is ${a} + {b}$?",
+          "variables": "a=[1:10] b=[1:10]",
+          "answer": "a + b" }
       ]
     </script>
   </primer-quiz>
   ```
 
-  `count` questions are picked at random and their options shuffled. Prompts and
-  option text may contain inline LaTeX delimited by `$…$`.
+  `count` questions are picked at random; multiple-choice options are shuffled. Prompts
+  and option text may contain inline LaTeX delimited by `$…$`.
+
+  **Randomized free-text questions** (the second example):
+  - `variables` — space-separated `name=[…]`; the bracket separator picks the kind:
+    `[lo:hi]` integer, `[lo;hi]` real (3 dp), `[v1,v2,…]` a choice. Negatives ok (`[-5:5]`).
+  - `{name}` in the prompt expands to the generated value (it consumes its own braces, so
+    to keep LaTeX braces write `\frac{{a}}{{b}}`).
+  - `answer` — an expression over the variables (`+ - * / % ^`, parentheses, and
+    `sqrt abs round floor ceil min max pow`), e.g. `"a * b"`. With no variables it's a
+    literal (a number, or text like `"Paris"`). Typed answers are graded numerically with
+    a small tolerance, or as case/space-insensitive text.
+  - A template (a free-text question **with** `variables`) is **re-instantiable**, so one
+    template can fill many `count` slots — each with fresh random values.
 
 The **confidence control** (a 0–10 star rating, persisted to `localStorage` under
 `primer:confidence:<id>`) is added to every page automatically — do not author it.

@@ -29,6 +29,7 @@ export default {
   "quiz.score": "Obtuviste {score} / {total}.",
   "quiz.empty": "No hay preguntas para esta prueba.",
   "quiz.buildError": "No se pudo construir la prueba ({error}).",
+  "quiz.answerPlaceholder": "Escribe tu respuesta",
 
   "manim.play": "Reproducir animación",
   "manim.pause": "Pausa",

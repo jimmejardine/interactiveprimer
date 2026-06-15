@@ -82,18 +82,52 @@
  */
 
 /**
- * A generated test: a selection of questions with options already shuffled.
+ * A free-text question as authored. `answer` is an expression over the `variables`
+ * (e.g. "a + b"), or a literal constant when there are no variables. `variables` is a
+ * spec string (see js/quiz-vars.js), and `{name}` placeholders in `prompt` expand to
+ * the generated values.
+ * @typedef {object} TextQuestion
+ * @property {string} prompt
+ * @property {string | number} answer
+ * @property {string} [variables]
+ */
+
+/** A question as authored: multiple-choice (has `options`) or free-text (has `answer`).
+ * @typedef {QuizQuestion | TextQuestion} AuthoredQuestion */
+
+/**
+ * One random variable parsed from a question's `variables` spec.
+ * @typedef {{ name: string, kind: "int", lo: number, hi: number }
+ *   | { name: string, kind: "real", lo: number, hi: number }
+ *   | { name: string, kind: "choice", values: string[] }} Variable
+ */
+
+/**
+ * A generated test: questions ready to render (options shuffled / variables resolved).
  * @typedef {object} GeneratedQuiz
  * @property {GeneratedQuestion[]} questions
  */
 
 /**
- * A question after selection + option shuffling, ready to render.
- * @typedef {object} GeneratedQuestion
+ * A multiple-choice question after selection + option shuffling, ready to render.
+ * @typedef {object} GeneratedChoiceQuestion
+ * @property {"choice"} kind
  * @property {string} prompt
  * @property {QuizOption[]} options    Shuffled options.
  * @property {number} correctIndex     Index into `options` of (a) correct answer.
  */
+
+/**
+ * A free-text question after variable instantiation, ready to render. `expected` is
+ * the computed correct answer used by the grader (never rendered into the DOM).
+ * @typedef {object} GeneratedTextQuestion
+ * @property {"text"} kind
+ * @property {string} prompt
+ * @property {number | string} expected
+ */
+
+/** A generated question, ready to render and grade.
+ * @typedef {GeneratedChoiceQuestion | GeneratedTextQuestion} GeneratedQuestion */
 
 /**
  * The learner's self-attested confidence for a concept, as a number of stars from
