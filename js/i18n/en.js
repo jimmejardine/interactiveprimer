@@ -39,6 +39,9 @@ export default {
   "manim.noScene": "No scene registered as “{name}”.",
   "manim.runError": "Couldn't run this animation: {error}",
 
+  "video.play": "Play video",
+  "video.unavailable": "Couldn't load this video.",
+
   "pathway.label": "Concept pathway",
   "pathway.more": "+{extra} more",
 

@@ -54,6 +54,10 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
   `display` attribute. e.g. `<primer-math display>\int_0^1 x\,dx</primer-math>`.
 - `<primer-manim scene="name" caption="…">` — plays a registered animation on a Play
   button (lazy-loads manim-web; supports replay). See scenes below.
+- `<primer-video src="…" caption="…">` — an inline YouTube video. `src` is a YouTube URL
+  (watch / youtu.be / embed / shorts) or a bare 11-char id. Shows a thumbnail + play
+  facade and only loads YouTube on click. In a translation overlay, keep the same `src`
+  to pin the English video or set a different one for a localized video.
 - `<primer-quiz count="3">` — a random test. Author the bank inline as a JSON array.
   A question is **multiple-choice** (has `options`) or **free-text** (has `answer`):
 

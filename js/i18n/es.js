@@ -38,6 +38,9 @@ export default {
   "manim.noScene": "No hay ninguna escena registrada como «{name}».",
   "manim.runError": "No se pudo ejecutar esta animación: {error}",
 
+  "video.play": "Reproducir vídeo",
+  "video.unavailable": "No se pudo cargar este vídeo.",
+
   "pathway.label": "Ruta de conceptos",
   "pathway.more": "+{extra} más",
 
