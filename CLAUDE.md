@@ -115,10 +115,16 @@ by name from a `<primer-manim>`:
 - `speak(text, { rate, pitch, lang })` returns a Promise that resolves when narration
   finishes (silent no-op if the browser lacks speech). `cancelSpeech()` stops it; the
   manim component already cancels speech on replay.
-- **Theme-aware colours:** call `const v = vizColors()` (from `primer`) and use its hex
-  strings — `v.bg`, `v.stroke`, `v.ink`, `v.a`, `v.b`, `v.c`, `v.accent` — instead of
-  manim's named colour constants, so the animation matches the active theme. Fall back to
-  a manim constant if you like (`v.a || BLUE`). A replay after a theme change re-reads them.
+- **Theme-aware colours:** call `const v = vizColors()` (from `primer`) instead of manim's
+  named colour constants, so the animation matches the active theme. It returns
+  `{ bg, ink, line, cat }`: `bg` backdrop, `ink` for labels/text, `line` for axes/strokes/
+  number lines, and `cat` — an **ordered categorical palette** (a generated golden-angle
+  sequence, so early entries are maximally distinct). Take `v.cat[0]`, `v.cat[1]`, … in
+  order so **all diagrams share the same colours**. Fall back to a manim constant if you
+  like (`v.cat[0] || BLUE`). A replay after a theme change re-reads them.
+- **No animation item should be colourless.** Give every mobject an explicit theme colour
+  (`v.cat[i]`, `v.line`, or `v.ink`). manim's defaults are white and vanish on light themes
+  — e.g. a `NumberLine` with no `color` is invisible on the light backdrop.
 - manim-web is young (v0.3.x): keep scenes simple, and the component shows a friendly
   message if a scene throws, so prefer small, defensive scenes.
 
