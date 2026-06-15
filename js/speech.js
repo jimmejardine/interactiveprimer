@@ -29,10 +29,44 @@ function supported() {
   );
 }
 
+// Warm up the (asynchronously-loaded) voice list as early as possible, so a voice matching
+// the requested language is usually available by the time the learner presses Play.
+if (supported()) {
+  try {
+    window.speechSynthesis.getVoices();
+  } catch {
+    /* best-effort */
+  }
+}
+
 /**
- * Speak `text` aloud, resolving when it finishes. Resolves immediately (a silent
- * no-op) where speech isn't supported. No specific voice is selected, so the
- * browser's default voice speaks without waiting for the async voice list to load.
+ * Pick an installed voice matching a BCP-47 tag: an exact match first, then any voice in the
+ * same base language (e.g. "en-US" → any "en-*"). Returns null when the voice list isn't
+ * populated yet, so the caller falls back to just setting `utterance.lang`.
+ *
+ * This matters because setting `utterance.lang` ALONE does not change the voice in many
+ * browsers — the default (OS-language) voice keeps speaking, so e.g. English narration on a
+ * Dutch machine comes out with a Dutch accent. Selecting an actual matching voice fixes that.
+ * @param {string} lang
+ * @returns {SpeechSynthesisVoice | null}
+ */
+function pickVoice(lang) {
+  const voices = window.speechSynthesis.getVoices();
+  if (!voices || voices.length === 0) return null;
+  const want = lang.toLowerCase();
+  const base = want.split("-")[0];
+  return (
+    voices.find((v) => v.lang.toLowerCase().replace("_", "-") === want) ||
+    voices.find((v) => v.lang.toLowerCase().replace("_", "-").split("-")[0] === base) ||
+    null
+  );
+}
+
+/**
+ * Speak `text` aloud, resolving when it finishes. Resolves immediately (a silent no-op)
+ * where speech isn't supported. When `opts.lang` is given, an installed voice for that
+ * language is selected (see {@link pickVoice}) so the words are pronounced in that language,
+ * not merely read by the default voice.
  * @param {string} text
  * @param {SpeakOptions} [opts]
  * @returns {Promise<void>}
@@ -44,7 +78,11 @@ export function speak(text, opts = {}) {
     const utterance = new SpeechSynthesisUtterance(text);
     if (opts.rate !== undefined) utterance.rate = opts.rate;
     if (opts.pitch !== undefined) utterance.pitch = opts.pitch;
-    if (opts.lang !== undefined) utterance.lang = opts.lang;
+    if (opts.lang !== undefined) {
+      utterance.lang = opts.lang;
+      const voice = pickVoice(opts.lang);
+      if (voice) utterance.voice = voice;
+    }
 
     let done = false;
     const finish = () => {

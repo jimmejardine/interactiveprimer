@@ -2,10 +2,10 @@
 /**
  * render.js — builds a concept page's shell at runtime so authors don't write it.
  *
- * A slim page's <body> contains only the content (one or more <primer-card>s) plus
- * the inline `concept-meta` JSON block and an optional inline scene <script>. This
- * module imports the Primer custom elements, then wraps that content in the shell
- * the pages used to spell out by hand:
+ * A slim page's <body> contains only the content (one or more <primer-card>s) plus the
+ * inline `concept-meta` JSON block, an optional `scene-strings` JSON block, and an optional
+ * inline scene <script>. This module imports the Primer custom elements, then wraps that
+ * content in the shell the pages used to spell out by hand:
  *
  *   <main class="primer-shell">
  *     <primer-page>          footer back to the tree
@@ -17,43 +17,67 @@
  *     </primer-page>
  *   </main>
  *
- * <primer-page> and <primer-concept> read everything they need from the page's
- * `concept-meta` block (see js/concept-meta.js), so no attributes are required here.
- * This module also sets the document title from that block (boot.js can't: it runs
- * first, before the block is parsed).
+ * Internationalization: every lesson lives at ONE canonical URL (the English page). When the
+ * active locale (a user setting; see js/i18n.js) is not English, this module fetches a
+ * translation overlay at `/i18n/<locale>/<id>.html` and swaps in its translated content +
+ * `scene-strings`, reusing the canonical page's (language-independent) inline scene JS. If no
+ * overlay exists, it falls back to English so the lesson is never blocked.
  * @module
  */
 
 import "primer";
 import { getConceptMeta } from "./concept-meta.js";
 import { initTheme } from "./theme.js";
+import { initLocale, getLocale, DEFAULT_LOCALE, t } from "./i18n.js";
+import { loadGraph } from "./graph-data.js";
 
 /** Build the page shell once the DOM is ready. */
-function render() {
+async function render() {
   const body = document.body;
 
   // Reconcile the synchronously-set theme (boot.js) with storage — this also loads the
   // fun display font when that theme is the saved choice.
   initTheme();
+  // Reconcile the synchronously-set locale (boot.js) with storage + browser languages.
+  initLocale();
 
-  // Global page chrome: the top-right hamburger menu (theme switcher), mounted once.
+  // Global page chrome: the top-right hamburger menu (theme + language), mounted once.
   if (!body.querySelector("primer-menu")) {
     body.appendChild(document.createElement("primer-menu"));
   }
 
-  // Title from the concept metadata (the page writes no <head>/<title>).
-  try {
-    const meta = getConceptMeta();
-    if (meta) document.title = `${meta.title} — Interactive Primer`;
-  } catch {
-    /* malformed metadata — the components surface the error on the page */
+  const meta = safeMeta();
+
+  // The content is every direct element child of <body> that is authored lesson content —
+  // i.e. NOT a <script> (leaving the concept-meta/scene-strings JSON blocks and any inline
+  // scene script in place), and NOT the chrome we just mounted (the fixed <primer-menu>) or
+  // a previously-built shell <main>. Excluding the menu matters: otherwise the overlay swap
+  // would move or even remove it along with the canonical content.
+  const SKIP = new Set(["SCRIPT", "PRIMER-MENU", "MAIN"]);
+  let content = /** @type {Element[]} */ ([...body.children].filter((el) => !SKIP.has(el.tagName)));
+  let pageTitle = meta?.title ?? null;
+
+  // Non-English: apply the translation overlay IF one exists, else fall back to English.
+  // We consult the emitted graph (which records a translated `titles[locale]` for every
+  // concept that has an overlay) so we only fetch when a translation is actually there —
+  // avoiding a noisy 404 in the console for the (common) untranslated case.
+  const locale = getLocale();
+  if (meta && locale !== DEFAULT_LOCALE) {
+    const applied = (await hasOverlay(meta.id, locale))
+      ? await applyOverlay(meta.id, locale, content)
+      : null;
+    if (applied) {
+      content = applied.content;
+      pageTitle = applied.title ?? pageTitle;
+    } else {
+      // No translation for this concept → render the whole page in English.
+      document.documentElement.lang = DEFAULT_LOCALE;
+    }
   }
 
-  // The content is every direct element child of <body> that isn't a <script>:
-  // this leaves the `concept-meta` JSON block and any inline scene script in place.
-  const content = /** @type {Element[]} */ (
-    [...body.children].filter((el) => el.tagName !== "SCRIPT")
-  );
+  // Title from the (possibly translated) concept title (the page writes no <head>/<title>).
+  if (pageTitle) document.title = `${pageTitle} — ${t("app.name")}`;
+
   if (content.length === 0) return;
 
   const main = document.createElement("main");
@@ -61,7 +85,7 @@ function render() {
   const page = document.createElement("primer-page");
   const concept = document.createElement("primer-concept");
 
-  // Move the authored content into the concept body (it slots into <primer-concept>).
+  // Move the (authored or translated) content into the concept body.
   concept.append(...content);
 
   // A navigation pathway at the top and bottom of the lesson; both slot into
@@ -73,8 +97,96 @@ function render() {
   body.appendChild(main);
 }
 
+/**
+ * Whether a translation overlay exists for `id` in `locale`, per the emitted graph
+ * (build-graph records a `titles[locale]` for every concept that has an overlay). Used to
+ * skip the overlay fetch — and its console 404 — when nothing is translated. Returns false
+ * if the graph can't be loaded (so we simply render English).
+ * @param {string} id
+ * @param {string} locale
+ * @returns {Promise<boolean>}
+ */
+async function hasOverlay(id, locale) {
+  try {
+    const { byId } = await loadGraph();
+    return Boolean(byId.get(id)?.titles?.[locale]);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fetch and apply the translation overlay for `id` in `locale`. Returns the translated
+ * content elements (and title) to render, or null when there is no usable overlay (so the
+ * caller falls back to English). Swaps the canonical content out of the DOM and replaces the
+ * page's `scene-strings` block with the overlay's, so the reused scene JS narrates in the
+ * target language.
+ * @param {string} id
+ * @param {string} locale
+ * @param {Element[]} canonicalContent
+ * @returns {Promise<{ content: Element[], title: string | null } | null>}
+ */
+async function applyOverlay(id, locale, canonicalContent) {
+  let html;
+  try {
+    const res = await fetch(`/i18n/${locale}/${id}.html`);
+    if (!res.ok) return null; // 404 etc. → no translation
+    html = await res.text();
+  } catch {
+    return null; // network/parse failure → fall back to English
+  }
+
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const translated = [...doc.body.children].filter((el) => el.tagName !== "SCRIPT");
+  if (translated.length === 0) return null;
+
+  // Translated title from the overlay's own concept-meta block, if present.
+  let title = null;
+  try {
+    title = getConceptMeta(doc)?.title ?? null;
+  } catch {
+    /* malformed overlay metadata — keep the English title */
+  }
+
+  // Update the live concept-meta title so <primer-concept> renders the translated <h1>
+  // (it reads the title from this block). Id/prerequisites/level are left untouched — only
+  // the display title changes, and the graph is built from files, not this live DOM.
+  if (title) {
+    const metaEl = document.querySelector("script.concept-meta");
+    if (metaEl?.textContent) {
+      try {
+        const m = JSON.parse(metaEl.textContent);
+        m.title = title;
+        metaEl.textContent = JSON.stringify(m);
+      } catch {
+        /* leave the English title if the block can't be parsed */
+      }
+    }
+  }
+
+  // Remove the canonical (English) content from the DOM…
+  for (const el of canonicalContent) el.remove();
+  // …and swap the canonical scene-strings for the overlay's, so getSceneStrings() (read by
+  // the reused scene JS at play time) returns the translated words.
+  document.querySelector("script.scene-strings")?.remove();
+  const overlayStrings = doc.querySelector("script.scene-strings");
+  if (overlayStrings) document.body.appendChild(document.importNode(overlayStrings, true));
+
+  const content = translated.map((el) => /** @type {Element} */ (document.importNode(el, true)));
+  return { content, title };
+}
+
+/** @returns {import("./types/domain.js").ConceptMeta | null} */
+function safeMeta() {
+  try {
+    return getConceptMeta();
+  } catch {
+    return null;
+  }
+}
+
 if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", render, { once: true });
+  document.addEventListener("DOMContentLoaded", () => void render(), { once: true });
 } else {
-  render();
+  void render();
 }

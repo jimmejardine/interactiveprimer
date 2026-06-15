@@ -20,6 +20,7 @@ import { attachShared } from "./shared.js";
 import { getScene } from "../scenes.js";
 import { cancelSpeech, pauseSpeech, resumeSpeech } from "../speech.js";
 import { vizColors } from "../theme.js";
+import { t } from "../i18n.js";
 
 export class PrimerManim extends HTMLElement {
   /** @type {"idle" | "playing" | "paused" | "done"} */
@@ -61,7 +62,7 @@ export class PrimerManim extends HTMLElement {
       <div class="card frame">
         <div class="stage" part="stage"></div>
         <div class="controls">
-          <button type="button" class="play" aria-label="Play animation" title="Play animation">▶</button>
+          <button type="button" class="play" aria-label="${t("manim.play")}" title="${t("manim.play")}">▶</button>
           ${caption ? `<span class="meta">${caption}</span>` : ""}
         </div>
       </div>`;
@@ -95,7 +96,7 @@ export class PrimerManim extends HTMLElement {
     }
     pauseSpeech();
     this.#state = "paused";
-    face(btn, "▶", "Resume");
+    face(btn, "▶", t("manim.resume"));
   }
 
   /** @param {HTMLButtonElement} btn */
@@ -107,7 +108,7 @@ export class PrimerManim extends HTMLElement {
     }
     resumeSpeech();
     this.#state = "playing";
-    face(btn, "⏸", "Pause");
+    face(btn, "⏸", t("manim.pause"));
   }
 
   /**
@@ -119,7 +120,7 @@ export class PrimerManim extends HTMLElement {
     const name = this.getAttribute("scene") ?? "";
     const builder = getScene(name);
     if (!builder) {
-      stage.innerHTML = `<span class="meta">No scene registered as “${name}”.</span>`;
+      stage.innerHTML = `<span class="meta">${t("manim.noScene", { name })}</span>`;
       return;
     }
 
@@ -137,11 +138,10 @@ export class PrimerManim extends HTMLElement {
       this.#state = "done";
       face(btn, "↻", "Replay");
     } catch (err) {
-      stage.innerHTML = `<span class="meta">Couldn't run this animation: ${
-        err instanceof Error ? err.message : String(err)
-      }</span>`;
+      const error = err instanceof Error ? err.message : String(err);
+      stage.innerHTML = `<span class="meta">${t("manim.runError", { error })}</span>`;
       this.#state = "idle";
-      face(btn, "▶", "Play animation");
+      face(btn, "▶", t("manim.play"));
     }
   }
 

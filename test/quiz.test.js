@@ -39,6 +39,8 @@ const q = {
 
 test("generateQuestion shuffles options and tracks the correct index", () => {
   const gen = generateQuestion(q, seededRng(7));
+  assert.equal(gen.kind, "choice");
+  if (gen.kind !== "choice") return;
   assert.equal(gen.options.length, 3);
   assert.equal(gen.options[gen.correctIndex].text, "4");
   assert.ok(gen.options[gen.correctIndex].correct);
@@ -74,4 +76,51 @@ test("generateQuiz picks distinct questions, capped at bank size", () => {
 
 test("generateQuiz rejects an empty bank", () => {
   assert.throws(() => generateQuiz([], 3, seededRng(1)));
+});
+
+test("free-text template re-instantiates to fill count past bank size", () => {
+  const bank = [
+    { prompt: "What is ${a} + {b}$?", variables: "a=[1:9] b=[1:9]", answer: "a + b" },
+  ];
+  const quiz = generateQuiz(bank, 3, seededRng(5));
+  assert.equal(quiz.questions.length, 3); // one template → three instances
+
+  for (const q of quiz.questions) {
+    if (q.kind !== "text") {
+      assert.fail("expected a free-text question");
+      continue;
+    }
+    // The expected answer must equal the sum of the two numbers shown in the prompt.
+    const nums = /** @type {RegExpMatchArray} */ (q.prompt.match(/-?\d+/g)).map(Number);
+    assert.equal(q.expected, nums[0] + nums[1]);
+  }
+});
+
+test("free-text question without variables uses a literal answer", () => {
+  const quiz = generateQuiz([{ prompt: "Capital of France?", answer: "Paris" }], 1, seededRng(1));
+  const q = quiz.questions[0];
+  assert.equal(q.kind, "text");
+  assert.equal(q.kind === "text" && q.expected, "Paris");
+});
+
+test("generateQuestion rejects a question with both options and answer", () => {
+  assert.throws(
+    () =>
+      generateQuestion(
+        /** @type {any} */ ({
+          prompt: "ambiguous",
+          options: [{ text: "a", correct: true }],
+          answer: "x",
+        }),
+        seededRng(1),
+      ),
+    /both options and answer/,
+  );
+});
+
+test("generateQuestion rejects a question with neither options nor answer", () => {
+  assert.throws(
+    () => generateQuestion(/** @type {any} */ ({ prompt: "empty" }), seededRng(1)),
+    /either options or answer/,
+  );
 });

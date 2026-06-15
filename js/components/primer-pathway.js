@@ -22,6 +22,7 @@ import { attachShared } from "./shared.js";
 import { getConceptMeta } from "../concept-meta.js";
 import { neighborhood } from "../graph.js";
 import { loadGraph } from "../graph-data.js";
+import { t, getLocale } from "../i18n.js";
 
 /** @typedef {import("../types/domain.js").ResolvedConcept} ResolvedConcept */
 
@@ -149,8 +150,14 @@ export class PrimerPathway extends HTMLElement {
    * @param {NonNullable<ReturnType<typeof neighborhood>>} hood
    */
   #render(root, byId, hood) {
+    // Label nodes in the active language: a node's translated title when the overlays
+    // provided one (harvested into graph.json by build-graph), else the English title.
+    const locale = getLocale();
     /** @param {string} id */
-    const title = (id) => byId.get(id)?.title ?? leaf(id);
+    const title = (id) => {
+      const c = byId.get(id);
+      return c?.titles?.[locale] ?? c?.title ?? leaf(id);
+    };
     /** Sort ids by resolved level, then title. @param {string[]} ids */
     const byLevel = (ids) =>
       [...ids].sort(
@@ -174,7 +181,7 @@ export class PrimerPathway extends HTMLElement {
     const column = (cls, ids) => {
       const shown = ids.slice(0, MAX_PER_COL).map(link);
       const extra = ids.length - MAX_PER_COL;
-      if (extra > 0) shown.push(`<span class="more">+${extra} more</span>`);
+      if (extra > 0) shown.push(`<span class="more">${t("pathway.more", { extra })}</span>`);
       return `<div class="col ${cls}">${shown.join("")}</div>`;
     };
 
@@ -182,7 +189,7 @@ export class PrimerPathway extends HTMLElement {
 
     root.innerHTML = `
       <style>${STYLE}</style>
-      <nav class="pathway" aria-label="Concept pathway">
+      <nav class="pathway" aria-label="${t("pathway.label")}">
         <div class="cols">
           ${column("col1", col1)}
           ${col2}

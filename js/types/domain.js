@@ -32,6 +32,7 @@
  * @property {boolean} [root]          Marks an entry point (no prerequisites expected).
  * @property {string} [completedDate]    Optional ISO date "YYYY-MM-DD" — when the lesson content was finished.
  * @property {string} [needsReviewDate]  Optional ISO date "YYYY-MM-DD" — when this concept was flagged as needing review.
+ * @property {string} [sourceHash]       Set only on translation overlays: hash of the English source's translatable surface this was translated from (see scripts/i18n-check.js).
  */
 
 /** A concept in the graph. Currently identical to its authored metadata. @typedef {ConceptMeta} Concept */
@@ -43,7 +44,10 @@
  *    so `level` fell back to the base (0).
  *  - `successors` are the ids of concepts that list this one as a direct prerequisite
  *    (the immediate mirror of `prerequisites`), computed when the graph is emitted.
- * @typedef {Concept & { level: Level, levelGrounded: boolean, successors?: string[] }} ResolvedConcept
+ *  - `titles` maps a non-default locale to that concept's translated title, harvested
+ *    from the per-locale overlays so the explorer can label nodes in the active language
+ *    (falling back to the English `title`). Absent when no translation exists.
+ * @typedef {Concept & { level: Level, levelGrounded: boolean, successors?: string[], titles?: Record<string, string> }} ResolvedConcept
  */
 
 /**
@@ -78,18 +82,52 @@
  */
 
 /**
- * A generated test: a selection of questions with options already shuffled.
+ * A free-text question as authored. `answer` is an expression over the `variables`
+ * (e.g. "a + b"), or a literal constant when there are no variables. `variables` is a
+ * spec string (see js/quiz-vars.js), and `{name}` placeholders in `prompt` expand to
+ * the generated values.
+ * @typedef {object} TextQuestion
+ * @property {string} prompt
+ * @property {string | number} answer
+ * @property {string} [variables]
+ */
+
+/** A question as authored: multiple-choice (has `options`) or free-text (has `answer`).
+ * @typedef {QuizQuestion | TextQuestion} AuthoredQuestion */
+
+/**
+ * One random variable parsed from a question's `variables` spec.
+ * @typedef {{ name: string, kind: "int", lo: number, hi: number }
+ *   | { name: string, kind: "real", lo: number, hi: number }
+ *   | { name: string, kind: "choice", values: string[] }} Variable
+ */
+
+/**
+ * A generated test: questions ready to render (options shuffled / variables resolved).
  * @typedef {object} GeneratedQuiz
  * @property {GeneratedQuestion[]} questions
  */
 
 /**
- * A question after selection + option shuffling, ready to render.
- * @typedef {object} GeneratedQuestion
+ * A multiple-choice question after selection + option shuffling, ready to render.
+ * @typedef {object} GeneratedChoiceQuestion
+ * @property {"choice"} kind
  * @property {string} prompt
  * @property {QuizOption[]} options    Shuffled options.
  * @property {number} correctIndex     Index into `options` of (a) correct answer.
  */
+
+/**
+ * A free-text question after variable instantiation, ready to render. `expected` is
+ * the computed correct answer used by the grader (never rendered into the DOM).
+ * @typedef {object} GeneratedTextQuestion
+ * @property {"text"} kind
+ * @property {string} prompt
+ * @property {number | string} expected
+ */
+
+/** A generated question, ready to render and grade.
+ * @typedef {GeneratedChoiceQuestion | GeneratedTextQuestion} GeneratedQuestion */
 
 /**
  * The learner's self-attested confidence for a concept, as a number of stars from

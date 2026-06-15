@@ -23,12 +23,14 @@ import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseConceptMeta } from "../js/concept-meta.js";
 import { validateGraph, indexConcepts, buildDependents } from "../js/graph.js";
+import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
 
 /** @typedef {import("../js/types/domain.js").Concept} Concept */
 /** @typedef {import("../js/types/domain.js").Diagnostic} Diagnostic */
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CONCEPTS_DIR = join(ROOT, "concepts");
+const I18N_DIR = join(ROOT, "i18n");
 
 const args = process.argv.slice(2);
 const checkOnly = args.includes("--check");
@@ -71,6 +73,38 @@ function extractMeta(html) {
  */
 function idFromPath(file) {
   return relative(CONCEPTS_DIR, file).replace(/\.html$/i, "").split(sep).join("/");
+}
+
+/**
+ * Harvest translated concept titles from the per-locale overlays under i18n/<locale>/, so
+ * the explorer can label nodes in the active language. Returns a Map of concept id →
+ * `{ [locale]: title }`. Overlay validity (missing/stale/orphan) is i18n-check's job.
+ * @returns {Promise<Map<string, Record<string, string>>>}
+ */
+async function collectTranslatedTitles() {
+  /** @type {Map<string, Record<string, string>>} */
+  const byId = new Map();
+  for (const { id: locale } of LOCALES) {
+    if (locale === DEFAULT_LOCALE) continue;
+    const dir = join(I18N_DIR, locale);
+    let files;
+    try {
+      files = await listHtml(dir);
+    } catch {
+      continue; // no overlays for this locale yet
+    }
+    for (const file of files) {
+      try {
+        const meta = parseConceptMeta(extractMeta(await readFile(file, "utf8")));
+        const map = byId.get(meta.id) ?? {};
+        map[locale] = meta.title;
+        byId.set(meta.id, map);
+      } catch {
+        /* malformed overlay — i18n-check reports it */
+      }
+    }
+  }
+  return byId;
 }
 
 async function main() {
@@ -124,12 +158,17 @@ async function main() {
   }
 
   // Attach each concept's immediate successors (the direct mirror of prerequisites)
-  // so the reverse direction is first-class data for the navigation pathway widget.
+  // so the reverse direction is first-class data for the navigation pathway widget, plus
+  // any translated titles harvested from the per-locale overlays.
   const dependents = buildDependents(indexConcepts(resolved));
-  const withSuccessors = resolved.map((r) => ({
-    ...r,
-    successors: [...(dependents.get(r.id) ?? [])].sort(),
-  }));
+  const translatedTitles = await collectTranslatedTitles();
+  const withSuccessors = resolved.map((r) => {
+    /** @type {any} */
+    const node = { ...r, successors: [...(dependents.get(r.id) ?? [])].sort() };
+    const titles = translatedTitles.get(r.id);
+    if (titles && Object.keys(titles).length) node.titles = titles;
+    return node;
+  });
 
   const sorted = withSuccessors.sort((a, b) => (a.level - b.level) || a.id.localeCompare(b.id));
   const output = {
