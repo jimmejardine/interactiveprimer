@@ -83,7 +83,9 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
   ```
 
   `count` questions are picked at random; multiple-choice options are shuffled. Prompts
-  and option text may contain inline LaTeX delimited by `$…$`.
+  and option text may contain inline LaTeX delimited by `$…$`. Inline JSON blocks (this bank,
+  the `concept-meta`, scene-strings) are parsed with **JSON5**, so `//` and `/* … */` comments
+  and trailing commas are allowed.
 
   **Randomized free-text questions** (the second example):
   - `variables` — space-separated `name=[…]`; the bracket separator picks the kind:

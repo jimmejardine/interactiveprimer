@@ -21,6 +21,7 @@ import { attachShared } from "./shared.js";
 import { generateQuiz } from "../quiz.js";
 import { checkAnswer } from "../quiz-vars.js";
 import { comparePolynomial } from "../poly.js";
+import { parseJsonc } from "../jsonc.js";
 import { t } from "../i18n.js";
 import { glitter, glitterIntensity } from "../glitter.js";
 import { playSound } from "../sounds.js";
@@ -47,7 +48,7 @@ export class PrimerQuiz extends HTMLElement {
       return;
     }
     try {
-      this.#bank = /** @type {AuthoredQuestion[]} */ (JSON.parse(bankEl.textContent));
+      this.#bank = /** @type {AuthoredQuestion[]} */ (parseJsonc(bankEl.textContent));
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       root.innerHTML = `<div class="card"><p class="meta">${t("quiz.buildError", { error })}</p></div>`;
@@ -217,16 +218,16 @@ export class PrimerQuiz extends HTMLElement {
       this.#grade(root, quiz);
     });
 
-    // Enter inside a text answer must NOT submit the form (that would grade prematurely
-    // and surprise the learner). Instead behave like Tab: advance to the next question's
-    // field, or land on the submit button after the last one.
+    // Enter inside a text answer OR on a radio option must NOT submit the form (it would
+    // grade prematurely and surprise the learner). Instead behave like Tab: advance to the
+    // next question's field, or land on the submit button after the last one. (A MathLive
+    // <math-field> handles its own Enter, so it isn't intercepted here.)
     form.addEventListener("keydown", (e) => {
       if (e.key !== "Enter") return;
-      const target = e.target;
-      if (!(target instanceof HTMLInputElement) || target.type !== "text") return;
+      const el = e.target;
+      if (!(el instanceof HTMLInputElement) || (el.type !== "text" && el.type !== "radio")) return;
       e.preventDefault();
-      const stops = focusStops(root);
-      const next = stops[stops.indexOf(target) + 1];
+      const next = nextFocusStop(root, el);
       if (next) {
         next.focus();
         if (next instanceof HTMLInputElement && next.type === "text") next.select();
@@ -385,24 +386,24 @@ export class PrimerQuiz extends HTMLElement {
 }
 
 /**
- * The ordered focus stops for Enter-to-advance: each question's primary field (its text
- * box, or its first radio for multiple-choice) followed by the submit button. Enter on a
- * text answer jumps to the next stop instead of submitting.
+ * Where Enter-to-advance should move focus next: the PRIMARY field of the question after
+ * the one `from` belongs to (its math/text box, else its first radio), or the submit
+ * button after the last question. Question-based, so Enter on any radio in a group — not
+ * just the first — advances to the next question rather than submitting.
  * @param {ShadowRoot} root
- * @returns {HTMLElement[]}
+ * @param {HTMLElement} from
+ * @returns {HTMLElement | null}
  */
-function focusStops(root) {
-  /** @type {HTMLElement[]} */
-  const stops = [];
-  for (const q of root.querySelectorAll(".q")) {
-    const field = /** @type {HTMLElement | null} */ (
-      q.querySelector('input.answer, input[type="radio"]')
+function nextFocusStop(root, from) {
+  const questions = [...root.querySelectorAll(".q")];
+  const currentQ = from.closest(".q");
+  const nextQ = questions[questions.indexOf(/** @type {Element} */ (currentQ)) + 1];
+  if (nextQ) {
+    return /** @type {HTMLElement | null} */ (
+      nextQ.querySelector('math-field, input.answer, input[type="radio"]')
     );
-    if (field) stops.push(field);
   }
-  const submit = /** @type {HTMLElement | null} */ (root.querySelector('button[type="submit"]'));
-  if (submit) stops.push(submit);
-  return stops;
+  return /** @type {HTMLElement | null} */ (root.querySelector('button[type="submit"]'));
 }
 
 /**

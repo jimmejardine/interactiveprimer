@@ -30,6 +30,7 @@ import { getConceptMeta } from "./concept-meta.js";
 import { initTheme } from "./theme.js";
 import { initLocale, getLocale, DEFAULT_LOCALE, t } from "./i18n.js";
 import { loadGraph } from "./graph-data.js";
+import { parseJsonc } from "./jsonc.js";
 
 /** Build the page shell once the DOM is ready. */
 async function render() {
@@ -159,7 +160,7 @@ async function applyOverlay(id, locale, canonicalContent) {
     const metaEl = document.querySelector("script.concept-meta");
     if (metaEl?.textContent) {
       try {
-        const m = JSON.parse(metaEl.textContent);
+        const m = parseJsonc(metaEl.textContent);
         m.title = title;
         metaEl.textContent = JSON.stringify(m);
       } catch {

@@ -58,11 +58,19 @@ const charts = new Map();
 
 /**
  * Register a named chart builder. Re-registering a name overwrites it.
+ *
+ * A page's inline `registerChart(...)` (a deferred module script) can run AFTER a
+ * `<primer-chart>` element has already connected and looked the name up — render.js may
+ * start building the page the moment parsing finishes, before that deferred script executes.
+ * So we announce each registration; <primer-chart> waits for this when its scene is missing.
  * @param {string} name
  * @param {ChartBuilder} builder
  */
 export function registerChart(name, builder) {
   charts.set(name, builder);
+  if (typeof document !== "undefined") {
+    document.dispatchEvent(new CustomEvent("primer:chart-registered", { detail: { name } }));
+  }
 }
 
 /**

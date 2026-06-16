@@ -8,6 +8,8 @@
  * @module
  */
 
+import { parseJsonc } from "./jsonc.js";
+
 /** @typedef {import("./types/domain.js").ConceptMeta} ConceptMeta */
 
 /**
@@ -107,5 +109,5 @@ function validateDate(value, field, id) {
 export function getConceptMeta(doc = document) {
   const el = doc.querySelector("script.concept-meta");
   if (!el || !el.textContent) return null;
-  return parseConceptMeta(JSON.parse(el.textContent));
+  return parseConceptMeta(parseJsonc(el.textContent));
 }

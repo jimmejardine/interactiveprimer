@@ -126,9 +126,11 @@
   // Pinned dependency URLs — the single source of truth for versions.
   const KATEX_VERSION = "0.16.11";
   const MANIM_VERSION = "0.3.22";
+  const JSON5_VERSION = "2.2.3";
   const KATEX_CSS = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VERSION}/dist/katex.min.css`;
   const KATEX_MJS = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VERSION}/dist/katex.mjs`;
   const MANIM_JS = `https://cdn.jsdelivr.net/npm/manim-web@${MANIM_VERSION}/dist/manim-web.browser.js`;
+  const JSON5_MJS = `https://cdn.jsdelivr.net/npm/json5@${JSON5_VERSION}/dist/index.min.mjs`;
 
   const head = document.head;
 
@@ -140,6 +142,16 @@
     vp.name = "viewport";
     vp.content = "width=device-width, initial-scale=1";
     head.appendChild(vp);
+  }
+
+  // The site favicon (a "tree of knowledge"). Concept pages write no <head>, and while browsers
+  // auto-request /favicon.ico anyway, an explicit link makes it unambiguous across browsers.
+  if (!document.querySelector('link[rel~="icon"]')) {
+    const icon = document.createElement("link");
+    icon.rel = "icon";
+    icon.href = "/favicon.ico";
+    icon.setAttribute("sizes", "any");
+    head.appendChild(icon);
   }
 
   // 1) Stylesheets: the Primer look-and-feel plus KaTeX's font glyph CSS. The local
@@ -168,6 +180,7 @@
     imports: {
       katex: KATEX_MJS,
       "manim-web": MANIM_JS,
+      json5: JSON5_MJS,
       primer: "/js/primer.js",
     },
   });

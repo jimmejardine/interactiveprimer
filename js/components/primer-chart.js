@@ -58,6 +58,8 @@ export class PrimerChart extends HTMLElement {
   #raf = 0;
   /** @type {(() => void) | null} */
   #onTheme = null;
+  /** @type {(() => void) | null} Tear-down for a pending "wait for scene registration". */
+  #stopWaiting = null;
 
   connectedCallback() {
     // Read the optional params config BEFORE building the shadow root (the inline
@@ -72,7 +74,7 @@ export class PrimerChart extends HTMLElement {
         /* manim-web renders into a 7:4 world frame; the stage MUST carry that aspect or the
            plot is squashed/clipped (mirrors <primer-manim>). */
         .stage { width: 100%; aspect-ratio: 7 / 4; display: grid; place-items: center; overflow: hidden; background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); }
-        .stage canvas { display: block; width: 100% !important; height: 100% !important; object-fit: contain; }
+        .stage canvas, .stage img { display: block; width: 100% !important; height: 100% !important; object-fit: contain; }
 
         /* Parameter controls: one row per param — label, slider, number box. */
         .controls { display: grid; gap: 0.5rem 0.75rem; margin-top: 0.6rem; }
@@ -109,6 +111,7 @@ export class PrimerChart extends HTMLElement {
     this.#onTheme = null;
     if (this.#raf) cancelAnimationFrame(this.#raf);
     this.#raf = 0;
+    this.#cancelWait();
     this.#dispose();
   }
 
@@ -193,16 +196,25 @@ export class PrimerChart extends HTMLElement {
     const name = this.getAttribute("scene") ?? "";
     const builder = getChart(name);
     if (!builder) {
-      stage.innerHTML = `<span class="meta">${t("manim.noScene", { name })}</span>`;
+      // The page's inline `registerChart(...)` is a deferred module script that can run AFTER
+      // this element connects (render.js may build the page before it executes). Wait for the
+      // registration event rather than failing outright.
+      this.#awaitRegistration(root, stage, name);
       return;
     }
 
+    this.#cancelWait();
     this.#dispose();
     stage.replaceChildren();
     try {
       const manim = await import("manim-web");
       this.#update = builder(stage, this.#wrapManim(manim));
       this.#update({ ...this.#values });
+      // A static chart (no controls) never changes — freeze it to an <img> and release the
+      // live WebGL context. Each manim Scene holds one context and browsers cap them (~16), so
+      // a page with many static charts (e.g. a quiz with chart options) would otherwise exhaust
+      // them. Interactive charts keep their live canvas so the controls stay responsive.
+      if (this.#params.length === 0) this.#freezeToImage(stage);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       stage.innerHTML = `<span class="meta">${t("manim.runError", { error })}</span>`;
@@ -210,7 +222,68 @@ export class PrimerChart extends HTMLElement {
     }
   }
 
-  /** Best-effort tear down the active Scene so its WebGL context is released. */
+  /**
+   * Wait for the named chart to be registered, then build. Falls back to a clear message if it
+   * never arrives (e.g. a typo'd scene name). Idempotent: a second call while waiting is a no-op.
+   * @param {ShadowRoot} root
+   * @param {HTMLElement} stage
+   * @param {string} name
+   */
+  #awaitRegistration(root, stage, name) {
+    if (this.#stopWaiting) return;
+    /** @param {Event} e */
+    const onReg = (e) => {
+      if (/** @type {CustomEvent} */ (e).detail?.name !== name) return;
+      this.#cancelWait();
+      void this.#build(root);
+    };
+    const timer = setTimeout(() => {
+      this.#cancelWait();
+      stage.innerHTML = `<span class="meta">${t("manim.noScene", { name })}</span>`;
+    }, 4000);
+    this.#stopWaiting = () => {
+      document.removeEventListener("primer:chart-registered", onReg);
+      clearTimeout(timer);
+    };
+    document.addEventListener("primer:chart-registered", onReg);
+  }
+
+  /** Stop waiting for a pending registration (if any). */
+  #cancelWait() {
+    if (this.#stopWaiting) {
+      this.#stopWaiting();
+      this.#stopWaiting = null;
+    }
+  }
+
+  /**
+   * Snapshot the drawn chart to an <img> and release its WebGL context. Forces one synchronous
+   * render so the read-back captures the current frame (the drawing buffer is cleared after the
+   * browser composites, so we must read it in the same task). If the snapshot fails, the live
+   * canvas is left in place.
+   * @param {HTMLElement} stage
+   */
+  #freezeToImage(stage) {
+    const scene = this.#scene;
+    const canvas = /** @type {HTMLCanvasElement | null} */ (stage.querySelector("canvas"));
+    if (!scene || !canvas) return;
+    let url;
+    try {
+      scene.render?.();
+      url = canvas.toDataURL("image/png");
+    } catch {
+      return; // tainted/unsupported — keep the live canvas
+    }
+    if (!url || url.length < 64) return; // empty data URL — keep the live canvas
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = "";
+    img.decoding = "async";
+    this.#dispose(); // free the context now that the picture is captured
+    stage.replaceChildren(img);
+  }
+
+  /** Best-effort tear down the active Scene AND release its WebGL context. */
   #dispose() {
     const scene = this.#scene;
     this.#scene = null;
@@ -218,8 +291,14 @@ export class PrimerChart extends HTMLElement {
     if (!scene) return;
     try {
       scene.stop?.();
+      const renderer = scene.renderer;
+      // three.js dispose() frees GPU memory but NOT the WebGL context; explicitly lose it so the
+      // browser reclaims the slot (else many charts trip the "too many active contexts" limit).
+      renderer?.forceContextLoss?.();
+      renderer?.dispose?.();
+      const gl = renderer?.getContext?.() ?? renderer?.gl ?? renderer?.context;
+      gl?.getExtension?.("WEBGL_lose_context")?.loseContext?.();
       scene.dispose?.();
-      scene.renderer?.dispose?.();
     } catch {
       /* best-effort */
     }

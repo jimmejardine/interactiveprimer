@@ -15,6 +15,8 @@
  * @module
  */
 
+import { parseJsonc } from "./jsonc.js";
+
 /**
  * Read the page's scene-strings block, keyed by versioned scene name. Returns {} if the
  * block is absent or malformed (so a scene falls back to its inline defaults).
@@ -25,7 +27,7 @@ export function getSceneStrings(doc = document) {
   const el = doc.querySelector("script.scene-strings");
   if (!el || !el.textContent) return {};
   try {
-    const parsed = JSON.parse(el.textContent);
+    const parsed = parseJsonc(el.textContent);
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
     return {};

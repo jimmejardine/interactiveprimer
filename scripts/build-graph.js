@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { parseConceptMeta } from "../js/concept-meta.js";
 import { validateGraph, indexConcepts, buildDependents } from "../js/graph.js";
 import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
+import { parseJsonc } from "../js/jsonc.js";
 
 /** @typedef {import("../js/types/domain.js").Concept} Concept */
 /** @typedef {import("../js/types/domain.js").Diagnostic} Diagnostic */
@@ -63,7 +64,7 @@ function extractMeta(html) {
     /<script[^>]*class=["'][^"']*\bconcept-meta\b[^"']*["'][^>]*>([\s\S]*?)<\/script>/i,
   );
   if (!m) throw new Error("no <script class=\"concept-meta\"> block found");
-  return JSON.parse(m[1]);
+  return parseJsonc(m[1]);
 }
 
 /**

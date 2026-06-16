@@ -30,6 +30,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { parseConceptMeta } from "../js/concept-meta.js";
 import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
+import { parseJsonc } from "../js/jsonc.js";
 import enCatalog from "../js/i18n/en.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -70,7 +71,7 @@ function extractMeta(html) {
     /<script[^>]*class=["'][^"']*\bconcept-meta\b[^"']*["'][^>]*>([\s\S]*?)<\/script>/i,
   );
   if (!m) throw new Error('no <script class="concept-meta"> block found');
-  return JSON.parse(m[1]);
+  return parseJsonc(m[1]);
 }
 
 /**
