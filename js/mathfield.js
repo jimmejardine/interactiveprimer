@@ -36,9 +36,22 @@ export function loadMathLive() {
           }
         }
         try {
-          // Drop the virtual keyboard's edit toolbar (undo/redo/copy/…) — our custom keyboards
-          // carry their own backspace + tab keys, so the toolbar is just clutter.
-          if (mod.mathVirtualKeyboard) mod.mathVirtualKeyboard.editToolbar = "none";
+          const vk = mod.mathVirtualKeyboard;
+          if (vk) {
+            // Drop the edit toolbar (undo/redo/copy/…) — our keyboards carry their own keys.
+            vk.editToolbar = "none";
+            // Mount the keyboard in our own container so we can cap its width and centre it.
+            // A fixed, full-width box capped at 640px with auto side margins centres reliably,
+            // where capping an inner MathLive panel via CSS just left-aligned it.
+            if (typeof document !== "undefined" && !document.getElementById("primer-mathkb")) {
+              const box = document.createElement("div");
+              box.id = "primer-mathkb";
+              box.style.cssText =
+                "position:fixed; left:0; right:0; bottom:0; z-index:1000; max-width:640px; margin-inline:auto;";
+              document.body.appendChild(box);
+              vk.container = box;
+            }
+          }
         } catch {
           /* best-effort config */
         }
