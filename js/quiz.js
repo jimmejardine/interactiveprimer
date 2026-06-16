@@ -18,6 +18,7 @@ import {
   parseVariables,
   instantiate,
   substitute,
+  fillExpressions,
   computeAnswer,
 } from "./quiz-vars.js";
 
@@ -59,11 +60,12 @@ function isChoice(q) {
 function isText(q) {
   return /** @type {any} */ (q).answer !== undefined;
 }
-/** A free-text question with a non-empty `variables` spec can be re-instantiated.
+/** A question with a non-empty `variables` spec can be re-instantiated (either kind —
+ * free-text or multiple-choice).
  * @param {AuthoredQuestion} q @returns {boolean} */
 function isTemplate(q) {
   const variables = /** @type {any} */ (q).variables;
-  return isText(q) && typeof variables === "string" && variables.trim() !== "";
+  return typeof variables === "string" && variables.trim() !== "";
 }
 
 /**
@@ -89,12 +91,19 @@ export function generateQuestion(question, rng) {
     if (q.options.length < 2) {
       throw new Error(`Question needs at least 2 options: "${q.prompt}"`);
     }
-    const options = shuffle(q.options, rng);
+    // Optional randomized template: draw values, then evaluate `{expr}` in the prompt and
+    // in each option's text (keeping its `correct` flag). Non-variable MCQs are unchanged.
+    const bindings = q.variables ? instantiate(parseVariables(q.variables), rng) : null;
+    const prompt = bindings ? fillExpressions(q.prompt, bindings) : q.prompt;
+    const prepared = bindings
+      ? q.options.map((o) => ({ text: fillExpressions(o.text, bindings), correct: o.correct }))
+      : q.options;
+    const options = shuffle(prepared, rng);
     const correctIndex = options.findIndex((o) => o.correct);
     if (correctIndex === -1) {
       throw new Error(`Question has no correct option: "${q.prompt}"`);
     }
-    return { kind: "choice", prompt: q.prompt, options, correctIndex };
+    return { kind: "choice", prompt, options, correctIndex };
   }
 
   const q = /** @type {TextQuestion} */ (question);

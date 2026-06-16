@@ -97,6 +97,17 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
     exponent). `answer` is the expanded polynomial as a string, e.g.
     `{ "prompt": "Expand $(x+3)(x+4)$", "answer": "x^2 + 7x + 12", "compare": "polynomial" }`.
 
+  **Randomized multiple-choice questions:** a `options` question may ALSO carry `variables`.
+  Then the prompt and each option's `text` evaluate `{expr}` against the drawn values —
+  `{a + b}`, `{2 * a}`, a bare `{a}`, and adjacent groups concatenate (`{a}{b}` → "412").
+  The `correct` flag stays as authored; the question re-instantiates each draw. Double the
+  braces (`{{12}}`) to keep a literal LaTeX `{12}`. Example:
+  `{ "prompt": "What is ${a}+{b}$?", "variables": "a=[1:9] b=[1:9]",
+     "options": [ { "text": "${a+b}$", "correct": true }, { "text": "${2*a}$", "correct": false } ] }`.
+  Pick ranges/distractors that don't collide — e.g. with `a,b∈[1:20]` sometimes `a==b`, making
+  `{a+b}`, `{2*a}`, `{2*b}` render the same number (grading still works, but the options look
+  ambiguous).
+
 The **confidence control** (a 0–10 star rating, persisted to `localStorage` under
 `primer:confidence:<id>`) is added to every page automatically — do not author it.
 

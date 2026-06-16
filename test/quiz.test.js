@@ -58,6 +58,46 @@ test("generateQuestion rejects malformed questions", () => {
   );
 });
 
+test("generateQuestion evaluates a variable multiple-choice question", () => {
+  /** @type {QuizQuestion} */
+  const vq = {
+    prompt: "What is ${a} + {b}$?",
+    variables: "a=[3:3] b=[5:5]", // fixed so the assertions are deterministic
+    options: [
+      { text: "${a + b}$", correct: true },
+      { text: "${2 * a}$", correct: false },
+      { text: "${a}{b}$", correct: false },
+    ],
+  };
+  const gen = generateQuestion(vq, seededRng(3));
+  assert.equal(gen.kind, "choice");
+  if (gen.kind !== "choice") return;
+  assert.equal(gen.prompt, "What is $3 + 5$?"); // {a}/{b} filled
+  // The authored-correct option still wins after fill + shuffle, and renders the sum.
+  assert.equal(gen.options[gen.correctIndex].text, "$8$");
+  // Distractors are computed too: 2*a = 6, and {a}{b} concatenates to 35.
+  const texts = gen.options.map((o) => o.text).sort();
+  assert.deepEqual(texts, ["$35$", "$6$", "$8$"]);
+});
+
+test("a variable multiple-choice question is a re-instantiable template", () => {
+  /** @type {QuizQuestion[]} */
+  const bank = [
+    {
+      prompt: "What is ${a} + {b}$?",
+      variables: "a=[1:9] b=[1:9]",
+      options: [
+        { text: "${a + b}$", correct: true },
+        { text: "${2 * a}$", correct: false },
+      ],
+    },
+  ];
+  // One template, but count > bank size is satisfiable because it re-instantiates.
+  const quiz = generateQuiz(bank, 4, seededRng(11));
+  assert.equal(quiz.questions.length, 4);
+  assert.ok(quiz.questions.every((q) => q.kind === "choice"));
+});
+
 test("generateQuiz picks distinct questions, capped at bank size", () => {
   /** @type {QuizQuestion[]} */
   const bank = [

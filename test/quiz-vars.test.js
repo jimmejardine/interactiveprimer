@@ -5,6 +5,7 @@ import {
   parseVariables,
   instantiate,
   substitute,
+  fillExpressions,
   evalExpr,
   computeAnswer,
   checkAnswer,
@@ -19,6 +20,19 @@ function seededRng(seed) {
     return state / 0x100000000;
   };
 }
+
+test("fillExpressions: evaluates expressions, concatenates, and leaves the rest alone", () => {
+  const b = { a: 4, b: 12, color: "red" };
+  assert.equal(fillExpressions("$ {a + b} $", b), "$ 16 $"); // arithmetic
+  assert.equal(fillExpressions("{2 * a}", b), "8");
+  assert.equal(fillExpressions("{a}", b), "4"); // bare name
+  assert.equal(fillExpressions("{a}{b}", b), "412"); // adjacent groups concatenate
+  assert.equal(fillExpressions("{color}", b), "red"); // string-valued choice
+  // Not an expression over the bindings → left untouched (e.g. LaTeX braces / unknowns).
+  assert.equal(fillExpressions("\\sqrt{x}", b), "\\sqrt{x}");
+  // Double braces keep a literal LaTeX brace group.
+  assert.equal(fillExpressions("x^{{12}}", b), "x^{12}");
+});
 
 test("parseVariables: integer, real, and choice kinds", () => {
   const vars = parseVariables("a=[1:10] b=[1;10] c=[1,2,3]");

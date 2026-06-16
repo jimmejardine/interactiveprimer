@@ -148,6 +148,32 @@ export function substitute(text, bindings) {
 }
 
 /**
+ * Replace every `{ … }` group with the result of EVALUATING its contents against the
+ * bindings — so a prompt or option can compute values: `{a + b}`, `{2 * a}`, or just
+ * `{a}` (adjacent groups concatenate, e.g. `{a}{b}` → "412"). A bare bound name formats
+ * its value directly (covering string-valued choices); otherwise the inside is evaluated
+ * as an arithmetic expression via {@link evalExpr}. Anything that isn't a valid expression
+ * over the bindings — unknown names, literal LaTeX braces — is left untouched; double the
+ * braces (`{{12}}`) to keep a literal `{12}`.
+ * @param {string} text
+ * @param {Record<string, number | string>} bindings
+ * @returns {string}
+ */
+export function fillExpressions(text, bindings) {
+  return text.replace(/\{([^{}]+)\}/g, (whole, inner) => {
+    const expr = inner.trim();
+    if (/^[A-Za-z_]\w*$/.test(expr) && Object.prototype.hasOwnProperty.call(bindings, expr)) {
+      return formatValue(bindings[expr]);
+    }
+    try {
+      return formatValue(evalExpr(expr, bindings));
+    } catch {
+      return whole; // not an expression over the bindings — leave it as-is
+    }
+  });
+}
+
+/**
  * Evaluate an arithmetic expression against the bindings. Supports + - * / % ^,
  * parentheses, unary minus, and the whitelisted {@link FUNCS}. NOT `eval`: a tiny
  * recursive-descent parser. Throws on unknown identifiers and non-finite results.

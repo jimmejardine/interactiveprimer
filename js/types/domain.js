@@ -79,6 +79,10 @@
  * @typedef {object} QuizQuestion
  * @property {string} prompt          The question text (may contain LaTeX).
  * @property {QuizOption[]} options    Two or more options; at least one correct.
+ * @property {string} [variables]     Optional spec (see js/quiz-vars.js). When present the
+ *   prompt and each option's `text` are evaluated against the drawn values: `{expr}` →
+ *   the computed value (e.g. `{a + b}`, `{2 * a}`), and adjacent groups concatenate
+ *   (`{a}{b}` → "412"). The question then re-instantiates with fresh values each draw.
  */
 
 /**
