@@ -31,6 +31,24 @@ import { loadMathLive } from "../mathfield.js";
 /** @typedef {import("../types/domain.js").GeneratedQuiz} GeneratedQuiz */
 /** @typedef {import("../types/domain.js").GeneratedQuestion} GeneratedQuestion */
 
+/**
+ * A small, beginner-friendly MathLive menu — replaces the (overwhelming) default menu with
+ * just a "squared" shortcut for now. Grow this list as lessons need richer math tooling.
+ * @param {any} mf  The MathLive math-field element.
+ * @returns {any[]}
+ */
+function mathMenuItems(mf) {
+  return [
+    {
+      label: "x²  (squared)",
+      onMenuSelect: () => {
+        mf.focus();
+        mf.insert("^2");
+      },
+    },
+  ];
+}
+
 export class PrimerQuiz extends HTMLElement {
   /** @type {AuthoredQuestion[]} The authored bank, kept so "Try again" can re-draw a fresh quiz. */
   #bank = [];
@@ -159,6 +177,9 @@ export class PrimerQuiz extends HTMLElement {
         math-field.mathfield { border-radius: 0.4rem; min-width: 8rem; }
         .mathfield.right { box-shadow: 0 0 0 2px var(--primer-ok, #1a8f3c); }
         .mathfield.wrong { box-shadow: 0 0 0 2px var(--primer-bad, #c0392b); }
+        /* Hide MathLive's virtual-keyboard toggle (the OS keyboard is used instead — its
+           own keyboard doesn't work well on mobile). The ☰ menu toggle stays. */
+        math-field::part(virtual-keyboard-toggle) { display: none; }
 
         /* Multiple-choice feedback after marking. */
         .option { display: flex; gap: 0.4rem; align-items: center; padding: 0.15rem 0.45rem; border-radius: 0.4rem; }
@@ -249,10 +270,40 @@ export class PrimerQuiz extends HTMLElement {
           input.before(mf);
           input.hidden = true; // keep it in the DOM as the value carrier
           mf.value = input.value;
+          // Curate the ☰ menu down to a beginner-friendly set (just "squared" for now),
+          // and disable MathLive's own virtual keyboard (it doesn't work well on mobile —
+          // the OS keyboard is used instead; the toggle button is hidden via CSS below).
+          mf.menuItems = mathMenuItems(mf);
+          mf.mathVirtualKeyboardPolicy = "manual";
           mf.addEventListener("input", () => {
             input.value = mf.value;
             input.dispatchEvent(new Event("input", { bubbles: true }));
           });
+
+          // Make Tab / Enter leave the math box like a text field or radio (MathLive
+          // otherwise traps Tab and swallows Enter). MathLive fires `move-out` when the
+          // caret would leave the field (Tab forward, Shift+Tab/arrows backward).
+          /** @param {Event} e */
+          const onMoveOut = (e) => {
+            e.preventDefault(); // we place focus ourselves, not MathLive's default shuffle
+            const dir = /** @type {any} */ (e).detail?.direction;
+            const target =
+              dir === "backward" || dir === "upward"
+                ? prevFocusStop(root, mf)
+                : nextFocusStop(root, mf);
+            target?.focus();
+          };
+          mf.addEventListener("move-out", onMoveOut);
+          // Enter advances (never submits). Capture so we intercept before MathLive; Enter
+          // isn't used for math editing, so this is safe.
+          /** @param {KeyboardEvent} e */
+          const onMfEnter = (e) => {
+            if (e.key !== "Enter") return;
+            e.preventDefault();
+            e.stopPropagation();
+            nextFocusStop(root, mf)?.focus();
+          };
+          mf.addEventListener("keydown", onMfEnter, true);
         }
       });
     }
@@ -404,6 +455,24 @@ function nextFocusStop(root, from) {
     );
   }
   return /** @type {HTMLElement | null} */ (root.querySelector('button[type="submit"]'));
+}
+
+/**
+ * The mirror of {@link nextFocusStop} for backward movement (Shift+Tab out of a math box):
+ * the PRIMARY field of the question BEFORE `from`'s, or null at the first question.
+ * @param {ShadowRoot} root
+ * @param {HTMLElement} from
+ * @returns {HTMLElement | null}
+ */
+function prevFocusStop(root, from) {
+  const questions = [...root.querySelectorAll(".q")];
+  const currentQ = from.closest(".q");
+  const prevQ = questions[questions.indexOf(/** @type {Element} */ (currentQ)) - 1];
+  return prevQ
+    ? /** @type {HTMLElement | null} */ (
+        prevQ.querySelector('math-field, input.answer, input[type="radio"]')
+      )
+    : null;
 }
 
 /**
