@@ -148,9 +148,15 @@ export class PrimerQuiz extends HTMLElement {
         .ok-mark { color: var(--primer-ok, #1a8f3c); font-weight: 700; }
         .bad-mark { color: var(--primer-bad, #c0392b); font-weight: 700; }
         .correct-answer {
+          display: inline-block;
           font: inherit; padding: 0.35rem 0.5rem; border-radius: 0.4rem;
           border: 1px solid var(--primer-ok, #1a8f3c); color: var(--primer-ok, #1a8f3c);
           background: var(--primer-ok-bg, #e6f6ec);
+        }
+        /* Visually hidden but available to screen readers (labels the revealed answer). */
+        .sr-only {
+          position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+          overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
         }
 
         /* MathLive editor (when a polynomial box is enhanced). A ring shows the mark without
@@ -354,15 +360,20 @@ export class PrimerQuiz extends HTMLElement {
             mark.setAttribute("aria-hidden", "true");
             mark.textContent = correct ? "✓" : "✗";
             row.append(mark);
-            // Only reveal the correct answer when they got it wrong.
+            // Only reveal the correct answer when they got it wrong. It's typeset with KaTeX
+            // (like the prompt/options) so a math answer reads as math, not raw "x^2 + 7x + 12".
             if (!correct) {
-              const ans = document.createElement("input");
-              ans.type = "text";
-              ans.readOnly = true;
+              const ans = document.createElement("span");
               ans.className = "correct-answer correct-feedback";
-              ans.value = String(q.expected);
-              ans.setAttribute("aria-label", t("quiz.correctAnswer"));
               ans.title = t("quiz.correctAnswer");
+              // A visually-hidden label so screen readers announce what the pill is, without
+              // overriding the typeset value's own MathML.
+              const label = document.createElement("span");
+              label.className = "sr-only";
+              label.textContent = `${t("quiz.correctAnswer")}: `;
+              const value = document.createElement("span");
+              value.innerHTML = answerHtml(q);
+              ans.append(label, value);
               row.append(ans);
             }
           }
@@ -510,6 +521,50 @@ function tex(text) {
   }
   out += escapeHtml(text.slice(last));
   return out;
+}
+
+/**
+ * Render the revealed correct answer of a free-text question as KaTeX HTML. A math answer
+ * (a polynomial, a number, or anything carrying digits/math symbols) is typeset as math; a
+ * plain word ("Paris") is wrapped in `\text{…}` so it stays upright instead of becoming italic
+ * math. KaTeX failures fall back to escaped plain text so a stray value never breaks the reveal.
+ * @param {import("../types/domain.js").GeneratedTextQuestion} q
+ * @returns {string}
+ */
+function answerHtml(q) {
+  const s = String(q.expected);
+  // Prose = has letters but no digit or math symbol (so a city/word, not an expression).
+  const isProse = /[a-zA-Z]/.test(s) && !/[0-9^_=\\/+*()²³⁰-⁹√π]/.test(s);
+  const math = q.compare === "polynomial" || typeof q.expected === "number" || !isProse;
+  // Wrap exponents so multi-digit powers (x^10) typeset whole; harmless for single digits.
+  const latex = math ? s.replace(/\^(-?\d+)/g, "^{$1}") : `\\text{${latexEscape(s)}}`;
+  try {
+    return katex.renderToString(latex, { throwOnError: false });
+  } catch {
+    return escapeHtml(s);
+  }
+}
+
+/**
+ * Escape the LaTeX special characters so an arbitrary word renders literally inside `\text{…}`.
+ * @param {string} s
+ * @returns {string}
+ */
+function latexEscape(s) {
+  return s.replace(/[\\{}$&#%_^~]/g, (c) =>
+    /** @type {Record<string,string>} */ ({
+      "\\": "\\textbackslash{}",
+      "{": "\\{",
+      "}": "\\}",
+      $: "\\$",
+      "&": "\\&",
+      "#": "\\#",
+      "%": "\\%",
+      _: "\\_",
+      "^": "\\textasciicircum{}",
+      "~": "\\textasciitilde{}",
+    })[c],
+  );
 }
 
 /**
