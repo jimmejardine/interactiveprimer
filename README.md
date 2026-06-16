@@ -3,7 +3,7 @@
 ## Overview
 
 Welcome to the Interactive Primer. It is an open-source collection of "smart web
-pages" that teach the whole of human knowledge from the age of 6 to 66. It starts
+pages" that teach the whole of human knowledge from the age of 5 to 105. It starts
 with age-appropriate concepts, slowly working through a tree of knowledge of
 increasingly difficult ideas. For the keenest of learners it will cover the most
 advanced topics imaginable (beyond PhD level). The

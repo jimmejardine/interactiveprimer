@@ -14,8 +14,6 @@
 export default {
   "app.name": "Interactive Primer",
 
-  "page.backToTree": "↑ Back to the tree of knowledge",
-
   "concept.confidence.prompt": "How confident are you with this concept?",
   "concept.confidence.legend": "Your confidence",
   "concept.confidence.rate": "Rate {n} out of {max}",
@@ -32,6 +30,12 @@ export default {
   "quiz.buildError": "Couldn't build the test ({error}).",
   "quiz.answerPlaceholder": "Type your answer",
   "quiz.correctAnswer": "Correct answer",
+  "quiz.retry": "Try again",
+  "quiz.result.perfect": "Perfect! 🎉",
+  "quiz.result.great": "Brilliant! 🌟",
+  "quiz.result.good": "Well done! 👍",
+  "quiz.result.ok": "Good try! 🙂",
+  "quiz.result.low": "Keep practising 💪",
 
   "manim.play": "Play animation",
   "manim.pause": "Pause",

@@ -29,9 +29,14 @@ import { playSound } from "../sounds.js";
 /** @typedef {import("../types/domain.js").GeneratedQuestion} GeneratedQuestion */
 
 export class PrimerQuiz extends HTMLElement {
+  /** @type {AuthoredQuestion[]} The authored bank, kept so "Try again" can re-draw a fresh quiz. */
+  #bank = [];
+  /** @type {number} How many questions to draw. */
+  #count = 3;
+
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
-    const count = Number(this.getAttribute("count") ?? "3");
+    this.#count = Number(this.getAttribute("count") ?? "3");
 
     // The question bank is authored inline, as a child <script type="application/json">.
     const bankEl = this.querySelector(':scope > script[type="application/json"]');
@@ -39,18 +44,31 @@ export class PrimerQuiz extends HTMLElement {
       root.innerHTML = `<div class="card"><p class="meta">${t("quiz.empty")}</p></div>`;
       return;
     }
-
-    /** @type {GeneratedQuiz} */
-    let quiz;
     try {
-      const bank = /** @type {AuthoredQuestion[]} */ (JSON.parse(bankEl.textContent));
-      quiz = generateQuiz(bank, count, Math.random);
+      this.#bank = /** @type {AuthoredQuestion[]} */ (JSON.parse(bankEl.textContent));
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       root.innerHTML = `<div class="card"><p class="meta">${t("quiz.buildError", { error })}</p></div>`;
       return;
     }
+    this.#start(root);
+  }
 
+  /**
+   * Draw a fresh random quiz from the authored bank and render it. Called on first
+   * connect and again from the scorecard's "Try again" button.
+   * @param {ShadowRoot} root
+   */
+  #start(root) {
+    /** @type {GeneratedQuiz} */
+    let quiz;
+    try {
+      quiz = generateQuiz(this.#bank, this.#count, Math.random);
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      root.innerHTML = `<div class="card"><p class="meta">${t("quiz.buildError", { error })}</p></div>`;
+      return;
+    }
     this.#render(root, quiz);
   }
 
@@ -127,12 +145,28 @@ export class PrimerQuiz extends HTMLElement {
         .option { display: flex; gap: 0.4rem; align-items: center; padding: 0.15rem 0.45rem; border-radius: 0.4rem; }
         .option.correct { background: var(--primer-ok-bg, #e6f6ec); color: var(--primer-ok, #1a8f3c); box-shadow: inset 0 0 0 1px var(--primer-ok, #1a8f3c); }
         .option.chosen-wrong { background: var(--primer-bad-bg, #fdecea); color: var(--primer-bad, #c0392b); box-shadow: inset 0 0 0 1px var(--primer-bad, #c0392b); }
+
+        /* Results scorecard — replaces the Check-answers button once graded. */
+        .scorecard { display: flex; align-items: center; gap: 0.9rem; flex-wrap: wrap; animation: scorecard-pop 0.35s ease both; }
+        .scorecard .ring {
+          --pct: 0; flex: none; width: 4.5rem; height: 4.5rem; border-radius: 50%;
+          display: grid; place-items: center;
+          background:
+            radial-gradient(closest-side, var(--primer-surface, #fff) 72%, transparent 73%),
+            conic-gradient(var(--ring, var(--primer-accent, #5b6ee1)) calc(var(--pct) * 1%), var(--primer-border, #ddd) 0);
+        }
+        .scorecard .ring .pct { font-family: var(--primer-font-display, sans-serif); font-weight: 700; font-size: 1.2rem; color: var(--primer-ink, #111); }
+        .scorecard .msg { margin: 0; font-family: var(--primer-font-display, sans-serif); font-size: 1.3rem; }
+        .scorecard .retry { margin-left: auto; }
+        @keyframes scorecard-pop { from { transform: scale(0.85); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+        @media (prefers-reduced-motion: reduce) { .scorecard { animation: none; } }
       </style>
       <form class="card quiz">
         <h2 style="margin-top:0;">${t("quiz.heading")}</h2>
         <ol class="questions" style="list-style:none; padding:0;">${items}</ol>
-        <button type="submit" disabled>${t("quiz.check")}</button>
-        <p class="result meta" role="status" aria-live="polite"></p>
+        <div class="result-area" role="status" aria-live="polite">
+          <button type="submit" disabled>${t("quiz.check")}</button>
+        </div>
       </form>`;
 
     const form = /** @type {HTMLFormElement} */ (root.querySelector("form"));
@@ -231,15 +265,14 @@ export class PrimerQuiz extends HTMLElement {
       el?.classList.toggle("wrong", !correct);
     });
     const total = quiz.questions.length;
-    const result = /** @type {HTMLElement} */ (root.querySelector(".result"));
-    result.textContent = t("quiz.score", { score, total });
+    const fraction = total ? score / total : 0;
+    const pct = Math.round(fraction * 100);
 
     // Announce the grade so <primer-concept> can fold it into the confidence stars — but
     // only when the learner actually answered something. A blank submission is ignored, so
     // it never drags the stars down to 0%. Composed + bubbling so it escapes this shadow
     // root and reaches the document listener.
     if (answered > 0) {
-      const fraction = total ? score / total : 0;
       this.dispatchEvent(
         new CustomEvent("quiz-graded", {
           detail: { fraction, score, total, answered },
@@ -259,7 +292,35 @@ export class PrimerQuiz extends HTMLElement {
         if (card) glitter(card, gi);
       }
     }
+
+    // Replace the "Check answers" button with a fun scorecard showing the percentage.
+    const ringColor =
+      fraction >= 0.5 ? "var(--primer-ok, #1a8f3c)" : "var(--primer-bad, #c0392b)";
+    const area = /** @type {HTMLElement | null} */ (root.querySelector(".result-area"));
+    if (area) {
+      area.innerHTML = `
+        <div class="scorecard">
+          <div class="ring" style="--pct:${pct}; --ring:${ringColor}"><span class="pct">${pct}%</span></div>
+          <p class="msg">${t(scoreMessageKey(pct))}</p>
+          <button type="button" class="retry">${t("quiz.retry")}</button>
+        </div>`;
+      const retry = /** @type {HTMLButtonElement | null} */ (area.querySelector(".retry"));
+      retry?.addEventListener("click", () => this.#start(root));
+    }
   }
+}
+
+/**
+ * The result-message i18n key for a percentage score (0–100), by band.
+ * @param {number} pct
+ * @returns {string}
+ */
+function scoreMessageKey(pct) {
+  if (pct >= 100) return "quiz.result.perfect";
+  if (pct >= 80) return "quiz.result.great";
+  if (pct >= 60) return "quiz.result.good";
+  if (pct >= 40) return "quiz.result.ok";
+  return "quiz.result.low";
 }
 
 /**

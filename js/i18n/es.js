@@ -13,8 +13,6 @@
 export default {
   "app.name": "Cartilla Interactiva",
 
-  "page.backToTree": "↑ Volver al árbol del conocimiento",
-
   "concept.confidence.prompt": "¿Qué tan seguro te sientes con este concepto?",
   "concept.confidence.legend": "Tu confianza",
   "concept.confidence.rate": "Califica {n} de {max}",
@@ -31,6 +29,12 @@ export default {
   "quiz.buildError": "No se pudo construir la prueba ({error}).",
   "quiz.answerPlaceholder": "Escribe tu respuesta",
   "quiz.correctAnswer": "Respuesta correcta",
+  "quiz.retry": "Intentar de nuevo",
+  "quiz.result.perfect": "¡Perfecto! 🎉",
+  "quiz.result.great": "¡Genial! 🌟",
+  "quiz.result.good": "¡Bien hecho! 👍",
+  "quiz.result.ok": "¡Buen intento! 🙂",
+  "quiz.result.low": "Sigue practicando 💪",
 
   "manim.play": "Reproducir animación",
   "manim.pause": "Pausa",
