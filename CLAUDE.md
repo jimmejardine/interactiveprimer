@@ -98,10 +98,12 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
     a small tolerance, or as case/space-insensitive text.
   - A template (a free-text question **with** `variables`) is **re-instantiable**, so one
     template can fill many `count` slots — each with fresh random values.
-  - `"compare": "polynomial"` grades the answer as a single-variable polynomial: term order
-    and spacing don't matter, and the box becomes a MathLive math editor (type `^` for an
-    exponent). `answer` is the expanded polynomial as a string, e.g.
+  - `"compare": "polynomial"` grades the answer by **algebraic equivalence** via the CortexJS
+    Compute Engine (lazy-loaded), so any equivalent form is accepted — factored, reordered,
+    fractions, etc. (`(x+3)(x+4)` ≡ `x^2+7x+12` ≡ `12+7x+x^2`). The box becomes a MathLive math
+    editor (type `^` for an exponent). `answer` is the expected expression as a string, e.g.
     `{ "prompt": "Expand $(x+3)(x+4)$", "answer": "x^2 + 7x + 12", "compare": "polynomial" }`.
+    Offline (CE can't load) it falls back to a simple expanded-polynomial comparator.
     Its on-screen keyboard defaults to `algebra-basic`; set `"keyboard": "<name>"` to pick a
     different per-module keyboard (see js/math-keyboards.js — add exponents/geometry/trig there).
   - `constraints` (either question kind) — a boolean expression over the variables that must

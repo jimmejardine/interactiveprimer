@@ -21,6 +21,8 @@ import { attachShared } from "./shared.js";
 import { generateQuiz } from "../quiz.js";
 import { checkAnswer } from "../quiz-vars.js";
 import { comparePolynomial } from "../poly.js";
+import { gradeEquivalent } from "../grade-math.js";
+import { loadComputeEngine } from "../compute-engine.js";
 import { parseJsonc } from "../jsonc.js";
 import { t } from "../i18n.js";
 import { glitter, glitterIntensity } from "../glitter.js";
@@ -37,6 +39,8 @@ export class PrimerQuiz extends HTMLElement {
   #bank = [];
   /** @type {number} How many questions to draw. */
   #count = 3;
+  /** @type {any} A loaded CortexJS ComputeEngine (for equivalence grading), or null. */
+  #ce = null;
 
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
@@ -252,6 +256,13 @@ export class PrimerQuiz extends HTMLElement {
     // shadow root (the default policy leaves the keyboard stuck open on mobile).
     const polyInputs = /** @type {HTMLInputElement[]} */ ([...root.querySelectorAll("input.answer.poly")]);
     if (polyInputs.length) {
+      // Preload the Compute Engine so equivalence grading is ready by the time the learner
+      // checks (cached across renders; null on failure → comparePolynomial fallback).
+      void loadComputeEngine().then((ce) => {
+        if (ce) this.#ce = ce;
+      });
+    }
+    if (polyInputs.length) {
       void loadMathLive().then((ok) => {
         if (!ok || !this.isConnected) return;
         for (const input of polyInputs) {
@@ -262,7 +273,8 @@ export class PrimerQuiz extends HTMLElement {
           input.before(mf);
           input.hidden = true; // keep it in the DOM as the value carrier
           mf.value = input.value;
-          mf.menuItems = []; // the ☰ menu misbehaves on touch — hidden via CSS; use the button below
+          // (Don't set `mf.menuItems` here — it throws "Mathfield not mounted" before the
+          // field finishes mounting. The ☰ menu toggle is hidden via CSS instead.)
           mf.addEventListener("input", () => {
             input.value = mf.value;
             input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -361,7 +373,11 @@ export class PrimerQuiz extends HTMLElement {
         correct =
           input !== null &&
           (q.compare === "polynomial"
-            ? comparePolynomial(String(q.expected), input.value)
+            ? // Algebraic equivalence via the Compute Engine (accepts factored / reordered /
+              // fraction forms); falls back to the simple comparator if CE hasn't loaded.
+              this.#ce
+              ? gradeEquivalent(this.#ce, String(q.expected), input.value)
+              : comparePolynomial(String(q.expected), input.value)
             : checkAnswer(q.expected, input.value));
         if (input) {
           const row = input.closest(".answer-row");
