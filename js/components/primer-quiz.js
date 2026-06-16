@@ -279,6 +279,23 @@ export class PrimerQuiz extends HTMLElement {
             if (layout) vk.layouts = [layout];
             vk.editToolbar = "none"; // drop the undo/redo/copy menubar (re-applied here as it can reset)
             vk.show();
+            // The keyboard is fixed to the bottom of the viewport, so on a short screen it can
+            // cover the very field being edited. Once it has settled (MathLive reports its final
+            // size via `boundingRect`; `geometrychange` fires when that changes), scroll the page
+            // just far enough to lift the field above the keyboard's top edge. A timeout backs it
+            // up in case the event doesn't fire. We reveal at most once per focus.
+            let revealed = false;
+            const reveal = () => {
+              if (revealed || !mf.isConnected) return;
+              revealed = true;
+              vk.removeEventListener?.("geometrychange", reveal);
+              const kbTop = vk.boundingRect?.top || window.innerHeight;
+              const rect = mf.getBoundingClientRect();
+              const overlap = rect.bottom - kbTop + 16; // 16px of breathing room below the field
+              if (overlap > 0) window.scrollBy({ top: overlap, behavior: "smooth" });
+            };
+            vk.addEventListener?.("geometrychange", reveal);
+            setTimeout(reveal, 300); // fallback ~ the keyboard's slide-in duration
           });
           mf.addEventListener("focusout", () => {
             const vk = /** @type {any} */ (globalThis).mathVirtualKeyboard;
