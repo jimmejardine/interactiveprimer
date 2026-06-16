@@ -30,6 +30,7 @@ export default {
   "quiz.buildError": "Couldn't build the test ({error}).",
   "quiz.answerPlaceholder": "Type your answer",
   "quiz.correctAnswer": "Correct answer",
+  "quiz.chartOption": "Graph option {n}",
   "quiz.exponentHint": "Type ^ for an exponent (e.g. x^2).",
   "quiz.retry": "Try again",
   "quiz.result.perfect": "Perfect! 🎉",

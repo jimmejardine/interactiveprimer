@@ -29,6 +29,7 @@ export default {
   "quiz.buildError": "No se pudo construir la prueba ({error}).",
   "quiz.answerPlaceholder": "Escribe tu respuesta",
   "quiz.correctAnswer": "Respuesta correcta",
+  "quiz.chartOption": "Gráfica {n}",
   "quiz.exponentHint": "Escribe ^ para un exponente (p. ej. x^2).",
   "quiz.retry": "Intentar de nuevo",
   "quiz.result.perfect": "¡Perfecto! 🎉",

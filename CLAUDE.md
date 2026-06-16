@@ -54,6 +54,10 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
   `display` attribute. e.g. `<primer-math display>\int_0^1 x\,dx</primer-math>`.
 - `<primer-manim scene="name" caption="…">` — plays a registered animation on a Play
   button (lazy-loads manim-web; supports replay). See scenes below.
+- `<primer-chart scene="name">` — a manim **chart** (a function plotted on axes). Two modes:
+  **static** (no body) draws once; **interactive** carries sliders + number boxes that re-plot
+  the curve live. Add the controls with an inline `params` config and read them in the chart
+  builder. See charts below.
 - `<primer-video src="…" caption="…">` — an inline YouTube video. `src` is a YouTube URL
   (watch / youtu.be / embed / shorts) or a bare 11-char id. Shows a thumbnail + play
   facade and only loads YouTube on click. In a translation overlay, keep the same `src`
@@ -108,6 +112,13 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
   `{a+b}`, `{2*a}`, `{2*b}` render the same number (grading still works, but the options look
   ambiguous).
 
+  **Chart options** (the choices are graphs, not text): give an option a `chart` (a registered
+  chart-scene name) instead of `text`, and it renders as a small `<primer-chart>` graph. Mix is
+  per-question; `correct` works the same. Example:
+  `{ "prompt": "Which graph shows $y = 2\\sin x$?",
+     "options": [ { "chart": "optSinX", "correct": false }, { "chart": "opt2SinX", "correct": true } ] }`.
+  Don't pair `chart` with `variables` (chart options aren't templated).
+
 The **confidence control** (a 0–10 star rating, persisted to `localStorage` under
 `primer:confidence:<id>`) is added to every page automatically — do not author it.
 
@@ -152,9 +163,50 @@ by name from a `<primer-manim>`:
 - manim-web is young (v0.3.x): keep scenes simple, and the component shows a friendly
   message if a scene throws, so prefer small, defensive scenes.
 
+## Charts (interactive manim plots)
+
+A **chart builder** is registered with `registerChart(name, builder)` and referenced by a
+`<primer-chart scene="name">`. Unlike an animated scene, a builder sets up its `Scene` + `Axes`
+**once** and returns an `update(params)` the component calls — initially, on every control
+change, and after a theme change. Reusing one `Scene` (re-plotting only the curve) avoids
+spinning up a new WebGL context per change.
+
+```html
+<primer-chart scene="sinLab">
+  <script type="application/json">
+    { "params": [ { "name": "A", "label": "Amplitude (A)", "min": 0, "max": 3, "step": 0.1, "value": 1 } ] }
+  </script>
+</primer-chart>
+
+<script type="module">
+  import { registerChart, vizColors } from "primer";
+  registerChart("sinLab", (host, manim) => {
+    const { Scene, Axes } = manim;
+    const v = vizColors();
+    const scene = new Scene(host);
+    const axes = new Axes({ xRange: [-6.28, 6.28, 1.57], yRange: [-3, 3, 1], color: v.line, tips: false });
+    scene.add(axes);
+    let curve = null;
+    return (p) => {                                   // p = current control values, e.g. { A: 2 }
+      if (curve) scene.remove(curve);
+      curve = axes.plot((x) => (p.A ?? 1) * Math.sin(x), { color: v.cat[0], strokeWidth: 4, numSamples: 200 });
+      scene.add(curve);                                // autoRender redraws
+    };
+  });
+</script>
+```
+
+- Same colour rule as scenes: **every** colour from `vizColors()` (axes `v.line`, curves
+  `v.cat[i]`), never a manim constant or hardcoded value. Omitting axis number labels keeps
+  small charts clean (and dodges the white-label default).
+- A **static** chart (no `params` config / a builder whose `update` ignores `p`) draws once —
+  this is what quiz **chart options** use.
+- Keep the number of live charts modest (each is a WebGL context; browsers cap ~16). The
+  component disposes its context on disconnect.
+
 ## Helpers re-exported from `primer` (for inline scripts)
 
-`registerScene`, `getScene`, `speak`, `cancelSpeech`, `vizColors`, `getConceptMeta`,
+`registerScene`, `getScene`, `registerChart`, `getChart`, `speak`, `cancelSpeech`, `vizColors`, `getConceptMeta`,
 `parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`,
 `getTheme`, `applyTheme`, `initTheme`), and the graph helpers (`resolveLevels`,
 `validateGraph`, …). Pinned KaTeX/manim-web versions live in `js/boot.js`.

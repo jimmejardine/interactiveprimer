@@ -94,18 +94,24 @@ export class PrimerQuiz extends HTMLElement {
             ${poly ? `<p class="hint meta">${t("quiz.exponentHint")}</p>` : ""}
           </li>`;
       }
+      // An option is EITHER a chart (a registered <primer-chart> scene, so the choice itself
+      // is a graph) or text. Chart options get a 2-column grid; text options the inline list.
+      const hasCharts = q.options.some((opt) => opt.chart);
       return `
         <li class="q">
           <p class="prompt">${tex(q.prompt)}</p>
-          <div class="options">
+          <div class="options${hasCharts ? " chart-options" : ""}">
             ${q.options
-              .map(
-                (opt, oi) => `
+              .map((opt, oi) => {
+                const body = opt.chart
+                  ? `<primer-chart scene="${escapeHtml(opt.chart)}" aria-label="${t("quiz.chartOption", { n: oi + 1 })}"></primer-chart>`
+                  : `<span>${tex(opt.text ?? "")}</span>`;
+                return `
                   <label class="option">
                     <input type="radio" name="q${qi}" value="${oi}">
-                    <span>${tex(opt.text)}</span>
-                  </label>`,
-              )
+                    ${body}
+                  </label>`;
+              })
               .join("")}
           </div>
         </li>`;
@@ -157,6 +163,14 @@ export class PrimerQuiz extends HTMLElement {
         .option { display: flex; gap: 0.4rem; align-items: center; padding: 0.15rem 0.45rem; border-radius: 0.4rem; }
         .option.correct { background: var(--primer-ok-bg, #e6f6ec); color: var(--primer-ok, #1a8f3c); box-shadow: inset 0 0 0 1px var(--primer-ok, #1a8f3c); }
         .option.chosen-wrong { background: var(--primer-bad-bg, #fdecea); color: var(--primer-bad, #c0392b); box-shadow: inset 0 0 0 1px var(--primer-bad, #c0392b); }
+
+        /* Chart options: each choice is a small graph. Lay them in a responsive 2-col grid,
+           the radio above its chart, the whole tile a clickable card. */
+        .options.chart-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
+        .options.chart-options .option { flex-direction: column; align-items: stretch; gap: 0.3rem; padding: 0.4rem; border: 1px solid var(--primer-border, #ddd); }
+        .options.chart-options .option > input[type="radio"] { align-self: start; }
+        .options.chart-options primer-chart { width: 100%; }
+        @media (max-width: 30rem) { .options.chart-options { grid-template-columns: 1fr; } }
 
         /* Results scorecard — replaces the Check-answers button once graded. */
         .scorecard { display: flex; align-items: center; gap: 0.9rem; flex-wrap: wrap; animation: scorecard-pop 0.35s ease both; }

@@ -68,9 +68,12 @@
  */
 
 /**
- * One option in a multiple-choice question.
+ * One option in a multiple-choice question. An option shows EITHER `text` (typeset, may
+ * contain LaTeX) OR a `chart` (the name of a registered chart scene, rendered as a small
+ * graph via <primer-chart> — so the choices themselves can be plots). Exactly one is given.
  * @typedef {object} QuizOption
- * @property {string} text       The text shown to the learner.
+ * @property {string} [text]     The text shown to the learner (when not a chart option).
+ * @property {string} [chart]    Name of a registered chart scene to render as this option.
  * @property {boolean} correct   Whether this option is the correct answer.
  */
 

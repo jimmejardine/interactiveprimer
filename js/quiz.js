@@ -96,7 +96,7 @@ export function generateQuestion(question, rng) {
     const bindings = q.variables ? instantiate(parseVariables(q.variables), rng) : null;
     const prompt = bindings ? fillExpressions(q.prompt, bindings) : q.prompt;
     const prepared = bindings
-      ? q.options.map((o) => ({ text: fillExpressions(o.text, bindings), correct: o.correct }))
+      ? q.options.map((o) => ({ text: fillExpressions(o.text ?? "", bindings), correct: o.correct }))
       : q.options;
     const options = shuffle(prepared, rng);
     const correctIndex = options.findIndex((o) => o.correct);
