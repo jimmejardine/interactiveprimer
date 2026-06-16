@@ -26,28 +26,18 @@ const STAR_SVG =
 
 /** Scoped styles for the concept header + star control (in the shadow root). */
 const STAR_CSS = `
-  /* Badge sits immediately left of the title. */
-  .title-row { display: flex; align-items: center; gap: 0.6rem; }
+  /* "(Level x)" trails the title, in the same display font as the caption — bold when the
+     level is declared, normal when implicit. The parentheses are presentational (so the
+     text stays "Level x"). */
+  .title-row { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
   .title-row h1 { margin: 0; }
-  /* Level badge: a small pill with the word "LEVEL" running vertically up the left, and the
-     number beside it in the title's display font (bold when declared, lighter when implicit).
-     The shared .badge rule supplies the pill bg/colour. */
   .level-badge {
-    display: inline-flex; flex-direction: row; align-items: center; gap: 0.3rem;
-    padding: 0.3rem 0.45rem; line-height: 1; font-weight: 400;
+    font-family: var(--primer-font-display, var(--primer-font-body));
+    font-size: 1.1rem; font-weight: 400; white-space: nowrap;
   }
+  .level-badge::before { content: "("; }
+  .level-badge::after { content: ")"; }
   .level-badge.is-declared { font-weight: 700; }
-  .level-word {
-    writing-mode: vertical-rl; transform: rotate(180deg);
-    font-size: 0.55rem; letter-spacing: 0.12em; text-transform: uppercase;
-  }
-  /* The number matches the title (caption) exactly: same display font, size, AND line-height,
-     so vertical-centring lands the digit at the same height as the title in every theme
-     (serif body font vs the fun theme's Fredoka have different in-box metrics). Only the
-     weight differs (bold when declared, normal when implicit, inherited from .level-badge). */
-  .level-num { font-family: var(--primer-font-display, var(--primer-font-body)); font-size: 2rem; line-height: 1.2; }
-  /* Keep the implicit placeholder hidden until the graph fills it: the shared
-     .badge { display:inline-block } would otherwise override the UA [hidden] rule. */
   .level-badge[hidden] { display: none; }
   /* Centre the prompt and the star row within the confidence card. */
   .confidence { text-align: center; }
@@ -81,11 +71,10 @@ export class PrimerConcept extends HTMLElement {
     // level is known from the page itself; an implicit level is read asynchronously
     // from the emitted graph (dist/graph.json) below.
     const declared = meta?.declaredLevel;
-    const levelWord = t("concept.level.word");
     const levelBadge =
       declared !== undefined
-        ? `<span class="badge level-badge is-declared" title="${t("concept.level.declaredTitle")}"><span class="level-word">${levelWord}</span><span class="level-num">${formatLevel(declared)}</span></span>`
-        : `<span class="badge level-badge" title="${t("concept.level.implicitTitle")}" hidden><span class="level-word">${levelWord}</span><span class="level-num"></span></span>`;
+        ? `<span class="level-badge is-declared" title="${t("concept.level.declaredTitle")}">${t("concept.level.label", { level: formatLevel(declared) })}</span>`
+        : `<span class="level-badge" title="${t("concept.level.implicitTitle")}" hidden></span>`;
 
     const stars = Array.from(
       { length: MAX_STARS },
@@ -97,7 +86,7 @@ export class PrimerConcept extends HTMLElement {
     root.innerHTML = `
       <style>${STAR_CSS}</style>
       <article>
-        <div class="title-row">${levelBadge}<h1>${title}</h1></div>
+        <div class="title-row"><h1>${title}</h1>${levelBadge}</div>
         <div class="body"><slot></slot></div>
         <section class="confidence card" aria-label="${t("concept.confidence.legend")}">
           <p class="meta" id="conf-label" style="margin-top:0;">${t("concept.confidence.prompt")}</p>
@@ -181,8 +170,7 @@ export class PrimerConcept extends HTMLElement {
     if (!this.isConnected) return;
     const badge = root.querySelector(".level-badge");
     if (!badge) return;
-    const num = badge.querySelector(".level-num");
-    if (num) num.textContent = formatLevel(level);
+    badge.textContent = t("concept.level.label", { level: formatLevel(level) });
     badge.removeAttribute("hidden");
   }
 }
