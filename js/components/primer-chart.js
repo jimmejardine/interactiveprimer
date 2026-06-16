@@ -94,6 +94,8 @@ export class PrimerChart extends HTMLElement {
   #onTheme = null;
   /** @type {(() => void) | null} Tear-down for a pending "wait for scene registration". */
   #stopWaiting = null;
+  /** @type {ResizeObserver | null} Re-thins crowded anchor labels when the slider width changes. */
+  #ro = null;
 
   connectedCallback() {
     // Read the optional params config BEFORE building the shadow root (the inline
@@ -146,6 +148,9 @@ export class PrimerChart extends HTMLElement {
           font-family: var(--primer-font-ui, sans-serif); font-size: 0.7rem; font-weight: 400;
           line-height: 1; margin-top: 1px; color: var(--primer-ink-soft, #667); white-space: nowrap;
         }
+        /* When labels would crowd, JS adds .sparse-labels — keep every tick MARK but show only
+           every 2nd label (the first is kept; even-positioned labels are dropped). */
+        .ticks.sparse-labels .tick:nth-child(even) b { display: none; }
         .meta { display: block; }
       </style>
       <div class="chart">
@@ -157,6 +162,12 @@ export class PrimerChart extends HTMLElement {
     if (this.#params.length) {
       const controls = /** @type {HTMLElement} */ (root.querySelector(".controls"));
       controls.addEventListener("input", (e) => this.#onInput(controls, e));
+      // Thin out crowded anchor labels as the controls' width changes (the observer also fires
+      // once on connect, which is when we first know the laid-out slider width).
+      if (typeof ResizeObserver !== "undefined") {
+        this.#ro = new ResizeObserver(() => this.#updateTickDensity(root));
+        this.#ro.observe(controls);
+      }
     }
 
     // Recolour + re-plot when the theme changes (rebuild so axis/curve colours refresh).
@@ -171,8 +182,28 @@ export class PrimerChart extends HTMLElement {
     this.#onTheme = null;
     if (this.#raf) cancelAnimationFrame(this.#raf);
     this.#raf = 0;
+    this.#ro?.disconnect();
+    this.#ro = null;
     this.#cancelWait();
     this.#dispose();
+  }
+
+  /**
+   * Thin crowded anchor labels: when a slider's ticks are spaced closer than a label is wide,
+   * mark its `.ticks` so only every 2nd label shows (the first is always kept). Tick *marks*
+   * always stay; only labels are dropped. Called by the ResizeObserver, so it tracks the live
+   * slider width (e.g. a phone in portrait vs landscape).
+   * @param {ShadowRoot} root
+   */
+  #updateTickDensity(root) {
+    const LABEL_MIN_PX = 34; // room for a ~3–4 char label at 0.7rem
+    for (const ticks of root.querySelectorAll(".ticks")) {
+      const range = ticks.parentElement?.querySelector('input[type="range"]');
+      const width = range?.getBoundingClientRect().width ?? 0;
+      const gaps = ticks.children.length - 1;
+      const spacing = gaps > 0 ? width / gaps : Infinity;
+      ticks.classList.toggle("sparse-labels", width > 0 && spacing < LABEL_MIN_PX);
+    }
   }
 
   /**
