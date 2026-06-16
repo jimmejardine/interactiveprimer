@@ -102,6 +102,8 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
     and spacing don't matter, and the box becomes a MathLive math editor (type `^` for an
     exponent). `answer` is the expanded polynomial as a string, e.g.
     `{ "prompt": "Expand $(x+3)(x+4)$", "answer": "x^2 + 7x + 12", "compare": "polynomial" }`.
+    Its on-screen keyboard defaults to `algebra-basic`; set `"keyboard": "<name>"` to pick a
+    different per-module keyboard (see js/math-keyboards.js — add exponents/geometry/trig there).
   - `constraints` (either question kind) — a boolean expression over the variables that must
     hold; the values are **re-rolled** (up to 100×) until it does. Uses the same evaluator
     plus comparisons/logic: `== != < > <= >= && ||`. e.g. `"a != b"`, `"a > b && b > 0"`. If

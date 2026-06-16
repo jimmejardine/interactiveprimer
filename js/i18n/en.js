@@ -31,7 +31,6 @@ export default {
   "quiz.answerPlaceholder": "Type your answer",
   "quiz.correctAnswer": "Correct answer",
   "quiz.chartOption": "Graph option {n}",
-  "quiz.exponentHint": "Type ^ for an exponent (e.g. x^2).",
   "quiz.retry": "Try again",
   "quiz.result.perfect": "Perfect! 🎉",
   "quiz.result.great": "Brilliant! 🌟",

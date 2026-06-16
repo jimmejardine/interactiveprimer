@@ -105,6 +105,9 @@
  * @property {"polynomial"} [compare]   How to grade the typed answer. Default: numeric (with
  *   tolerance) or case/space-insensitive text. "polynomial" compares as a single-variable
  *   polynomial (order/format independent) and offers a math editor for entering exponents.
+ * @property {string} [keyboard]   Name of a custom MathLive virtual keyboard for the math
+ *   answer field (see js/math-keyboards.js), e.g. "algebra-basic". Polynomial answers default
+ *   to "algebra-basic".
  */
 
 /** A question as authored: multiple-choice (has `options`) or free-text (has `answer`).
@@ -140,6 +143,7 @@
  * @property {string} prompt
  * @property {number | string} expected
  * @property {"polynomial"} [compare]   Grading mode, carried through from the authored question.
+ * @property {string} [keyboard]   Custom math-keyboard name, carried through from the question.
  */
 
 /** A generated question, ready to render and grade.

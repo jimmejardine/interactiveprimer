@@ -26,35 +26,11 @@ import { t } from "../i18n.js";
 import { glitter, glitterIntensity } from "../glitter.js";
 import { playSound } from "../sounds.js";
 import { loadMathLive } from "../mathfield.js";
+import { getMathKeyboard } from "../math-keyboards.js";
 
 /** @typedef {import("../types/domain.js").AuthoredQuestion} AuthoredQuestion */
 /** @typedef {import("../types/domain.js").GeneratedQuiz} GeneratedQuiz */
 /** @typedef {import("../types/domain.js").GeneratedQuestion} GeneratedQuestion */
-
-/**
- * A small, beginner-friendly MathLive menu — replaces the (overwhelming) default menu with
- * just a "squared" shortcut for now. Grow this list as lessons need richer math tooling.
- * @param {any} mf  The MathLive math-field element.
- * @returns {any[]}
- */
-function mathMenuItems(mf) {
-  return [
-    {
-      label: "x",
-      onMenuSelect: () => {
-        mf.focus();
-        mf.insert("x");
-      },
-    },
-    {
-      label: "x²",
-      onMenuSelect: () => {
-        mf.focus();
-        mf.insert("x^2");
-      },
-    },
-  ];
-}
 
 export class PrimerQuiz extends HTMLElement {
   /** @type {AuthoredQuestion[]} The authored bank, kept so "Try again" can re-draw a fresh quiz. */
@@ -114,10 +90,9 @@ export class PrimerQuiz extends HTMLElement {
             <p class="prompt">${tex(q.prompt)}</p>
             <div class="answer-row">
               <input type="text" class="answer${poly ? " poly" : ""}" name="q${qi}" autocomplete="off" inputmode="text"
-                ${poly ? 'spellcheck="false" autocapitalize="off"' : ""}
+                ${poly ? `spellcheck="false" autocapitalize="off" data-keyboard="${escapeHtml(q.keyboard ?? "algebra-basic")}"` : ""}
                 aria-label="${t("quiz.answerPlaceholder")}" placeholder="${t("quiz.answerPlaceholder")}">
             </div>
-            ${poly ? `<p class="hint meta">${t("quiz.exponentHint")}</p>` : ""}
           </li>`;
       }
       // An option is EITHER a chart (a registered <primer-chart> scene, so the choice itself
@@ -177,26 +152,15 @@ export class PrimerQuiz extends HTMLElement {
           border: 1px solid var(--primer-ok, #1a8f3c); color: var(--primer-ok, #1a8f3c);
           background: var(--primer-ok-bg, #e6f6ec);
         }
-        .hint { margin: 0.3rem 0 0; font-size: 0.85rem; }
 
         /* MathLive editor (when a polynomial box is enhanced). A ring shows the mark without
            fighting MathLive's own border. */
         math-field.mathfield { border-radius: 0.4rem; min-width: 8rem; }
         .mathfield.right { box-shadow: 0 0 0 2px var(--primer-ok, #1a8f3c); }
         .mathfield.wrong { box-shadow: 0 0 0 2px var(--primer-bad, #c0392b); }
-        /* Hide MathLive's ☰ menu toggle (it's finicky on touch — its shortcuts are surfaced
-           as the .math-key buttons instead). The virtual-keyboard toggle stays so the math
-           keyboard works on mobile. */
+        /* Hide MathLive's ☰ menu toggle (finicky on touch); the custom virtual keyboard
+           provides the shortcuts (x, x², …). The keyboard toggle stays so it works on mobile. */
         math-field::part(menu-toggle) { display: none; }
-        /* Inline math-key shortcut buttons next to the field (x, x², …). */
-        .math-keys { display: inline-flex; gap: 0.3rem; }
-        .math-key {
-          font: inherit; line-height: 1; padding: 0.3rem 0.55rem; border-radius: 0.4rem;
-          border: 1px solid var(--primer-border, #ccc);
-          background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
-          cursor: pointer;
-        }
-        .math-key:hover { border-color: var(--primer-accent, #46e); }
 
         /* Multiple-choice feedback after marking. */
         .option { display: flex; gap: 0.4rem; align-items: center; padding: 0.15rem 0.45rem; border-radius: 0.4rem; }
@@ -296,22 +260,16 @@ export class PrimerQuiz extends HTMLElement {
             input.dispatchEvent(new Event("input", { bubbles: true }));
           });
 
-          // Reliable inline math-key buttons (from mathMenuItems) beside the field — the
-          // MathLive ☰ menu misbehaves on touch, so we surface the same shortcuts as plain
-          // buttons that work on every device. On mobile the math keyboard remains available
-          // for everything else.
-          const keys = document.createElement("span");
-          keys.className = "math-keys";
-          for (const itemDef of mathMenuItems(mf)) {
-            const btn = document.createElement("button");
-            btn.type = "button";
-            btn.className = "math-key";
-            btn.textContent = itemDef.label;
-            btn.setAttribute("aria-label", itemDef.label);
-            btn.addEventListener("click", () => itemDef.onMenuSelect());
-            keys.append(btn);
+          // Swap in this module's simple custom keyboard while the field is focused (the
+          // virtual keyboard is a shared singleton, so set it per focus). Unknown name → leave
+          // MathLive's default keyboards.
+          const layout = getMathKeyboard(input.dataset.keyboard);
+          if (layout) {
+            mf.addEventListener("focusin", () => {
+              const vk = /** @type {any} */ (globalThis).mathVirtualKeyboard;
+              if (vk) vk.layouts = [layout];
+            });
           }
-          mf.after(keys);
 
           // Make Tab / Enter leave the math box like a text field or radio (MathLive
           // otherwise traps Tab and swallows Enter). MathLive fires `move-out` when the
