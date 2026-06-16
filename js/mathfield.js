@@ -35,6 +35,13 @@ export function loadMathLive() {
             /* best-effort config */
           }
         }
+        try {
+          // Drop the virtual keyboard's edit toolbar (undo/redo/copy/…) — our custom keyboards
+          // carry their own backspace + tab keys, so the toolbar is just clutter.
+          if (mod.mathVirtualKeyboard) mod.mathVirtualKeyboard.editToolbar = "none";
+        } catch {
+          /* best-effort config */
+        }
         return typeof customElements !== "undefined" && !!customElements.get("math-field");
       })
       .catch(() => false);

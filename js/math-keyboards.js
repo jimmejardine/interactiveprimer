@@ -22,6 +22,7 @@ const BASIC_ALGEBRA = {
       { label: "2", key: "2" },
       { label: "3", key: "3" },
       { label: "4", key: "4" },
+      { class: "action", label: "⌫", command: "deleteBackward" },
     ],
     [
 
@@ -30,6 +31,8 @@ const BASIC_ALGEBRA = {
       { label: "7", key: "7" },
       { label: "8", key: "8" },
       { label: "9", key: "9" },
+      { class: "action", label: "X", command: "deleteAll" },
+
     ],
     [
       { label: "+", key: "+" },
@@ -37,6 +40,7 @@ const BASIC_ALGEBRA = {
       { label: "×", insert: "\\times" },
       { label: "÷", insert: "\\div" },
       { label: ".", key: "." },
+      { class: "action", label: "Prev", command: "moveToPreviousPlaceholder" }
     ],
     [
       { label: "x", key: "x" },
@@ -44,10 +48,7 @@ const BASIC_ALGEBRA = {
       { label: "x³", insert: "x^3" },
       { label: "(", key: "(" },
       { label: ")", key: ")" },
-    ],
-    [
-      { class: "action", label: "⌫", command: "deleteBackward" },
-      { class: "action", label: "Tab", command: "moveToNextPlaceholder" }
+      { class: "action", label: "Next", command: "moveToNextPlaceholder" }
     ],
   ],
 };
