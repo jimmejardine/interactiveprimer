@@ -158,9 +158,11 @@ export class PrimerQuiz extends HTMLElement {
         math-field.mathfield { border-radius: 0.4rem; min-width: 8rem; }
         .mathfield.right { box-shadow: 0 0 0 2px var(--primer-ok, #1a8f3c); }
         .mathfield.wrong { box-shadow: 0 0 0 2px var(--primer-bad, #c0392b); }
-        /* Hide MathLive's ☰ menu toggle (finicky on touch); the custom virtual keyboard
-           provides the shortcuts (x, x², …). The keyboard toggle stays so it works on mobile. */
+        /* Hide MathLive's in-field controls: the ☰ menu (finicky) and the virtual-keyboard
+           toggle (it wastes space). The keyboard pops up on focus / hides on blur instead
+           (see the focus handlers + manual policy). */
         math-field::part(menu-toggle) { display: none; }
+        math-field::part(virtual-keyboard-toggle) { display: none; }
 
         /* Multiple-choice feedback after marking. */
         .option { display: flex; gap: 0.4rem; align-items: center; padding: 0.15rem 0.45rem; border-radius: 0.4rem; }
@@ -249,7 +251,7 @@ export class PrimerQuiz extends HTMLElement {
         for (const input of polyInputs) {
           const mf = /** @type {any} */ (document.createElement("math-field"));
           mf.className = "mathfield";
-          mf.mathVirtualKeyboardPolicy = "sandboxed"; // render + dismiss the keyboard inside this shadow root
+          mf.mathVirtualKeyboardPolicy = "manual"; // we show on focus / hide on blur ourselves (below)
           mf.setAttribute("aria-label", input.getAttribute("aria-label") ?? "");
           input.before(mf);
           input.hidden = true; // keep it in the DOM as the value carrier
@@ -260,16 +262,22 @@ export class PrimerQuiz extends HTMLElement {
             input.dispatchEvent(new Event("input", { bubbles: true }));
           });
 
-          // Swap in this module's simple custom keyboard while the field is focused (the
-          // virtual keyboard is a shared singleton, so set it per focus). Unknown name → leave
-          // MathLive's default keyboards.
+          // Show this module's keyboard on focus and hide it on blur (policy is "manual", and
+          // the in-field toggle is hidden via CSS — so the keyboard pops up only while the
+          // field is active and takes no space otherwise). The virtual keyboard is a shared
+          // singleton, so set the module's layout each time the field is focused.
           const layout = getMathKeyboard(input.dataset.keyboard);
-          if (layout) {
-            mf.addEventListener("focusin", () => {
-              const vk = /** @type {any} */ (globalThis).mathVirtualKeyboard;
-              if (vk) vk.layouts = [layout];
-            });
-          }
+          mf.addEventListener("focusin", () => {
+            const vk = /** @type {any} */ (globalThis).mathVirtualKeyboard;
+            if (!vk) return;
+            if (layout) vk.layouts = [layout];
+            vk.editToolbar = "none"; // drop the undo/redo/copy menubar (re-applied here as it can reset)
+            vk.show();
+          });
+          mf.addEventListener("focusout", () => {
+            const vk = /** @type {any} */ (globalThis).mathVirtualKeyboard;
+            vk?.hide();
+          });
 
           // Make Tab / Enter leave the math box like a text field or radio (MathLive
           // otherwise traps Tab and swallows Enter). MathLive fires `move-out` when the
