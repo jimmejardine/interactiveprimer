@@ -92,6 +92,10 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
     a small tolerance, or as case/space-insensitive text.
   - A template (a free-text question **with** `variables`) is **re-instantiable**, so one
     template can fill many `count` slots — each with fresh random values.
+  - `"compare": "polynomial"` grades the answer as a single-variable polynomial: term order
+    and spacing don't matter, and the box becomes a MathLive math editor (type `^` for an
+    exponent). `answer` is the expanded polynomial as a string, e.g.
+    `{ "prompt": "Expand $(x+3)(x+4)$", "answer": "x^2 + 7x + 12", "compare": "polynomial" }`.
 
 The **confidence control** (a 0–10 star rating, persisted to `localStorage` under
 `primer:confidence:<id>`) is added to every page automatically — do not author it.

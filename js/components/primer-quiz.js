@@ -20,9 +20,11 @@ import katex from "katex";
 import { attachShared } from "./shared.js";
 import { generateQuiz } from "../quiz.js";
 import { checkAnswer } from "../quiz-vars.js";
+import { comparePolynomial } from "../poly.js";
 import { t } from "../i18n.js";
 import { glitter, glitterIntensity } from "../glitter.js";
 import { playSound } from "../sounds.js";
+import { loadMathLive } from "../mathfield.js";
 
 /** @typedef {import("../types/domain.js").AuthoredQuestion} AuthoredQuestion */
 /** @typedef {import("../types/domain.js").GeneratedQuiz} GeneratedQuiz */
@@ -80,13 +82,16 @@ export class PrimerQuiz extends HTMLElement {
     /** @param {GeneratedQuestion} q @param {number} qi */
     const item = (q, qi) => {
       if (q.kind === "text") {
+        const poly = q.compare === "polynomial";
         return `
           <li class="q">
             <p class="prompt">${tex(q.prompt)}</p>
             <div class="answer-row">
-              <input type="text" class="answer" name="q${qi}" autocomplete="off" inputmode="text"
+              <input type="text" class="answer${poly ? " poly" : ""}" name="q${qi}" autocomplete="off" inputmode="text"
+                ${poly ? 'spellcheck="false" autocapitalize="off"' : ""}
                 aria-label="${t("quiz.answerPlaceholder")}" placeholder="${t("quiz.answerPlaceholder")}">
             </div>
+            ${poly ? `<p class="hint meta">${t("quiz.exponentHint")}</p>` : ""}
           </li>`;
       }
       return `
@@ -140,6 +145,13 @@ export class PrimerQuiz extends HTMLElement {
           border: 1px solid var(--primer-ok, #1a8f3c); color: var(--primer-ok, #1a8f3c);
           background: var(--primer-ok-bg, #e6f6ec);
         }
+        .hint { margin: 0.3rem 0 0; font-size: 0.85rem; }
+
+        /* MathLive editor (when a polynomial box is enhanced). A ring shows the mark without
+           fighting MathLive's own border. */
+        math-field.mathfield { border-radius: 0.4rem; min-width: 8rem; }
+        .mathfield.right { box-shadow: 0 0 0 2px var(--primer-ok, #1a8f3c); }
+        .mathfield.wrong { box-shadow: 0 0 0 2px var(--primer-bad, #c0392b); }
 
         /* Multiple-choice feedback after marking. */
         .option { display: flex; gap: 0.4rem; align-items: center; padding: 0.15rem 0.45rem; border-radius: 0.4rem; }
@@ -206,6 +218,29 @@ export class PrimerQuiz extends HTMLElement {
         if (next instanceof HTMLInputElement && next.type === "text") next.select();
       }
     });
+
+    // Progressive enhancement: upgrade polynomial boxes to a MathLive <math-field> (where
+    // `^` opens an exponent). The plain <input> stays as the value carrier — the field writes
+    // its LaTeX back into it — so grading/anyAnswered keep reading one place, and a MathLive
+    // load failure simply leaves the usable text box (the comparator parses plain `x^2` too).
+    const polyInputs = /** @type {HTMLInputElement[]} */ ([...root.querySelectorAll("input.answer.poly")]);
+    if (polyInputs.length) {
+      void loadMathLive().then((ok) => {
+        if (!ok || !this.isConnected) return;
+        for (const input of polyInputs) {
+          const mf = /** @type {any} */ (document.createElement("math-field"));
+          mf.className = "mathfield";
+          mf.setAttribute("aria-label", input.getAttribute("aria-label") ?? "");
+          input.before(mf);
+          input.hidden = true; // keep it in the DOM as the value carrier
+          mf.value = input.value;
+          mf.addEventListener("input", () => {
+            input.value = mf.value;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+          });
+        }
+      });
+    }
   }
 
   /**
@@ -220,7 +255,9 @@ export class PrimerQuiz extends HTMLElement {
     for (const el of root.querySelectorAll(".option.correct, .option.chosen-wrong")) {
       el.classList.remove("correct", "chosen-wrong");
     }
-    for (const el of root.querySelectorAll(".answer.right, .answer.wrong")) {
+    for (const el of root.querySelectorAll(
+      ".answer.right, .answer.wrong, .mathfield.right, .mathfield.wrong",
+    )) {
       el.classList.remove("right", "wrong");
     }
     for (const el of root.querySelectorAll(".correct-feedback")) el.remove();
@@ -233,11 +270,18 @@ export class PrimerQuiz extends HTMLElement {
           root.querySelector(`input[name="q${qi}"]`)
         );
         if (input && input.value.trim() !== "") answered++;
-        correct = input !== null && checkAnswer(q.expected, input.value);
+        correct =
+          input !== null &&
+          (q.compare === "polynomial"
+            ? comparePolynomial(String(q.expected), input.value)
+            : checkAnswer(q.expected, input.value));
         if (input) {
-          input.classList.toggle("right", correct);
-          input.classList.toggle("wrong", !correct);
           const row = input.closest(".answer-row");
+          // Colour the VISIBLE control: the MathLive editor when the box was enhanced, else
+          // the text input itself.
+          const field = /** @type {HTMLElement} */ (row?.querySelector("math-field") ?? input);
+          field.classList.toggle("right", correct);
+          field.classList.toggle("wrong", !correct);
           if (row) {
             // A result mark beside the box: green tick if right, red cross if wrong.
             const mark = document.createElement("span");

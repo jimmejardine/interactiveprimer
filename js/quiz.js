@@ -101,7 +101,7 @@ export function generateQuestion(question, rng) {
   const bindings = q.variables ? instantiate(parseVariables(q.variables), rng) : {};
   const prompt = substitute(q.prompt, bindings);
   const expected = computeAnswer(q.answer, bindings);
-  return { kind: "text", prompt, expected };
+  return { kind: "text", prompt, expected, compare: q.compare };
 }
 
 /**

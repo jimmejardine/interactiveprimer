@@ -90,6 +90,9 @@
  * @property {string} prompt
  * @property {string | number} answer
  * @property {string} [variables]
+ * @property {"polynomial"} [compare]   How to grade the typed answer. Default: numeric (with
+ *   tolerance) or case/space-insensitive text. "polynomial" compares as a single-variable
+ *   polynomial (order/format independent) and offers a math editor for entering exponents.
  */
 
 /** A question as authored: multiple-choice (has `options`) or free-text (has `answer`).
@@ -124,6 +127,7 @@
  * @property {"text"} kind
  * @property {string} prompt
  * @property {number | string} expected
+ * @property {"polynomial"} [compare]   Grading mode, carried through from the authored question.
  */
 
 /** A generated question, ready to render and grade.
