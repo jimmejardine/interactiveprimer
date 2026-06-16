@@ -50,7 +50,7 @@
           {
             "params": [
               { "name": "A",   "label": "Amplitude (A)", "min": 0,    "max": 3,   "step": 0.1, "value": 1 },
-              { "name": "f",   "label": "Frequency (f)", "min": 1,    "max": 4,   "step": 1,   "value": 1 },
+              { "name": "f",   "label": "Frequency (f)", "min": 1,    "max": 4,   "step": 0.1, "value": 1 },
               { "name": "phi", "label": "Phase (φ°)",    "min": -180, "max": 180, "step": 15,  "value": 0 }
             ]
           }
@@ -88,10 +88,10 @@
     </primer-card>
 
     <!-- Chart scenes. Unlike <primer-manim> animations (registerScene), these are
-         registerChart builders: each sets up a manim Axes + Scene ONCE and returns an
+         registerChart builders: each sets up a JSXGraph board ONCE and returns an
          update(params) that re-plots. The interactive lab uses params; the quiz-option
          charts ignore them (static). Every colour comes from the theme via vizColors() —
-         never a hardcoded or manim-constant colour. -->
+         never a hardcoded colour: axes take v.line, tick labels v.ink, the curve v.cat[0]. -->
     <script type="module">
       import { registerChart, vizColors } from "primer";
 
@@ -99,80 +99,92 @@
       // converts to radians for Math.sin.
       const DEG = Math.PI / 180;
 
-      // Build the shared axes + scene for a chart. Returns { scene, axes, v }. The axes carry
-      // number labels (degrees on x, amplitude on y); manim draws those labels as WHITE fill
-      // text by default — invisible on the light theme — so we recolour them to the ink colour.
-      // Axis lines/ticks take the theme line colour; the plotted curve a categorical colour.
-      const makeChart = (host, manim, opts) => {
-        const { yRange = [-3, 3, 1], yNumbers = [-2, -1, 1, 2] } = opts ?? {};
-        const { Scene, Axes } = manim;
+      // Build the shared board + axes for a chart. Returns { board, v }. The x-axis labels the
+      // ±180, ±360 degree marks (major ticks every 180°) with a minor tick at each 90°; the y-axis
+      // ticks every `yTick`. Axis lines/ticks take the theme line colour and the tick labels the
+      // ink colour (JSXGraph colours text via strokeColor); the plotted curve a categorical colour.
+      const makeChart = (host, JXG, opts) => {
+        const { ymax = 3.2, ymin = -3.2, yTick = 1 } = opts ?? {};
         const v = vizColors();
-        const scene = new Scene(host);
-        const axes = new Axes({
-          xRange: [-360, 360, 90],
-          yRange,
-          xLength: 12,
-          yLength: 6,
-          color: v.line,
-          tips: false,
-          xAxisConfig: { includeNumbers: true, numbersToInclude: [-360, -180, 180, 360], numberFontSize: 18 },
-          yAxisConfig: { includeNumbers: true, numbersToInclude: yNumbers, numberFontSize: 18 },
+        const board = JXG.JSXGraph.initBoard(host, {
+          boundingbox: [-400, ymax, 400, ymin],
+          keepaspectratio: false,
+          axis: false,
+          grid: false,
         });
-        // Recolour the number labels (stroke `color` above only covers the axis line + ticks).
-        for (const axis of [axes.getXAxis?.(), axes.getYAxis?.()]) {
-          for (const label of axis?.getNumberLabels?.() ?? []) {
-            label.setColor?.(v.ink);
-            label.setFill?.(v.ink, 1);
-          }
-        }
-        scene.add(axes);
-        return { scene, axes, v };
+        // Axis lines + ticks are drawn thin and faint (low stroke opacity) so the number labels —
+        // which stay at full ink — read clearly against them. Both colours still come from the theme.
+        // Secondary marks are the axis's own short minor ticks (minorHeight); `minorTicks` is the
+        // count BETWEEN majors: 1 → one mark at each 90°. No grid (it washes the backdrop grey).
+        const axisOpts = (ticksDistance, minorTicks) => ({
+          strokeColor: v.line,
+          strokeOpacity: 0.45,
+          strokeWidth: 1,
+          highlight: false,
+          ticks: {
+            ticksDistance,
+            insertTicks: false,
+            minorTicks,
+            minorHeight: 4,
+            drawZero: false,
+            strokeColor: v.line,
+            strokeOpacity: 0.45,
+            strokeWidth: 1,
+            label: { strokeColor: v.ink, strokeOpacity: 1, fontSize: 13, anchorX: "middle", offset: [0, -2] },
+          },
+        });
+        board.create("axis", [[0, 0], [1, 0]], axisOpts(180, 1)); // x: labelled majors at ±180/±360, short minors at 90
+        board.create("axis", [[0, 0], [0, 1]], axisOpts(yTick, 0)); // y
+        return { board, v };
       };
+
+      // Plot a function of degrees over the visible range. `style` overrides (e.g. the faint
+      // reference curve). functiongraph re-evaluates its function on board.update(), so a function
+      // that closes over mutable values re-plots without recreating the curve.
+      const plot = (board, fn, color, style) =>
+        board.create("functiongraph", [fn, -360, 360], {
+          strokeColor: color,
+          strokeWidth: 4,
+          highlight: false,
+          ...style,
+        });
 
       // A static option chart: plot one fixed function of degrees and stand still.
       const optionChart = (name, fn, opts) => {
-        registerChart(name, (host, manim) => {
-          const { scene, axes, v } = makeChart(host, manim, opts);
-          const curve = axes.plot(fn, { color: v.cat[0], strokeWidth: 4, numSamples: 300 });
-          scene.add(curve);
+        registerChart(name, (host, JXG) => {
+          const { board, v } = makeChart(host, JXG, opts);
+          plot(board, fn, v.cat[0]);
           return () => {}; // no parameters — nothing to re-plot
         });
       };
 
-      // The interactive lab: a faint reference sin(x), plus a bold A·sin(fx+φ) that re-plots
-      // every time a slider/number box changes. The Scene + Axes are created once; only the
-      // bold curve is removed and re-added, so dragging never spins up a new WebGL context.
+      // The interactive lab: a faint reference sin(x), plus a bold A·sin(fx+φ) that re-plots every
+      // time a slider/number box changes. The board + both curves are created once; the bold
+      // curve's function reads the live `cur` values, so update() just calls board.update().
       // A, f are unitless; the phase φ is in degrees.
-      registerChart("sinLab", (host, manim) => {
-        const { scene, axes, v } = makeChart(host, manim, { yRange: [-3, 3, 1], yNumbers: [-2, -1, 1, 2] });
-        const reference = axes.plot((x) => Math.sin(x * DEG), { color: v.line, strokeWidth: 2, numSamples: 300 });
-        reference.setStrokeOpacity?.(0.35);
-        scene.add(reference);
+      registerChart("sinLab", (host, JXG) => {
+        const { board, v } = makeChart(host, JXG, { ymax: 3.2, ymin: -3.2, yTick: 1 });
+        plot(board, (x) => Math.sin(x * DEG), v.line, { strokeWidth: 2, strokeOpacity: 0.35 });
 
-        let curve = null;
+        const cur = { A: 1, f: 1, phi: 0 };
+        plot(board, (x) => cur.A * Math.sin((cur.f * x + cur.phi) * DEG), v.cat[0]);
         return (p) => {
-          const A = Number.isFinite(p.A) ? p.A : 1;
-          const f = Number.isFinite(p.f) ? p.f : 1;
-          const phi = Number.isFinite(p.phi) ? p.phi : 0;
-          if (curve) scene.remove(curve);
-          curve = axes.plot((x) => A * Math.sin((f * x + phi) * DEG), {
-            color: v.cat[0],
-            strokeWidth: 4,
-            numSamples: 300,
-          });
-          scene.add(curve); // autoRender redraws
+          if (Number.isFinite(p.A)) cur.A = p.A;
+          if (Number.isFinite(p.f)) cur.f = p.f;
+          if (Number.isFinite(p.phi)) cur.phi = p.phi;
+          board.update();
         };
       });
 
       // Amplitude question (y range gives 2·sin headroom).
-      const ampOpts = { yRange: [-2.5, 2.5, 1], yNumbers: [-2, -1, 1, 2] };
+      const ampOpts = { ymax: 2.6, ymin: -2.6, yTick: 1 };
       optionChart("optSinX", (x) => Math.sin(x * DEG), ampOpts);
       optionChart("opt2SinX", (x) => 2 * Math.sin(x * DEG), ampOpts);
       optionChart("optHalfSinX", (x) => 0.5 * Math.sin(x * DEG), ampOpts);
       optionChart("optSin2x", (x) => Math.sin(2 * x * DEG), ampOpts);
 
       // Phase question (unit amplitude).
-      const phaseOpts = { yRange: [-1.5, 1.5, 1], yNumbers: [-1, 1] };
+      const phaseOpts = { ymax: 1.7, ymin: -1.7, yTick: 1 };
       optionChart("optShiftLeft", (x) => Math.sin((x + 90) * DEG), phaseOpts);
       optionChart("optShiftRight", (x) => Math.sin((x - 90) * DEG), phaseOpts);
       optionChart("optFlip", (x) => Math.sin((x + 180) * DEG), phaseOpts);

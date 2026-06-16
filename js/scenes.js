@@ -40,16 +40,17 @@ export function getScene(name) {
 
 /**
  * A chart builder, used by <primer-chart>. Unlike a {@link SceneBuilder} (which plays an
- * animation once), a chart builder sets up its Scene + Axes ONCE and returns an `update`
- * function the component calls — initially, on every control change, and again after a
- * theme change. So the same manim Scene is reused (no WebGL-context churn) and only the
- * plotted curve is re-drawn.
+ * animation once), a chart builder sets up its JSXGraph board ONCE (via `JXG.JSXGraph.initBoard`)
+ * and returns an `update` function the component calls — initially, on every control change, and
+ * again after a theme change. The board is SVG, so re-plotting is cheap and there is no
+ * WebGL-context limit: a common pattern is to create the curve once over a closure of the current
+ * values, then `board.update()` in the returned function.
  *
  * `params` is the current control values keyed by name (e.g. `{ A: 2, f: 1, phi: 0 }`);
  * for a static chart (no controls) it is `{}`.
  * @callback ChartBuilder
- * @param {HTMLElement} host       Element to mount the chart into.
- * @param {Record<string, any>} manim  The imported manim-web module namespace.
+ * @param {HTMLElement} host       Element to mount the chart (board) into.
+ * @param {Record<string, any>} JXG  The imported JSXGraph namespace.
  * @returns {(params: Record<string, number>) => void}  Re-plot for the given param values.
  */
 

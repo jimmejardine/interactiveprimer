@@ -54,10 +54,10 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
   `display` attribute. e.g. `<primer-math display>\int_0^1 x\,dx</primer-math>`.
 - `<primer-manim scene="name" caption="…">` — plays a registered animation on a Play
   button (lazy-loads manim-web; supports replay). See scenes below.
-- `<primer-chart scene="name">` — a manim **chart** (a function plotted on axes). Two modes:
-  **static** (no body) draws once; **interactive** carries sliders + number boxes that re-plot
-  the curve live. Add the controls with an inline `params` config and read them in the chart
-  builder. See charts below.
+- `<primer-chart scene="name">` — a **JSXGraph chart** (a function plotted on axes, SVG). Two
+  modes: **static** (no body) draws once; **interactive** carries sliders + number boxes that
+  re-plot the curve live. Add the controls with an inline `params` config and read them in the
+  chart builder. See charts below.
 - `<primer-video src="…" caption="…">` — an inline YouTube video. `src` is a YouTube URL
   (watch / youtu.be / embed / shorts) or a bare 11-char id. Shows a thumbnail + play
   facade and only loads YouTube on click. In a translation overlay, keep the same `src`
@@ -172,13 +172,15 @@ by name from a `<primer-manim>`:
 - manim-web is young (v0.3.x): keep scenes simple, and the component shows a friendly
   message if a scene throws, so prefer small, defensive scenes.
 
-## Charts (interactive manim plots)
+## Charts (JSXGraph plots)
 
-A **chart builder** is registered with `registerChart(name, builder)` and referenced by a
-`<primer-chart scene="name">`. Unlike an animated scene, a builder sets up its `Scene` + `Axes`
-**once** and returns an `update(params)` the component calls — initially, on every control
-change, and after a theme change. Reusing one `Scene` (re-plotting only the curve) avoids
-spinning up a new WebGL context per change.
+Charts are drawn with **JSXGraph** (an SVG plotting/geometry library) — separate from the manim
+animations behind `<primer-manim>`. A **chart builder** is registered with
+`registerChart(name, builder)` and referenced by a `<primer-chart scene="name">`. The builder
+receives the host element and the `JXG` namespace, sets up a **board** (via `JXG.JSXGraph.initBoard`)
+**once**, and returns an `update(params)` the component calls — initially, on every control
+change, and after a theme change. Because JSXGraph is SVG there's no WebGL context (and no
+context cap), so charts are cheap and you can use as many as you like.
 
 ```html
 <primer-chart scene="sinLab">
@@ -189,36 +191,40 @@ spinning up a new WebGL context per change.
 
 <script type="module">
   import { registerChart, vizColors } from "primer";
-  registerChart("sinLab", (host, manim) => {
-    const { Scene, Axes } = manim;
+  registerChart("sinLab", (host, JXG) => {
     const v = vizColors();
-    const scene = new Scene(host);
-    const axes = new Axes({ xRange: [-6.28, 6.28, 1.57], yRange: [-3, 3, 1], color: v.line, tips: false });
-    scene.add(axes);
-    let curve = null;
+    const board = JXG.JSXGraph.initBoard(host, { boundingbox: [-6.6, 3, 6.6, -3], axis: false });
+    board.create("axis", [[0, 0], [1, 0]], { strokeColor: v.line });          // x-axis
+    board.create("axis", [[0, 0], [0, 1]], { strokeColor: v.line });          // y-axis
+    const cur = { A: 1 };                                                      // live values
+    // functiongraph re-evaluates its function on board.update(), so close over `cur` and just
+    // mutate it — no need to recreate the curve.
+    board.create("functiongraph", [(x) => cur.A * Math.sin(x), -6.3, 6.3],
+      { strokeColor: v.cat[0], strokeWidth: 4, highlight: false });
     return (p) => {                                   // p = current control values, e.g. { A: 2 }
-      if (curve) scene.remove(curve);
-      curve = axes.plot((x) => (p.A ?? 1) * Math.sin(x), { color: v.cat[0], strokeWidth: 4, numSamples: 200 });
-      scene.add(curve);                                // autoRender redraws
+      if (Number.isFinite(p.A)) cur.A = p.A;
+      board.update();
     };
   });
 </script>
 ```
 
 - Same colour rule as scenes: **every** colour from `vizColors()` (axes `v.line`, curves
-  `v.cat[i]`), never a manim constant or hardcoded value. Omitting axis number labels keeps
-  small charts clean (and dodges the white-label default).
+  `v.cat[i]`, any text labels `v.ink` — JSXGraph colours text via `strokeColor`), never a
+  hardcoded value. The component disables pan/zoom/navigation chrome and re-fits on resize by
+  default; a builder's own `initBoard` options override that.
 - A **static** chart (no `params` config / a builder whose `update` ignores `p`) draws once —
-  this is what quiz **chart options** use.
-- Keep the number of live charts modest (each is a WebGL context; browsers cap ~16). The
-  component disposes its context on disconnect.
+  this is what quiz **chart options** use. The component rebuilds the board on a theme change, so
+  read `vizColors()` at the top of the builder (not cached outside it).
+- The board fills a 7:4 stage. Give `functiongraph` an explicit `[fn, xmin, xmax]` range so it
+  only plots the visible span.
 
 ## Helpers re-exported from `primer` (for inline scripts)
 
 `registerScene`, `getScene`, `registerChart`, `getChart`, `speak`, `cancelSpeech`, `vizColors`, `getConceptMeta`,
 `parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`,
 `getTheme`, `applyTheme`, `initTheme`), and the graph helpers (`resolveLevels`,
-`validateGraph`, …). Pinned KaTeX/manim-web versions live in `js/boot.js`.
+`validateGraph`, …). Pinned KaTeX/manim-web/JSXGraph versions live in `js/boot.js`.
 
 ## Themes & page chrome (automatic)
 

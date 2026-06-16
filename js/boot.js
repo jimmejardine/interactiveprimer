@@ -127,10 +127,15 @@
   const KATEX_VERSION = "0.16.11";
   const MANIM_VERSION = "0.3.22";
   const JSON5_VERSION = "2.2.3";
+  const JSXGRAPH_VERSION = "1.12.2";
   const KATEX_CSS = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VERSION}/dist/katex.min.css`;
   const KATEX_MJS = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VERSION}/dist/katex.mjs`;
   const MANIM_JS = `https://cdn.jsdelivr.net/npm/manim-web@${MANIM_VERSION}/dist/manim-web.browser.js`;
   const JSON5_MJS = `https://cdn.jsdelivr.net/npm/json5@${JSON5_VERSION}/dist/index.min.mjs`;
+  // JSXGraph powers <primer-chart> (SVG plots). Its stylesheet (distrib/jsxgraph.css) is NOT
+  // loaded here — <primer-chart> lazy-injects it on first use, so a page with no chart pays
+  // nothing. Keep this version in step with the jsxgraph.css href in js/components/primer-chart.js.
+  const JSXGRAPH_MJS = `https://cdn.jsdelivr.net/npm/jsxgraph@${JSXGRAPH_VERSION}/distrib/jsxgraphcore.mjs`;
 
   const head = document.head;
 
@@ -180,6 +185,7 @@
     imports: {
       katex: KATEX_MJS,
       "manim-web": MANIM_JS,
+      jsxgraph: JSXGRAPH_MJS,
       json5: JSON5_MJS,
       primer: "/js/primer.js",
     },

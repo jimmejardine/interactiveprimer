@@ -1,10 +1,10 @@
 // @ts-check
 /**
- * <primer-chart scene="name"> — mounts a registered manim-web CHART (a plotted function on
- * axes). Two modes, driven by an optional inline config:
+ * <primer-chart scene="name"> — mounts a registered CHART (a plotted function on axes),
+ * rendered with JSXGraph (SVG). Two modes, driven by an optional inline config:
  *
  *   - STATIC (no config): the chart is drawn once and stands still. This is what the quiz
- *     uses to render a sine graph as a multiple-choice OPTION.
+ *     uses to render a graph as a multiple-choice OPTION.
  *
  *       <primer-chart scene="optSin2x"></primer-chart>
  *
@@ -19,14 +19,14 @@
  *         </script>
  *       </primer-chart>
  *
- * Unlike <primer-manim> (which plays an animation behind a Play button), a chart has no
- * controls of its own beyond the parameter inputs and renders immediately. manim-web is
- * imported lazily, so a page with no chart pays nothing.
+ * The chart builder (see js/scenes.js `registerChart`) creates its JSXGraph board ONCE and
+ * returns an `update(params)`; we call it initially, on every control change, and again after a
+ * theme change (a rebuild, so axis/curve colours refresh). JSXGraph is imported lazily, so a
+ * page with no chart pays nothing.
  *
- * The chart builder (see js/scenes.js `registerChart`) creates its Scene + Axes ONCE and
- * returns an `update(params)`; we reuse that one Scene for every re-plot, so dragging a
- * slider doesn't churn WebGL contexts. On disconnect we dispose the Scene to free its
- * context (so the quiz's "Try again" and page navigation don't exhaust the browser's limit).
+ * JSXGraph renders SVG — there is no WebGL context (and so no per-browser context cap), no
+ * snapshotting and no async-label race. A page can carry as many charts as it likes; we just
+ * free each board on disconnect so its resize handlers are released.
  * @module
  */
 
@@ -36,54 +36,32 @@ import { vizColors } from "../theme.js";
 import { t } from "../i18n.js";
 
 /**
- * Serialize STATIC chart renders across every <primer-chart> on the page. Each static chart
- * spins up a manim Scene (one WebGL context), draws, snapshots to an <img>, then disposes the
- * context. Running them one-at-a-time means at most ONE static-chart context is alive at a time,
- * so a page with many charts (a quiz with 8 graph options) never bursts past the browser's
- * context limit, and each disposed context is reclaimed before the next is created.
- * @type {Promise<unknown>}
+ * JSXGraph's stylesheet. Lazy-fetched once into a constructable sheet and adopted into each
+ * chart's shadow root (a document-level <link> can't cross the shadow boundary). Best-effort:
+ * the board still renders if it fails to load. Keep the version in step with js/boot.js.
  */
-let renderQueue = Promise.resolve();
+const JSXGRAPH_CSS = "https://cdn.jsdelivr.net/npm/jsxgraph@1.12.2/distrib/jsxgraph.css";
+
+/** @type {Promise<CSSStyleSheet | null> | null} Shared across all <primer-chart> instances. */
+let jsxCssPromise = null;
 
 /**
- * Run `task` after all previously-queued static renders finish (failures don't stall the chain).
- * @template T
- * @param {() => Promise<T>} task
- * @returns {Promise<T>}
+ * Fetch jsxgraph.css once and wrap it in a constructable stylesheet. Resolves null on any
+ * failure (CORS, offline) so a chart never blocks on its stylesheet.
+ * @returns {Promise<CSSStyleSheet | null>}
  */
-function enqueue(task) {
-  const result = renderQueue.then(task, task);
-  // Keep the chain alive regardless of this task's outcome.
-  renderQueue = result.then(
-    () => {},
-    () => {},
-  );
-  return result;
-}
-
-/**
- * Await every async mobject in `mobjects` (and their descendants) finishing its render — manim
- * draws `MathTexImage` axis labels asynchronously (MathJax → SVG → texture), so a snapshot taken
- * before they resolve comes out blank/label-less. Mirrors manim's own `_awaitAsyncRenders`. Raced
- * against a timeout so a stuck/failed label can never hang the queue.
- * @param {any[]} mobjects
- * @param {number} [timeoutMs]
- * @returns {Promise<void>}
- */
-async function awaitReady(mobjects, timeoutMs = 2500) {
-  /** @type {Promise<unknown>[]} */
-  const pending = [];
-  /** @param {any} m */
-  const walk = (m) => {
-    if (!m) return;
-    if (typeof m.waitForRender === "function") pending.push(Promise.resolve(m.waitForRender()).catch(() => {}));
-    for (const child of m.children ?? []) walk(child);
-  };
-  for (const m of mobjects) walk(m);
-  if (pending.length === 0) return;
-  /** @type {Promise<void>} */
-  const timeout = new Promise((resolve) => setTimeout(resolve, timeoutMs));
-  await Promise.race([Promise.all(pending), timeout]);
+function loadJsxCss() {
+  if (!jsxCssPromise) {
+    jsxCssPromise = fetch(JSXGRAPH_CSS)
+      .then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))))
+      .then((css) => {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(css);
+        return sheet;
+      })
+      .catch(() => null);
+  }
+  return jsxCssPromise;
 }
 
 /**
@@ -103,10 +81,10 @@ export class PrimerChart extends HTMLElement {
   #values = {};
   /** @type {((params: Record<string, number>) => void) | null} The builder's re-plot fn. */
   #update = null;
-  /** @type {any} The active manim Scene (captured for disposal). */
-  #scene = null;
-  /** @type {any[]} Top-level mobjects added to the active Scene (so we can await their async render). */
-  #added = [];
+  /** @type {any} The active JSXGraph board (captured for disposal + theme rebuild). */
+  #board = null;
+  /** @type {any} The JSXGraph namespace (`JXG.JSXGraph`), kept so #dispose can freeBoard. */
+  #jsx = null;
   /** @type {number} Pending rAF handle, so rapid input coalesces to one redraw per frame. */
   #raf = 0;
   /** @type {(() => void) | null} */
@@ -121,13 +99,23 @@ export class PrimerChart extends HTMLElement {
     for (const p of this.#params) this.#values[p.name] = p.value ?? p.min;
 
     const root = this.shadowRoot ?? attachShared(this);
+
+    // Adopt JSXGraph's stylesheet into THIS shadow root (it can't reach in from document <head>).
+    void loadJsxCss().then((sheet) => {
+      if (sheet && this.isConnected && !root.adoptedStyleSheets.includes(sheet)) {
+        root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+      }
+    });
+
     root.innerHTML = `
       <style>
         .chart { padding: 0; }
-        /* manim-web renders into a 7:4 world frame; the stage MUST carry that aspect or the
-           plot is squashed/clipped (mirrors <primer-manim>). */
-        .stage { width: 100%; aspect-ratio: 7 / 4; display: grid; place-items: center; overflow: hidden; background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); }
-        .stage canvas, .stage img { display: block; width: 100% !important; height: 100% !important; object-fit: contain; }
+        /* The board fills a 7:4 stage; JSXGraph adds class "jxgbox" to this same element and
+           draws the SVG inside it. Keep our themed background (our inline <style> outranks the
+           adopted jsxgraph.css .jxgbox rule, which cascades before shadow-root styles). */
+        .stage { width: 100%; aspect-ratio: 7 / 4; position: relative; overflow: hidden; background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); }
+        .stage.jxgbox { background: var(--primer-viz-bg, #fff); }
+        .stage svg { display: block; width: 100% !important; height: 100% !important; }
 
         /* Parameter controls: one row per param — label, slider, number box. */
         .controls { display: grid; gap: 0.5rem 0.75rem; margin-top: 0.6rem; }
@@ -240,8 +228,9 @@ export class PrimerChart extends HTMLElement {
   }
 
   /**
-   * (Re)build the chart: dispose any prior Scene, lazy-load manim, run the registered
-   * builder to get a fresh `update`, and draw the current values once.
+   * (Re)build the chart: dispose any prior board, lazy-load JSXGraph, run the registered
+   * builder to get a fresh `update`, and draw the current values once. Static and interactive
+   * charts share this one path — JSXGraph is SVG, so there's no per-context bookkeeping.
    * @param {ShadowRoot} root
    */
   async #build(root) {
@@ -257,73 +246,19 @@ export class PrimerChart extends HTMLElement {
     }
 
     this.#cancelWait();
-
-    // STATIC chart (no controls): render through the global queue so only one static-chart WebGL
-    // context is alive at a time, snapshot it to an <img>, and free the context. Each manim Scene
-    // holds one WebGL context and browsers cap them, so building 8 quiz-option charts at once would
-    // otherwise exhaust them.
-    if (this.#params.length === 0) {
-      await enqueue(() => this.#renderStatic(stage, builder));
-      return;
-    }
-
-    // INTERACTIVE chart: keep a live Scene so the sliders re-plot instantly.
     this.#dispose();
     stage.replaceChildren();
+    stage.removeAttribute("style"); // JSXGraph writes inline sizing onto the container; start clean
     try {
-      const manim = await import("manim-web");
-      this.#update = builder(stage, this.#wrapManim(manim));
+      const mod = await import("jsxgraph");
+      if (!this.isConnected) return;
+      const JXG = mod.default ?? /** @type {any} */ (mod).JXG ?? mod;
+      this.#update = builder(stage, this.#wrapJXG(JXG));
       this.#update({ ...this.#values });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       stage.innerHTML = `<span class="meta">${t("manim.runError", { error })}</span>`;
       this.#update = null;
-    }
-  }
-
-  /**
-   * Render a static chart to an <img>, run inside the global queue. Draws once, WAITS for the
-   * async axis labels to finish (so the snapshot isn't blank), forces a final synchronous render,
-   * snapshots, and ALWAYS releases the WebGL context (even on failure). Bails — just disposing — if
-   * the element was removed while queued (e.g. the quiz redrew on "Try again").
-   * @param {HTMLElement} stage
-   * @param {import("../scenes.js").ChartBuilder} builder
-   */
-  async #renderStatic(stage, builder) {
-    this.#dispose();
-    if (!this.isConnected) return;
-    stage.replaceChildren();
-    try {
-      const manim = await import("manim-web");
-      if (!this.isConnected) return;
-      const update = builder(stage, this.#wrapManim(manim));
-      update({ ...this.#values });
-      // Axis number labels render asynchronously (MathJax → texture); wait so we don't snapshot a
-      // blank/label-less frame.
-      await awaitReady(this.#added);
-      if (!this.isConnected) return;
-      const canvas = /** @type {HTMLCanvasElement | null} */ (stage.querySelector("canvas"));
-      let url = "";
-      if (this.#scene && canvas) {
-        this.#scene.render?.(); // force a final synchronous frame with the now-ready textures
-        url = canvas.toDataURL("image/png");
-      }
-      if (url && url.length >= 64) {
-        const img = document.createElement("img");
-        img.src = url;
-        img.alt = "";
-        img.decoding = "async";
-        stage.replaceChildren(img);
-      } else if (this.isConnected) {
-        stage.innerHTML = `<span class="meta">${t("manim.runError", { error: "no image" })}</span>`;
-      }
-    } catch (err) {
-      if (this.isConnected) {
-        const error = err instanceof Error ? err.message : String(err);
-        stage.innerHTML = `<span class="meta">${t("manim.runError", { error })}</span>`;
-      }
-    } finally {
-      this.#dispose(); // free the WebGL context whether or not the snapshot succeeded
     }
   }
 
@@ -361,65 +296,49 @@ export class PrimerChart extends HTMLElement {
     }
   }
 
-  /** Best-effort tear down the active Scene AND release its WebGL context. */
+  /** Best-effort free the active JSXGraph board (releases its resize handlers/SVG). */
   #dispose() {
-    const scene = this.#scene;
-    this.#scene = null;
+    const board = this.#board;
+    this.#board = null;
     this.#update = null;
-    this.#added = [];
-    if (!scene) return;
+    if (!board) return;
     try {
-      scene.stop?.();
-      const renderer = scene.renderer;
-      // three.js dispose() frees GPU memory but NOT the WebGL context; explicitly lose it so the
-      // browser reclaims the slot (else many charts trip the "too many active contexts" limit).
-      renderer?.forceContextLoss?.();
-      renderer?.dispose?.();
-      const gl = renderer?.getContext?.() ?? renderer?.gl ?? renderer?.context;
-      gl?.getExtension?.("WEBGL_lose_context")?.loseContext?.();
-      scene.dispose?.();
+      this.#jsx?.freeBoard?.(board);
     } catch {
       /* best-effort */
     }
   }
 
   /**
-   * Return a copy of the manim namespace whose `Scene` captures its instance on this element
-   * (for disposal) and defaults to the theme background — mirrors <primer-manim>'s wrap.
-   * @param {Record<string, any>} manim
+   * Return a copy of the JXG namespace whose `JSXGraph.initBoard` captures the created board on
+   * this element (for disposal + theme rebuild) and injects our teaching-graph defaults — mirrors
+   * how <primer-manim>/<primer-chart> wrapped manim's Scene.
+   * @param {Record<string, any>} JXG
    * @returns {Record<string, any>}
    */
-  #wrapManim(manim) {
+  #wrapJXG(JXG) {
     const self = this;
-    const bg = vizColors().bg;
-    const BaseScene = manim.Scene;
-    class CapturingScene extends BaseScene {
-      /** @param {...any} args */
-      constructor(...args) {
-        const [container, options] = args;
-        const opts = options && typeof options === "object" ? options : {};
-        super(container, { backgroundColor: bg, ...opts });
-        self.#scene = this;
-        self.#added = [];
-      }
-      /** Record top-level mobjects so a static snapshot can await their async (label) render.
-       * @param {...any} mobjects */
-      add(...mobjects) {
-        self.#added.push(...mobjects);
-        return super.add(...mobjects);
-      }
-      /** Keep the tracked list accurate (and not retain old curves) when the interactive lab
-       * removes a mobject to re-plot.
-       * @param {...any} mobjects */
-      remove(...mobjects) {
-        for (const m of mobjects) {
-          const i = self.#added.indexOf(m);
-          if (i !== -1) self.#added.splice(i, 1);
-        }
-        return super.remove(...mobjects);
-      }
-    }
-    return { ...manim, Scene: CapturingScene };
+    const JSXGraph = JXG.JSXGraph;
+    self.#jsx = JSXGraph;
+    // Sensible defaults for a static teaching graph: no copyright/nav chrome, no pan/zoom, and
+    // re-fit on container resize. A builder's own options override these.
+    const defaults = {
+      showCopyright: false,
+      showNavigation: false,
+      showInfobox: false,
+      pan: { enabled: false },
+      zoom: { enabled: false },
+      resize: { enabled: true, throttle: 200 },
+    };
+    // Inherit every JSXGraph member via the prototype chain; override only initBoard.
+    const wrappedJSXGraph = Object.create(JSXGraph);
+    /** @param {any} box @param {any} [attributes] */
+    wrappedJSXGraph.initBoard = (box, attributes) => {
+      const board = JSXGraph.initBoard(box, { ...defaults, ...(attributes || {}) });
+      self.#board = board;
+      return board;
+    };
+    return Object.assign(Object.create(JXG), { JSXGraph: wrappedJSXGraph });
   }
 }
 
