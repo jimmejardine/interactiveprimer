@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import {
   parseVariables,
   instantiate,
+  drawBindings,
+  ConstraintError,
   substitute,
   fillExpressions,
   evalExpr,
@@ -20,6 +22,38 @@ function seededRng(seed) {
     return state / 0x100000000;
   };
 }
+
+test("evalExpr: comparisons and logic return 1/0 with correct precedence", () => {
+  const b = { a: 3, b: 5 };
+  assert.equal(evalExpr("a < b", b), 1);
+  assert.equal(evalExpr("a > b", b), 0);
+  assert.equal(evalExpr("a != b", b), 1);
+  assert.equal(evalExpr("a == b", b), 0);
+  assert.equal(evalExpr("a + b <= 8", b), 1); // additive binds tighter than <=
+  assert.equal(evalExpr("a + b <= 7", b), 0);
+  assert.equal(evalExpr("a > 0 && b > 0", b), 1);
+  assert.equal(evalExpr("a > 9 || b > 4", b), 1);
+  assert.equal(evalExpr("a > 9 || b > 9", b), 0);
+});
+
+test("drawBindings: re-rolls until the constraint holds", () => {
+  const vars = parseVariables("a=[1:6] b=[1:6]");
+  for (let seed = 1; seed <= 20; seed++) {
+    const got = drawBindings(vars, "a != b", seededRng(seed));
+    assert.notEqual(got.a, got.b);
+  }
+});
+
+test("drawBindings: throws ConstraintError when unsatisfiable", () => {
+  const vars = parseVariables("a=[5:5] b=[5:5]"); // a and b are always 5
+  assert.throws(() => drawBindings(vars, "a != b", seededRng(1)), ConstraintError);
+});
+
+test("drawBindings: empty/absent constraint accepts the first draw", () => {
+  const vars = parseVariables("a=[5:5]");
+  assert.deepEqual(drawBindings(vars, "", seededRng(1)), { a: 5 });
+  assert.deepEqual(drawBindings(vars, undefined, seededRng(1)), { a: 5 });
+});
 
 test("fillExpressions: evaluates expressions, concatenates, and leaves the rest alone", () => {
   const b = { a: 4, b: 12, color: "red" };

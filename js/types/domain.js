@@ -86,6 +86,9 @@
  *   prompt and each option's `text` are evaluated against the drawn values: `{expr}` →
  *   the computed value (e.g. `{a + b}`, `{2 * a}`), and adjacent groups concatenate
  *   (`{a}{b}` → "412"). The question then re-instantiates with fresh values each draw.
+ * @property {string} [constraints]   Optional boolean expression over the variables that
+ *   must hold (e.g. `"a != b"`, `"a > b && b > 0"`); the values are re-rolled until it's
+ *   true. If unsatisfiable, the quiz falls back to other questions. See js/quiz-vars.js.
  */
 
 /**
@@ -97,6 +100,8 @@
  * @property {string} prompt
  * @property {string | number} answer
  * @property {string} [variables]
+ * @property {string} [constraints]   Optional boolean expression over the variables that
+ *   must hold; values are re-rolled until true (see js/quiz-vars.js).
  * @property {"polynomial"} [compare]   How to grade the typed answer. Default: numeric (with
  *   tolerance) or case/space-insensitive text. "polynomial" compares as a single-variable
  *   polynomial (order/format independent) and offers a math editor for entering exponents.

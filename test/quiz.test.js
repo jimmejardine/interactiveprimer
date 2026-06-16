@@ -80,6 +80,47 @@ test("generateQuestion evaluates a variable multiple-choice question", () => {
   assert.deepEqual(texts, ["$35$", "$6$", "$8$"]);
 });
 
+test("generateQuestion honours a variable constraint", () => {
+  /** @type {QuizQuestion} */
+  const vq = {
+    prompt: "What is ${a} + {b}$?",
+    variables: "a=[1:6] b=[1:6]",
+    constraints: "a != b",
+    options: [
+      { text: "${a + b}$", correct: true },
+      { text: "${2 * a}$", correct: false },
+    ],
+  };
+  // Across many seeds the drawn a, b always differ → the two options never coincide.
+  for (let seed = 1; seed <= 20; seed++) {
+    const gen = generateQuestion(vq, seededRng(seed));
+    if (gen.kind !== "choice") continue;
+    const texts = gen.options.map((o) => o.text);
+    assert.equal(new Set(texts).size, texts.length); // no duplicate option
+  }
+});
+
+test("generateQuiz falls back past an unsatisfiable-constraint question", () => {
+  /** @type {QuizQuestion[]} */
+  const bank = [
+    // Impossible: a and b are pinned to 5 but must differ → always re-rolls out.
+    {
+      prompt: "bad",
+      variables: "a=[5:5] b=[5:5]",
+      constraints: "a != b",
+      options: [{ text: "${a}$", correct: true }, { text: "${b}$", correct: false }],
+    },
+    { prompt: "Q2", options: [{ text: "a", correct: true }, { text: "b", correct: false }] },
+    { prompt: "Q3", options: [{ text: "a", correct: true }, { text: "b", correct: false }] },
+  ];
+  const quiz = generateQuiz(bank, 2, seededRng(7));
+  assert.equal(quiz.questions.length, 2);
+  assert.ok(quiz.questions.every((q) => q.prompt !== "bad")); // the bad one is dropped
+
+  // A bank whose ONLY question is unsatisfiable can't build anything → throws.
+  assert.throws(() => generateQuiz([bank[0]], 1, seededRng(7)));
+});
+
 test("a variable multiple-choice question is a re-instantiable template", () => {
   /** @type {QuizQuestion[]} */
   const bank = [

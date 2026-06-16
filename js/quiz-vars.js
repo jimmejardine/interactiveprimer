@@ -134,6 +134,37 @@ export function instantiate(vars, rng) {
   return bindings;
 }
 
+/** Max re-rolls when satisfying a question's `constraints` before giving up. */
+export const MAX_REROLLS = 100;
+
+/** Thrown by {@link drawBindings} when a question's constraints can't be satisfied — a
+ * sentinel so the quiz builder can drop the question and draw another (vs. a genuine
+ * authoring error, which propagates). */
+export class ConstraintError extends Error {}
+
+/**
+ * Instantiate the variables, re-rolling until the `constraints` expression evaluates to a
+ * non-zero (truthy) result — e.g. `"a != b"`, `"a > b && b > 0"`. An empty/absent
+ * constraint accepts the first draw. Throws {@link ConstraintError} after `maxRerolls`.
+ * (A malformed constraint — e.g. an unknown variable — makes `evalExpr` throw on the first
+ * attempt, which propagates so the authoring mistake surfaces.)
+ * @param {Variable[]} vars
+ * @param {string | undefined} constraint
+ * @param {Rng} rng
+ * @param {number} [maxRerolls]
+ * @returns {Record<string, number | string>}
+ */
+export function drawBindings(vars, constraint, rng, maxRerolls = MAX_REROLLS) {
+  const cons = typeof constraint === "string" ? constraint.trim() : "";
+  for (let attempt = 0; attempt <= maxRerolls; attempt++) {
+    const bindings = instantiate(vars, rng);
+    if (!cons || evalExpr(cons, bindings) !== 0) return bindings;
+  }
+  throw new ConstraintError(
+    `could not satisfy constraint "${constraint}" after ${maxRerolls} re-rolls`,
+  );
+}
+
 /**
  * Replace every `{name}` placeholder of a bound variable with its formatted value.
  * Unknown `{…}` (and all other text, KaTeX included) is left untouched.
@@ -174,8 +205,10 @@ export function fillExpressions(text, bindings) {
 }
 
 /**
- * Evaluate an arithmetic expression against the bindings. Supports + - * / % ^,
- * parentheses, unary minus, and the whitelisted {@link FUNCS}. NOT `eval`: a tiny
+ * Evaluate an expression against the bindings. Supports arithmetic (`+ - * / % ^`,
+ * parentheses, unary minus, the whitelisted {@link FUNCS}) AND boolean logic —
+ * comparisons (`== != < > <= >=`) and `&& ||`, which return 1/0 — so the same evaluator
+ * grades a quiz `constraints` expression (truthy = passes). NOT `eval`: a tiny
  * recursive-descent parser. Throws on unknown identifiers and non-finite results.
  * @param {string} src
  * @param {Record<string, number | string>} bindings
@@ -185,7 +218,9 @@ export function evalExpr(src, bindings) {
   // Tokenize.
   /** @type {Array<{t:string, v:any}>} */
   const toks = [];
-  const re = /\s*([A-Za-z_]\w*|\d+(?:\.\d+)?|[+\-*/%^(),])/g;
+  // Multi-char operators (<=, >=, ==, !=, &&, ||) are listed before the single-char class
+  // so they tokenize as one token; the class then covers single < and > (and arithmetic).
+  const re = /\s*([A-Za-z_]\w*|\d+(?:\.\d+)?|<=|>=|==|!=|&&|\|\||[+\-*/%^(),<>])/g;
   let m;
   let pos = 0;
   while ((m = re.exec(src)) !== null) {
@@ -209,6 +244,49 @@ export function evalExpr(src, bindings) {
     i++;
     return tk;
   };
+
+  // Boolean layers sit BELOW additive so `a + b <= 20` groups as `(a + b) <= 20`. They
+  // return 1/0, and treat any non-zero operand as true — so a constraint expression like
+  // `a != b` or `a > b && b > 0` evaluates to truthy/falsy. Comparisons reuse a small
+  // epsilon for == / != since values are integers or 3-dp reals.
+  const COMPARE = new Set(["==", "!=", "<", ">", "<=", ">="]);
+  /** logical-or: and ('||' and)*  @returns {number} */
+  function parseOr() {
+    let left = parseAnd();
+    while (peek() && peek().t === "op" && peek().v === "||") {
+      eat();
+      const right = parseAnd();
+      left = left !== 0 || right !== 0 ? 1 : 0;
+    }
+    return left;
+  }
+  /** logical-and: compare ('&&' compare)*  @returns {number} */
+  function parseAnd() {
+    let left = parseCompare();
+    while (peek() && peek().t === "op" && peek().v === "&&") {
+      eat();
+      const right = parseCompare();
+      left = left !== 0 && right !== 0 ? 1 : 0;
+    }
+    return left;
+  }
+  /** comparison: additive (op additive)?  (one comparison, non-chaining)  @returns {number} */
+  function parseCompare() {
+    const left = parseExpr();
+    if (peek() && peek().t === "op" && COMPARE.has(peek().v)) {
+      const op = eat().v;
+      const right = parseExpr();
+      switch (op) {
+        case "==": return Math.abs(left - right) < 1e-9 ? 1 : 0;
+        case "!=": return Math.abs(left - right) >= 1e-9 ? 1 : 0;
+        case "<": return left < right ? 1 : 0;
+        case ">": return left > right ? 1 : 0;
+        case "<=": return left <= right ? 1 : 0;
+        case ">=": return left >= right ? 1 : 0;
+      }
+    }
+    return left;
+  }
 
   /** additive: term (('+'|'-') term)* @returns {number} */
   function parseExpr() {
@@ -287,7 +365,7 @@ export function evalExpr(src, bindings) {
     throw new Error(`unexpected token in "${src}"`);
   }
 
-  const result = parseExpr();
+  const result = parseOr();
   if (i !== toks.length) throw new Error(`trailing tokens in "${src}"`);
   if (!Number.isFinite(result)) throw new Error(`expression "${src}" is not a finite number`);
   return result;

@@ -16,7 +16,8 @@
 
 import {
   parseVariables,
-  instantiate,
+  drawBindings,
+  ConstraintError,
   substitute,
   fillExpressions,
   computeAnswer,
@@ -91,9 +92,12 @@ export function generateQuestion(question, rng) {
     if (q.options.length < 2) {
       throw new Error(`Question needs at least 2 options: "${q.prompt}"`);
     }
-    // Optional randomized template: draw values, then evaluate `{expr}` in the prompt and
-    // in each option's text (keeping its `correct` flag). Non-variable MCQs are unchanged.
-    const bindings = q.variables ? instantiate(parseVariables(q.variables), rng) : null;
+    // Optional randomized template: draw values (re-rolling until `constraints` hold), then
+    // evaluate `{expr}` in the prompt and each option's text (keeping its `correct` flag).
+    // Non-variable MCQs are unchanged.
+    const bindings = q.variables
+      ? drawBindings(parseVariables(q.variables), q.constraints, rng)
+      : null;
     const prompt = bindings ? fillExpressions(q.prompt, bindings) : q.prompt;
     const prepared = bindings
       ? q.options.map((o) => ({ text: fillExpressions(o.text ?? "", bindings), correct: o.correct }))
@@ -107,7 +111,9 @@ export function generateQuestion(question, rng) {
   }
 
   const q = /** @type {TextQuestion} */ (question);
-  const bindings = q.variables ? instantiate(parseVariables(q.variables), rng) : {};
+  const bindings = q.variables
+    ? drawBindings(parseVariables(q.variables), q.constraints, rng)
+    : {};
   const prompt = substitute(q.prompt, bindings);
   const expected = computeAnswer(q.answer, bindings);
   return { kind: "text", prompt, expected, compare: q.compare };
@@ -118,6 +124,11 @@ export function generateQuestion(question, rng) {
  * questions are used at most once (distinct, capped at how many were authored);
  * variable TEMPLATES are re-instantiable, so when templates are present `count` is
  * always satisfiable — one template can yield many random instances.
+ *
+ * If a question's `constraints` can't be satisfied (a {@link ConstraintError} after the
+ * re-roll limit), that question is dropped and a replacement is drawn from the bank, so the
+ * quiz still builds from the others. Throws only if NOTHING can be built; other errors
+ * (a malformed question) propagate so authoring mistakes surface.
  * @param {AuthoredQuestion[]} bank
  * @param {number} count
  * @param {Rng} rng
@@ -126,22 +137,45 @@ export function generateQuestion(question, rng) {
 export function generateQuiz(bank, count, rng) {
   if (bank.length === 0) throw new Error("Cannot generate a quiz from an empty bank");
 
-  // First pass: each bank entry at most once, in random order (statics and templates
-  // mixed, so both get a fair chance). To exceed the bank size, only templates repeat
-  // (re-instantiated each time); with no templates, the quiz is capped at the bank size.
+  // Each bank entry at most once in a random first pass (statics and templates mixed); to
+  // exceed the bank size, only templates repeat (re-instantiated each time).
   const order = shuffle(bank, rng);
   const templates = shuffle(
     bank.filter((q) => isTemplate(q)),
     rng,
   );
 
-  /** @type {AuthoredQuestion[]} */
-  const picked = [];
-  for (let i = 0; picked.length < count; i++) {
-    if (i < order.length) picked.push(order[i]);
-    else if (templates.length > 0) picked.push(templates[(i - order.length) % templates.length]);
-    else break; // only statics, and they're exhausted
+  /** @type {GeneratedQuestion[]} */
+  const questions = [];
+  /** @type {Set<AuthoredQuestion>} entries whose constraints proved unsatisfiable */
+  const dead = new Set();
+  let oi = 0; // cursor into the distinct first pass
+  let ti = 0; // cursor into the template repeat pass
+
+  while (questions.length < count) {
+    /** @type {AuthoredQuestion | undefined} */
+    let candidate;
+    if (oi < order.length) {
+      candidate = order[oi++];
+    } else {
+      const alive = templates.filter((q) => !dead.has(q));
+      if (alive.length === 0) break; // statics exhausted, no live templates left
+      candidate = alive[ti++ % alive.length];
+    }
+    if (dead.has(candidate)) continue;
+    try {
+      questions.push(generateQuestion(candidate, rng));
+    } catch (err) {
+      if (err instanceof ConstraintError) {
+        dead.add(candidate); // unsatisfiable — drop it and draw another
+        continue;
+      }
+      throw err; // malformed question, etc. — surface it
+    }
   }
 
-  return { questions: picked.map((q) => generateQuestion(q, rng)) };
+  if (questions.length === 0) {
+    throw new Error("Couldn't build any quiz questions (constraints unsatisfiable?)");
+  }
+  return { questions };
 }

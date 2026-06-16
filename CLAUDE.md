@@ -102,6 +102,10 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
     and spacing don't matter, and the box becomes a MathLive math editor (type `^` for an
     exponent). `answer` is the expanded polynomial as a string, e.g.
     `{ "prompt": "Expand $(x+3)(x+4)$", "answer": "x^2 + 7x + 12", "compare": "polynomial" }`.
+  - `constraints` (either question kind) — a boolean expression over the variables that must
+    hold; the values are **re-rolled** (up to 100×) until it does. Uses the same evaluator
+    plus comparisons/logic: `== != < > <= >= && ||`. e.g. `"a != b"`, `"a > b && b > 0"`. If
+    a question's constraints can't be met, the quiz falls back to other questions.
 
   **Randomized multiple-choice questions:** a `options` question may ALSO carry `variables`.
   Then the prompt and each option's `text` evaluate `{expr}` against the drawn values —
@@ -110,9 +114,8 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
   braces (`{{12}}`) to keep a literal LaTeX `{12}`. Example:
   `{ "prompt": "What is ${a}+{b}$?", "variables": "a=[1:9] b=[1:9]",
      "options": [ { "text": "${a+b}$", "correct": true }, { "text": "${2*a}$", "correct": false } ] }`.
-  Pick ranges/distractors that don't collide — e.g. with `a,b∈[1:20]` sometimes `a==b`, making
-  `{a+b}`, `{2*a}`, `{2*b}` render the same number (grading still works, but the options look
-  ambiguous).
+  Use `constraints` to stop distractors colliding — e.g. with `a,b∈[1:20]`, `a==b` makes
+  `{a+b}`, `{2*a}`, `{2*b}` render identically, so add `"constraints": "a != b"`.
 
   **Chart options** (the choices are graphs, not text): give an option a `chart` (a registered
   chart-scene name) instead of `text`, and it renders as a small `<primer-chart>` graph. Mix is
