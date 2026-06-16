@@ -36,6 +36,57 @@ import { vizColors } from "../theme.js";
 import { t } from "../i18n.js";
 
 /**
+ * Serialize STATIC chart renders across every <primer-chart> on the page. Each static chart
+ * spins up a manim Scene (one WebGL context), draws, snapshots to an <img>, then disposes the
+ * context. Running them one-at-a-time means at most ONE static-chart context is alive at a time,
+ * so a page with many charts (a quiz with 8 graph options) never bursts past the browser's
+ * context limit, and each disposed context is reclaimed before the next is created.
+ * @type {Promise<unknown>}
+ */
+let renderQueue = Promise.resolve();
+
+/**
+ * Run `task` after all previously-queued static renders finish (failures don't stall the chain).
+ * @template T
+ * @param {() => Promise<T>} task
+ * @returns {Promise<T>}
+ */
+function enqueue(task) {
+  const result = renderQueue.then(task, task);
+  // Keep the chain alive regardless of this task's outcome.
+  renderQueue = result.then(
+    () => {},
+    () => {},
+  );
+  return result;
+}
+
+/**
+ * Await every async mobject in `mobjects` (and their descendants) finishing its render — manim
+ * draws `MathTexImage` axis labels asynchronously (MathJax → SVG → texture), so a snapshot taken
+ * before they resolve comes out blank/label-less. Mirrors manim's own `_awaitAsyncRenders`. Raced
+ * against a timeout so a stuck/failed label can never hang the queue.
+ * @param {any[]} mobjects
+ * @param {number} [timeoutMs]
+ * @returns {Promise<void>}
+ */
+async function awaitReady(mobjects, timeoutMs = 2500) {
+  /** @type {Promise<unknown>[]} */
+  const pending = [];
+  /** @param {any} m */
+  const walk = (m) => {
+    if (!m) return;
+    if (typeof m.waitForRender === "function") pending.push(Promise.resolve(m.waitForRender()).catch(() => {}));
+    for (const child of m.children ?? []) walk(child);
+  };
+  for (const m of mobjects) walk(m);
+  if (pending.length === 0) return;
+  /** @type {Promise<void>} */
+  const timeout = new Promise((resolve) => setTimeout(resolve, timeoutMs));
+  await Promise.race([Promise.all(pending), timeout]);
+}
+
+/**
  * @typedef {object} ChartParam
  * @property {string} name    Key passed to the builder's update() (e.g. "A").
  * @property {string} [label] Control label shown to the learner (defaults to `name`).
@@ -54,6 +105,8 @@ export class PrimerChart extends HTMLElement {
   #update = null;
   /** @type {any} The active manim Scene (captured for disposal). */
   #scene = null;
+  /** @type {any[]} Top-level mobjects added to the active Scene (so we can await their async render). */
+  #added = [];
   /** @type {number} Pending rAF handle, so rapid input coalesces to one redraw per frame. */
   #raf = 0;
   /** @type {(() => void) | null} */
@@ -204,21 +257,73 @@ export class PrimerChart extends HTMLElement {
     }
 
     this.#cancelWait();
+
+    // STATIC chart (no controls): render through the global queue so only one static-chart WebGL
+    // context is alive at a time, snapshot it to an <img>, and free the context. Each manim Scene
+    // holds one WebGL context and browsers cap them, so building 8 quiz-option charts at once would
+    // otherwise exhaust them.
+    if (this.#params.length === 0) {
+      await enqueue(() => this.#renderStatic(stage, builder));
+      return;
+    }
+
+    // INTERACTIVE chart: keep a live Scene so the sliders re-plot instantly.
     this.#dispose();
     stage.replaceChildren();
     try {
       const manim = await import("manim-web");
       this.#update = builder(stage, this.#wrapManim(manim));
       this.#update({ ...this.#values });
-      // A static chart (no controls) never changes — freeze it to an <img> and release the
-      // live WebGL context. Each manim Scene holds one context and browsers cap them (~16), so
-      // a page with many static charts (e.g. a quiz with chart options) would otherwise exhaust
-      // them. Interactive charts keep their live canvas so the controls stay responsive.
-      if (this.#params.length === 0) this.#freezeToImage(stage);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       stage.innerHTML = `<span class="meta">${t("manim.runError", { error })}</span>`;
       this.#update = null;
+    }
+  }
+
+  /**
+   * Render a static chart to an <img>, run inside the global queue. Draws once, WAITS for the
+   * async axis labels to finish (so the snapshot isn't blank), forces a final synchronous render,
+   * snapshots, and ALWAYS releases the WebGL context (even on failure). Bails — just disposing — if
+   * the element was removed while queued (e.g. the quiz redrew on "Try again").
+   * @param {HTMLElement} stage
+   * @param {import("../scenes.js").ChartBuilder} builder
+   */
+  async #renderStatic(stage, builder) {
+    this.#dispose();
+    if (!this.isConnected) return;
+    stage.replaceChildren();
+    try {
+      const manim = await import("manim-web");
+      if (!this.isConnected) return;
+      const update = builder(stage, this.#wrapManim(manim));
+      update({ ...this.#values });
+      // Axis number labels render asynchronously (MathJax → texture); wait so we don't snapshot a
+      // blank/label-less frame.
+      await awaitReady(this.#added);
+      if (!this.isConnected) return;
+      const canvas = /** @type {HTMLCanvasElement | null} */ (stage.querySelector("canvas"));
+      let url = "";
+      if (this.#scene && canvas) {
+        this.#scene.render?.(); // force a final synchronous frame with the now-ready textures
+        url = canvas.toDataURL("image/png");
+      }
+      if (url && url.length >= 64) {
+        const img = document.createElement("img");
+        img.src = url;
+        img.alt = "";
+        img.decoding = "async";
+        stage.replaceChildren(img);
+      } else if (this.isConnected) {
+        stage.innerHTML = `<span class="meta">${t("manim.runError", { error: "no image" })}</span>`;
+      }
+    } catch (err) {
+      if (this.isConnected) {
+        const error = err instanceof Error ? err.message : String(err);
+        stage.innerHTML = `<span class="meta">${t("manim.runError", { error })}</span>`;
+      }
+    } finally {
+      this.#dispose(); // free the WebGL context whether or not the snapshot succeeded
     }
   }
 
@@ -256,38 +361,12 @@ export class PrimerChart extends HTMLElement {
     }
   }
 
-  /**
-   * Snapshot the drawn chart to an <img> and release its WebGL context. Forces one synchronous
-   * render so the read-back captures the current frame (the drawing buffer is cleared after the
-   * browser composites, so we must read it in the same task). If the snapshot fails, the live
-   * canvas is left in place.
-   * @param {HTMLElement} stage
-   */
-  #freezeToImage(stage) {
-    const scene = this.#scene;
-    const canvas = /** @type {HTMLCanvasElement | null} */ (stage.querySelector("canvas"));
-    if (!scene || !canvas) return;
-    let url;
-    try {
-      scene.render?.();
-      url = canvas.toDataURL("image/png");
-    } catch {
-      return; // tainted/unsupported — keep the live canvas
-    }
-    if (!url || url.length < 64) return; // empty data URL — keep the live canvas
-    const img = document.createElement("img");
-    img.src = url;
-    img.alt = "";
-    img.decoding = "async";
-    this.#dispose(); // free the context now that the picture is captured
-    stage.replaceChildren(img);
-  }
-
   /** Best-effort tear down the active Scene AND release its WebGL context. */
   #dispose() {
     const scene = this.#scene;
     this.#scene = null;
     this.#update = null;
+    this.#added = [];
     if (!scene) return;
     try {
       scene.stop?.();
@@ -321,6 +400,23 @@ export class PrimerChart extends HTMLElement {
         const opts = options && typeof options === "object" ? options : {};
         super(container, { backgroundColor: bg, ...opts });
         self.#scene = this;
+        self.#added = [];
+      }
+      /** Record top-level mobjects so a static snapshot can await their async (label) render.
+       * @param {...any} mobjects */
+      add(...mobjects) {
+        self.#added.push(...mobjects);
+        return super.add(...mobjects);
+      }
+      /** Keep the tracked list accurate (and not retain old curves) when the interactive lab
+       * removes a mobject to re-plot.
+       * @param {...any} mobjects */
+      remove(...mobjects) {
+        for (const m of mobjects) {
+          const i = self.#added.indexOf(m);
+          if (i !== -1) self.#added.splice(i, 1);
+        }
+        return super.remove(...mobjects);
       }
     }
     return { ...manim, Scene: CapturingScene };
