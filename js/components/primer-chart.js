@@ -34,6 +34,7 @@ import { attachShared } from "./shared.js";
 import { getChart } from "../scenes.js";
 import { vizColors } from "../theme.js";
 import { t } from "../i18n.js";
+import { snapToAnchor } from "../chart-snap.js";
 
 /**
  * JSXGraph's stylesheet. Lazy-fetched once into a constructable sheet and adopted into each
@@ -72,6 +73,8 @@ function loadJsxCss() {
  * @property {number} max
  * @property {number} [step]  Slider/number step (default 0.1).
  * @property {number} [value] Initial value (default `min`).
+ * @property {number[]} [anchors] "Interesting" values drawn as labelled ticks; dragging the
+ *   slider near one snaps onto it (see js/chart-snap.js). Out-of-range values are ignored.
  */
 
 export class PrimerChart extends HTMLElement {
@@ -121,11 +124,27 @@ export class PrimerChart extends HTMLElement {
         .controls { display: grid; gap: 0.5rem 0.75rem; margin-top: 0.6rem; }
         .control { display: grid; grid-template-columns: minmax(6rem, auto) 1fr minmax(3.5rem, auto); gap: 0.6rem; align-items: center; }
         .control > label { font-family: var(--primer-font-ui, sans-serif); font-size: 0.9rem; color: var(--primer-ink, #111); }
-        .control input[type="range"] { width: 100%; accent-color: var(--primer-accent, #46e); }
+        .control input[type="range"] { width: 100%; accent-color: var(--primer-accent, #46e); display: block; }
         .control input[type="number"] {
           font: inherit; width: 100%; padding: 0.25rem 0.4rem; border-radius: 0.4rem;
           border: 1px solid var(--primer-border, #ccc);
           background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
+        }
+        /* Anchor ticks: drawn under the slider, one per in-range anchor. The slider cell becomes
+           a positioning context so each tick can sit over its value. */
+        .slider { position: relative; --tick-inset: 8px; /* ≈ half a native range thumb */ }
+        .ticks { position: relative; height: 1.1rem; margin-top: 0.15rem; pointer-events: none; }
+        .tick {
+          position: absolute; top: 0;
+          /* Centre over the value, compensating for the thumb inset at both ends of the track. */
+          left: calc(var(--tick-inset) + (100% - 2 * var(--tick-inset)) * var(--at));
+          transform: translateX(-50%);
+          display: flex; flex-direction: column; align-items: center;
+        }
+        .tick i { display: block; width: 1px; height: 5px; background: var(--primer-ink-soft, #667); }
+        .tick b {
+          font-family: var(--primer-font-ui, sans-serif); font-size: 0.7rem; font-weight: 400;
+          line-height: 1; margin-top: 1px; color: var(--primer-ink-soft, #667); white-space: nowrap;
         }
         .meta { display: block; }
       </style>
@@ -179,19 +198,43 @@ export class PrimerChart extends HTMLElement {
         const step = p.step ?? 0.1;
         const value = this.#values[p.name];
         const label = escapeHtml(p.label ?? p.name);
-        // Slider and number share a name via `data-name`; `data-role` distinguishes them.
+        // Slider and number share a name via `data-name`; `data-role` distinguishes them. The
+        // range lives in a `.slider` cell so its anchor ticks can be positioned over the track.
         return `
           <div class="control">
             <label for="chart-num-${i}">${label}</label>
-            <input type="range" data-name="${escapeHtml(p.name)}" data-role="range"
-              min="${p.min}" max="${p.max}" step="${step}" value="${value}"
-              aria-label="${label}">
+            <div class="slider">
+              <input type="range" data-name="${escapeHtml(p.name)}" data-role="range"
+                min="${p.min}" max="${p.max}" step="${step}" value="${value}"
+                aria-label="${label}">
+              ${this.#ticksHtml(p)}
+            </div>
             <input type="number" id="chart-num-${i}" data-name="${escapeHtml(p.name)}" data-role="number"
               min="${p.min}" max="${p.max}" step="${step}" value="${value}"
               aria-label="${label}">
           </div>`;
       })
       .join("");
+  }
+
+  /**
+   * The labelled-tick markup for a param's `anchors`, or "" if it has none. Each in-range,
+   * finite anchor becomes a tick positioned by its fraction along the track (`--at`).
+   * @param {ChartParam} p
+   * @returns {string}
+   */
+  #ticksHtml(p) {
+    const span = p.max - p.min;
+    if (!Array.isArray(p.anchors) || !(span > 0)) return "";
+    const ticks = p.anchors
+      .filter((a) => Number.isFinite(a) && a >= p.min && a <= p.max)
+      .map((a) => {
+        const at = (a - p.min) / span;
+        const label = escapeHtml(String(+a.toFixed(3))); // drop float noise; keep author values clean
+        return `<span class="tick" style="--at:${at}"><i></i><b>${label}</b></span>`;
+      })
+      .join("");
+    return ticks ? `<div class="ticks">${ticks}</div>` : "";
   }
 
   /**
@@ -204,12 +247,29 @@ export class PrimerChart extends HTMLElement {
     const input = /** @type {HTMLInputElement} */ (e.target);
     const name = input.dataset.name;
     if (!name) return;
-    const value = Number(input.value);
+    let value = Number(input.value);
     if (!Number.isFinite(value)) return;
+    // Dragging the slider snaps to a nearby anchor (typing in the number box stays exact). The
+    // snap distance is a fixed pixel budget mapped into value units, so the magnet feels the same
+    // on every slider regardless of its range. Tradeoff: values within ~SNAP_PX of an anchor
+    // resolve to the anchor, so an anchor's immediate ±neighbours become unreachable — acceptable
+    // for these "interesting point" sliders.
+    if (input.dataset.role === "range") {
+      const p = this.#params.find((q) => q.name === name);
+      const width = input.getBoundingClientRect().width;
+      if (p?.anchors && width > 0) {
+        const SNAP_PX = 10;
+        value = snapToAnchor(value, p.anchors, (SNAP_PX / width) * (p.max - p.min));
+      }
+    }
     this.#values[name] = value;
     // Mirror to the sibling control with the same name (slider ↔ number box).
     for (const other of controls.querySelectorAll(`input[data-name="${name}"]`)) {
       if (other !== input) /** @type {HTMLInputElement} */ (other).value = String(value);
+    }
+    // If a slider drag snapped, pull the dragged thumb onto the anchor too.
+    if (input.dataset.role === "range" && Number(input.value) !== value) {
+      input.value = String(value);
     }
     this.#scheduleReplot();
   }
@@ -322,6 +382,12 @@ export class PrimerChart extends HTMLElement {
     self.#jsx = JSXGraph;
     // Sensible defaults for a static teaching graph: no copyright/nav chrome, no pan/zoom, and
     // re-fit on container resize. A builder's own options override these.
+    // JSXGraph's default grid is a solid mid-grey that fights the curve and washes the backdrop;
+    // tint it from the theme (the axis colour) at a low opacity so it reads as a faint guide, and
+    // drop the dotted minor grid. Read vizColors() here (not cached) so a theme rebuild — which
+    // re-enters #wrapJXG — re-tints it. A builder can still override `grid` (its initBoard options
+    // win), e.g. `grid: false` to switch the grid off entirely.
+    const v = vizColors();
     const defaults = {
       showCopyright: false,
       showNavigation: false,
@@ -329,6 +395,11 @@ export class PrimerChart extends HTMLElement {
       pan: { enabled: false },
       zoom: { enabled: false },
       resize: { enabled: true, throttle: 200 },
+      grid: {
+        major: { strokeColor: v.line, strokeOpacity: 0.05 },
+        minor: { strokeOpacity: 0 },
+        minorElements: 0,
+      },
     };
     // Inherit every JSXGraph member via the prototype chain; override only initBoard.
     const wrappedJSXGraph = Object.create(JSXGraph);
