@@ -190,6 +190,22 @@ export class PrimerQuiz extends HTMLElement {
       e.preventDefault();
       this.#grade(root, quiz);
     });
+
+    // Enter inside a text answer must NOT submit the form (that would grade prematurely
+    // and surprise the learner). Instead behave like Tab: advance to the next question's
+    // field, or land on the submit button after the last one.
+    form.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      const target = e.target;
+      if (!(target instanceof HTMLInputElement) || target.type !== "text") return;
+      e.preventDefault();
+      const stops = focusStops(root);
+      const next = stops[stops.indexOf(target) + 1];
+      if (next) {
+        next.focus();
+        if (next instanceof HTMLInputElement && next.type === "text") next.select();
+      }
+    });
   }
 
   /**
@@ -308,6 +324,27 @@ export class PrimerQuiz extends HTMLElement {
       retry?.addEventListener("click", () => this.#start(root));
     }
   }
+}
+
+/**
+ * The ordered focus stops for Enter-to-advance: each question's primary field (its text
+ * box, or its first radio for multiple-choice) followed by the submit button. Enter on a
+ * text answer jumps to the next stop instead of submitting.
+ * @param {ShadowRoot} root
+ * @returns {HTMLElement[]}
+ */
+function focusStops(root) {
+  /** @type {HTMLElement[]} */
+  const stops = [];
+  for (const q of root.querySelectorAll(".q")) {
+    const field = /** @type {HTMLElement | null} */ (
+      q.querySelector('input.answer, input[type="radio"]')
+    );
+    if (field) stops.push(field);
+  }
+  const submit = /** @type {HTMLElement | null} */ (root.querySelector('button[type="submit"]'));
+  if (submit) stops.push(submit);
+  return stops;
 }
 
 /**
