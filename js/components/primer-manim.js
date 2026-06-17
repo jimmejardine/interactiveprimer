@@ -18,6 +18,7 @@
 
 import { attachShared } from "./shared.js";
 import { getScene } from "../scenes.js";
+import { makeSceneStrings } from "../scene-strings.js";
 import { cancelSpeech, pauseSpeech, resumeSpeech } from "../speech.js";
 import { vizColors } from "../theme.js";
 import { t } from "../i18n.js";
@@ -138,7 +139,8 @@ export class PrimerManim extends HTMLElement {
 
     try {
       const manim = await import("manim-web");
-      await builder(stage, this.#wrapManim(manim));
+      // Hand the builder a scene-scoped strings accessor (locale → English → "$$scene.key$$").
+      await builder(stage, this.#wrapManim(manim), makeSceneStrings(name));
       this.#state = "done";
       face(btn, "↻", "Replay");
     } catch (err) {

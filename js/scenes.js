@@ -4,9 +4,10 @@
  * (a function that builds/plays an animation) and reference it from a
  * <primer-manim scene="..."> element.
  *
- * A scene receives the host element to draw into and the imported manim-web module
- * namespace, so scene authors write directly against whatever manim-web exposes —
- * this keeps the registry independent of manim-web's exact API.
+ * A scene receives the host element to draw into, the imported manim-web module namespace, and a
+ * scene-scoped `sceneStrings` accessor (the localized narration words), so scene authors write
+ * directly against whatever manim-web exposes — this keeps the registry independent of manim-web's
+ * exact API.
  * @module
  */
 
@@ -14,6 +15,8 @@
  * @callback SceneBuilder
  * @param {HTMLElement} host       Element to mount the animation into.
  * @param {Record<string, any>} manim  The imported manim-web module namespace.
+ * @param {Record<string, string>} sceneStrings  Scene-scoped localized strings: reading a key
+ *   resolves locale → English → a `"$$scene.key$$"` placeholder (see js/scene-strings.js).
  * @returns {void | Promise<void>}
  */
 

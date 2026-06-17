@@ -123,9 +123,10 @@ async function hasOverlay(id, locale) {
 /**
  * Fetch and apply the translation overlay for `id` in `locale`. Returns the translated
  * content elements (and title) to render, or null when there is no usable overlay (so the
- * caller falls back to English). Swaps the canonical content out of the DOM and replaces the
- * page's `scene-strings` block with the overlay's, so the reused scene JS narrates in the
- * target language.
+ * caller falls back to English). Swaps the canonical content out of the DOM and appends the
+ * overlay's `scene-strings` block tagged `data-locale`, KEEPING the English block as the
+ * fallback source so the reused scene JS narrates in the target language and falls back to
+ * English per-key (see js/scene-strings.js `makeSceneStrings`).
  * @param {string} id
  * @param {string} locale
  * @param {Element[]} canonicalContent
@@ -171,11 +172,15 @@ async function applyOverlay(id, locale, canonicalContent) {
 
   // Remove the canonical (English) content from the DOM…
   for (const el of canonicalContent) el.remove();
-  // …and swap the canonical scene-strings for the overlay's, so getSceneStrings() (read by
-  // the reused scene JS at play time) returns the translated words.
-  document.querySelector("script.scene-strings")?.remove();
+  // …but KEEP the canonical (English) scene-strings block in place and append the overlay's
+  // block tagged with the active locale. The scene accessor (makeSceneStrings) then resolves
+  // each key from the locale block, falling back to the retained English block per-key.
   const overlayStrings = doc.querySelector("script.scene-strings");
-  if (overlayStrings) document.body.appendChild(document.importNode(overlayStrings, true));
+  if (overlayStrings) {
+    const node = /** @type {HTMLElement} */ (document.importNode(overlayStrings, true));
+    node.setAttribute("data-locale", locale);
+    document.body.appendChild(node);
+  }
 
   const content = translated.map((el) => /** @type {Element} */ (document.importNode(el, true)));
   return { content, title };
