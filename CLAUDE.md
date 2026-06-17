@@ -302,6 +302,24 @@ from `--primer-*` tokens defined per theme in `css/primer.css`, so headings, car
 explorer and badges re-theme themselves; the only theme-coupled JS is animations (use
 `vizColors()` above). Levels start at 0; a real number that propagates via `max`.
 
+## Localization (automatic)
+
+The hamburger menu carries a language switcher; English is the default + fallback. A lesson's
+translation lives in a per-locale **overlay** at `i18n/<locale>/<id>.html` (translated content +
+`scene-strings` + a `sourceHash`); `js/render.js` fetches and swaps it in when the locale isn't
+English. `npm run i18n:check` flags stale/missing overlays; `npm run i18n:bless` re-stamps hashes.
+
+The active locale is resolved + persisted (`localStorage["primer:locale"]`) in three in-step
+places: the synchronous pre-paint scripts in `js/boot.js` and `index.html`, and the shared
+post-paint `initLocale()` in `js/i18n.js` (the authority). Two URL entry points:
+
+- **`?lang=<locale>`** (e.g. `…/addition.html?lang=es`) — a shareable "open in this language"
+  link: it wins over storage/browser, is **persisted** (the whole site stays in that language),
+  then stripped from the URL so a later menu switch can't snap back.
+- **Direct visit to an overlay URL** (`/i18n/<locale>/<id>.html`) — `boot.js` (overlays carry the
+  same `<script src="/js/boot.js">` as concept pages) redirects to the canonical lesson with
+  `?lang=<locale>`. When render.js *fetches* an overlay the `<script>` is ignored.
+
 ## Validate & preview
 
 ```bash

@@ -25,6 +25,25 @@
  */
 
 (function boot() {
+  // Supported locales — the single list this script keys off (kept in step with LOCALES in
+  // js/i18n.js). Declared first because the overlay-redirect below already needs it.
+  const SUPPORTED = ["en", "es"];
+
+  // Translation overlays (i18n/<locale>/<id>.html) are normally FETCHED as data by render.js,
+  // never served as a page — but they now carry this same boot.js so a DIRECT visit isn't a
+  // bare, shell-less fragment. Detect that case and redirect to the canonical lesson with
+  // ?lang=<locale>, which sets the locale (see initLocale in js/i18n.js). location.replace
+  // leaves no back-button bounce. This runs FIRST, before the double-include guard.
+  try {
+    const m = location.pathname.match(/^\/i18n\/([^/]+)\/(.+)$/);
+    if (m && SUPPORTED.indexOf(m[1]) !== -1) {
+      location.replace(`/concepts/${m[2]}?lang=${m[1]}`);
+      return;
+    }
+  } catch (e) {
+    /* non-fatal: fall through and boot normally */
+  }
+
   // Guard against accidental double-inclusion.
   if (/** @type {any} */ (window).__primerBooted) return;
   /** @type {any} */ (window).__primerBooted = true;
@@ -97,12 +116,29 @@
   // + persists): a valid stored choice wins, else the first matching browser language, else
   // English. Keep SUPPORTED in step with LOCALES in js/i18n.js.
   try {
-    const SUPPORTED = ["en", "es"];
     let locale = "";
+    // An explicit ?lang=<locale> wins and is persisted (the "open in Spanish" share link).
+    // js/i18n.js initLocale() re-applies + strips it authoritatively after paint; setting it
+    // here keeps <html lang> correct from the first synchronous tick.
     try {
-      locale = localStorage.getItem("primer:locale") || "";
+      const fromParam = (new URLSearchParams(location.search).get("lang") || "").toLowerCase();
+      if (SUPPORTED.indexOf(fromParam) !== -1) {
+        locale = fromParam;
+        try {
+          localStorage.setItem("primer:locale", locale);
+        } catch (e) {
+          /* localStorage blocked */
+        }
+      }
     } catch (e) {
-      /* localStorage blocked */
+      /* URLSearchParams/location unavailable */
+    }
+    if (!locale) {
+      try {
+        locale = localStorage.getItem("primer:locale") || "";
+      } catch (e) {
+        /* localStorage blocked */
+      }
     }
     if (SUPPORTED.indexOf(locale) === -1) {
       const langs =

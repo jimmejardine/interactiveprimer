@@ -1,8 +1,22 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pickInitialLocale, bcp47, lookup, fillVars, LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
+import { pickInitialLocale, localeFromSearch, bcp47, lookup, fillVars, LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
 import { fmt } from "../js/scene-strings.js";
+
+test("localeFromSearch reads a supported ?lang param (case-insensitive)", () => {
+  assert.equal(localeFromSearch("?lang=es"), "es");
+  assert.equal(localeFromSearch("?lang=en"), "en");
+  assert.equal(localeFromSearch("?lang=ES"), "es");
+  assert.equal(localeFromSearch("?foo=1&lang=es"), "es");
+});
+
+test("localeFromSearch returns null when absent or unsupported", () => {
+  assert.equal(localeFromSearch("?lang=fr"), null);
+  assert.equal(localeFromSearch("?lang="), null);
+  assert.equal(localeFromSearch("?foo=1"), null);
+  assert.equal(localeFromSearch(""), null);
+});
 
 test("pickInitialLocale honours a valid stored choice over browser languages", () => {
   assert.equal(pickInitialLocale("es", ["en", "en-GB"]), "es");

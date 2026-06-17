@@ -44,6 +44,24 @@ function isLocale(id) {
 }
 
 /**
+ * The supported locale named by a URL query string's `lang` param (case-insensitive), or
+ * null when absent/unsupported/malformed. This is the "open in Spanish" share link —
+ * `?lang=es` — that `initLocale()` turns into a persisted choice. Pure (no DOM), so it is
+ * unit-tested.
+ * @param {string} search  e.g. location.search ("?lang=es")
+ * @returns {LocaleId | null}
+ */
+export function localeFromSearch(search) {
+  try {
+    const v = new URLSearchParams(search).get("lang");
+    const base = v ? v.toLowerCase() : "";
+    return isLocale(base) ? base : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Decide the initial locale: a valid stored choice wins; otherwise the first browser
  * language whose base subtag matches a supported locale; otherwise the default. Pure, so
  * it is unit-tested.
@@ -129,8 +147,22 @@ export function applyLocale(id) {
  * Reconcile the synchronously-set locale with storage + the browser's languages on startup
  * (idempotent; does NOT reload). boot.js already set <html lang>; this persists the resolved
  * choice so it sticks.
+ *
+ * An explicit `?lang=<locale>` in the URL is the one authority: it WINS over storage/browser,
+ * is persisted (so the whole site stays in that language — a shareable "open in Spanish"
+ * link), and is then stripped from the URL so a later menu switch / reload can't snap back to
+ * the language the link named. Because the concept-page body stays hidden behind boot.js's
+ * anti-FOUC veil until `primer:rendered`, resolving the locale here is flash-free.
  */
 export function initLocale() {
+  const fromParam = localeFromSearch(location.search);
+  if (fromParam) {
+    document.documentElement.lang = fromParam;
+    persist(fromParam);
+    stripLangParam();
+    return;
+  }
+
   let stored = null;
   try {
     stored = localStorage.getItem(STORAGE_KEY);
@@ -142,6 +174,21 @@ export function initLocale() {
   const id = pickInitialLocale(stored, navLangs);
   document.documentElement.lang = id;
   persist(id);
+}
+
+/**
+ * Remove the `lang` query param from the address bar (keeping any other params + the hash),
+ * without a navigation, after it has been applied + persisted. Best-effort.
+ */
+function stripLangParam() {
+  try {
+    const url = new URL(location.href);
+    if (!url.searchParams.has("lang")) return;
+    url.searchParams.delete("lang");
+    history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+  } catch {
+    /* history/URL unavailable — leaving ?lang in the URL is harmless */
+  }
 }
 
 /** @param {LocaleId} id */
