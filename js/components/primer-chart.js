@@ -88,6 +88,8 @@ export class PrimerChart extends HTMLElement {
   #panel = null;
   /** @type {(() => void) | null} Unsubscribe from a shared slider group. */
   #unsubscribe = null;
+  /** @type {number} Monotonic build id: a build superseded during its async await aborts. */
+  #buildGen = 0;
 
   connectedCallback() {
     // Read the optional legacy params config BEFORE building the shadow root (the inline
@@ -175,12 +177,18 @@ export class PrimerChart extends HTMLElement {
     }
 
     this.#cancelWait();
+    // Mark this as the latest build. #build is async (it awaits the JSXGraph import), so a rapid
+    // second trigger (e.g. a theme-change during load) can start a concurrent build. Without this
+    // guard, each would create its own board + slider subscription, leaving orphaned boards — the
+    // one `this.#update` drives wouldn't be the one on screen, so the chart only repainted when the
+    // visible board was clicked (its own handler redraws it).
+    const gen = ++this.#buildGen;
     this.#dispose();
     stage.replaceChildren();
     stage.removeAttribute("style"); // JSXGraph writes inline sizing onto the container; start clean
     try {
       const mod = await import("jsxgraph");
-      if (!this.isConnected) return;
+      if (!this.isConnected || gen !== this.#buildGen) return; // superseded by a newer build → abort
       const JXG = mod.default ?? /** @type {any} */ (mod).JXG ?? mod;
       this.#update = builder(stage, this.#wrapJXG(JXG));
       this.#mountTitleAndControls(root, name);
