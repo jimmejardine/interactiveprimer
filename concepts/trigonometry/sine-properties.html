@@ -104,12 +104,18 @@
       // ticks every `yTick`. Axis lines/ticks take the theme line colour and the tick labels the
       // ink colour (JSXGraph colours text via strokeColor); the plotted curve a categorical colour.
       const makeChart = (host, JXG, opts) => {
-        // xName/yName label the axes themselves ("x" at the right end, "y" at the top); pass an
-        // empty string / null to drop either name.
-        const { ymax = 3.2, ymin = -3.2, yTick = 1, xName = "x", yName = "y" } = opts ?? {};
+        // The x-domain [xmin,xmax] is the single source of truth for the horizontal extent: the
+        // board's bounding box (with `xPad` breathing room so the curve doesn't touch the frame),
+        // the plotted functiongraph, and autoY's sampling all read it. xName/yName label the axes
+        // themselves ("x" at the right end, "y" at the top); pass an empty string / null to drop one.
+        const {
+          xmin = -360, xmax = 360, xPad = 40, xTick = 180,
+          ymax = 3.2, ymin = -3.2, yTick = 1,
+          xName = "x", yName = "y",
+        } = opts ?? {};
         const v = vizColors();
         const board = JXG.JSXGraph.initBoard(host, {
-          boundingbox: [-400, ymax, 400, ymin],
+          boundingbox: [xmin - xPad, ymax, xmax + xPad, ymin],
           keepaspectratio: false,
           axis: false,
           grid: false,
@@ -147,32 +153,57 @@
         const nameLabel = (name, label) =>
           name ? { name, withLabel: true, label: { strokeColor: v.ink, strokeOpacity: 1, fontSize: 14, ...label } } : {};
         board.create("axis", [[0, 0], [1, 0]], {
-          ...axisOpts(180, 1, { anchorX: "middle", anchorY: "top", offset: [0, -8] }), // x: majors at ±180/±360, minors at 90
+          ...axisOpts(xTick, 1, { anchorX: "middle", anchorY: "top", offset: [0, -8] }), // x: majors every xTick, a minor between
           ...nameLabel(xName, { position: "rt", anchorX: "right", offset: [8, 12] }),
         });
         board.create("axis", [[0, 0], [0, 1]], {
           ...axisOpts(yTick, 0, { anchorX: "right", anchorY: "middle", offset: [-8, 0] }), // y
           ...nameLabel(yName, { position: "rt", anchorX: "left", offset: [8, 6] }),
         });
-        return { board, v };
+        return { board, v, domain: [xmin, xmax] };
       };
 
-      // Plot a function of degrees over the visible range. `style` overrides (e.g. the faint
-      // reference curve). functiongraph re-evaluates its function on board.update(), so a function
-      // that closes over mutable values re-plots without recreating the curve.
-      const plot = (board, fn, color, style) =>
-        board.create("functiongraph", [fn, -360, 360], {
+      // Plot a function of degrees over a chart's x-domain (the [xmin,xmax] makeChart returns, so
+      // the curve spans exactly the axis range). `style` overrides (e.g. the faint reference curve).
+      // functiongraph re-evaluates its function on board.update(), so a function that closes over
+      // mutable values re-plots without recreating the curve.
+      const plot = (board, domain, fn, color, style) =>
+        board.create("functiongraph", [fn, domain[0], domain[1]], {
           strokeColor: color,
-          strokeWidth: 4,
+          strokeWidth: 2,
           highlight: false,
           ...style,
         });
 
+      // Auto-derive a padded, symmetric y-range by SAMPLING the functions across the x-domain —
+      // so the axes fit the data instead of being hand-tuned. Pass ALL of a comparison group's
+      // functions together to get one SHARED range: auto-ranging each option on its own would make
+      // every amplitude fill the frame and look identical, defeating the "which is taller?" quiz.
+      // `floor` keeps a sensible minimum height for a near-flat curve; `pad` leaves headroom.
+      const autoY = (fns, { xmin = -360, xmax = 360, pad = 1.2, floor = 1 } = {}) => {
+        let peak = floor;
+        const step = (xmax - xmin) / 360;
+        for (let x = xmin; x <= xmax; x += step) {
+          for (const f of fns) {
+            const y = Math.abs(f(x));
+            if (Number.isFinite(y)) peak = Math.max(peak, y);
+          }
+        }
+        const ymax = peak * pad;
+        return { ymax, ymin: -ymax };
+      };
+
+      // Build a comparison group's chart opts from ONE place: a shared auto y-range sampled over
+      // `fns`, merged with any fixed opts (yTick, or a custom x-window via xmin/xmax). Because both
+      // autoY and makeChart read xmin/xmax from this same opts object, the sampled window and the
+      // drawn axes can never drift apart.
+      const groupOpts = (fns, opts = {}) => ({ ...opts, ...autoY(fns, opts) });
+
       // A static option chart: plot one fixed function of degrees and stand still.
       const optionChart = (name, fn, opts) => {
         registerChart(name, (host, JXG) => {
-          const { board, v } = makeChart(host, JXG, opts);
-          plot(board, fn, v.cat[0]);
+          const { board, v, domain } = makeChart(host, JXG, opts);
+          plot(board, domain, fn, v.cat[0]);
           return () => {}; // no parameters — nothing to re-plot
         });
       };
@@ -182,11 +213,11 @@
       // curve's function reads the live `cur` values, so update() just calls board.update().
       // A, f are unitless; the phase φ is in degrees.
       registerChart("sinLab", (host, JXG) => {
-        const { board, v } = makeChart(host, JXG, { ymax: 3.2, ymin: -3.2, yTick: 1 });
-        plot(board, (x) => Math.sin(x * DEG), v.line, { strokeWidth: 2, strokeOpacity: 0.35 });
+        const { board, v, domain } = makeChart(host, JXG, { ymax: 3.2, ymin: -3.2, yTick: 1 });
+        plot(board, domain, (x) => Math.sin(x * DEG), v.line, { strokeWidth: 2, strokeOpacity: 0.35 });
 
         const cur = { A: 1, f: 1, phi: 0 };
-        plot(board, (x) => cur.A * Math.sin((cur.f * x + cur.phi) * DEG), v.cat[0]);
+        plot(board, domain, (x) => cur.A * Math.sin((cur.f * x + cur.phi) * DEG), v.cat[0]);
         return (p) => {
           if (Number.isFinite(p.A)) cur.A = p.A;
           if (Number.isFinite(p.f)) cur.f = p.f;
@@ -195,18 +226,25 @@
         };
       });
 
-      // Amplitude question (y range gives 2·sin headroom).
-      const ampOpts = { ymax: 2.6, ymin: -2.6, yTick: 1 };
-      optionChart("optSinX", (x) => Math.sin(x * DEG), ampOpts);
-      optionChart("opt2SinX", (x) => 2 * Math.sin(x * DEG), ampOpts);
-      optionChart("optHalfSinX", (x) => 0.5 * Math.sin(x * DEG), ampOpts);
-      optionChart("optSin2x", (x) => Math.sin(2 * x * DEG), ampOpts);
+      // Amplitude question — the four options share ONE auto-derived range (sample them together)
+      // so the taller amplitude really does look taller. The 2·sin option drives the range.
+      const ampSet = [
+        ["optSinX", (x) => Math.sin(x * DEG)],
+        ["opt2SinX", (x) => 2 * Math.sin(x * DEG)],
+        ["optHalfSinX", (x) => 0.5 * Math.sin(x * DEG)],
+        ["optSin2x", (x) => Math.sin(2 * x * DEG)],
+      ];
+      const ampOpts = groupOpts(ampSet.map(([, fn]) => fn), { yTick: 1 });
+      for (const [name, fn] of ampSet) optionChart(name, fn, ampOpts);
 
-      // Phase question (unit amplitude).
-      const phaseOpts = { ymax: 1.7, ymin: -1.7, yTick: 1 };
-      optionChart("optShiftLeft", (x) => Math.sin((x + 90) * DEG), phaseOpts);
-      optionChart("optShiftRight", (x) => Math.sin((x - 90) * DEG), phaseOpts);
-      optionChart("optFlip", (x) => Math.sin((x + 180) * DEG), phaseOpts);
+      // Phase question (all unit amplitude) — shared auto range across the three options.
+      const phaseSet = [
+        ["optShiftLeft", (x) => Math.sin((x + 90) * DEG)],
+        ["optShiftRight", (x) => Math.sin((x - 90) * DEG)],
+        ["optFlip", (x) => Math.sin((x + 180) * DEG)],
+      ];
+      const phaseOpts = groupOpts(phaseSet.map(([, fn]) => fn), { yTick: 1 });
+      for (const [name, fn] of phaseSet) optionChart(name, fn, phaseOpts);
     </script>
   </body>
 </html>
