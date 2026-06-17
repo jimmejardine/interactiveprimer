@@ -29,7 +29,10 @@ Primer we simply call it the **tree**.
 
 To make these dependencies concrete, **every concept page lists the nodes it has as
 prerequisites**. Before a page's concept can be tackled, its prerequisite pages should
-already be understood.
+already be understood. A page's prerequisites come from two places, unioned together: the
+explicit list in its metadata block, and every concept it links to inline with
+`<primer-ref>` in the lesson copy (each such reference is, by definition, a backward
+dependency) — so a prerequisite mentioned in the prose needn't be repeated in the metadata.
 
 ## The levels of knowledge
 

@@ -41,7 +41,7 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
 |---|---|---|
 | `id` | yes | Full path, e.g. `arithmetic/addition`. Must match the file path. |
 | `title` | yes | Display title. |
-| `prerequisites` | no (default `[]`) | Array of full-path ids (the DAG edges). |
+| `prerequisites` | no (default `[]`) | Array of full-path ids (the DAG edges). The final edge set is the **union of this list and the inline `<primer-ref>`s in the prose** (see below), so a prerequisite you already link to in the copy needn't be repeated here. |
 | `declaredLevel` | no | Real number. Levels start at 0 and propagate downstream via `max(declared, all prerequisite levels)`. Fractions allowed (e.g. `2.5`). |
 | `root` | no | `true` marks an entry point (no prerequisites). **Base concepts must set this** or they fail validation as orphans. |
 | `completedDate` | no | ISO date `YYYY-MM-DD` — when the lesson content was finished. Surfaced by the graph tool; omit on stubs. |
@@ -62,6 +62,13 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
   (watch / youtu.be / embed / shorts) or a bare 11-char id. Shows a thumbnail + play
   facade and only loads YouTube on click. In a translation overlay, keep the same `src`
   to pin the English video or set a different one for a localized video.
+- `<primer-ref to="full/path/id">words</primer-ref>` — an inline link to **another concept**.
+  Renders the words as a concept link (to `/concepts/<id>.html`) followed by a small confidence
+  dot; leave the body empty to auto-fill the target's title. **Every `<primer-ref>` also declares
+  a prerequisite** — it's harvested by the graph build and unioned into this concept's
+  `prerequisites` — so it must point **backward** to a concept this page builds on. (A wrong-way
+  ref makes a cycle, which `npm run graph` flags.) For an incidental/forward link that is *not* a
+  prerequisite, use a plain `<a href="/concepts/<id>.html">` instead.
 - `<primer-quiz count="3">` — a random test. Author the bank inline as a JSON array.
   A question is **multiple-choice** (has `options`) or **free-text** (has `answer`):
 

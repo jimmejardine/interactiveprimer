@@ -22,6 +22,7 @@ import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseConceptMeta } from "../js/concept-meta.js";
+import { extractConceptRefs } from "../js/concept-refs.js";
 import { validateGraph, indexConcepts, buildDependents } from "../js/graph.js";
 import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
 import { parseJsonc } from "../js/jsonc.js";
@@ -118,7 +119,14 @@ async function main() {
   for (const file of files) {
     const expectedId = idFromPath(file);
     try {
-      const meta = parseConceptMeta(extractMeta(await readFile(file, "utf8")));
+      const html = await readFile(file, "utf8");
+      const meta = parseConceptMeta(extractMeta(html));
+      // Prerequisites are the union of the concept-meta header and the inline `<primer-ref>`s
+      // in the prose (each ref is a backward edge to a concept this page builds on). A ref to
+      // an unknown id then surfaces via the existing dangling-prerequisite check; a ref pointed
+      // the wrong way creates a cycle, which detectCycles flags. Self-references are dropped.
+      const refs = extractConceptRefs(html).filter((r) => r !== meta.id);
+      meta.prerequisites = [...new Set([...meta.prerequisites, ...refs])];
       if (meta.id !== expectedId) {
         fileDiagnostics.push({
           severity: "error",
