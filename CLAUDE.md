@@ -339,6 +339,8 @@ tags the elements `fn` creates. The student steps the proof forwards/backwards (
 
 - **Colours** as everywhere: from `themeColors()` (`colors.line`/`colors.cat[i]` strokes, fills
   `colors.cat[i]` at opacity, **text via `strokeColor: colors.ink`**) — never hardcoded.
+- **No endpoint dots**: a `segment`/`line`/`arrow` built from coordinates hides its auto-created endpoint
+  points by default (teaching figures draw lines, not points). To show a dot, create an explicit `point`.
 - **`opts`**: `{ boundingbox, keepAspect = true, title, sliders, start, stepMs = 450 }`. A figure opens
   **fully revealed** by default (the finished render); set `start: 0` to begin collapsed and play through, or
   any step count. A single-`step` (or zero-`step`) figure is static — the control bar auto-hides. `stepMs` is

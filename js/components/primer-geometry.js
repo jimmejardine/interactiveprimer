@@ -183,7 +183,7 @@ export class PrimerGeometry extends HTMLElement {
       }
       applyStepVisibility(this.#steps, this.#current);
       board.update();
-      for (const s of this.#steps) for (const el of s.els) el.setAttribute?.({ transitionDuration: this.#stepMs });
+      for (const s of this.#steps) for (const { el } of s.els) el.setAttribute?.({ transitionDuration: this.#stepMs });
 
       this.#renderBar();
       this.#emit();
@@ -222,6 +222,11 @@ export class PrimerGeometry extends HTMLElement {
     });
     // Geometry wants equal aspect and NO grid/axis (override the chart faint-grid default).
     board = wrapped.JSXGraph.initBoard(host, { boundingbox, keepaspectratio: keepAspect, axis: false, grid: false });
+    // A segment/line/arrow built from coordinates auto-creates its endpoint POINTS, which show as
+    // dots. For teaching figures we draw lines, not points, so hide those endpoints by default —
+    // an author who wants a visible dot creates an explicit `point` (unaffected by this default).
+    board.options.line.point1 = { ...board.options.line.point1, visible: false, withLabel: false };
+    board.options.line.point2 = { ...board.options.line.point2, visible: false, withLabel: false };
     const { step, steps } = createStepCollector(board);
     const sliders = entry.opts.sliders ? (getSliderGroup(entry.opts.sliders)?.values ?? {}) : {};
     entry.builder({ board, colors, JXG, step, sliders });

@@ -25,23 +25,30 @@ test("clampStep treats non-finite as 0", () => {
 function fakeBoard() {
   return { objectsList: /** @type {any[]} */ ([]) };
 }
-/** @param {{objectsList: any[]}} board @param {number} n */
-function add(board, n) {
-  for (let i = 0; i < n; i++) board.objectsList.push({ id: board.objectsList.length, setAttribute() {} });
+/** @param {{objectsList: any[]}} board @param {number} n @param {boolean} [visible] */
+function add(board, n, visible = true) {
+  for (let i = 0; i < n; i++) board.objectsList.push({ id: board.objectsList.length, visProp: { visible }, setAttribute() {} });
 }
 
-test("createStepCollector captures only the elements each step creates", () => {
+test("createStepCollector captures each step's elements with their intended visibility", () => {
   const board = fakeBoard();
   add(board, 3); // base elements (created outside any step)
   const { step, steps } = createStepCollector(board);
-  step("one", () => add(board, 2));
+  step("one", () => {
+    add(board, 2); // visible
+    add(board, 1, false); // a hidden helper (e.g. an auto endpoint)
+  });
   step("two", () => add(board, 1));
   assert.equal(steps.length, 2);
   assert.deepEqual(
     steps.map((s) => s.caption),
     ["one", "two"],
   );
-  assert.equal(steps[0].els.length, 2); // the 2 created in step "one" — base excluded
+  assert.equal(steps[0].els.length, 3); // the 3 created in step "one" — base excluded
+  assert.deepEqual(
+    steps[0].els.map((e) => e.vis),
+    [true, true, false], // intended visibility captured
+  );
   assert.equal(steps[1].els.length, 1);
 });
 
@@ -59,27 +66,28 @@ function fakeEl() {
   };
 }
 
-test("applyStepVisibility reveals step i iff i < current", () => {
-  const s0 = [fakeEl()];
-  const s1 = [fakeEl(), fakeEl()];
-  const s2 = [fakeEl()];
+test("applyStepVisibility reveals step i iff i < current, honouring intended visibility", () => {
+  const a = fakeEl();
+  const b = fakeEl();
+  const helper = fakeEl(); // a deliberately-hidden element in step 1
+  const c = fakeEl();
   const steps = [
-    { caption: "a", els: s0 },
-    { caption: "b", els: s1 },
-    { caption: "c", els: s2 },
+    { caption: "a", els: [{ el: a, vis: true }] },
+    { caption: "b", els: [{ el: b, vis: true }, { el: helper, vis: false }] },
+    { caption: "c", els: [{ el: c, vis: true }] },
   ];
 
   applyStepVisibility(steps, 0); // nothing revealed
-  assert.equal(s0[0].visible, false);
-  assert.equal(s1[0].visible, false);
-  assert.equal(s2[0].visible, false);
+  assert.equal(a.visible, false);
+  assert.equal(b.visible, false);
+  assert.equal(c.visible, false);
 
   applyStepVisibility(steps, 2); // steps 0 and 1 revealed, step 2 hidden
-  assert.equal(s0[0].visible, true);
-  assert.equal(s1[0].visible, true);
-  assert.equal(s1[1].visible, true);
-  assert.equal(s2[0].visible, false);
+  assert.equal(a.visible, true);
+  assert.equal(b.visible, true);
+  assert.equal(helper.visible, false); // revealed step, but intended-hidden → stays hidden
+  assert.equal(c.visible, false);
 
   applyStepVisibility(steps, 3); // all revealed
-  assert.equal(s2[0].visible, true);
+  assert.equal(c.visible, true);
 });

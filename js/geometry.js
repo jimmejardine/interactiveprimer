@@ -24,14 +24,26 @@ export function clampStep(n, stepCount) {
 }
 
 /**
- * @typedef {{ caption: string, els: any[] }} Waypoint
+ * @typedef {{ el: any, vis: boolean }} StepEl  An element + the visibility the author gave it at
+ *   creation (so a deliberately-hidden helper — e.g. a line's auto-endpoint, or an invisible
+ *   construction point — is NOT forced visible when its step is revealed).
+ * @typedef {{ caption: string, els: StepEl[] }} Waypoint
  */
+
+/**
+ * Read an element's intended visibility (JSXGraph stores it on `visProp.visible`); defaults true.
+ * @param {any} el
+ * @returns {boolean}
+ */
+function intendedVisible(el) {
+  return el?.visProp ? el.visProp.visible !== false : true;
+}
 
 /**
  * A waypoint collector over a JSXGraph board. `step(caption, drawFn)` runs `drawFn` immediately and
  * records the elements it created — by diffing `board.objectsList` before/after — together with the
- * caption. Elements created OUTSIDE any `step()` (before/between calls) are "base": never recorded,
- * so they stay visible at every step.
+ * caption and each element's intended visibility. Elements created OUTSIDE any `step()`
+ * (before/between calls) are "base": never recorded, so they stay as drawn at every step.
  * @param {{ objectsList: any[] }} board
  * @returns {{ step: (caption: string, drawFn: () => void) => void, steps: Waypoint[] }}
  */
@@ -42,22 +54,22 @@ export function createStepCollector(board) {
   const step = (caption, drawFn) => {
     const before = board.objectsList.length;
     drawFn();
-    const els = board.objectsList.slice(before);
+    const els = board.objectsList.slice(before).map((el) => ({ el, vis: intendedVisible(el) }));
     steps.push({ caption, els });
   };
   return { step, steps };
 }
 
 /**
- * Apply the reveal-by-threshold rule: step `i` is visible iff `i < current`. Toggles each recorded
- * element's `visible` attribute (JSXGraph hides the element and its label together). The caller calls
- * `board.update()` afterwards. Base elements are untouched (always visible).
+ * Apply the reveal-by-threshold rule: step `i` is revealed iff `i < current`. A revealed element is
+ * shown only to its *intended* visibility (so endpoints/helpers an author created hidden stay
+ * hidden); a not-yet-revealed step's elements are hidden. The caller calls `board.update()` after.
  * @param {Waypoint[]} steps
  * @param {number} current
  */
 export function applyStepVisibility(steps, current) {
   steps.forEach((s, i) => {
-    const visible = i < current;
-    for (const el of s.els) el.setAttribute?.({ visible });
+    const reveal = i < current;
+    for (const { el, vis } of s.els) el.setAttribute?.({ visible: reveal && vis });
   });
 }
