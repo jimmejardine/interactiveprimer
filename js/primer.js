@@ -15,6 +15,7 @@ import "./components/primer-page.js";
 import "./components/primer-concept.js";
 import "./components/primer-card.js";
 import "./components/primer-theorem.js";
+import "./components/primer-ref.js";
 import "./components/primer-math.js";
 import "./components/primer-manim.js";
 import "./components/primer-chart.js";

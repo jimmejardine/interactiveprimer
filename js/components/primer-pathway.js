@@ -23,6 +23,7 @@ import { getConceptMeta } from "../concept-meta.js";
 import { neighborhood } from "../graph.js";
 import { loadGraph } from "../graph-data.js";
 import { t, getLocale } from "../i18n.js";
+import { confidenceColor } from "../confidence-color.js";
 
 /** @typedef {import("../types/domain.js").ResolvedConcept} ResolvedConcept */
 
@@ -30,37 +31,6 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 
 /** Most nodes to show in any one column before collapsing the rest into a "+k more" chip. */
 const MAX_PER_COL = 6;
-
-/** Confidence (star) storage — mirrors js/components/primer-concept.js. */
-const CONFIDENCE_PREFIX = "primer:confidence:";
-const MAX_STARS = 10;
-
-/**
- * A node's colour from its self-attested star rating: a RED→YELLOW→GREEN hue ramp
- * proportional to the rating (0 stars = red, half = yellow, full = green). Returns
- * null when the concept hasn't been rated, so the node keeps its default white look.
- * @param {string} id
- * @returns {string | null}
- */
-function confidenceColor(id) {
-  let raw;
-  try {
-    raw = localStorage.getItem(CONFIDENCE_PREFIX + id);
-  } catch {
-    return null; // localStorage unavailable (private mode, file://)
-  }
-  if (raw === null) return null; // not yet rated → white
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return null;
-  const stars = Math.min(MAX_STARS, Math.max(0, n));
-  const hue = (stars / MAX_STARS) * 120; // 0 → red, 60 → yellow, 120 → green
-  // Saturation/lightness are theme-driven so the ramp stays legible against the node
-  // text in every theme (e.g. darker, muted fills in dark mode). See css/primer.css.
-  const s = getComputedStyle(document.documentElement);
-  const sat = s.getPropertyValue("--primer-conf-sat").trim() || "70%";
-  const light = s.getPropertyValue("--primer-conf-light").trim() || "62%";
-  return `hsl(${hue}, ${sat}, ${light})`;
-}
 
 /** Paint a node element from its concept's rating (clears to the default when unrated). @param {Element} el */
 function paintNode(el) {
