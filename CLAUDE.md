@@ -175,9 +175,12 @@ what you need — so the only `primer` import is `registerManimScene`:
   light themes — e.g. a `NumberLine` with no `color` is invisible on the light backdrop. Watch
   sub-parts: a `NumberLine`'s `color` is the **stroke** (line + ticks) only — its number labels
   are filled text and must be coloured separately, e.g.
-  `for (const l of line.getNumberLabels?.() ?? []) { l.setColor?.(colors.ink); l.setFill?.(colors.ink, 1); }`.
-- manim-web is young (v0.3.x): keep scenes simple, and the component shows a friendly
-  message if a scene throws, so prefer small, defensive scenes.
+  `for (const l of line.getNumberLabels()) l.setColor(colors.ink);` (`setColor` on the labels
+  covers their fill).
+- manim-web is pinned (v0.3.22 in `js/boot.js`), so call its API **directly** — don't write
+  feature-detection fallbacks (`const Grow = GrowFromCenter ?? FadeIn`, `Integer ? … : Text`,
+  `if (MoveAlongPath) … else …`): the exports are guaranteed present, so those branches are dead
+  code. Keep scenes simple; the component already shows a friendly message if a scene throws.
 
 ## Charts (JSXGraph plots)
 
