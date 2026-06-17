@@ -27,35 +27,7 @@ import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
 import { SLIDER_PANEL_CSS, mountSliderPanel } from "./slider-panel.js";
 import { groupForChart, getSliderGroup, subscribeSliders, setSliderValues, getChartMeta } from "../charts.js";
-
-/**
- * JSXGraph's stylesheet. Lazy-fetched once into a constructable sheet and adopted into each chart's
- * shadow root (a document-level <link> can't cross the shadow boundary). Best-effort: the board
- * still renders if it fails to load. Keep the version in step with js/boot.js.
- */
-const JSXGRAPH_CSS = "https://cdn.jsdelivr.net/npm/jsxgraph@1.12.2/distrib/jsxgraph.css";
-
-/** @type {Promise<CSSStyleSheet | null> | null} Shared across all <primer-chart> instances. */
-let jsxCssPromise = null;
-
-/**
- * Fetch jsxgraph.css once and wrap it in a constructable stylesheet. Resolves null on any failure
- * (CORS, offline) so a chart never blocks on its stylesheet.
- * @returns {Promise<CSSStyleSheet | null>}
- */
-function loadJsxCss() {
-  if (!jsxCssPromise) {
-    jsxCssPromise = fetch(JSXGRAPH_CSS)
-      .then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))))
-      .then((css) => {
-        const sheet = new CSSStyleSheet();
-        sheet.replaceSync(css);
-        return sheet;
-      })
-      .catch(() => null);
-  }
-  return jsxCssPromise;
-}
+import { adoptJsxCss, wrapBoard } from "./jsx-board.js";
 
 /**
  * @typedef {object} ChartParam
@@ -100,11 +72,7 @@ export class PrimerChart extends HTMLElement {
     const root = this.shadowRoot ?? attachShared(this);
 
     // Adopt JSXGraph's stylesheet into THIS shadow root (it can't reach in from document <head>).
-    void loadJsxCss().then((sheet) => {
-      if (sheet && this.isConnected && !root.adoptedStyleSheets.includes(sheet)) {
-        root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
-      }
-    });
+    adoptJsxCss(root, () => this.isConnected);
 
     root.innerHTML = `
       <style>
@@ -316,43 +284,16 @@ export class PrimerChart extends HTMLElement {
   }
 
   /**
-   * Return a copy of the JXG namespace whose `JSXGraph.initBoard` captures the created board on this
-   * element (for disposal + theme rebuild) and injects our teaching-graph defaults.
+   * Wrap the JXG namespace so `initBoard` injects the shared teaching-graph defaults and captures
+   * the created board on this element (for disposal + theme rebuild). See js/components/jsx-board.js.
    * @param {Record<string, any>} JXG
    * @returns {Record<string, any>}
    */
   #wrapJXG(JXG) {
-    const self = this;
-    const JSXGraph = JXG.JSXGraph;
-    self.#jsx = JSXGraph;
-    // Sensible defaults for a static teaching graph: no copyright/nav chrome, no pan/zoom, re-fit on
-    // resize. JSXGraph's default grid is a solid mid-grey that fights the curve; tint it from the
-    // theme (axis colour) at a low opacity, and drop the dotted minor grid. Read themeColors() here
-    // (not cached) so a theme rebuild — which re-enters #wrapJXG — re-tints it. A builder's own
-    // initBoard options override these (e.g. `grid: false`).
-    const colors = themeColors();
-    const defaults = {
-      showCopyright: false,
-      showNavigation: false,
-      showInfobox: false,
-      pan: { enabled: false },
-      zoom: { enabled: false },
-      resize: { enabled: true, throttle: 200 },
-      grid: {
-        major: { strokeColor: colors.line, strokeOpacity: 0.05 },
-        minor: { strokeOpacity: 0 },
-        minorElements: 0,
-      },
-    };
-    // Inherit every JSXGraph member via the prototype chain; override only initBoard.
-    const wrappedJSXGraph = Object.create(JSXGraph);
-    /** @param {any} box @param {any} [attributes] */
-    wrappedJSXGraph.initBoard = (box, attributes) => {
-      const board = JSXGraph.initBoard(box, { ...defaults, ...(attributes || {}) });
-      self.#board = board;
-      return board;
-    };
-    return Object.assign(Object.create(JXG), { JSXGraph: wrappedJSXGraph });
+    return wrapBoard(JXG, themeColors(), (board, JSXGraph) => {
+      this.#board = board;
+      this.#jsx = JSXGraph;
+    });
   }
 }
 

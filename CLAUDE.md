@@ -303,10 +303,53 @@ and after a theme change. Drive it from a `<primer-chart>` carrying an inline `p
   then `{ …, title: () => s("title") }` and a slider `{ name: "A", label: () => s("amplitude"), … }`.
   See `concepts/trigonometry/sine-properties.html` for the full showcase.
 
+## Geometry diagrams (`registerGeometry`)
+
+For **figures** rather than function plots — lines, angles, polygons, Greek-letter labels — register a
+geometry builder and reference it from a **`<primer-geometry scene="name">`** element (a peer of
+`<primer-chart>`, also JSXGraph/SVG). The board is **equal-aspect, grid-less and axis-less** by default, so
+angles/circles aren't distorted. Greek letters and `°` are plain Unicode (no math engine).
+
+A diagram is a **timeline of waypoints**: the builder draws everything up front, and each `step(caption, fn)`
+tags the elements `fn` creates. The student steps the proof forwards/backwards (elements fade in by an
+`i < current` threshold); elements created outside any `step()` are "base" (always visible).
+
+```html
+<primer-geometry scene="rightTriangle"></primer-geometry>
+
+<script type="module">
+  import { registerGeometry } from "primer";
+  registerGeometry("rightTriangle", ({ board, colors, step }) => {
+    const A = board.create("point", [0, 0], { fixed: true, name: "A", color: colors.ink });
+    const B = board.create("point", [4, 0], { fixed: true, name: "B", color: colors.ink });
+    const C = board.create("point", [0, 3], { fixed: true, name: "C", color: colors.ink });
+    step("A right triangle", () => board.create("polygon", [A, B, C], { strokeColor: colors.line, fillOpacity: 0 }));
+    step("The right angle",  () => board.create("angle", [B, A, C], { orthoType: "square", strokeColor: colors.line }));
+    step("Label θ",          () => board.create("text", [2.4, 1.1, "θ"], { strokeColor: colors.ink, fontSize: 18 }));
+  }, { boundingbox: [-1, 4, 5, -1], title: "Right triangle" });
+</script>
+```
+
+- **Colours** as everywhere: from `themeColors()` (`colors.line`/`colors.cat[i]` strokes, fills
+  `colors.cat[i]` at opacity, **text via `strokeColor: colors.ink`**) — never hardcoded.
+- **`opts`**: `{ boundingbox, keepAspect = true, title, sliders, start = 0, stepMs = 450 }`. A single-`step`
+  (or zero-`step`) figure is static — the control bar auto-hides. `stepMs` is the reveal fade.
+- **Controls**: the element shows ‹ Prev · k/N · Next › · Play · **All steps** (Expand → a vertical
+  comic-strip of every step, each cumulative, under its caption). Add the **`no-controls`** attribute to hide
+  the bar for an externally-driven figure.
+- **External sliders** (no draggable points): set `opts.sliders = "groupName"` (a `registerChartSliders`
+  group rendered by a separate `<primer-chart-sliders name="groupName">`); the builder gets the live values
+  as `sliders` — read them in **functional coordinates** so the figure re-plots as the sliders move:
+  `board.create("point", [() => r * Math.cos(sliders.t * DEG), () => r * Math.sin(sliders.t * DEG)])`.
+- **External control / manim sync**: the element exposes `goTo(k)`, `next()`, `prev()`, `play()`, `reset()`,
+  and `step`/`stepCount`, and fires `primer:geometry-step` `{ detail: { name, step, stepCount } }`. A manim
+  scene (or any script) can `document.querySelector('primer-geometry[scene="x"]').goTo(k)` to drive a proof
+  in lockstep. See `concepts/geometry/parallel-lines.html` for the showcase.
+
 ## Helpers re-exported from `primer` (for inline scripts)
 
 `registerManimScene`, `getManimScene`, `registerChart`, `getChart`, `registerCharts`, `registerChartSliders`,
-`computeRange`, `speak`, `cancelSpeech`, `themeColors`, `makeStrings`, `getConceptMeta`,
+`computeRange`, `registerGeometry`, `getGeometry`, `speak`, `cancelSpeech`, `themeColors`, `makeStrings`, `getConceptMeta`,
 `parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`,
 `getTheme`, `applyTheme`, `initTheme`), and the graph helpers (`resolveLevels`,
 `validateGraph`, …). Pinned KaTeX/manim-web/JSXGraph versions live in `js/boot.js`.

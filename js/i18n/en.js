@@ -45,6 +45,13 @@ export default {
   "manim.noScene": "No scene registered as “{name}”.",
   "manim.runError": "Couldn't run this animation: {error}",
 
+  "geometry.prev": "Previous step",
+  "geometry.next": "Next step",
+  "geometry.play": "Play",
+  "geometry.pause": "Pause",
+  "geometry.expand": "All steps",
+  "geometry.collapse": "Collapse",
+
   "video.play": "Play video",
   "video.unavailable": "Couldn't load this video.",
 

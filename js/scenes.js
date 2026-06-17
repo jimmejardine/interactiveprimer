@@ -102,3 +102,52 @@ export function registerChart(name, builder) {
 export function getChart(name) {
   return charts.get(name);
 }
+
+/**
+ * A geometry builder, used by <primer-geometry>. It draws a static figure (lines, angles, polygons,
+ * Greek-letter text) into a JSXGraph board, declaring ordered "waypoints" via the `step(caption, fn)`
+ * helper so the figure can be played forwards/backwards. See js/geometry.js for the toolkit shape and
+ * js/components/primer-geometry.js for how the timeline + board are assembled.
+ * @callback GeometryBuilder
+ * @param {Record<string, any>} toolkit  `{ board, colors, JXG, step, sliders }`.
+ * @returns {void}
+ *
+ * @typedef {object} GeometryOptions
+ * @property {[number, number, number, number]} [boundingbox]
+ * @property {boolean} [keepAspect]
+ * @property {string | (() => string)} [title]
+ * @property {string} [sliders]  Name of a registered slider group the diagram listens to.
+ * @property {number} [start]    Initial revealed-step count (default 0).
+ * @property {number} [stepMs]   Fade duration for a step reveal in ms (default 450).
+ *
+ * @typedef {object} GeometryEntry
+ * @property {GeometryBuilder} builder
+ * @property {GeometryOptions} opts
+ */
+
+/** @type {Map<string, GeometryEntry>} */
+const geometries = new Map();
+
+/**
+ * Register a named geometry diagram. Re-registering a name overwrites it. Announces the registration
+ * (like {@link registerChart}) so a `<primer-geometry>` that connected before this deferred script ran
+ * can finish building.
+ * @param {string} name
+ * @param {GeometryBuilder} builder
+ * @param {GeometryOptions} [opts]
+ */
+export function registerGeometry(name, builder, opts = {}) {
+  geometries.set(name, { builder, opts });
+  if (typeof document !== "undefined") {
+    document.dispatchEvent(new CustomEvent("primer:geometry-registered", { detail: { name } }));
+  }
+}
+
+/**
+ * Look up a geometry entry by name (or undefined if not registered).
+ * @param {string} name
+ * @returns {GeometryEntry | undefined}
+ */
+export function getGeometry(name) {
+  return geometries.get(name);
+}

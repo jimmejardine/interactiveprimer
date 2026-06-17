@@ -44,6 +44,13 @@ export default {
   "manim.noScene": "No hay ninguna escena registrada como «{name}».",
   "manim.runError": "No se pudo ejecutar esta animación: {error}",
 
+  "geometry.prev": "Paso anterior",
+  "geometry.next": "Paso siguiente",
+  "geometry.play": "Reproducir",
+  "geometry.pause": "Pausa",
+  "geometry.expand": "Todos los pasos",
+  "geometry.collapse": "Contraer",
+
   "video.play": "Reproducir vídeo",
   "video.unavailable": "No se pudo cargar este vídeo.",
 
