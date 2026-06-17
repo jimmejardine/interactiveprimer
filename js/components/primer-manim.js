@@ -18,8 +18,8 @@
 
 import { attachShared } from "./shared.js";
 import { getManimScene } from "../scenes.js";
-import { makeSceneStrings } from "../scene-strings.js";
-import { cancelSpeech, pauseSpeech, resumeSpeech } from "../speech.js";
+import { makeSceneStrings, fmt } from "../scene-strings.js";
+import { speak, cancelSpeech, pauseSpeech, resumeSpeech } from "../speech.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
 
@@ -139,8 +139,18 @@ export class PrimerManim extends HTMLElement {
 
     try {
       const manim = await import("manim-web");
-      // Hand the builder a scene-scoped strings accessor (locale → English → "$$scene.key$$").
-      await builder(stage, this.#wrapManim(manim), makeSceneStrings(name));
+      // Hand the builder a single toolkit object: the host, the (wrapped) manim namespace, a
+      // scene-scoped strings accessor (locale → English → "$$scene.key$$"), and the narration /
+      // theme helpers — so a scene imports only `registerManimScene`.
+      await builder({
+        host: stage,
+        manim: this.#wrapManim(manim),
+        sceneStrings: makeSceneStrings(name),
+        speak,
+        cancelSpeech,
+        themeColors,
+        fmt,
+      });
       this.#state = "done";
       face(btn, "↻", "Replay");
     } catch (err) {

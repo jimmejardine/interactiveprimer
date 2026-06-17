@@ -134,23 +134,28 @@ The **confidence control** (a 0–10 star rating, persisted to `localStorage` un
 ## Animations + narration (manim-web scenes)
 
 Register a scene in an inline module script (anywhere in `<body>`), then reference it
-by name from a `<primer-manim>`:
+by name from a `<primer-manim>`. The builder receives a **single `toolkit` object** — destructure
+what you need — so the only `primer` import is `registerManimScene`:
 
 ```html
 <script type="module">
-  import { registerManimScene, speak } from "primer";
+  import { registerManimScene } from "primer";
 
-  registerManimScene("addNumberLine", async (host, manim) => {
+  registerManimScene("addNumberLine", async ({ host, manim, speak, themeColors }) => {
     const { Scene, Circle, Create } = manim;       // `manim` = manim-web namespace
+    const colors = themeColors();                   // theme palette (see colour rules below)
     const scene = new Scene(host);                  // `host` = element to draw into
     await Promise.all([                             // animate and narrate in lockstep
-      scene.play(new Create(new Circle())),
+      scene.play(new Create(new Circle({ color: colors.cat[0] }))),
       speak("Start at a, then count on."),
     ]);
   });
 </script>
 ```
 
+- The `toolkit` carries everything a scene needs: `host`, `manim`, `sceneStrings` (localized
+  narration words; see Localization), `speak`, `cancelSpeech`, `themeColors`, and `fmt`. There is
+  nothing else to import.
 - `speak(text, { rate, pitch })` returns a Promise that resolves when narration finishes
   (silent no-op if the browser lacks speech). Narration is spoken in the **active locale's**
   voice automatically — authors don't deal with `lang`/`bcp47`; just pass the (localized) text.

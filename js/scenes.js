@@ -4,19 +4,34 @@
  * (a function that builds/plays an animation) and reference it from a
  * <primer-manim scene="..."> element.
  *
- * A scene receives the host element to draw into, the imported manim-web module namespace, and a
- * scene-scoped `sceneStrings` accessor (the localized narration words), so scene authors write
- * directly against whatever manim-web exposes — this keeps the registry independent of manim-web's
- * exact API.
+ * A scene builder receives a single `toolkit` object bundling everything it needs — the host
+ * element, the imported manim-web namespace, the localized `sceneStrings`, and the `speak` /
+ * `cancelSpeech` / `themeColors` / `fmt` helpers — so a scene's only `primer` import is
+ * `registerManimScene` and it destructures what it wants. (The toolkit is assembled by
+ * `<primer-manim>`; see js/components/primer-manim.js.)
  * @module
  */
 
 /**
- * @callback ManimSceneBuilder
- * @param {HTMLElement} host       Element to mount the animation into.
- * @param {Record<string, any>} manim  The imported manim-web module namespace.
- * @param {Record<string, string>} sceneStrings  Scene-scoped localized strings: reading a key
+ * The single argument passed to a {@link ManimSceneBuilder}. Bundles the scene's drawing surface,
+ * the manim-web namespace, the localized narration strings, and the on-theme/narration helpers.
+ * @typedef {object} ManimSceneToolkit
+ * @property {HTMLElement} host  Element to mount the animation into.
+ * @property {Record<string, any>} manim  The imported manim-web module namespace.
+ * @property {Record<string, string>} sceneStrings  Scene-scoped localized strings: reading a key
  *   resolves locale → English → a `"$$scene.key$$"` placeholder (see js/scene-strings.js).
+ * @property {(text: string, opts?: { rate?: number, pitch?: number, lang?: string }) => Promise<void>} speak
+ *   Narrate text aloud in the active locale's voice (see js/speech.js).
+ * @property {() => void} cancelSpeech  Stop any in-progress/queued narration.
+ * @property {(count?: number) => { bg: string, ink: string, line: string, cat: string[] }} themeColors
+ *   The live theme palette (see js/theme.js).
+ * @property {(template: string, vars: Record<string, string | number>) => string} fmt
+ *   Interpolate `{name}` placeholders in a scene string (see js/scene-strings.js).
+ */
+
+/**
+ * @callback ManimSceneBuilder
+ * @param {ManimSceneToolkit} toolkit  Everything the scene needs, in one object.
  * @returns {void | Promise<void>}
  */
 
