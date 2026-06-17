@@ -117,7 +117,7 @@ export function getChart(name) {
  * @property {boolean} [keepAspect]
  * @property {string | (() => string)} [title]
  * @property {string} [sliders]  Name of a registered slider group the diagram listens to.
- * @property {number} [start]    Initial revealed-step count (default 0).
+ * @property {number} [start]    Initial revealed-step count (default: all steps revealed).
  * @property {number} [stepMs]   Fade duration for a step reveal in ms (default 450).
  *
  * @typedef {object} GeometryEntry

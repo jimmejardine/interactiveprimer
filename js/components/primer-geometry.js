@@ -62,6 +62,8 @@ export class PrimerGeometry extends HTMLElement {
   #miniBoards = [];
   /** @type {boolean} */
   #expanded = false;
+  /** @type {boolean} Whether the initial step has been chosen (so rebuilds keep the student's place). */
+  #started = false;
 
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
@@ -95,9 +97,11 @@ export class PrimerGeometry extends HTMLElement {
         <h3 class="geo-title" part="title" hidden></h3>
         <div class="stage" part="stage"></div>
         <div class="bar" part="controls" hidden>
+          <button class="rewind" type="button" aria-label="${t("geometry.rewind")}">«</button>
           <button class="prev" type="button" aria-label="${t("geometry.prev")}">‹</button>
           <span class="count" aria-live="polite">0 / 0</span>
           <button class="next" type="button" aria-label="${t("geometry.next")}">›</button>
+          <button class="forward" type="button" aria-label="${t("geometry.forward")}">»</button>
           <button class="play" type="button">${t("geometry.play")}</button>
           <button class="expand" type="button">${t("geometry.expand")}</button>
           <span class="caption"></span>
@@ -106,8 +110,10 @@ export class PrimerGeometry extends HTMLElement {
       </div>`;
 
     const bar = /** @type {HTMLElement} */ (root.querySelector(".bar"));
+    bar.querySelector(".rewind")?.addEventListener("click", () => this.reset());
     bar.querySelector(".prev")?.addEventListener("click", () => this.prev());
     bar.querySelector(".next")?.addEventListener("click", () => this.next());
+    bar.querySelector(".forward")?.addEventListener("click", () => this.goTo(this.#steps.length));
     bar.querySelector(".play")?.addEventListener("click", () => this.#togglePlay());
     bar.querySelector(".expand")?.addEventListener("click", () => this.#toggleExpand());
 
@@ -164,12 +170,17 @@ export class PrimerGeometry extends HTMLElement {
       heading.textContent = title;
       heading.hidden = !title;
 
-      // Initial step (restored across rebuilds). Apply instantly, THEN enable fades so the first
-      // hide doesn't flash a fade-out.
-      if (this.#current === 0 && this.#steps.length) {
-        this.#current = clampStep(entry.opts.start ?? 0, this.#steps.length);
+      // Initial step. By default a figure opens FULLY revealed (the finished render) — the student
+      // sees the deltas only by rewinding and stepping forward; an author can override with opts.start.
+      // A rebuild (e.g. theme change) keeps the student's current position (including 0), so the
+      // #started flag distinguishes "first build" from "rewound to 0". Apply instantly, THEN enable
+      // fades so the first hide doesn't flash a fade-out.
+      if (!this.#started) {
+        this.#current = clampStep(entry.opts.start ?? this.#steps.length, this.#steps.length);
+        this.#started = true;
+      } else {
+        this.#current = clampStep(this.#current, this.#steps.length);
       }
-      this.#current = clampStep(this.#current, this.#steps.length);
       applyStepVisibility(this.#steps, this.#current);
       board.update();
       for (const s of this.#steps) for (const el of s.els) el.setAttribute?.({ transitionDuration: this.#stepMs });
@@ -294,8 +305,10 @@ export class PrimerGeometry extends HTMLElement {
     count.textContent = `${this.#current} / ${n}`;
     const caption = /** @type {HTMLElement} */ (root.querySelector(".caption"));
     caption.textContent = this.#current > 0 ? (this.#steps[this.#current - 1]?.caption ?? "") : "";
+    /** @type {HTMLButtonElement} */ (root.querySelector(".rewind")).disabled = this.#current <= 0;
     /** @type {HTMLButtonElement} */ (root.querySelector(".prev")).disabled = this.#current <= 0;
     /** @type {HTMLButtonElement} */ (root.querySelector(".next")).disabled = this.#current >= n;
+    /** @type {HTMLButtonElement} */ (root.querySelector(".forward")).disabled = this.#current >= n;
   }
 
   #emit() {

@@ -339,9 +339,11 @@ tags the elements `fn` creates. The student steps the proof forwards/backwards (
 
 - **Colours** as everywhere: from `themeColors()` (`colors.line`/`colors.cat[i]` strokes, fills
   `colors.cat[i]` at opacity, **text via `strokeColor: colors.ink`**) — never hardcoded.
-- **`opts`**: `{ boundingbox, keepAspect = true, title, sliders, start = 0, stepMs = 450 }`. A single-`step`
-  (or zero-`step`) figure is static — the control bar auto-hides. `stepMs` is the reveal fade.
-- **Controls**: the element shows ‹ Prev · k/N · Next › · Play · **All steps** (Expand → a vertical
+- **`opts`**: `{ boundingbox, keepAspect = true, title, sliders, start, stepMs = 450 }`. A figure opens
+  **fully revealed** by default (the finished render); set `start: 0` to begin collapsed and play through, or
+  any step count. A single-`step` (or zero-`step`) figure is static — the control bar auto-hides. `stepMs` is
+  the reveal fade.
+- **Controls**: the element shows « Rewind · ‹ Prev · k/N · Next › · » Skip-to-end · Play · **All steps** (Expand → a vertical
   comic-strip of every step, each cumulative, under its caption). Add the **`no-controls`** attribute to hide
   the bar for an externally-driven figure.
 - **External sliders** (no draggable points): set `opts.sliders = "groupName"` (a `registerChartSliders`
