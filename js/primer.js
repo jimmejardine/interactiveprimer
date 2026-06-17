@@ -36,6 +36,7 @@ export { speak, cancelSpeech } from "./speech.js";
 export { parseConceptMeta, getConceptMeta } from "./concept-meta.js";
 export { BASE_LEVEL, maxLevel, formatLevel } from "./levels.js";
 export {
+  ROOT_ID,
   indexConcepts,
   findRoots,
   resolvePrerequisites,

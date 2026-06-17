@@ -12,6 +12,12 @@
 
 import { maxLevel, BASE_LEVEL } from "./levels.js";
 
+/** The id of the single, canonical root of the tree (the one page that everything climbs from). */
+export const ROOT_ID = "root";
+
+/** The id of the maintenance node every orphan is auto-attached to (it, in turn, hangs off {@link ROOT_ID}). */
+export const ORPHANS_ID = "orphans";
+
 /** @typedef {import("./types/domain.js").Concept} Concept */
 /** @typedef {import("./types/domain.js").ResolvedConcept} ResolvedConcept */
 /** @typedef {import("./types/domain.js").Level} Level */
@@ -34,12 +40,35 @@ export function indexConcepts(concepts) {
 }
 
 /**
- * Concepts explicitly marked as roots (entry points).
+ * The tree's roots. There is exactly one — the concept whose id is {@link ROOT_ID} — so this
+ * returns `[ROOT_ID]` when that concept is present, otherwise `[]`. (Kept array-shaped for the
+ * reachability/validation callers.)
  * @param {Concept[]} concepts
  * @returns {string[]}
  */
 export function findRoots(concepts) {
-  return concepts.filter((c) => c.root === true).map((c) => c.id);
+  return concepts.some((c) => c.id === ROOT_ID) ? [ROOT_ID] : [];
+}
+
+/**
+ * Re-parent every orphan under the {@link ORPHANS_ID} maintenance node, in place. An orphan is a
+ * concept (other than the root or the orphans node itself) with **no existing prerequisite** —
+ * none of its prerequisites resolves to a known concept (so a page that lists nothing, or only
+ * dangling ids, qualifies). Such a concept gains {@link ORPHANS_ID} as a prerequisite, which wires
+ * it into the tree (the orphans node hangs off {@link ROOT_ID}) instead of failing the orphan
+ * check. No-op when the orphans node is absent from the set, so a fork without it still surfaces
+ * true orphans via validation rather than gaining fabricated dangling edges.
+ * @param {Concept[]} concepts
+ * @returns {Concept[]} the same array (prerequisites mutated in place)
+ */
+export function attachOrphans(concepts) {
+  const ids = new Set(concepts.map((c) => c.id));
+  if (!ids.has(ORPHANS_ID)) return concepts;
+  for (const c of concepts) {
+    if (c.id === ROOT_ID || c.id === ORPHANS_ID) continue;
+    if (!c.prerequisites.some((p) => ids.has(p))) c.prerequisites.push(ORPHANS_ID);
+  }
+  return concepts;
 }
 
 /**
@@ -302,10 +331,10 @@ export function validateGraph(concepts) {
     diagnostics.push({ severity: "error", code: "cycle", concept: cycle[0], message: `Prerequisite cycle: ${cycle.join(" → ")}` });
   }
 
-  // Roots & orphans (unreachable from a declared root).
+  // Root & orphans (unreachable from the single root).
   const rootIds = findRoots([...byId.values()]);
   if (rootIds.length === 0) {
-    diagnostics.push({ severity: "error", code: "no-roots", message: "No concept is marked as a root (`root: true`); nothing can be reached." });
+    diagnostics.push({ severity: "error", code: "missing-root", message: `The tree has no concept with id "${ROOT_ID}"; nothing can be reached.` });
   }
   const reachable = reachableFromRoots(byId, rootIds);
   for (const id of byId.keys()) {

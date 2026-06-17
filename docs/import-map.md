@@ -55,14 +55,15 @@ concept's place in the knowledge tree. Its `id` must equal the page's path under
     "id": "arithmetic/addition",
     "title": "Addition",
     "prerequisites": ["arithmetic/counting"],
-    "declaredLevel": 2.5,
-    "root": false
+    "declaredLevel": 2.5
   }
 </script>
 ```
 
 `prerequisites` defaults to `[]`, `declaredLevel` is optional (levels start at 0 and
-propagate downstream), and `root: true` marks an entry point. Two further optional
+propagate downstream). The tree has a single root (the page with id `root`); a page with no
+prerequisite is auto-attached to the `orphans` maintenance node during the build, which hangs
+off `root`. Two further optional
 fields aid curation and are surfaced by the graph tool: `completedDate` and
 `needsReviewDate`, each an ISO `YYYY-MM-DD` string. The page's Web Components and the
 [`scripts/build-graph.js`](../scripts/build-graph.js) validator both read this block.

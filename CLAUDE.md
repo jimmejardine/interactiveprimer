@@ -41,9 +41,8 @@ This file is the cheat-sheet for authoring **concept pages**. A page is a single
 |---|---|---|
 | `id` | yes | Full path, e.g. `arithmetic/addition`. Must match the file path. |
 | `title` | yes | Display title. |
-| `prerequisites` | no (default `[]`) | Array of full-path ids (the DAG edges). The final edge set is the **union of this list and the inline `<primer-ref>`s in the prose** (see below), so a prerequisite you already link to in the copy needn't be repeated here. |
+| `prerequisites` | no (default `[]`) | Array of full-path ids (the DAG edges). The final edge set is the **union of this list and the inline `<primer-ref>`s in the prose** (see below), so a prerequisite you already link to in the copy needn't be repeated here. The tree has exactly **one root**, the page with id `root`; every other concept reaches it through prerequisites. A base concept with no natural prerequisite of its own may simply omit `prerequisites` — the graph build auto-attaches any such page to the `orphans` maintenance node (which hangs off `root`), so it joins the tree instead of failing as an orphan. |
 | `declaredLevel` | no | Real number. Levels start at 0 and propagate downstream via `max(declared, all prerequisite levels)`. Fractions allowed (e.g. `2.5`). |
-| `root` | no | `true` marks an entry point (no prerequisites). **Base concepts must set this** or they fail validation as orphans. |
 | `completedDate` | no | ISO date `YYYY-MM-DD` — when the lesson content was finished. Surfaced by the graph tool; omit on stubs. |
 | `needsReviewDate` | no | ISO date `YYYY-MM-DD` — when this concept was flagged as needing review (the date the flag was raised, not a deadline). |
 
@@ -401,12 +400,14 @@ npm run check        # typecheck + tests + graph validation (run before done)
 ```
 
 `npm run graph` reports **errors** (duplicate id, id≠path, dangling/cyclic
-prerequisites, orphans unreachable from a root, no roots) and **warnings** (a declared
-level below a prerequisite, or no declared level in a concept's ancestry).
+prerequisites, an orphan unreachable from the root, a missing root) and **warnings** (a declared
+level below a prerequisite, or no declared level in a concept's ancestry). Orphans are
+auto-attached to the `orphans` node during the build, so the orphan error is now only a
+safety net (e.g. if that maintenance node is deleted).
 
 ## Checklist for a new page
 
 1. File at `concepts/<path>.html`; `concept-meta.id` equals `<path>`.
-2. List `prerequisites` by full-path id; set `root: true` only on base concepts.
+2. List `prerequisites` by full-path id; a base concept with no natural prerequisite may omit them (it's auto-attached to the `orphans` node).
 3. Author content as `<primer-card>`s; add math/animation/quiz as needed.
 4. `npm run graph` is clean, then preview with `npm run serve`.

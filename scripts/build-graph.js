@@ -23,7 +23,7 @@ import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseConceptMeta } from "../js/concept-meta.js";
 import { extractConceptRefs } from "../js/concept-refs.js";
-import { validateGraph, indexConcepts, buildDependents } from "../js/graph.js";
+import { validateGraph, indexConcepts, buildDependents, attachOrphans } from "../js/graph.js";
 import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
 import { parseJsonc } from "../js/jsonc.js";
 
@@ -145,6 +145,11 @@ async function main() {
       });
     }
   }
+
+  // Re-parent any orphan (a page with no resolvable prerequisite) under the "orphans"
+  // maintenance node before validating, so the tree stays connected without authors wiring
+  // base pages to the root by hand.
+  attachOrphans(concepts);
 
   const { diagnostics, resolved } = validateGraph(concepts);
   const all = [...fileDiagnostics, ...diagnostics];

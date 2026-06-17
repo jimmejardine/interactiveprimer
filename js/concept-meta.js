@@ -55,13 +55,6 @@ export function parseConceptMeta(raw) {
     meta.declaredLevel = lvl;
   }
 
-  if (obj.root !== undefined) {
-    if (typeof obj.root !== "boolean") {
-      throw new Error(`concept "${id}" \`root\` must be a boolean`);
-    }
-    meta.root = obj.root;
-  }
-
   if (obj.completedDate !== undefined) {
     meta.completedDate = validateDate(obj.completedDate, "completedDate", id);
   }

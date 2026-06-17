@@ -9,7 +9,8 @@
  *    prerequisites are referenced by those same full-path ids (the DAG edges).
  *  - A concept MAY declare a numeric level; a declared level propagates downstream
  *    to every concept that depends on it (directly or transitively).
- *  - A concept MAY mark itself a `root` (an entry point with no prerequisites).
+ *  - There is exactly one root: the concept whose id is "root". Every other concept
+ *    reaches it through prerequisites.
  *
  * @module
  */
@@ -29,7 +30,6 @@
  * @property {string} title         Human-readable title, e.g. "Addition".
  * @property {string[]} prerequisites  Full-path ids of concepts required first (DAG edges).
  * @property {Level} [declaredLevel]   Optional numeric level explicitly declared.
- * @property {boolean} [root]          Marks an entry point (no prerequisites expected).
  * @property {string} [completedDate]    Optional ISO date "YYYY-MM-DD" — when the lesson content was finished.
  * @property {string} [needsReviewDate]  Optional ISO date "YYYY-MM-DD" — when this concept was flagged as needing review.
  * @property {string} [sourceHash]       Set only on translation overlays: hash of the English source's translatable surface this was translated from (see scripts/i18n-check.js).
@@ -61,7 +61,7 @@
 
 /**
  * @typedef {(
- *   "duplicate-id" | "dangling-prerequisite" | "cycle" | "no-roots" |
+ *   "duplicate-id" | "dangling-prerequisite" | "cycle" | "missing-root" |
  *   "orphan" | "declared-below-prerequisite" | "ungrounded-level" |
  *   "id-path-mismatch" | "metadata-error"
  * )} DiagnosticCode

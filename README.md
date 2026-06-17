@@ -86,7 +86,7 @@ time — **there is no build step**. The toolchain:
 - The knowledge-tree logic — prerequisite resolution and downstream **level propagation** —
   lives in [`js/graph.js`](js/graph.js) and [`js/levels.js`](js/levels.js); quiz generation
   in [`js/quiz.js`](js/quiz.js). All are unit-tested.
-- Each concept's graph data (id, title, prerequisites, declared level, root flag, and
+- Each concept's graph data (id, title, prerequisites, declared level, and
   optional `completedDate` / `needsReviewDate` curation dates) is the inline
   `<script class="concept-meta">` JSON block on its page — the single source of truth,
   read both by the page's Web Components and by the graph build script.
@@ -104,8 +104,9 @@ npm run check:graph  # validate only, write nothing (use in CI)
 
 It reports **errors** (fail the build): duplicate ids, an id that doesn't match its file
 path, dangling prerequisite references, prerequisite **cycles**, **orphans** (concepts not
-reachable from any `root`), and missing roots — and **warnings**: a declared level below a
-prerequisite, or a concept with no declared level anywhere in its ancestry.
+reachable from **the** root — the single page with id `root`), and a missing `root` concept —
+and **warnings**: a declared level below a prerequisite, or a concept with no declared level
+anywhere in its ancestry.
 
 ### Developing
 

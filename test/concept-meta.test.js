@@ -9,7 +9,6 @@ test("parseConceptMeta accepts a full, valid concept", () => {
     title: "Addition",
     prerequisites: ["arithmetic/counting"],
     declaredLevel: 2.5,
-    root: false,
   });
   assert.equal(meta.id, "arithmetic/addition");
   assert.equal(meta.declaredLevel, 2.5);
