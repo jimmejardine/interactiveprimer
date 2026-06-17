@@ -78,10 +78,13 @@ const STYLE = `
   }
   /* The scrolled CONTENT (carries the wires overlay): width is auto, so it fills the
      viewport and the columns compress (pills ellipsize) as it narrows. The min-width is the
-     floor below which it stops crushing and the .scroll parent shows a scrollbar instead.
-     Keep this element the wires' offset parent so #drawWires keeps aligning and the wires
-     scroll with the nodes. */
-  .pathway { position: relative; margin: 0; min-width: 26rem; }
+     floor below which the columns stop narrowing and the .scroll parent shows a horizontal
+     scrollbar instead — so it sets the per-column node spacing on small screens (each column
+     is ~1/3 of it). Keep it generous so phone pills don't crush; the scrollbar takes the rest.
+     (Grid tracks stay minmax(0,1fr) below, so .cols always == .pathway width and the wires
+     stay aligned.) Keep this element the wires' offset parent so #drawWires keeps aligning and
+     the wires scroll with the nodes. */
+  .pathway { position: relative; margin: 0; min-width: 32rem; }
   .cols {
     position: relative; z-index: 1;
     /* minmax(0, 1fr) lets a track shrink below its pill's text so the pill can ellipsize
