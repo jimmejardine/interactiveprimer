@@ -105,21 +105,21 @@ import just works:
 
 <script type="module">
   import { registerManimScene } from "primer";
-  registerManimScene("addNumberLine", async ({ host, manim }) => { /* … */ });
+  registerManimScene("addNumberLine", async ({ scene, manim }) => { /* … */ });
 </script>
 ```
 
-The builder receives a single `toolkit` object — `{ host, manim, sceneStrings, speak,
+The builder receives a single `toolkit` object — `{ scene, manim, sceneStrings, speak,
 cancelSpeech, themeColors, fmt }` — so `registerManimScene` is the only `primer` import a
-scene needs. A scene can narrate aloud with the injected `speak(text)`, which uses the
-browser's built-in speech and resolves when the phrase finishes — so it can be awaited in
+scene needs. The `scene` is already built on the stage (with the theme backdrop), so a scene
+just calls `scene.play(...)`. It can narrate aloud with the injected `speak(text)`, which uses
+the browser's built-in speech and resolves when the phrase finishes — so it can be awaited in
 lockstep with `scene.play(...)`. Speech only starts on the Play click (per browser autoplay
 rules) and is silently skipped where unsupported; replaying cancels any in-progress narration.
 
 ```js
 import { registerManimScene } from "primer";
-registerManimScene("countOne", async ({ host, manim, speak }) => {
-  const scene = new manim.Scene(host);
+registerManimScene("countOne", async ({ scene, manim, speak }) => {
   await Promise.all([scene.play(/* … */), speak("one")]);
 });
 ```

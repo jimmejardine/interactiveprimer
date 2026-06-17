@@ -141,11 +141,10 @@ what you need — so the only `primer` import is `registerManimScene`:
 <script type="module">
   import { registerManimScene } from "primer";
 
-  registerManimScene("addNumberLine", async ({ host, manim, speak, themeColors }) => {
-    const { Scene, Circle, Create } = manim;       // `manim` = manim-web namespace
+  registerManimScene("addNumberLine", async ({ scene, manim, speak, themeColors }) => {
+    const { Circle, Create } = manim;               // `manim` = manim-web namespace
     const colors = themeColors();                   // theme palette (see colour rules below)
-    const scene = new Scene(host);                  // `host` = element to draw into
-    await Promise.all([                             // animate and narrate in lockstep
+    await Promise.all([                             // `scene` is ready — just animate + narrate
       scene.play(new Create(new Circle({ color: colors.cat[0] }))),
       speak("Start at a, then count on."),
     ]);
@@ -153,9 +152,10 @@ what you need — so the only `primer` import is `registerManimScene`:
 </script>
 ```
 
-- The `toolkit` carries everything a scene needs: `host`, `manim`, `sceneStrings` (localized
-  narration words; see Localization), `speak`, `cancelSpeech`, `themeColors`, and `fmt`. There is
-  nothing else to import.
+- The `toolkit` carries everything a scene needs: `scene` (the manim Scene, already built on the
+  stage with the theme backdrop — just `scene.play(...)`, no `new Scene`), `manim`, `sceneStrings`
+  (localized narration words; see Localization), `speak`, `cancelSpeech`, `themeColors`, and `fmt`.
+  There is nothing else to import.
 - `speak(text, { rate, pitch })` returns a Promise that resolves when narration finishes
   (silent no-op if the browser lacks speech). Narration is spoken in the **active locale's**
   voice automatically — authors don't deal with `lang`/`bcp47`; just pass the (localized) text.

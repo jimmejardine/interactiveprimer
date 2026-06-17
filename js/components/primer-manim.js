@@ -139,12 +139,16 @@ export class PrimerManim extends HTMLElement {
 
     try {
       const manim = await import("manim-web");
-      // Hand the builder a single toolkit object: the host, the (wrapped) manim namespace, a
-      // scene-scoped strings accessor (locale → English → "$$scene.key$$"), and the narration /
-      // theme helpers — so a scene imports only `registerManimScene`.
+      // Build the one scene on the stage with the theme backdrop, and capture it so the controls
+      // (pause/resume) and the theme-change handler can reach it. Then hand the builder a single
+      // toolkit object: the ready-to-use `scene`, the manim namespace, a scene-scoped strings
+      // accessor (locale → English → "$$scene.key$$"), and the narration / theme helpers — so a
+      // scene imports only `registerManimScene` and never constructs a Scene itself.
+      const scene = new manim.Scene(stage, { backgroundColor: themeColors().bg });
+      this.#scene = scene;
       await builder({
-        host: stage,
-        manim: this.#wrapManim(manim),
+        scene,
+        manim,
         sceneStrings: makeSceneStrings(name),
         speak,
         cancelSpeech,
@@ -161,31 +165,6 @@ export class PrimerManim extends HTMLElement {
     }
   }
 
-  /**
-   * Return a copy of the manim namespace whose `Scene` captures its instance on this
-   * element, so the controls can pause/resume the running scene. Everything else is
-   * passed through unchanged.
-   * @param {Record<string, any>} manim
-   * @returns {Record<string, any>}
-   */
-  #wrapManim(manim) {
-    const self = this;
-    const bg = themeColors().bg; // theme backdrop, passed into every Scene this run
-    const BaseScene = manim.Scene;
-    class CapturingScene extends BaseScene {
-      /** @param {...any} args */
-      constructor(...args) {
-        // Inject the theme background as the default Scene option (manim's
-        // SceneOptions.backgroundColor is a CSS colour string). A scene that sets its
-        // own backgroundColor still wins.
-        const [container, options] = args;
-        const opts = options && typeof options === "object" ? options : {};
-        super(container, { backgroundColor: bg, ...opts });
-        self.#scene = this;
-      }
-    }
-    return { ...manim, Scene: CapturingScene };
-  }
 }
 
 /**

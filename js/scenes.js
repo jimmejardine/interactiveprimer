@@ -4,19 +4,21 @@
  * (a function that builds/plays an animation) and reference it from a
  * <primer-manim scene="..."> element.
  *
- * A scene builder receives a single `toolkit` object bundling everything it needs — the host
- * element, the imported manim-web namespace, the localized `sceneStrings`, and the `speak` /
- * `cancelSpeech` / `themeColors` / `fmt` helpers — so a scene's only `primer` import is
- * `registerManimScene` and it destructures what it wants. (The toolkit is assembled by
- * `<primer-manim>`; see js/components/primer-manim.js.)
+ * A scene builder receives a single `toolkit` object bundling everything it needs — a ready-built
+ * `scene` (the manim Scene, already mounted on the stage with the theme backdrop), the imported
+ * manim-web namespace, the localized `sceneStrings`, and the `speak` / `cancelSpeech` /
+ * `themeColors` / `fmt` helpers — so a scene's only `primer` import is `registerManimScene` and it
+ * destructures what it wants. (The toolkit is assembled by `<primer-manim>`; see
+ * js/components/primer-manim.js.)
  * @module
  */
 
 /**
- * The single argument passed to a {@link ManimSceneBuilder}. Bundles the scene's drawing surface,
- * the manim-web namespace, the localized narration strings, and the on-theme/narration helpers.
+ * The single argument passed to a {@link ManimSceneBuilder}. Bundles a ready-built scene, the
+ * manim-web namespace, the localized narration strings, and the on-theme/narration helpers.
  * @typedef {object} ManimSceneToolkit
- * @property {HTMLElement} host  Element to mount the animation into.
+ * @property {any} scene  The manim Scene, already created on the stage (with the theme backdrop)
+ *   and captured for pause/resume — just call `scene.play(...)`. No need to `new Scene(...)`.
  * @property {Record<string, any>} manim  The imported manim-web module namespace.
  * @property {Record<string, string>} sceneStrings  Scene-scoped localized strings: reading a key
  *   resolves locale → English → a `"$$scene.key$$"` placeholder (see js/scene-strings.js).
