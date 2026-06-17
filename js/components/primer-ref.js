@@ -13,10 +13,11 @@
  * (dist/graph.json) and shown in the active locale — the same title lookup the pathway map
  * uses. If the graph can't be fetched, a readable fallback (the id's last segment) stays.
  *
- * After the words it appends a small dot whose colour is the target concept's confidence
- * shading — the very same RED→YELLOW→GREEN star ramp the pathway nodes use (see
- * js/confidence-color.js) — so a reference shows, at a glance, how well you know where it
- * leads. The dot repaints live when the rating or theme changes.
+ * After the words it appends a small ⧉ glyph (a monochrome text character, so it takes a
+ * colour) tinted with the target concept's confidence shading — the very same
+ * RED→YELLOW→GREEN star ramp the pathway nodes use (see js/confidence-color.js) — so a
+ * reference shows, at a glance, how well you know where it leads. Unrated, it falls back to
+ * the default ink colour. It repaints live when the rating or theme changes.
  *
  * The `to` ids are a machine-readable record of cross-references: like `prerequisites`,
  * they can later be harvested, and build-graph could flag a `to` that names no concept.
@@ -34,7 +35,7 @@ function leaf(id) {
 
 export class PrimerRef extends HTMLElement {
   /** @type {HTMLElement | null} */
-  #dot = null;
+  #icon = null;
   /** @type {((e: Event) => void) | null} */
   #onConfidence = null;
   /** @type {(() => void) | null} */
@@ -53,27 +54,28 @@ export class PrimerRef extends HTMLElement {
     while (this.firstChild) a.appendChild(this.firstChild);
     this.appendChild(a);
 
-    // The confidence dot, painted from the TARGET concept's rating and kept in sync. It's a
+    // The ⧉ confidence icon, tinted from the TARGET concept's rating and kept in sync. It's a
     // second link to the same page (a mouse convenience), but hidden from assistive tech and
     // taken out of the tab order so the anchor above stays the single accessible reference.
     if (id) {
-      const dot = document.createElement("a");
-      dot.className = "concept-ref-dot";
-      dot.setAttribute("href", `/concepts/${id}.html`);
-      dot.setAttribute("aria-hidden", "true");
-      dot.setAttribute("tabindex", "-1");
-      this.appendChild(dot);
-      this.#dot = dot;
-      this.#paintDot(id);
+      const icon = document.createElement("a");
+      icon.className = "concept-ref-icon";
+      icon.setAttribute("href", `/concepts/${id}.html`);
+      icon.setAttribute("aria-hidden", "true");
+      icon.setAttribute("tabindex", "-1");
+      icon.textContent = "⧉";
+      this.appendChild(icon);
+      this.#icon = icon;
+      this.#paintIcon(id);
 
       // Repaint when the learner re-rates this target (a click elsewhere fires this), and
-      // when the theme changes (the dot's fill is an inline hsl built from theme tokens, so
-      // unlike a CSS var it won't update itself).
+      // when the theme changes (the glyph's colour is an inline hsl built from theme tokens,
+      // so unlike a CSS var it won't update itself).
       this.#onConfidence = (e) => {
-        if (/** @type {any} */ (e).detail?.conceptId === id) this.#paintDot(id);
+        if (/** @type {any} */ (e).detail?.conceptId === id) this.#paintIcon(id);
       };
       document.addEventListener("confidence-change", this.#onConfidence);
-      this.#onTheme = () => this.#paintDot(id);
+      this.#onTheme = () => this.#paintIcon(id);
       document.addEventListener("theme-change", this.#onTheme);
     }
 
@@ -99,9 +101,9 @@ export class PrimerRef extends HTMLElement {
     this.#onTheme = null;
   }
 
-  /** Set the dot's fill from the target's rating; empty (CSS default) when unrated. @param {string} id */
-  #paintDot(id) {
-    if (this.#dot) this.#dot.style.background = confidenceColor(id) ?? "";
+  /** Tint the icon from the target's rating; empty (CSS default ink) when unrated. @param {string} id */
+  #paintIcon(id) {
+    if (this.#icon) this.#icon.style.color = confidenceColor(id) ?? "";
   }
 }
 
