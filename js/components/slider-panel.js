@@ -138,7 +138,10 @@ function controlsHtml(defs, values) {
     .map((p, i) => {
       const step = p.step ?? 0.1;
       const value = values[p.name];
-      const label = escapeHtml(p.label ?? p.name);
+      // `label` may be a thunk (resolved here, at render, so a localized label picks up the active
+      // locale even though the slider was registered before the translation overlay applied).
+      const raw = typeof p.label === "function" ? p.label() : p.label;
+      const label = escapeHtml(raw ?? p.name);
       // Slider and number share a name via `data-name`; `data-role` distinguishes them. The range
       // lives in a `.slider` cell so its anchor ticks can be positioned over the track.
       return `

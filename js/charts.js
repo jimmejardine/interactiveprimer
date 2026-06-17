@@ -26,7 +26,8 @@ import { themeColors } from "./theme.js";
 /**
  * @typedef {object} SliderDef
  * @property {string} name
- * @property {string} [label]
+ * @property {string | (() => string)} [label]  A literal, or a thunk resolved when the panel
+ *   renders — pass `() => strings("amplitude")` (see js/scene-strings.js `makeStrings`) to localize.
  * @property {number} min
  * @property {number} max
  * @property {number} [step]
@@ -63,7 +64,8 @@ import { themeColors } from "./theme.js";
 /**
  * @typedef {object} ChartOptions
  * @property {string} [id]          Series id (defaults to the joined chart names).
- * @property {string} [title]       Heading rendered above each chart's board.
+ * @property {string | (() => string)} [title]  Heading rendered above each chart's board. A
+ *   literal, or a thunk resolved at render — pass `() => strings("title")` to localize.
  * @property {number} [xmin]        Default -1.
  * @property {number} [xmax]        Default 1.
  * @property {number|null} [ymin]   null → autocomputed from the data.
@@ -171,7 +173,7 @@ export function createSliderBroker() {
 /** The app-wide broker singleton (ES modules are singletons, so every importer shares it). */
 const broker = createSliderBroker();
 
-/** @type {Map<string, { title?: string }>} chart name → display metadata (e.g. title heading). */
+/** @type {Map<string, { title?: string | (() => string) }>} chart name → display metadata (e.g. title heading). */
 const chartMeta = new Map();
 
 /* ------------------------------------------------------------------ */
@@ -186,7 +188,7 @@ export const groupForChart = (name) => broker.groupForChart(name);
 export const subscribeSliders = (name, fn) => broker.subscribe(name, fn);
 /** @param {string} name @param {Record<string, number>} partial */
 export const setSliderValues = (name, partial) => broker.setValues(name, partial);
-/** @param {string} name @returns {{ title?: string } | undefined} */
+/** @param {string} name @returns {{ title?: string | (() => string) } | undefined} */
 export const getChartMeta = (name) => chartMeta.get(name);
 
 /* ------------------------------------------------------------------ */

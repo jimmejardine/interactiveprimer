@@ -126,7 +126,7 @@ async function hasOverlay(id, locale) {
  * caller falls back to English). Swaps the canonical content out of the DOM and appends the
  * overlay's `scene-strings` block tagged `data-locale`, KEEPING the English block as the
  * fallback source so the reused scene JS narrates in the target language and falls back to
- * English per-key (see js/scene-strings.js `makeSceneStrings`).
+ * English per-key (see js/scene-strings.js `makeStrings`).
  * @param {string} id
  * @param {string} locale
  * @param {Element[]} canonicalContent
@@ -173,7 +173,7 @@ async function applyOverlay(id, locale, canonicalContent) {
   // Remove the canonical (English) content from the DOM…
   for (const el of canonicalContent) el.remove();
   // …but KEEP the canonical (English) scene-strings block in place and append the overlay's
-  // block tagged with the active locale. The scene accessor (makeSceneStrings) then resolves
+  // block tagged with the active locale. The strings accessor (makeStrings) then resolves
   // each key from the locale block, falling back to the retained English block per-key.
   const overlayStrings = doc.querySelector("script.scene-strings");
   if (overlayStrings) {

@@ -296,11 +296,17 @@ and after a theme change. Drive it from a `<primer-chart>` carrying an inline `p
   read `themeColors()` at the top of the builder (not cached outside it).
 - The board fills a 7:4 stage. Give `functiongraph` an explicit `[fn, xmin, xmax]` range so it
   only plots the visible span.
+- **Localizing a chart.** A chart's `title` and each slider `label` may be a **function** returning
+  the string. Pull the words from the page's `scene-strings` block (see Localization) via
+  `makeStrings(namespace)` and pass them as thunks so they resolve when the chart RENDERS — after a
+  translation overlay has been applied — not at registration: `const s = makeStrings("sinLab");`
+  then `{ …, title: () => s("title") }` and a slider `{ name: "A", label: () => s("amplitude"), … }`.
+  See `concepts/trigonometry/sine-properties.html` for the full showcase.
 
 ## Helpers re-exported from `primer` (for inline scripts)
 
 `registerManimScene`, `getManimScene`, `registerChart`, `getChart`, `registerCharts`, `registerChartSliders`,
-`computeRange`, `speak`, `cancelSpeech`, `themeColors`, `getConceptMeta`,
+`computeRange`, `speak`, `cancelSpeech`, `themeColors`, `makeStrings`, `getConceptMeta`,
 `parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`,
 `getTheme`, `applyTheme`, `initTheme`), and the graph helpers (`resolveLevels`,
 `validateGraph`, …). Pinned KaTeX/manim-web/JSXGraph versions live in `js/boot.js`.

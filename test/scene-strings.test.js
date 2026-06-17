@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { makeSceneStrings, getSceneStrings } from "../js/scene-strings.js";
+import { makeStrings, getSceneStrings } from "../js/scene-strings.js";
 
 /**
  * Build a fake `doc` whose querySelector returns stub <script> elements by selector. `locale`
@@ -25,33 +25,33 @@ const EN = `{ "addNumberLine@1": { "start": "Start at {a}.", "equation": "{a}+{b
 const ES = `{ "addNumberLine@1": { "start": "Empieza en {a}." } }`;
 
 test("uses the active-locale string when present", () => {
-  const S = makeSceneStrings("addNumberLine@1", fakeDoc({ locale: ES, english: EN }));
+  const S = makeStrings("addNumberLine@1", fakeDoc({ locale: ES, english: EN }));
   assert.equal(S("start"), "Empieza en {a}.");
 });
 
 test("falls back to the English block per-key when the locale omits a key", () => {
-  const S = makeSceneStrings("addNumberLine@1", fakeDoc({ locale: ES, english: EN }));
+  const S = makeStrings("addNumberLine@1", fakeDoc({ locale: ES, english: EN }));
   // `equation` is missing from the es overlay → English wins, no placeholder.
   assert.equal(S("equation"), "{a}+{b}={sum}");
 });
 
 test("English-only page (no locale block) returns the English string", () => {
-  const S = makeSceneStrings("addNumberLine@1", fakeDoc({ english: EN }));
+  const S = makeStrings("addNumberLine@1", fakeDoc({ english: EN }));
   assert.equal(S("start"), "Start at {a}.");
 });
 
 test("missing in both blocks yields a visible placeholder", () => {
-  const S = makeSceneStrings("addNumberLine@1", fakeDoc({ locale: ES, english: EN }));
+  const S = makeStrings("addNumberLine@1", fakeDoc({ locale: ES, english: EN }));
   assert.equal(S("nope"), "$$addNumberLine@1.nope$$");
 });
 
 test("an unknown scene name yields placeholders for every key", () => {
-  const S = makeSceneStrings("ghost@1", fakeDoc({ english: EN }));
+  const S = makeStrings("ghost@1", fakeDoc({ english: EN }));
   assert.equal(S("start"), "$$ghost@1.start$$");
 });
 
 test("interpolates {vars} into the resolved string, leaving unknown placeholders intact", () => {
-  const S = makeSceneStrings("addNumberLine@1", fakeDoc({ english: EN }));
+  const S = makeStrings("addNumberLine@1", fakeDoc({ english: EN }));
   assert.equal(S("start", { a: 7 }), "Start at 7.");
   assert.equal(S("equation", { a: 1, b: 2 }), "1+2={sum}"); // {sum} not provided → kept
 });

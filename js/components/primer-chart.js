@@ -213,8 +213,11 @@ export class PrimerChart extends HTMLElement {
   #mountTitleAndControls(root, name) {
     const controls = /** @type {HTMLElement} */ (root.querySelector(".controls"));
 
-    // Title heading (high-level charts carry one in their registered metadata).
-    const title = getChartMeta(name)?.title ?? "";
+    // Title heading (high-level charts carry one in their registered metadata). It may be a thunk
+    // (resolved here, at render, so a localized title reflects the active locale even though the
+    // chart was registered before the translation overlay applied).
+    const rawTitle = getChartMeta(name)?.title;
+    const title = (typeof rawTitle === "function" ? rawTitle() : rawTitle) ?? "";
     const heading = /** @type {HTMLElement} */ (root.querySelector(".chart-title"));
     heading.textContent = title;
     heading.hidden = !title;

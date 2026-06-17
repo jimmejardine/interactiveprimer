@@ -18,7 +18,7 @@
 
 import { attachShared } from "./shared.js";
 import { getManimScene } from "../scenes.js";
-import { makeSceneStrings } from "../scene-strings.js";
+import { makeStrings } from "../scene-strings.js";
 import { speak, cancelSpeech, pauseSpeech, resumeSpeech } from "../speech.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
@@ -149,7 +149,7 @@ export class PrimerManim extends HTMLElement {
       await builder({
         scene,
         manim,
-        sceneStrings: makeSceneStrings(name),
+        sceneStrings: makeStrings(name),
         speak,
         cancelSpeech,
         themeColors,
