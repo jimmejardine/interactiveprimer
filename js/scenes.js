@@ -7,7 +7,7 @@
  * A scene builder receives a single `toolkit` object bundling everything it needs — a ready-built
  * `scene` (the manim Scene, already mounted on the stage with the theme backdrop), the imported
  * manim-web namespace, the localized `sceneStrings`, and the `speak` / `cancelSpeech` /
- * `themeColors` / `fmt` helpers — so a scene's only `primer` import is `registerManimScene` and it
+ * `themeColors` helpers — so a scene's only `primer` import is `registerManimScene` and it
  * destructures what it wants. (The toolkit is assembled by `<primer-manim>`; see
  * js/components/primer-manim.js.)
  * @module
@@ -20,15 +20,15 @@
  * @property {any} scene  The manim Scene, already created on the stage (with the theme backdrop)
  *   and captured for pause/resume — just call `scene.play(...)`. No need to `new Scene(...)`.
  * @property {Record<string, any>} manim  The imported manim-web module namespace.
- * @property {Record<string, string>} sceneStrings  Scene-scoped localized strings: reading a key
- *   resolves locale → English → a `"$$scene.key$$"` placeholder (see js/scene-strings.js).
+ * @property {(key: string, vars?: Record<string, string | number>) => string} sceneStrings
+ *   Scene-scoped localized strings: `sceneStrings(key, vars?)` resolves the key locale → English →
+ *   a `"$$scene.key$$"` placeholder, then interpolates any `{name}` placeholders from `vars`
+ *   (see js/scene-strings.js).
  * @property {(text: string, opts?: { rate?: number, pitch?: number, lang?: string }) => Promise<void>} speak
  *   Narrate text aloud in the active locale's voice (see js/speech.js).
  * @property {() => void} cancelSpeech  Stop any in-progress/queued narration.
  * @property {(count?: number) => { bg: string, ink: string, line: string, cat: string[] }} themeColors
  *   The live theme palette (see js/theme.js).
- * @property {(template: string, vars: Record<string, string | number>) => string} fmt
- *   Interpolate `{name}` placeholders in a scene string (see js/scene-strings.js).
  */
 
 /**

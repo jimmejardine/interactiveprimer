@@ -110,7 +110,7 @@ import just works:
 ```
 
 The builder receives a single `toolkit` object — `{ scene, manim, sceneStrings, speak,
-cancelSpeech, themeColors, fmt }` — so `registerManimScene` is the only `primer` import a
+cancelSpeech, themeColors }` — so `registerManimScene` is the only `primer` import a
 scene needs. The `scene` is already built on the stage (with the theme backdrop), so a scene
 just calls `scene.play(...)`. It can narrate aloud with the injected `speak(text)`, which uses
 the browser's built-in speech and resolves when the phrase finishes — so it can be awaited in

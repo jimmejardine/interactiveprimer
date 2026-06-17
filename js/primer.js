@@ -28,7 +28,7 @@ export { registerManimScene, getManimScene, registerChart, getChart } from "./sc
 export { registerCharts, registerChartSliders, computeRange } from "./charts.js";
 export { THEMES, getTheme, applyTheme, initTheme, themeColors } from "./theme.js";
 export { LOCALES, getLocale, applyLocale, t } from "./i18n.js";
-export { getSceneStrings, fmt } from "./scene-strings.js";
+export { getSceneStrings } from "./scene-strings.js";
 export { speak, cancelSpeech } from "./speech.js";
 export { parseConceptMeta, getConceptMeta } from "./concept-meta.js";
 export { BASE_LEVEL, maxLevel, formatLevel } from "./levels.js";

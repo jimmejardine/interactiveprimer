@@ -2,7 +2,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { pickInitialLocale, localeFromSearch, bcp47, lookup, fillVars, LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
-import { fmt } from "../js/scene-strings.js";
 
 test("localeFromSearch reads a supported ?lang param (case-insensitive)", () => {
   assert.equal(localeFromSearch("?lang=es"), "es");
@@ -51,10 +50,10 @@ test("lookup falls back to the key itself when missing everywhere", () => {
   assert.equal(lookup("es", "totally.unknown.key"), "totally.unknown.key");
 });
 
-test("fillVars / fmt interpolate {placeholders} and leave unknown ones intact", () => {
+test("fillVars interpolates {placeholders} and leaves unknown ones intact", () => {
   assert.equal(fillVars("Level {level}", { level: 2.5 }), "Level 2.5");
-  assert.equal(fmt("{a} + {b} = {sum}", { a: 3, b: 4, sum: 7 }), "3 + 4 = 7");
-  assert.equal(fmt("hi {name}", {}), "hi {name}");
+  assert.equal(fillVars("{a} + {b} = {sum}", { a: 3, b: 4, sum: 7 }), "3 + 4 = 7");
+  assert.equal(fillVars("hi {name}", {}), "hi {name}");
 });
 
 test("LOCALES includes English (default) and Spanish", () => {

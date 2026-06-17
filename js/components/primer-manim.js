@@ -18,7 +18,7 @@
 
 import { attachShared } from "./shared.js";
 import { getManimScene } from "../scenes.js";
-import { makeSceneStrings, fmt } from "../scene-strings.js";
+import { makeSceneStrings } from "../scene-strings.js";
 import { speak, cancelSpeech, pauseSpeech, resumeSpeech } from "../speech.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
@@ -153,7 +153,6 @@ export class PrimerManim extends HTMLElement {
         speak,
         cancelSpeech,
         themeColors,
-        fmt,
       });
       this.#state = "done";
       face(btn, "↻", "Replay");

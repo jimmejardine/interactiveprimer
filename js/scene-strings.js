@@ -11,13 +11,15 @@
  * The English canonical page carries the English strings; a translation overlay carries its
  * own. At runtime render.js KEEPS the English block (untagged) and appends the active locale's
  * block tagged `data-locale="<locale>"` — so both can coexist. A scene receives a scene-scoped
- * accessor (see {@link makeSceneStrings}, passed as the 3rd argument to the scene builder) that
- * resolves each key locale → English → a visible `$$scene.key$$` placeholder, so the English
- * block is the single source of the English words (no inline literal fallback needed).
+ * accessor (see {@link makeSceneStrings}, supplied in the scene toolkit) called as
+ * `sceneStrings(key, vars?)`: it resolves the key locale → English → a visible `$$scene.key$$`
+ * placeholder, then interpolates any `{name}` placeholders from `vars` — so the English block is
+ * the single source of the English words (no inline literal fallback needed).
  * @module
  */
 
 import { parseJsonc } from "./jsonc.js";
+import { fillVars } from "./i18n.js";
 
 /**
  * Parse the scene-strings block matched by `selector` into its keyed object. Returns {} when the
@@ -50,35 +52,27 @@ export function getSceneStrings(doc = document) {
 }
 
 /**
- * Build a scene-scoped strings accessor for `sceneName`. Reading a property resolves the key:
- *   1. the active locale block (`script.scene-strings[data-locale]`), then
- *   2. the English block (`script.scene-strings:not([data-locale])`), then
- *   3. a `"$$<scene>.<key>$$"` placeholder (logging an error) when neither defines it.
- * Both blocks are read once here; the returned Proxy just looks keys up.
+ * Build a scene-scoped strings accessor for `sceneName`. Call it as `sceneStrings(key, vars?)`:
+ *   1. the key resolves against the active locale block (`script.scene-strings[data-locale]`),
+ *      then the English block (`script.scene-strings:not([data-locale])`), then a
+ *      `"$$<scene>.<key>$$"` placeholder (logging an error) when neither defines it;
+ *   2. when `vars` is given, `{name}` placeholders in the resolved string are interpolated.
+ * Both blocks are read once here; the returned function just looks keys up + fills.
  * @param {string} sceneName Versioned scene name, e.g. "addNumberLine@1".
  * @param {Document} [doc]
- * @returns {Record<string, string>}
+ * @returns {(key: string, vars?: Record<string, string | number>) => string}
  */
 export function makeSceneStrings(sceneName, doc = document) {
   const locale = readBlock(doc, "script.scene-strings[data-locale]")[sceneName] ?? {};
   const english = readBlock(doc, "script.scene-strings:not([data-locale])")[sceneName] ?? {};
-  return new Proxy(/** @type {Record<string, string>} */ ({}), {
-    get(_target, key) {
-      if (typeof key !== "string") return undefined;
-      if (key in locale) return locale[key];
-      if (key in english) return english[key];
+  return (key, vars) => {
+    let template;
+    if (key in locale) template = locale[key];
+    else if (key in english) template = english[key];
+    else {
       console.error(`[primer] missing scene string "${sceneName}.${key}"`);
-      return `$$${sceneName}.${key}$$`;
-    },
-  });
-}
-
-/**
- * Interpolate `{name}` placeholders in a template from `vars` (leaves unknown ones intact).
- * @param {string} template
- * @param {Record<string, string | number>} vars
- * @returns {string}
- */
-export function fmt(template, vars) {
-  return String(template).replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m));
+      template = `$$${sceneName}.${key}$$`;
+    }
+    return vars ? fillVars(template, vars) : template;
+  };
 }

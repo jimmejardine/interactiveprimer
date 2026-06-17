@@ -154,8 +154,9 @@ what you need — so the only `primer` import is `registerManimScene`:
 
 - The `toolkit` carries everything a scene needs: `scene` (the manim Scene, already built on the
   stage with the theme backdrop — just `scene.play(...)`, no `new Scene`), `manim`, `sceneStrings`
-  (localized narration words; see Localization), `speak`, `cancelSpeech`, `themeColors`, and `fmt`.
-  There is nothing else to import.
+  (call `sceneStrings(key, vars?)` for localized narration words, interpolating any `{name}`
+  placeholders; see Localization), `speak`, `cancelSpeech`, and `themeColors`. There is nothing
+  else to import.
 - `speak(text, { rate, pitch })` returns a Promise that resolves when narration finishes
   (silent no-op if the browser lacks speech). Narration is spoken in the **active locale's**
   voice automatically — authors don't deal with `lang`/`bcp47`; just pass the (localized) text.
