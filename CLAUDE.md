@@ -156,20 +156,21 @@ by name from a `<primer-manim>`:
   voice automatically — authors don't deal with `lang`/`bcp47`; just pass the (localized) text.
   `cancelSpeech()` stops it; the manim component already cancels speech on replay.
 - **NEVER pick your own colours — always use the theme.** A scene must take every colour from
-  `const v = vizColors()` (imported from `primer`). Do **not** use manim's named colour
+  `const colors = themeColors()` (imported from `primer`). Do **not** use manim's named colour
   constants (`BLUE`, `RED`, `WHITE`, …), do **not** hardcode hex/`hsl`/`rgb`, and do **not**
-  write an `|| BLUE`-style fallback (`vizColors()` always returns valid colours). This is what
+  write an `|| BLUE`-style fallback (`themeColors()` always returns valid colours). This is what
   keeps every diagram on-theme and mutually consistent, and re-themes them on a theme change.
-  `vizColors()` returns `{ bg, ink, line, cat }`: `bg` backdrop, `ink` for labels/text, `line`
+  `themeColors()` returns `{ bg, ink, line, cat }`: `bg` backdrop, `ink` for labels/text, `line`
   for axes/strokes/number lines, and `cat` — an **ordered categorical palette** (a generated
-  golden-angle sequence, so early entries are maximally distinct). Take `v.cat[0]`, `v.cat[1]`,
-  … in order so all diagrams share the same colours. A replay after a theme change re-reads them.
+  golden-angle sequence, so early entries are maximally distinct). Take `colors.cat[0]`,
+  `colors.cat[1]`, … in order so all diagrams share the same colours. A replay after a theme
+  change re-reads them.
 - **No animation item should be colourless.** Give every mobject an explicit theme colour
-  (`v.cat[i]`, `v.line`, or `v.ink`). manim's defaults are white and vanish on light themes
-  — e.g. a `NumberLine` with no `color` is invisible on the light backdrop. Watch sub-parts:
-  a `NumberLine`'s `color` is the **stroke** (line + ticks) only — its number labels are
-  filled text and must be coloured separately, e.g.
-  `for (const l of line.getNumberLabels?.() ?? []) { l.setColor?.(v.ink); l.setFill?.(v.ink, 1); }`.
+  (`colors.cat[i]`, `colors.line`, or `colors.ink`). manim's defaults are white and vanish on
+  light themes — e.g. a `NumberLine` with no `color` is invisible on the light backdrop. Watch
+  sub-parts: a `NumberLine`'s `color` is the **stroke** (line + ticks) only — its number labels
+  are filled text and must be coloured separately, e.g.
+  `for (const l of line.getNumberLabels?.() ?? []) { l.setColor?.(colors.ink); l.setFill?.(colors.ink, 1); }`.
 - manim-web is young (v0.3.x): keep scenes simple, and the component shows a friendly
   message if a scene throws, so prefer small, defensive scenes.
 
@@ -200,9 +201,9 @@ one identical domain + range — no board/axes/plot boilerplate. The markup is j
       // f is (x, sliders) => y, or an ARRAY of them (one curve each). Slider values arrive as `s`.
       f: [ (x) => Math.sin(x * DEG),
            (x, s) => s.A * Math.sin((s.f * x + s.phi) * DEG) ],
-      // line: one style object (all curves) | array (per curve) | (v, i) => style. The FUNCTION
-      // form is the theme-safe way to colour curves — it gets fresh vizColors + the curve index.
-      line: (v, i) => i === 0 ? { strokeColor: v.line, strokeOpacity: 0.35 } : { strokeColor: v.cat[0] },
+      // line: one style object (all curves) | array (per curve) | (colors, i) => style. The FUNCTION
+      // form is the theme-safe way to colour curves — it gets fresh themeColors + the curve index.
+      line: (colors, i) => i === 0 ? { strokeColor: colors.line, strokeOpacity: 0.35 } : { strokeColor: colors.cat[0] },
     }],
     { id: "sinLab", xmin: -360, xmax: 360, xticks: 180, yticks: 1, ymin: -3.2, ymax: 3.2 },
     // sliders: inline defs (single chart only). They render inside this chart; values feed every f.
@@ -258,17 +259,17 @@ and after a theme change. Drive it from a `<primer-chart>` carrying an inline `p
 </primer-chart>
 
 <script type="module">
-  import { registerChart, vizColors } from "primer";
+  import { registerChart, themeColors } from "primer";
   registerChart("sinLab", (host, JXG) => {
-    const v = vizColors();
+    const colors = themeColors();
     const board = JXG.JSXGraph.initBoard(host, { boundingbox: [-6.6, 3, 6.6, -3], axis: false });
-    board.create("axis", [[0, 0], [1, 0]], { strokeColor: v.line });          // x-axis
-    board.create("axis", [[0, 0], [0, 1]], { strokeColor: v.line });          // y-axis
+    board.create("axis", [[0, 0], [1, 0]], { strokeColor: colors.line });          // x-axis
+    board.create("axis", [[0, 0], [0, 1]], { strokeColor: colors.line });          // y-axis
     const cur = { A: 1 };                                                      // live values
     // functiongraph re-evaluates its function on board.update(), so close over `cur` and just
     // mutate it — no need to recreate the curve.
     board.create("functiongraph", [(x) => cur.A * Math.sin(x), -6.3, 6.3],
-      { strokeColor: v.cat[0], strokeWidth: 4, highlight: false });
+      { strokeColor: colors.cat[0], strokeWidth: 4, highlight: false });
     return (p) => {                                   // p = current control values, e.g. { A: 2 }
       if (Number.isFinite(p.A)) cur.A = p.A;
       board.update();
@@ -277,20 +278,20 @@ and after a theme change. Drive it from a `<primer-chart>` carrying an inline `p
 </script>
 ```
 
-- Same colour rule as scenes: **every** colour from `vizColors()` (axes `v.line`, curves
-  `v.cat[i]`, any text labels `v.ink` — JSXGraph colours text via `strokeColor`), never a
+- Same colour rule as scenes: **every** colour from `themeColors()` (axes `colors.line`, curves
+  `colors.cat[i]`, any text labels `colors.ink` — JSXGraph colours text via `strokeColor`), never a
   hardcoded value. The component disables pan/zoom/navigation chrome and re-fits on resize by
   default; a builder's own `initBoard` options override that.
 - A **static** chart (no `params` config / a builder whose `update` ignores `p`) draws once —
   this is what quiz **chart options** use. The component rebuilds the board on a theme change, so
-  read `vizColors()` at the top of the builder (not cached outside it).
+  read `themeColors()` at the top of the builder (not cached outside it).
 - The board fills a 7:4 stage. Give `functiongraph` an explicit `[fn, xmin, xmax]` range so it
   only plots the visible span.
 
 ## Helpers re-exported from `primer` (for inline scripts)
 
 `registerManimScene`, `getManimScene`, `registerChart`, `getChart`, `registerCharts`, `registerChartSliders`,
-`computeRange`, `speak`, `cancelSpeech`, `vizColors`, `getConceptMeta`,
+`computeRange`, `speak`, `cancelSpeech`, `themeColors`, `getConceptMeta`,
 `parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`,
 `getTheme`, `applyTheme`, `initTheme`), and the graph helpers (`resolveLevels`,
 `validateGraph`, …). Pinned KaTeX/manim-web/JSXGraph versions live in `js/boot.js`.
@@ -301,7 +302,7 @@ You don't author any of this per page. `boot.js` applies the saved theme (light 
 fun) with no flash and mounts a top-right hamburger menu (the theme switcher). Colours come
 from `--primer-*` tokens defined per theme in `css/primer.css`, so headings, cards, the
 explorer and badges re-theme themselves; the only theme-coupled JS is animations (use
-`vizColors()` above). Levels start at 0; a real number that propagates via `max`.
+`themeColors()` above). Levels start at 0; a real number that propagates via `max`.
 
 ## Localization (automatic)
 

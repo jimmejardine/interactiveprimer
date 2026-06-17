@@ -14,14 +14,14 @@
  * Slider values are passed as the 2nd argument to every `f(x, sliders)` lambda.
  *
  * The board/axes/curve STYLING here is lifted from the original per-page helper (the trig page) so
- * migrated charts look identical. Every colour comes from `vizColors()` at build time (re-read on a
+ * migrated charts look identical. Every colour comes from `themeColors()` at build time (re-read on a
  * theme rebuild), never hardcoded. The low-level `registerChart` path (js/scenes.js) still works for
  * one-off boards.
  * @module
  */
 
 import { registerChart } from "./scenes.js";
-import { vizColors } from "./theme.js";
+import { themeColors } from "./theme.js";
 
 /**
  * @typedef {object} SliderDef
@@ -35,7 +35,7 @@ import { vizColors } from "./theme.js";
  */
 
 /**
- * @typedef {object} VizColors
+ * @typedef {object} ThemeColors
  * @property {string} bg
  * @property {string} ink
  * @property {string} line
@@ -44,9 +44,9 @@ import { vizColors } from "./theme.js";
 
 /**
  * A curve's stroke style: one JSXGraph options object applied to every curve, an array indexed per
- * curve, or a function `(v, i) => options`. The function form is the THEME-SAFE way to colour
- * curves — it receives fresh `vizColors` and the curve index, so colours follow the theme.
- * @typedef {Record<string, any> | Record<string, any>[] | ((v: VizColors, i: number) => Record<string, any>)} LineStyle
+ * curve, or a function `(colors, i) => options`. The function form is the THEME-SAFE way to colour
+ * curves — it receives fresh `themeColors` and the curve index, so colours follow the theme.
+ * @typedef {Record<string, any> | Record<string, any>[] | ((colors: ThemeColors, i: number) => Record<string, any>)} LineStyle
  */
 
 /**
@@ -221,18 +221,18 @@ export function computeRange(fns, { xmin = -360, xmax = 360, pad = 1.2, floor = 
 
 /**
  * Resolve a {@link LineStyle} for curve index `i` against live theme colours. Always yields a
- * `strokeColor` (defaulting to `v.cat[i]`) so a curve is never the invisible JSXGraph default.
+ * `strokeColor` (defaulting to `colors.cat[i]`) so a curve is never the invisible JSXGraph default.
  * @param {LineStyle | undefined} line
- * @param {VizColors} v
+ * @param {ThemeColors} colors
  * @param {number} i
  * @returns {Record<string, any>}
  */
-export function resolveLineStyle(line, v, i) {
+export function resolveLineStyle(line, colors, i) {
   let style;
-  if (typeof line === "function") style = line(v, i) ?? {};
+  if (typeof line === "function") style = line(colors, i) ?? {};
   else if (Array.isArray(line)) style = line[i] ?? {};
   else style = line ?? {};
-  return { strokeColor: v.cat[i], ...style };
+  return { strokeColor: colors.cat[i], ...style };
 }
 
 /* ------------------------------------------------------------------ */
@@ -245,11 +245,11 @@ export function resolveLineStyle(line, v, i) {
  * @param {HTMLElement} host
  * @param {Record<string, any>} JXG
  * @param {{ xmin: number, xmax: number, ymin: number, ymax: number, xticks: number|null, yticks: number|null, xName: string, yName: string }} opts
- * @returns {{ board: any, v: VizColors, domain: [number, number] }}
+ * @returns {{ board: any, colors: ThemeColors, domain: [number, number] }}
  */
 function makeChartBoard(host, JXG, opts) {
   const { xmin, xmax, ymin, ymax, xticks, yticks, xName, yName } = opts;
-  const v = vizColors();
+  const colors = themeColors();
   // A small horizontal margin (6% of the span each side) so the curve doesn't touch the frame —
   // proportional, so it works at any scale (≈40 units on a ±360° window, ≈0.12 on a ±1 window).
   const xPad = (xmax - xmin) * 0.06;
@@ -266,7 +266,7 @@ function makeChartBoard(host, JXG, opts) {
   // left (set per axis via the `label` override).
   /** @param {number|null} ticksDistance @param {number} minorTicks @param {Record<string, any>} label */
   const axisOpts = (ticksDistance, minorTicks, label) => ({
-    strokeColor: v.line,
+    strokeColor: colors.line,
     strokeOpacity: 0.45,
     strokeWidth: 1,
     highlight: false,
@@ -275,17 +275,17 @@ function makeChartBoard(host, JXG, opts) {
       minorTicks,
       minorHeight: 4,
       drawZero: false,
-      strokeColor: v.line,
+      strokeColor: colors.line,
       strokeOpacity: 0.12,
       strokeWidth: 1,
-      label: { strokeColor: v.ink, strokeOpacity: 1, fontSize: 13, anchorX: "middle", offset: [0, -2], ...label },
+      label: { strokeColor: colors.ink, strokeOpacity: 1, fontSize: 13, anchorX: "middle", offset: [0, -2], ...label },
     },
   });
   // Name the axis itself (distinct from the tick numbers): "x" tucked inside the right end, "y" just
   // right of the top. `position: "rt"` is JSXGraph's "far positive end" for an axis.
   /** @param {string} name @param {Record<string, any>} label */
   const nameLabel = (name, label) =>
-    name ? { name, withLabel: true, label: { strokeColor: v.ink, strokeOpacity: 1, fontSize: 14, ...label } } : {};
+    name ? { name, withLabel: true, label: { strokeColor: colors.ink, strokeOpacity: 1, fontSize: 14, ...label } } : {};
   board.create("axis", [[0, 0], [1, 0]], {
     ...axisOpts(xticks, 1, { anchorX: "middle", anchorY: "top", offset: [0, -8] }),
     ...nameLabel(xName, { position: "rt", anchorX: "right", offset: [8, 12] }),
@@ -294,7 +294,7 @@ function makeChartBoard(host, JXG, opts) {
     ...axisOpts(yticks, 0, { anchorX: "right", anchorY: "middle", offset: [-8, 0] }),
     ...nameLabel(yName, { position: "rt", anchorX: "left", offset: [8, 6] }),
   });
-  return { board, v, domain: [xmin, xmax] };
+  return { board, colors, domain: [xmin, xmax] };
 }
 
 /**
@@ -394,7 +394,7 @@ export function registerCharts(charts, chartOptions = {}, sliders) {
     if (groupName) broker.linkChart(c.name, groupName);
     chartMeta.set(c.name, { title });
     registerChart(c.name, (host, JXG) => {
-      const { board, v, domain } = makeChartBoard(host, JXG, {
+      const { board, colors, domain } = makeChartBoard(host, JXG, {
         xmin,
         xmax,
         ymin: /** @type {number} */ (lo),
@@ -408,7 +408,7 @@ export function registerCharts(charts, chartOptions = {}, sliders) {
         const wrapped = groupName
           ? /** @param {number} x */ (x) => fn(x, broker.getGroup(/** @type {string} */ (groupName))?.values ?? {})
           : /** @param {number} x */ (x) => fn(x, {});
-        plotFn(board, domain, wrapped, resolveLineStyle(line, v, i));
+        plotFn(board, domain, wrapped, resolveLineStyle(line, colors, i));
       });
       return () => board.update();
     });

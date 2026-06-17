@@ -20,7 +20,7 @@ import { attachShared } from "./shared.js";
 import { getManimScene } from "../scenes.js";
 import { makeSceneStrings } from "../scene-strings.js";
 import { cancelSpeech, pauseSpeech, resumeSpeech } from "../speech.js";
-import { vizColors } from "../theme.js";
+import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
 
 export class PrimerManim extends HTMLElement {
@@ -40,7 +40,7 @@ export class PrimerManim extends HTMLElement {
     this.#onTheme = () => {
       if (!this.#scene) return;
       try {
-        this.#scene.renderer.backgroundColor = vizColors().bg;
+        this.#scene.renderer.backgroundColor = themeColors().bg;
         this.#scene.render();
       } catch {
         /* best-effort */
@@ -160,7 +160,7 @@ export class PrimerManim extends HTMLElement {
    */
   #wrapManim(manim) {
     const self = this;
-    const bg = vizColors().bg; // theme backdrop, passed into every Scene this run
+    const bg = themeColors().bg; // theme backdrop, passed into every Scene this run
     const BaseScene = manim.Scene;
     class CapturingScene extends BaseScene {
       /** @param {...any} args */

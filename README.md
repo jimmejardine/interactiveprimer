@@ -77,7 +77,7 @@ time — **there is no build step**. The toolchain:
   is applied with no flash by [`js/boot.js`](js/boot.js), managed by
   [`js/theme.js`](js/theme.js), and switched from a top-right hamburger menu
   ([`js/components/primer-menu.js`](js/components/primer-menu.js)). Animations read the
-  theme's palette via `vizColors()`.
+  theme's palette via `themeColors()`.
 - **Typed JavaScript + JSDoc** (no `.ts` authoring). Code runs raw in the browser and in
   Node, yet is fully type-checked by `tsc` against the libraries' own type definitions.
 - The knowledge-tree logic — prerequisite resolution and downstream **level propagation** —

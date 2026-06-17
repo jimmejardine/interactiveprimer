@@ -23,7 +23,7 @@
 
 import { attachShared } from "./shared.js";
 import { getChart } from "../scenes.js";
-import { vizColors } from "../theme.js";
+import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
 import { SLIDER_PANEL_CSS, mountSliderPanel } from "./slider-panel.js";
 import { groupForChart, getSliderGroup, subscribeSliders, setSliderValues, getChartMeta } from "../charts.js";
@@ -324,10 +324,10 @@ export class PrimerChart extends HTMLElement {
     self.#jsx = JSXGraph;
     // Sensible defaults for a static teaching graph: no copyright/nav chrome, no pan/zoom, re-fit on
     // resize. JSXGraph's default grid is a solid mid-grey that fights the curve; tint it from the
-    // theme (axis colour) at a low opacity, and drop the dotted minor grid. Read vizColors() here
+    // theme (axis colour) at a low opacity, and drop the dotted minor grid. Read themeColors() here
     // (not cached) so a theme rebuild — which re-enters #wrapJXG — re-tints it. A builder's own
     // initBoard options override these (e.g. `grid: false`).
-    const v = vizColors();
+    const colors = themeColors();
     const defaults = {
       showCopyright: false,
       showNavigation: false,
@@ -336,7 +336,7 @@ export class PrimerChart extends HTMLElement {
       zoom: { enabled: false },
       resize: { enabled: true, throttle: 200 },
       grid: {
-        major: { strokeColor: v.line, strokeOpacity: 0.05 },
+        major: { strokeColor: colors.line, strokeOpacity: 0.05 },
         minor: { strokeOpacity: 0 },
         minorElements: 0,
       },

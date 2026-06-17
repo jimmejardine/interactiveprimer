@@ -119,7 +119,7 @@ export function catColor(i, params) {
  * @param {number} [count] How many categorical colours to generate (default 12).
  * @returns {{ bg: string, ink: string, line: string, cat: string[] }}
  */
-export function vizColors(count = 12) {
+export function themeColors(count = 12) {
   const s = getComputedStyle(document.documentElement);
   /** @param {string} name @param {string} fallback */
   const get = (name, fallback) => s.getPropertyValue(name).trim() || fallback;

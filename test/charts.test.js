@@ -47,28 +47,28 @@ test("computeRange: a throwing function can't break sampling", () => {
 
 /* ---------------------------- resolveLineStyle --------------------------- */
 
-const V = { bg: "#bg", ink: "#ink", line: "#line", cat: ["#c0", "#c1", "#c2"] };
+const COLORS = { bg: "#bg", ink: "#ink", line: "#line", cat: ["#c0", "#c1", "#c2"] };
 
 test("resolveLineStyle: defaults strokeColor to the categorical palette by index", () => {
-  assert.deepEqual(resolveLineStyle(undefined, V, 0), { strokeColor: "#c0" });
-  assert.deepEqual(resolveLineStyle(undefined, V, 2), { strokeColor: "#c2" });
+  assert.deepEqual(resolveLineStyle(undefined, COLORS, 0), { strokeColor: "#c0" });
+  assert.deepEqual(resolveLineStyle(undefined, COLORS, 2), { strokeColor: "#c2" });
 });
 
 test("resolveLineStyle: an object applies to every curve and can override the colour", () => {
-  assert.deepEqual(resolveLineStyle({ strokeWidth: 3 }, V, 1), { strokeColor: "#c1", strokeWidth: 3 });
-  assert.deepEqual(resolveLineStyle({ strokeColor: "#z" }, V, 0), { strokeColor: "#z" });
+  assert.deepEqual(resolveLineStyle({ strokeWidth: 3 }, COLORS, 1), { strokeColor: "#c1", strokeWidth: 3 });
+  assert.deepEqual(resolveLineStyle({ strokeColor: "#z" }, COLORS, 0), { strokeColor: "#z" });
 });
 
 test("resolveLineStyle: an array indexes per curve", () => {
   const line = [{ strokeColor: "#z" }, {}];
-  assert.deepEqual(resolveLineStyle(line, V, 0), { strokeColor: "#z" });
-  assert.deepEqual(resolveLineStyle(line, V, 1), { strokeColor: "#c1" }); // {} → default cat[1]
+  assert.deepEqual(resolveLineStyle(line, COLORS, 0), { strokeColor: "#z" });
+  assert.deepEqual(resolveLineStyle(line, COLORS, 1), { strokeColor: "#c1" }); // {} → default cat[1]
 });
 
 test("resolveLineStyle: a function receives live colours and the index", () => {
-  /** @param {{ line: string }} v @param {number} i */
-  const line = (v, i) => ({ strokeColor: v.line, dash: i });
-  assert.deepEqual(resolveLineStyle(line, V, 2), { strokeColor: "#line", dash: 2 });
+  /** @param {{ line: string }} colors @param {number} i */
+  const line = (colors, i) => ({ strokeColor: colors.line, dash: i });
+  assert.deepEqual(resolveLineStyle(line, COLORS, 2), { strokeColor: "#line", dash: 2 });
 });
 
 /* -------------------------------- broker -------------------------------- */
