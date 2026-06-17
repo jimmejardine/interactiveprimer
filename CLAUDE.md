@@ -138,9 +138,9 @@ by name from a `<primer-manim>`:
 
 ```html
 <script type="module">
-  import { registerScene, speak } from "primer";
+  import { registerManimScene, speak } from "primer";
 
-  registerScene("addNumberLine", async (host, manim) => {
+  registerManimScene("addNumberLine", async (host, manim) => {
     const { Scene, Circle, Create } = manim;       // `manim` = manim-web namespace
     const scene = new Scene(host);                  // `host` = element to draw into
     await Promise.all([                             // animate and narrate in lockstep
@@ -151,9 +151,10 @@ by name from a `<primer-manim>`:
 </script>
 ```
 
-- `speak(text, { rate, pitch, lang })` returns a Promise that resolves when narration
-  finishes (silent no-op if the browser lacks speech). `cancelSpeech()` stops it; the
-  manim component already cancels speech on replay.
+- `speak(text, { rate, pitch })` returns a Promise that resolves when narration finishes
+  (silent no-op if the browser lacks speech). Narration is spoken in the **active locale's**
+  voice automatically — authors don't deal with `lang`/`bcp47`; just pass the (localized) text.
+  `cancelSpeech()` stops it; the manim component already cancels speech on replay.
 - **NEVER pick your own colours — always use the theme.** A scene must take every colour from
   `const v = vizColors()` (imported from `primer`). Do **not** use manim's named colour
   constants (`BLUE`, `RED`, `WHITE`, …), do **not** hardcode hex/`hsl`/`rgb`, and do **not**
@@ -288,7 +289,7 @@ and after a theme change. Drive it from a `<primer-chart>` carrying an inline `p
 
 ## Helpers re-exported from `primer` (for inline scripts)
 
-`registerScene`, `getScene`, `registerChart`, `getChart`, `registerCharts`, `registerChartSliders`,
+`registerManimScene`, `getManimScene`, `registerChart`, `getChart`, `registerCharts`, `registerChartSliders`,
 `computeRange`, `speak`, `cancelSpeech`, `vizColors`, `getConceptMeta`,
 `parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`,
 `getTheme`, `applyTheme`, `initTheme`), and the graph helpers (`resolveLevels`,

@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * Registry of manim-web scenes, keyed by name. Concept pages register a scene
+ * Registry of manim-web scenes, keyed by name. Concept pages register a manim scene
  * (a function that builds/plays an animation) and reference it from a
  * <primer-manim scene="..."> element.
  *
@@ -12,7 +12,7 @@
  */
 
 /**
- * @callback SceneBuilder
+ * @callback ManimSceneBuilder
  * @param {HTMLElement} host       Element to mount the animation into.
  * @param {Record<string, any>} manim  The imported manim-web module namespace.
  * @param {Record<string, string>} sceneStrings  Scene-scoped localized strings: reading a key
@@ -20,24 +20,24 @@
  * @returns {void | Promise<void>}
  */
 
-/** @type {Map<string, SceneBuilder>} */
+/** @type {Map<string, ManimSceneBuilder>} */
 const scenes = new Map();
 
 /**
- * Register a named scene. Re-registering a name overwrites it.
+ * Register a named manim scene. Re-registering a name overwrites it.
  * @param {string} name
- * @param {SceneBuilder} builder
+ * @param {ManimSceneBuilder} builder
  */
-export function registerScene(name, builder) {
+export function registerManimScene(name, builder) {
   scenes.set(name, builder);
 }
 
 /**
- * Look up a scene by name (or undefined if not registered).
+ * Look up a manim scene by name (or undefined if not registered).
  * @param {string} name
- * @returns {SceneBuilder | undefined}
+ * @returns {ManimSceneBuilder | undefined}
  */
-export function getScene(name) {
+export function getManimScene(name) {
   return scenes.get(name);
 }
 

@@ -24,10 +24,10 @@ import "./components/primer-pathway.js";
 import "./components/primer-menu.js";
 
 // Re-exports for page scripts.
-export { registerScene, getScene, registerChart, getChart } from "./scenes.js";
+export { registerManimScene, getManimScene, registerChart, getChart } from "./scenes.js";
 export { registerCharts, registerChartSliders, computeRange } from "./charts.js";
 export { THEMES, getTheme, applyTheme, initTheme, vizColors } from "./theme.js";
-export { LOCALES, getLocale, applyLocale, bcp47, t } from "./i18n.js";
+export { LOCALES, getLocale, applyLocale, t } from "./i18n.js";
 export { getSceneStrings, fmt } from "./scene-strings.js";
 export { speak, cancelSpeech } from "./speech.js";
 export { parseConceptMeta, getConceptMeta } from "./concept-meta.js";

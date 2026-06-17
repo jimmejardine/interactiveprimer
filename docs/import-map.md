@@ -104,8 +104,8 @@ import just works:
 </primer-card>
 
 <script type="module">
-  import { registerScene } from "primer";
-  registerScene("addNumberLine", async (host, manim) => { /* … */ });
+  import { registerManimScene } from "primer";
+  registerManimScene("addNumberLine", async (host, manim) => { /* … */ });
 </script>
 ```
 
@@ -116,8 +116,8 @@ be awaited in lockstep with `scene.play(...)`. Speech only starts on the Play cl
 cancels any in-progress narration.
 
 ```js
-import { registerScene, speak } from "primer";
-registerScene("countOne", async (host, manim) => {
+import { registerManimScene, speak } from "primer";
+registerManimScene("countOne", async (host, manim) => {
   const scene = new manim.Scene(host);
   await Promise.all([scene.play(/* … */), speak("one")]);
 });

@@ -103,10 +103,10 @@ function referencedScenes(html) {
   return out;
 }
 
-/** Scene names registered by `registerScene("…")`. @param {string} html @returns {Set<string>} */
+/** Scene names registered by `registerManimScene("…")`. @param {string} html @returns {Set<string>} */
 function registeredScenes(html) {
   const out = new Set();
-  const re = /registerScene\(\s*["']([^"']+)["']/g;
+  const re = /registerManimScene\(\s*["']([^"']+)["']/g;
   let m;
   while ((m = re.exec(html)) !== null) out.add(m[1]);
   return out;

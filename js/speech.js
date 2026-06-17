@@ -1,23 +1,30 @@
 // @ts-check
 /**
- * Spoken narration via the browser's Web Speech API — no dependencies, no audio
- * files. Scenes use it to narrate an animation:
+ * Spoken narration via the browser's Web Speech API — no audio files. Scenes use it to
+ * narrate an animation:
  *
- *   import { registerScene, speak } from "primer";
+ *   import { registerManimScene, speak } from "primer";
  *   await Promise.all([scene.play(...), speak("one")]);
  *
- * `speak` resolves when the utterance finishes, so it can be awaited in lockstep
- * with `scene.play(...)`. On a browser without speech support it resolves
- * immediately, so animations still run (just silently). Speech may only start from
- * a user gesture (the Play button) per browser autoplay policy.
+ * `speak` resolves when the utterance finishes, so it can be awaited in lockstep with
+ * `scene.play(...)`. On a browser without speech support it resolves immediately, so animations
+ * still run (just silently). Speech may only start from a user gesture (the Play button) per
+ * browser autoplay policy.
+ *
+ * Localization is automatic: with no explicit `lang`, narration uses the ACTIVE locale's voice
+ * (via `bcp47()`), so a scene author just writes `speak(text)` and it is pronounced in the
+ * current language. (This module therefore depends on js/i18n.js.)
  * @module
  */
+
+import { bcp47 } from "./i18n.js";
 
 /**
  * @typedef {object} SpeakOptions
  * @property {number} [rate]   Speaking rate (0.1–10, default 1).
  * @property {number} [pitch]  Voice pitch (0–2, default 1).
- * @property {string} [lang]   BCP-47 language tag, e.g. "en-US".
+ * @property {string} [lang]   BCP-47 language tag, e.g. "en-US". Advanced override — defaults
+ *   to the active locale's tag, so scene authors normally omit it.
  */
 
 /** @returns {boolean} Whether the Web Speech API is usable here. */
@@ -64,9 +71,10 @@ function pickVoice(lang) {
 
 /**
  * Speak `text` aloud, resolving when it finishes. Resolves immediately (a silent no-op)
- * where speech isn't supported. When `opts.lang` is given, an installed voice for that
- * language is selected (see {@link pickVoice}) so the words are pronounced in that language,
- * not merely read by the default voice.
+ * where speech isn't supported. The language defaults to the ACTIVE locale's BCP-47 tag
+ * (`bcp47()`) — pass `opts.lang` only to override it. An installed voice for that language is
+ * selected (see {@link pickVoice}) so the words are pronounced in that language, not merely
+ * read by the default voice.
  * @param {string} text
  * @param {SpeakOptions} [opts]
  * @returns {Promise<void>}
@@ -78,11 +86,11 @@ export function speak(text, opts = {}) {
     const utterance = new SpeechSynthesisUtterance(text);
     if (opts.rate !== undefined) utterance.rate = opts.rate;
     if (opts.pitch !== undefined) utterance.pitch = opts.pitch;
-    if (opts.lang !== undefined) {
-      utterance.lang = opts.lang;
-      const voice = pickVoice(opts.lang);
-      if (voice) utterance.voice = voice;
-    }
+    // Default to the active locale's voice so scene authors don't deal with lang/bcp47.
+    const lang = opts.lang ?? bcp47();
+    utterance.lang = lang;
+    const voice = pickVoice(lang);
+    if (voice) utterance.voice = voice;
 
     let done = false;
     const finish = () => {

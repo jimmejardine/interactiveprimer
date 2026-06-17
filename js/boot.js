@@ -15,7 +15,7 @@
  * sits and injects the import map synchronously — before the parser reaches the
  * concept-meta block, the cards, or any inline scene `<script type="module">`. Being
  * first, the import map is always present before any bare-specifier module (e.g. a
- * scene's `import { registerScene } from "primer"`) resolves.
+ * scene's `import { registerManimScene } from "primer"`) resolves.
  *
  * The pinned CDN versions live here in ONE place. Self-hosting later is a drop-in:
  * point these URLs at /vendor/ and nothing else changes.

@@ -17,7 +17,7 @@
  */
 
 import { attachShared } from "./shared.js";
-import { getScene } from "../scenes.js";
+import { getManimScene } from "../scenes.js";
 import { makeSceneStrings } from "../scene-strings.js";
 import { cancelSpeech, pauseSpeech, resumeSpeech } from "../speech.js";
 import { vizColors } from "../theme.js";
@@ -123,7 +123,7 @@ export class PrimerManim extends HTMLElement {
   async #start(root, btn) {
     const stage = /** @type {HTMLElement} */ (root.querySelector(".stage"));
     const name = this.getAttribute("scene") ?? "";
-    const builder = getScene(name);
+    const builder = getManimScene(name);
     if (!builder) {
       stage.innerHTML = `<span class="meta">${t("manim.noScene", { name })}</span>`;
       return;
