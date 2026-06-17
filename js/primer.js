@@ -17,6 +17,7 @@ import "./components/primer-card.js";
 import "./components/primer-math.js";
 import "./components/primer-manim.js";
 import "./components/primer-chart.js";
+import "./components/primer-chart-sliders.js";
 import "./components/primer-video.js";
 import "./components/primer-quiz.js";
 import "./components/primer-pathway.js";
@@ -24,6 +25,7 @@ import "./components/primer-menu.js";
 
 // Re-exports for page scripts.
 export { registerScene, getScene, registerChart, getChart } from "./scenes.js";
+export { registerCharts, registerChartSliders, computeRange } from "./charts.js";
 export { THEMES, getTheme, applyTheme, initTheme, vizColors } from "./theme.js";
 export { LOCALES, getLocale, applyLocale, bcp47, t } from "./i18n.js";
 export { getSceneStrings, fmt } from "./scene-strings.js";

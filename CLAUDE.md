@@ -175,12 +175,79 @@ by name from a `<primer-manim>`:
 ## Charts (JSXGraph plots)
 
 Charts are drawn with **JSXGraph** (an SVG plotting/geometry library) — separate from the manim
-animations behind `<primer-manim>`. A **chart builder** is registered with
-`registerChart(name, builder)` and referenced by a `<primer-chart scene="name">`. The builder
-receives the host element and the `JXG` namespace, sets up a **board** (via `JXG.JSXGraph.initBoard`)
-**once**, and returns an `update(params)` the component calls — initially, on every control
-change, and after a theme change. Because JSXGraph is SVG there's no WebGL context (and no
-context cap), so charts are cheap and you can use as many as you like.
+animations behind `<primer-manim>`. There are **two** ways to author them: the high-level
+`registerCharts` helper (use this by default), or the low-level `registerChart` builder (for
+full control / one-off boards). Both render into a `<primer-chart scene="name">`. Because JSXGraph
+is SVG there's no WebGL context (and no context cap), so charts are cheap and you can use as many as
+you like.
+
+### Authoring charts the easy way: `registerCharts`
+
+`registerCharts(charts, chartOptions, sliders?)` registers a whole **family** of charts that share
+one identical domain + range — no board/axes/plot boilerplate. The markup is just an empty
+`<primer-chart scene="name"></primer-chart>`.
+
+```html
+<primer-chart scene="sinLab"></primer-chart>
+
+<script type="module">
+  import { registerCharts } from "primer";
+  const DEG = Math.PI / 180;
+  registerCharts(
+    [{
+      name: "sinLab",
+      // f is (x, sliders) => y, or an ARRAY of them (one curve each). Slider values arrive as `s`.
+      f: [ (x) => Math.sin(x * DEG),
+           (x, s) => s.A * Math.sin((s.f * x + s.phi) * DEG) ],
+      // line: one style object (all curves) | array (per curve) | (v, i) => style. The FUNCTION
+      // form is the theme-safe way to colour curves — it gets fresh vizColors + the curve index.
+      line: (v, i) => i === 0 ? { strokeColor: v.line, strokeOpacity: 0.35 } : { strokeColor: v.cat[0] },
+    }],
+    { id: "sinLab", xmin: -360, xmax: 360, xticks: 180, yticks: 1, ymin: -3.2, ymax: 3.2 },
+    // sliders: inline defs (single chart only). They render inside this chart; values feed every f.
+    [ { name: "A", label: "Amplitude (A)", min: 0, max: 3, step: 0.1, value: 1, anchors: [0,1,2,3] },
+      { name: "f", label: "Frequency (f)", min: 0, max: 4, step: 0.1, value: 1 },
+      { name: "phi", label: "Phase (φ°)", min: -360, max: 360, step: 15, value: 0 } ],
+  );
+</script>
+```
+
+- **`chartOptions`** (all optional): `{ id, title, xmin=-1, xmax=1, ymin=null, ymax=null,
+  xticks=null, yticks=null, xaxisname="x", yaxisname="y" }`. The whole series shares one domain +
+  range. **null `ymin`/`ymax` are auto-computed** by sampling every curve of every chart across
+  `[xmin,xmax]` — one **shared** range, so e.g. quiz options stay visually comparable (a taller
+  amplitude really looks taller). `xticks`/`yticks` are the major-tick spacing; null → JSXGraph
+  auto-spacing. `title` renders as a heading above the board. `id` defaults to the joined chart
+  names. (Interactive charts whose curve grows with a slider should set an explicit `ymin/ymax` so
+  the axes don't jump — auto-range only samples the initial slider values.)
+- **`sliders`** (optional, 3rd arg) is a **union**:
+  - a **string** — the name of a *shared* slider group registered with `registerChartSliders(name,
+    defs)` and placed on the page with `<primer-chart-sliders name="…">`. Any number of charts may
+    name the same group; they all re-plot together as it moves.
+  - an **array** of slider defs — inline, allowed only for a **single-chart** series; the panel
+    renders inside that chart.
+
+  ```html
+  <primer-chart-sliders name="wave"></primer-chart-sliders>
+  <primer-chart scene="chartA"></primer-chart>
+  <primer-chart scene="chartB"></primer-chart>
+  <script type="module">
+    import { registerCharts, registerChartSliders } from "primer";
+    registerChartSliders("wave", [ { name: "A", label: "Amplitude", min: 0, max: 3, step: 0.1, value: 1 } ]);
+    registerCharts([{ name: "chartA", f: (x, s) => s.A * Math.sin(x) },
+                    { name: "chartB", f: (x, s) => s.A * Math.cos(x) }], { xmin: -6.3, xmax: 6.3 }, "wave");
+  </script>
+  ```
+
+  A slider def is `{ name, label?, min, max, step?=0.1, value?=min, anchors? }` (the same shape as a
+  low-level `params` entry; `anchors` are snap points).
+
+### For full control: the low-level `registerChart`
+
+`registerChart(name, builder)` is the primitive `registerCharts` is built on. The builder receives
+the host element and the `JXG` namespace, sets up a **board** (via `JXG.JSXGraph.initBoard`)
+**once**, and returns an `update(params)` the component calls — initially, on every control change,
+and after a theme change. Drive it from a `<primer-chart>` carrying an inline `params` block:
 
 ```html
 <primer-chart scene="sinLab">
@@ -221,7 +288,8 @@ context cap), so charts are cheap and you can use as many as you like.
 
 ## Helpers re-exported from `primer` (for inline scripts)
 
-`registerScene`, `getScene`, `registerChart`, `getChart`, `speak`, `cancelSpeech`, `vizColors`, `getConceptMeta`,
+`registerScene`, `getScene`, `registerChart`, `getChart`, `registerCharts`, `registerChartSliders`,
+`computeRange`, `speak`, `cancelSpeech`, `vizColors`, `getConceptMeta`,
 `parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`,
 `getTheme`, `applyTheme`, `initTheme`), and the graph helpers (`resolveLevels`,
 `validateGraph`, …). Pinned KaTeX/manim-web/JSXGraph versions live in `js/boot.js`.

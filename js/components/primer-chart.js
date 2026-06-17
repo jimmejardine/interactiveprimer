@@ -1,32 +1,23 @@
 // @ts-check
 /**
- * <primer-chart scene="name"> — mounts a registered CHART (a plotted function on axes),
- * rendered with JSXGraph (SVG). Two modes, driven by an optional inline config:
+ * <primer-chart scene="name"> — mounts a registered CHART (a plotted function on axes), rendered
+ * with JSXGraph (SVG). A chart can come from two authoring paths:
  *
- *   - STATIC (no config): the chart is drawn once and stands still. This is what the quiz
- *     uses to render a graph as a multiple-choice OPTION.
+ *   - HIGH-LEVEL `registerCharts(...)` (js/charts.js): the markup is just
+ *     `<primer-chart scene="name"></primer-chart>`. The component pulls the chart's TITLE and any
+ *     shared SLIDERS from the registered definition. Sliders may be shared across a whole series
+ *     (driven by a `<primer-chart-sliders>` panel elsewhere) or inline to a single chart (rendered
+ *     here). All attached charts re-plot together when the shared values change.
  *
- *       <primer-chart scene="optSin2x"></primer-chart>
+ *   - LOW-LEVEL `registerChart(...)` + an inline `<script type="application/json">` `params` block:
+ *     the legacy path — the component renders the params as sliders and calls the builder's
+ *     `update(params)` directly. Still fully supported; inline params take precedence over a group.
  *
- *   - INTERACTIVE (a `params` config): the chart carries sliders + linked number boxes, and
- *     re-plots LIVE as the learner drags or types. Each param has a name, range and default;
- *     the chart builder reads the current values and re-draws the curve.
- *
- *       <primer-chart scene="sinLab">
- *         <script type="application/json">
- *           { "params": [
- *               { "name":"A", "label":"Amplitude (A)", "min":0, "max":3, "step":0.1, "value":1 } ] }
- *         </script>
- *       </primer-chart>
- *
- * The chart builder (see js/scenes.js `registerChart`) creates its JSXGraph board ONCE and
- * returns an `update(params)`; we call it initially, on every control change, and again after a
- * theme change (a rebuild, so axis/curve colours refresh). JSXGraph is imported lazily, so a
- * page with no chart pays nothing.
- *
- * JSXGraph renders SVG — there is no WebGL context (and so no per-browser context cap), no
- * snapshotting and no async-label race. A page can carry as many charts as it likes; we just
- * free each board on disconnect so its resize handlers are released.
+ * The builder (see js/scenes.js `registerChart`) creates its JSXGraph board ONCE and returns an
+ * `update`; we call it initially, on every control change, and again after a theme change (a
+ * rebuild, so axis/curve colours refresh). JSXGraph is imported lazily, so a page with no chart pays
+ * nothing. JSXGraph renders SVG — no WebGL context cap — so a page can carry as many charts as it
+ * likes; we free each board on disconnect.
  * @module
  */
 
@@ -34,12 +25,13 @@ import { attachShared } from "./shared.js";
 import { getChart } from "../scenes.js";
 import { vizColors } from "../theme.js";
 import { t } from "../i18n.js";
-import { snapToAnchor } from "../chart-snap.js";
+import { SLIDER_PANEL_CSS, mountSliderPanel } from "./slider-panel.js";
+import { groupForChart, getSliderGroup, subscribeSliders, setSliderValues, getChartMeta } from "../charts.js";
 
 /**
- * JSXGraph's stylesheet. Lazy-fetched once into a constructable sheet and adopted into each
- * chart's shadow root (a document-level <link> can't cross the shadow boundary). Best-effort:
- * the board still renders if it fails to load. Keep the version in step with js/boot.js.
+ * JSXGraph's stylesheet. Lazy-fetched once into a constructable sheet and adopted into each chart's
+ * shadow root (a document-level <link> can't cross the shadow boundary). Best-effort: the board
+ * still renders if it fails to load. Keep the version in step with js/boot.js.
  */
 const JSXGRAPH_CSS = "https://cdn.jsdelivr.net/npm/jsxgraph@1.12.2/distrib/jsxgraph.css";
 
@@ -47,8 +39,8 @@ const JSXGRAPH_CSS = "https://cdn.jsdelivr.net/npm/jsxgraph@1.12.2/distrib/jsxgr
 let jsxCssPromise = null;
 
 /**
- * Fetch jsxgraph.css once and wrap it in a constructable stylesheet. Resolves null on any
- * failure (CORS, offline) so a chart never blocks on its stylesheet.
+ * Fetch jsxgraph.css once and wrap it in a constructable stylesheet. Resolves null on any failure
+ * (CORS, offline) so a chart never blocks on its stylesheet.
  * @returns {Promise<CSSStyleSheet | null>}
  */
 function loadJsxCss() {
@@ -73,14 +65,14 @@ function loadJsxCss() {
  * @property {number} max
  * @property {number} [step]  Slider/number step (default 0.1).
  * @property {number} [value] Initial value (default `min`).
- * @property {number[]} [anchors] "Interesting" values drawn as labelled ticks; dragging the
- *   slider near one snaps onto it (see js/chart-snap.js). Out-of-range values are ignored.
+ * @property {number[]} [anchors] "Interesting" values drawn as labelled ticks; dragging the slider
+ *   near one snaps onto it (see js/chart-snap.js). Out-of-range values are ignored.
  */
 
 export class PrimerChart extends HTMLElement {
-  /** @type {ChartParam[]} The interactive controls (empty → static chart). */
+  /** @type {ChartParam[]} Inline (legacy) controls; empty when the chart has none / uses a group. */
   #params = [];
-  /** @type {Record<string, number>} Current control values, keyed by param name. */
+  /** @type {Record<string, number>} Current values for the legacy inline-params path. */
   #values = {};
   /** @type {((params: Record<string, number>) => void) | null} The builder's re-plot fn. */
   #update = null;
@@ -88,17 +80,17 @@ export class PrimerChart extends HTMLElement {
   #board = null;
   /** @type {any} The JSXGraph namespace (`JXG.JSXGraph`), kept so #dispose can freeBoard. */
   #jsx = null;
-  /** @type {number} Pending rAF handle, so rapid input coalesces to one redraw per frame. */
-  #raf = 0;
   /** @type {(() => void) | null} */
   #onTheme = null;
-  /** @type {(() => void) | null} Tear-down for a pending "wait for scene registration". */
+  /** @type {(() => void) | null} Tear-down for a pending "wait for chart registration". */
   #stopWaiting = null;
-  /** @type {ResizeObserver | null} Re-thins crowded anchor labels when the slider width changes. */
-  #ro = null;
+  /** @type {{ destroy: () => void } | null} Mounted slider panel (inline / legacy charts only). */
+  #panel = null;
+  /** @type {(() => void) | null} Unsubscribe from a shared slider group. */
+  #unsubscribe = null;
 
   connectedCallback() {
-    // Read the optional params config BEFORE building the shadow root (the inline
+    // Read the optional legacy params config BEFORE building the shadow root (the inline
     // <script type="application/json"> is light-DOM child content).
     this.#params = this.#readParams();
     for (const p of this.#params) this.#values[p.name] = p.value ?? p.min;
@@ -115,60 +107,25 @@ export class PrimerChart extends HTMLElement {
     root.innerHTML = `
       <style>
         .chart { padding: 0; }
-        /* The board fills a 7:4 stage; JSXGraph adds class "jxgbox" to this same element and
-           draws the SVG inside it. Keep our themed background (our inline <style> outranks the
-           adopted jsxgraph.css .jxgbox rule, which cascades before shadow-root styles). */
+        .chart-title {
+          font-family: var(--primer-font-display, var(--primer-font-body, sans-serif));
+          font-size: 1.05rem; font-weight: 600; margin: 0 0 0.5rem; color: var(--primer-ink, #111);
+        }
+        .chart-title[hidden] { display: none; }
+        /* The board fills a 7:4 stage; JSXGraph adds class "jxgbox" to this same element and draws
+           the SVG inside it. Keep our themed background (our inline <style> outranks the adopted
+           jsxgraph.css .jxgbox rule, which cascades before shadow-root styles). */
         .stage { width: 100%; aspect-ratio: 7 / 4; position: relative; overflow: hidden; background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); }
         .stage.jxgbox { background: var(--primer-viz-bg, #fff); }
         .stage svg { display: block; width: 100% !important; height: 100% !important; }
-
-        /* Parameter controls: one row per param — label, slider, number box. */
-        .controls { display: grid; gap: 0.5rem 0.75rem; margin-top: 0.6rem; }
-        .control { display: grid; grid-template-columns: minmax(6rem, auto) 1fr minmax(3.5rem, auto); gap: 0.6rem; align-items: center; }
-        .control > label { font-family: var(--primer-font-ui, sans-serif); font-size: 0.9rem; color: var(--primer-ink, #111); }
-        .control input[type="range"] { width: 100%; accent-color: var(--primer-accent, #46e); display: block; }
-        .control input[type="number"] {
-          font: inherit; width: 100%; padding: 0.25rem 0.4rem; border-radius: 0.4rem;
-          border: 1px solid var(--primer-border, #ccc);
-          background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
-        }
-        /* Anchor ticks: drawn under the slider, one per in-range anchor. The slider cell becomes
-           a positioning context so each tick can sit over its value. */
-        .slider { position: relative; --tick-inset: 8px; /* ≈ half a native range thumb */ }
-        .ticks { position: relative; height: 1.1rem; margin-top: 0.15rem; pointer-events: none; }
-        .tick {
-          position: absolute; top: 0;
-          /* Centre over the value, compensating for the thumb inset at both ends of the track. */
-          left: calc(var(--tick-inset) + (100% - 2 * var(--tick-inset)) * var(--at));
-          transform: translateX(-50%);
-          display: flex; flex-direction: column; align-items: center;
-        }
-        .tick i { display: block; width: 1px; height: 5px; background: var(--primer-ink-soft, #667); }
-        .tick b {
-          font-family: var(--primer-font-ui, sans-serif); font-size: 0.7rem; font-weight: 400;
-          line-height: 1; margin-top: 1px; color: var(--primer-ink-soft, #667); white-space: nowrap;
-        }
-        /* When labels would crowd, JS adds .sparse-labels — keep every tick MARK but show only
-           every 2nd label (the first is kept; even-positioned labels are dropped). */
-        .ticks.sparse-labels .tick:nth-child(even) b { display: none; }
+        ${SLIDER_PANEL_CSS}
         .meta { display: block; }
       </style>
       <div class="chart">
+        <h3 class="chart-title" part="title" hidden></h3>
         <div class="stage" part="stage"></div>
-        ${this.#params.length ? `<div class="controls">${this.#controlsHtml()}</div>` : ""}
+        <div class="controls" part="controls"></div>
       </div>`;
-
-    // Keep slider ↔ number box in sync and re-plot (coalesced) on any change.
-    if (this.#params.length) {
-      const controls = /** @type {HTMLElement} */ (root.querySelector(".controls"));
-      controls.addEventListener("input", (e) => this.#onInput(controls, e));
-      // Thin out crowded anchor labels as the controls' width changes (the observer also fires
-      // once on connect, which is when we first know the laid-out slider width).
-      if (typeof ResizeObserver !== "undefined") {
-        this.#ro = new ResizeObserver(() => this.#updateTickDensity(root));
-        this.#ro.observe(controls);
-      }
-    }
 
     // Recolour + re-plot when the theme changes (rebuild so axis/curve colours refresh).
     this.#onTheme = () => void this.#build(root);
@@ -180,35 +137,13 @@ export class PrimerChart extends HTMLElement {
   disconnectedCallback() {
     if (this.#onTheme) document.removeEventListener("theme-change", this.#onTheme);
     this.#onTheme = null;
-    if (this.#raf) cancelAnimationFrame(this.#raf);
-    this.#raf = 0;
-    this.#ro?.disconnect();
-    this.#ro = null;
     this.#cancelWait();
     this.#dispose();
   }
 
   /**
-   * Thin crowded anchor labels: when a slider's ticks are spaced closer than a label is wide,
-   * mark its `.ticks` so only every 2nd label shows (the first is always kept). Tick *marks*
-   * always stay; only labels are dropped. Called by the ResizeObserver, so it tracks the live
-   * slider width (e.g. a phone in portrait vs landscape).
-   * @param {ShadowRoot} root
-   */
-  #updateTickDensity(root) {
-    const LABEL_MIN_PX = 34; // room for a ~3–4 char label at 0.7rem
-    for (const ticks of root.querySelectorAll(".ticks")) {
-      const range = ticks.parentElement?.querySelector('input[type="range"]');
-      const width = range?.getBoundingClientRect().width ?? 0;
-      const gaps = ticks.children.length - 1;
-      const spacing = gaps > 0 ? width / gaps : Infinity;
-      ticks.classList.toggle("sparse-labels", width > 0 && spacing < LABEL_MIN_PX);
-    }
-  }
-
-  /**
-   * Parse the optional inline `<script type="application/json">` config into a param list.
-   * A malformed or absent block yields no params (a static chart).
+   * Parse the optional inline `<script type="application/json">` config into a param list. A
+   * malformed or absent block yields no params (the chart uses a group, or is static).
    * @returns {ChartParam[]}
    */
   #readParams() {
@@ -222,106 +157,10 @@ export class PrimerChart extends HTMLElement {
     }
   }
 
-  /** @returns {string} The controls markup (one labelled slider + number box per param). */
-  #controlsHtml() {
-    return this.#params
-      .map((p, i) => {
-        const step = p.step ?? 0.1;
-        const value = this.#values[p.name];
-        const label = escapeHtml(p.label ?? p.name);
-        // Slider and number share a name via `data-name`; `data-role` distinguishes them. The
-        // range lives in a `.slider` cell so its anchor ticks can be positioned over the track.
-        return `
-          <div class="control">
-            <label for="chart-num-${i}">${label}</label>
-            <div class="slider">
-              <input type="range" data-name="${escapeHtml(p.name)}" data-role="range"
-                min="${p.min}" max="${p.max}" step="${step}" value="${value}"
-                aria-label="${label}">
-              ${this.#ticksHtml(p)}
-            </div>
-            <input type="number" id="chart-num-${i}" data-name="${escapeHtml(p.name)}" data-role="number"
-              min="${p.min}" max="${p.max}" step="${step}" value="${value}"
-              aria-label="${label}">
-          </div>`;
-      })
-      .join("");
-  }
-
   /**
-   * The labelled-tick markup for a param's `anchors`, or "" if it has none. Each in-range,
-   * finite anchor becomes a tick positioned by its fraction along the track (`--at`).
-   * @param {ChartParam} p
-   * @returns {string}
-   */
-  #ticksHtml(p) {
-    const span = p.max - p.min;
-    if (!Array.isArray(p.anchors) || !(span > 0)) return "";
-    const ticks = p.anchors
-      .filter((a) => Number.isFinite(a) && a >= p.min && a <= p.max)
-      .map((a) => {
-        const at = (a - p.min) / span;
-        const label = escapeHtml(String(+a.toFixed(3))); // drop float noise; keep author values clean
-        return `<span class="tick" style="--at:${at}"><i></i><b>${label}</b></span>`;
-      })
-      .join("");
-    return ticks ? `<div class="ticks">${ticks}</div>` : "";
-  }
-
-  /**
-   * Handle a control edit: read the value, mirror it to the paired input, store it, and
-   * schedule a (coalesced) re-plot.
-   * @param {HTMLElement} controls
-   * @param {Event} e
-   */
-  #onInput(controls, e) {
-    const input = /** @type {HTMLInputElement} */ (e.target);
-    const name = input.dataset.name;
-    if (!name) return;
-    let value = Number(input.value);
-    if (!Number.isFinite(value)) return;
-    // Dragging the slider snaps to a nearby anchor (typing in the number box stays exact). The
-    // snap distance is a fixed pixel budget mapped into value units, so the magnet feels the same
-    // on every slider regardless of its range. Tradeoff: values within ~SNAP_PX of an anchor
-    // resolve to the anchor, so an anchor's immediate ±neighbours become unreachable — acceptable
-    // for these "interesting point" sliders.
-    if (input.dataset.role === "range") {
-      const p = this.#params.find((q) => q.name === name);
-      const width = input.getBoundingClientRect().width;
-      if (p?.anchors && width > 0) {
-        const SNAP_PX = 10;
-        value = snapToAnchor(value, p.anchors, (SNAP_PX / width) * (p.max - p.min));
-      }
-    }
-    this.#values[name] = value;
-    // Mirror to the sibling control with the same name (slider ↔ number box).
-    for (const other of controls.querySelectorAll(`input[data-name="${name}"]`)) {
-      if (other !== input) /** @type {HTMLInputElement} */ (other).value = String(value);
-    }
-    // If a slider drag snapped, pull the dragged thumb onto the anchor too.
-    if (input.dataset.role === "range" && Number(input.value) !== value) {
-      input.value = String(value);
-    }
-    this.#scheduleReplot();
-  }
-
-  /** Re-plot at most once per animation frame, so dragging a slider stays smooth. */
-  #scheduleReplot() {
-    if (this.#raf) return;
-    this.#raf = requestAnimationFrame(() => {
-      this.#raf = 0;
-      try {
-        this.#update?.({ ...this.#values });
-      } catch {
-        /* a bad value mid-edit shouldn't break the chart */
-      }
-    });
-  }
-
-  /**
-   * (Re)build the chart: dispose any prior board, lazy-load JSXGraph, run the registered
-   * builder to get a fresh `update`, and draw the current values once. Static and interactive
-   * charts share this one path — JSXGraph is SVG, so there's no per-context bookkeeping.
+   * (Re)build the chart: dispose any prior board/panel/subscription, lazy-load JSXGraph, run the
+   * registered builder for a fresh `update`, then wire title + controls + the initial draw. Static,
+   * inline-slider and shared-slider charts share this one path.
    * @param {ShadowRoot} root
    */
   async #build(root) {
@@ -329,9 +168,8 @@ export class PrimerChart extends HTMLElement {
     const name = this.getAttribute("scene") ?? "";
     const builder = getChart(name);
     if (!builder) {
-      // The page's inline `registerChart(...)` is a deferred module script that can run AFTER
-      // this element connects (render.js may build the page before it executes). Wait for the
-      // registration event rather than failing outright.
+      // The page's inline `registerChart(...)` / `registerCharts(...)` is a deferred module script
+      // that can run AFTER this element connects. Wait for the registration event rather than fail.
       this.#awaitRegistration(root, stage, name);
       return;
     }
@@ -345,7 +183,7 @@ export class PrimerChart extends HTMLElement {
       if (!this.isConnected) return;
       const JXG = mod.default ?? /** @type {any} */ (mod).JXG ?? mod;
       this.#update = builder(stage, this.#wrapJXG(JXG));
-      this.#update({ ...this.#values });
+      this.#mountTitleAndControls(root, name);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       stage.innerHTML = `<span class="meta">${t("manim.runError", { error })}</span>`;
@@ -354,8 +192,67 @@ export class PrimerChart extends HTMLElement {
   }
 
   /**
-   * Wait for the named chart to be registered, then build. Falls back to a clear message if it
-   * never arrives (e.g. a typo'd scene name). Idempotent: a second call while waiting is a no-op.
+   * After the board is built, resolve where this chart's sliders + title come from, render them, and
+   * draw the initial state. Three cases:
+   *   - legacy inline params → render a local panel; pushes into the builder's update() directly.
+   *   - shared slider group  → subscribe (all attached charts re-plot together). The panel is
+   *     rendered HERE only for an inline (single-chart) group; a shared group's panel lives in a
+   *     `<primer-chart-sliders>` element.
+   *   - static (neither)     → just draw once.
+   * @param {ShadowRoot} root
+   * @param {string} name
+   */
+  #mountTitleAndControls(root, name) {
+    const controls = /** @type {HTMLElement} */ (root.querySelector(".controls"));
+
+    // Title heading (high-level charts carry one in their registered metadata).
+    const title = getChartMeta(name)?.title ?? "";
+    const heading = /** @type {HTMLElement} */ (root.querySelector(".chart-title"));
+    heading.textContent = title;
+    heading.hidden = !title;
+
+    // Legacy inline params win over any group.
+    if (this.#params.length) {
+      this.#panel = mountSliderPanel(controls, this.#params, this.#values, (vals) => {
+        this.#values = vals;
+        try {
+          this.#update?.(vals);
+        } catch {
+          /* a bad value mid-edit shouldn't break the chart */
+        }
+      });
+      this.#update?.({ ...this.#values });
+      return;
+    }
+
+    // Shared slider group?
+    const group = groupForChart(name);
+    if (group) {
+      const g = getSliderGroup(group);
+      // Subscribe so this board re-plots whenever the shared values change. subscribe() draws once
+      // immediately, so we do NOT also call #update here.
+      this.#unsubscribe = subscribeSliders(group, (vals) => {
+        try {
+          this.#update?.(vals);
+        } catch {
+          /* ignore a transient bad value */
+        }
+      });
+      // An inline (single-chart) group renders its panel inside this element; a shared group's panel
+      // is owned by a <primer-chart-sliders> element placed elsewhere.
+      if (g?.inline) {
+        this.#panel = mountSliderPanel(controls, g.defs, g.values, (vals) => setSliderValues(group, vals));
+      }
+      return;
+    }
+
+    // Static chart — one draw, no controls.
+    this.#update?.({});
+  }
+
+  /**
+   * Wait for the named chart to be registered, then build. Falls back to a clear message if it never
+   * arrives (e.g. a typo'd scene name). Idempotent: a second call while waiting is a no-op.
    * @param {ShadowRoot} root
    * @param {HTMLElement} stage
    * @param {string} name
@@ -387,8 +284,15 @@ export class PrimerChart extends HTMLElement {
     }
   }
 
-  /** Best-effort free the active JSXGraph board (releases its resize handlers/SVG). */
+  /**
+   * Best-effort tear-down: unsubscribe from the slider group (BEFORE the board is freed, so the
+   * callback bound to it is gone), destroy the panel, and free the JSXGraph board.
+   */
   #dispose() {
+    this.#unsubscribe?.();
+    this.#unsubscribe = null;
+    this.#panel?.destroy();
+    this.#panel = null;
     const board = this.#board;
     this.#board = null;
     this.#update = null;
@@ -401,9 +305,8 @@ export class PrimerChart extends HTMLElement {
   }
 
   /**
-   * Return a copy of the JXG namespace whose `JSXGraph.initBoard` captures the created board on
-   * this element (for disposal + theme rebuild) and injects our teaching-graph defaults — mirrors
-   * how <primer-manim>/<primer-chart> wrapped manim's Scene.
+   * Return a copy of the JXG namespace whose `JSXGraph.initBoard` captures the created board on this
+   * element (for disposal + theme rebuild) and injects our teaching-graph defaults.
    * @param {Record<string, any>} JXG
    * @returns {Record<string, any>}
    */
@@ -411,13 +314,11 @@ export class PrimerChart extends HTMLElement {
     const self = this;
     const JSXGraph = JXG.JSXGraph;
     self.#jsx = JSXGraph;
-    // Sensible defaults for a static teaching graph: no copyright/nav chrome, no pan/zoom, and
-    // re-fit on container resize. A builder's own options override these.
-    // JSXGraph's default grid is a solid mid-grey that fights the curve and washes the backdrop;
-    // tint it from the theme (the axis colour) at a low opacity so it reads as a faint guide, and
-    // drop the dotted minor grid. Read vizColors() here (not cached) so a theme rebuild — which
-    // re-enters #wrapJXG — re-tints it. A builder can still override `grid` (its initBoard options
-    // win), e.g. `grid: false` to switch the grid off entirely.
+    // Sensible defaults for a static teaching graph: no copyright/nav chrome, no pan/zoom, re-fit on
+    // resize. JSXGraph's default grid is a solid mid-grey that fights the curve; tint it from the
+    // theme (axis colour) at a low opacity, and drop the dotted minor grid. Read vizColors() here
+    // (not cached) so a theme rebuild — which re-enters #wrapJXG — re-tints it. A builder's own
+    // initBoard options override these (e.g. `grid: false`).
     const v = vizColors();
     const defaults = {
       showCopyright: false,
@@ -442,22 +343,6 @@ export class PrimerChart extends HTMLElement {
     };
     return Object.assign(Object.create(JXG), { JSXGraph: wrappedJSXGraph });
   }
-}
-
-/**
- * @param {string} s
- * @returns {string}
- */
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) =>
-    /** @type {Record<string,string>} */ ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
-    })[c],
-  );
 }
 
 if (!customElements.get("primer-chart")) {
