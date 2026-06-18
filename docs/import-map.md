@@ -73,25 +73,25 @@ fields aid curation and are surfaced by the graph tool: `completedDate` and
 Author content as one or more `<primer-card>` cards. Inside a card you can use the
 Primer custom elements: `<primer-math>`, `<primer-manim>`, `<primer-quiz>`.
 
-A quiz is authored inline — its question bank is a child
-`<script type="application/json">`, an array of questions. `count` of them are
-chosen at random and their options shuffled; prompts and option text may contain
-inline math wrapped in `$…$`:
+A quiz's question bank is built in JS by `registerQuiz(name, builder)` (an inline module
+script, like a manim scene) and referenced by `<primer-quiz name="…">`. `count` questions are
+chosen at random and options shuffled; prompts/option text may contain inline math wrapped in
+`$…$`. Translatable prose comes from a `scene-strings` block (keyed by the quiz name) via the
+builder's `strings("key")`; language-neutral maths stays inline — so a translation overlay
+carries only the strings, never the bank:
 
 ```html
-<primer-quiz count="3">
-  <script type="application/json">
-    [
-      {
-        "prompt": "What is $2 + 3$?",
-        "options": [
-          { "text": "$5$", "correct": true },
-          { "text": "$6$", "correct": false }
-        ]
-      }
-    ]
-  </script>
-</primer-quiz>
+<primer-quiz name="addingQuiz@1" count="3"></primer-quiz>
+<script type="application/json" class="scene-strings">
+  { "addingQuiz@1": { "sumWords": "What is the sum?" } }
+</script>
+<script type="module">
+  import { registerQuiz } from "primer";
+  registerQuiz("addingQuiz@1", ({ strings }) => [
+    { prompt: () => strings("sumWords"),
+      options: [ { text: "$5$", correct: true }, { text: "$6$", correct: false } ] },
+  ]);
+</script>
 ```
 
 A page that shows an animation registers a manim-web scene with one inline module

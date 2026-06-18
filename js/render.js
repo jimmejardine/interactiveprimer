@@ -172,11 +172,11 @@ async function applyOverlay(id, locale, canonicalContent) {
 
   // Remove the canonical (English) content from the DOM…
   for (const el of canonicalContent) el.remove();
-  // …but KEEP the canonical (English) scene-strings block in place and append the overlay's
-  // block tagged with the active locale. The strings accessor (makeStrings) then resolves
-  // each key from the locale block, falling back to the retained English block per-key.
-  const overlayStrings = doc.querySelector("script.scene-strings");
-  if (overlayStrings) {
+  // …but KEEP the canonical (English) scene-strings block(s) in place and append EACH of the
+  // overlay's blocks tagged with the active locale. A page may carry several blocks (e.g. quiz
+  // strings kept separate from scene/chart strings); makeStrings merges them all by namespace and
+  // resolves each key from the locale blocks, falling back to the retained English blocks per-key.
+  for (const overlayStrings of doc.querySelectorAll("script.scene-strings")) {
     const node = /** @type {HTMLElement} */ (document.importNode(overlayStrings, true));
     node.setAttribute("data-locale", locale);
     document.body.appendChild(node);

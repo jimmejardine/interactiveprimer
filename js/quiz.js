@@ -53,6 +53,12 @@ export function shuffle(items, rng) {
   return out;
 }
 
+/** A prompt for an error message: a string prompt as-is, a function prompt a generic label.
+ * @param {unknown} prompt @returns {string} */
+function describe(prompt) {
+  return typeof prompt === "string" ? prompt : "<computed prompt>";
+}
+
 /** @param {AuthoredQuestion} q @returns {boolean} Whether it's a multiple-choice question. */
 function isChoice(q) {
   return Array.isArray(/** @type {any} */ (q).options);
@@ -81,31 +87,40 @@ export function generateQuestion(question, rng) {
   const choice = isChoice(question);
   const text = isText(question);
   if (choice && text) {
-    throw new Error(`Question has both options and answer: "${question.prompt}"`);
+    throw new Error(`Question has both options and answer: "${describe(question.prompt)}"`);
   }
   if (!choice && !text) {
-    throw new Error(`Question needs either options or answer: "${question.prompt}"`);
+    throw new Error(`Question needs either options or answer: "${describe(question.prompt)}"`);
   }
 
   if (choice) {
     const q = /** @type {QuizQuestion} */ (question);
     if (q.options.length < 2) {
-      throw new Error(`Question needs at least 2 options: "${q.prompt}"`);
+      throw new Error(`Question needs at least 2 options: "${describe(q.prompt)}"`);
     }
-    // Optional randomized template: draw values (re-rolling until `constraints` hold), then
-    // evaluate `{expr}` in the prompt and each option's text (keeping its `correct` flag).
-    // Non-variable MCQs are unchanged.
+    // Optional randomized template: draw values (re-rolling until `constraints` hold). A `prompt`
+    // or option `text` may be a FUNCTION of the bindings (called with them); a string instead has
+    // its `{expr}` groups evaluated when there are variables (non-variable string MCQs are
+    // unchanged). Chart options (no `text`) pass through untouched.
     const bindings = q.variables
       ? drawBindings(parseVariables(q.variables), q.constraints, rng)
       : null;
-    const prompt = bindings ? fillExpressions(q.prompt, bindings) : q.prompt;
-    const prepared = bindings
-      ? q.options.map((o) => ({ text: fillExpressions(o.text ?? "", bindings), correct: o.correct }))
-      : q.options;
+    const b = bindings ?? {};
+    const prompt =
+      typeof q.prompt === "function" ? q.prompt(b) : bindings ? fillExpressions(q.prompt, bindings) : q.prompt;
+    const prepared = q.options.map((o) => {
+      const text =
+        typeof o.text === "function"
+          ? o.text(b)
+          : bindings && o.text !== undefined
+            ? fillExpressions(o.text, bindings)
+            : o.text;
+      return { ...o, text };
+    });
     const options = shuffle(prepared, rng);
     const correctIndex = options.findIndex((o) => o.correct);
     if (correctIndex === -1) {
-      throw new Error(`Question has no correct option: "${q.prompt}"`);
+      throw new Error(`Question has no correct option: "${describe(prompt)}"`);
     }
     return { kind: "choice", prompt, options, correctIndex };
   }
@@ -114,8 +129,10 @@ export function generateQuestion(question, rng) {
   const bindings = q.variables
     ? drawBindings(parseVariables(q.variables), q.constraints, rng)
     : {};
-  const prompt = substitute(q.prompt, bindings);
-  const expected = computeAnswer(q.answer, bindings);
+  // `prompt` and `answer` may each be a FUNCTION of the bindings (e.g. `answer: (b) => b.a + b.b`);
+  // a string `prompt` fills its `{name}` placeholders and a string/number `answer` is evaluated.
+  const prompt = typeof q.prompt === "function" ? q.prompt(bindings) : substitute(q.prompt, bindings);
+  const expected = typeof q.answer === "function" ? q.answer(bindings) : computeAnswer(q.answer, bindings);
   return { kind: "text", prompt, expected, compare: q.compare, keyboard: q.keyboard };
 }
 

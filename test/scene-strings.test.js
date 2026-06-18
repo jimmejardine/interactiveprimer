@@ -4,19 +4,20 @@ import assert from "node:assert/strict";
 import { makeStrings, getSceneStrings } from "../js/scene-strings.js";
 
 /**
- * Build a fake `doc` whose querySelector returns stub <script> elements by selector. `locale`
- * and `english` are the JSON text for the tagged / untagged scene-strings blocks (omit for absent).
- * @param {{ locale?: string, english?: string }} blocks
+ * Build a fake `doc` whose querySelectorAll returns stub <script> elements by selector. `locale`
+ * and `english` are the JSON text for the tagged / untagged scene-strings block(s) — a string for a
+ * single block, or an array for several (the page may carry more than one); omit for absent.
+ * @param {{ locale?: string | string[], english?: string | string[] }} blocks
  * @returns {any}
  */
 function fakeDoc({ locale, english } = {}) {
+  const toList = (/** @type {string | string[] | undefined} */ v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
   return {
     /** @param {string} selector */
-    querySelector(selector) {
+    querySelectorAll(selector) {
       // The locale selector carries [data-locale] but not :not(...); the English one is the :not.
       const wantsLocale = selector.includes("[data-locale]") && !selector.includes(":not");
-      const text = wantsLocale ? locale : english;
-      return text == null ? null : { textContent: text };
+      return toList(wantsLocale ? locale : english).map((textContent) => ({ textContent }));
     },
   };
 }
@@ -54,6 +55,24 @@ test("interpolates {vars} into the resolved string, leaving unknown placeholders
   const S = makeStrings("addNumberLine@1", fakeDoc({ english: EN }));
   assert.equal(S("start", { a: 7 }), "Start at 7.");
   assert.equal(S("equation", { a: 1, b: 2 }), "1+2={sum}"); // {sum} not provided → kept
+});
+
+test("merges several scene-strings blocks by namespace (disjoint namespaces combine)", () => {
+  const sceneBlock = `{ "scene@1": { "s": "scene-en" } }`;
+  const quizBlock = `{ "quiz@1": { "p": "quiz-en" } }`;
+  // Two English blocks on the page — e.g. quiz strings kept separate from scene strings.
+  const scene = makeStrings("scene@1", fakeDoc({ english: [sceneBlock, quizBlock] }));
+  const quiz = makeStrings("quiz@1", fakeDoc({ english: [sceneBlock, quizBlock] }));
+  assert.equal(scene("s"), "scene-en");
+  assert.equal(quiz("p"), "quiz-en");
+});
+
+test("across multiple blocks, the locale value still overrides English per-key", () => {
+  const enScene = `{ "scene@1": { "s": "scene-en" } }`;
+  const enQuiz = `{ "quiz@1": { "p": "quiz-en" } }`;
+  const esQuiz = `{ "quiz@1": { "p": "quiz-es" } }`;
+  const S = makeStrings("quiz@1", fakeDoc({ english: [enScene, enQuiz], locale: [esQuiz] }));
+  assert.equal(S("p"), "quiz-es");
 });
 
 test("getSceneStrings prefers the locale block, else English", () => {

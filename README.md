@@ -121,8 +121,8 @@ npm run serve      # static file server; open /index.html
 Type-checking, tests and graph validation need no compilation; they are *checks*, not a
 build. Authoring a new concept is just adding an `.html` page (copy
 `concepts/arithmetic/counting.html`) — its `concept-meta` id must match the new
-file's path under `concepts/`. An optional quiz is authored inline on the page, as a
-`<script type="application/json">` bank inside a `<primer-quiz>` (see `addition.html`).
+file's path under `concepts/`. An optional quiz is authored in JS with `registerQuiz`
+and shown via `<primer-quiz name="…">` (see `addition.html`).
 
 
 ## Acknowledgements

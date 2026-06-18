@@ -1,29 +1,32 @@
 // @ts-check
 /**
- * <primer-quiz count="3"> — a randomly generated test. The question bank is authored
- * inline, as a child `<script type="application/json">` array. A question is either:
+ * <primer-quiz name="…" count="3"> — a randomly generated test. The question bank is built by a
+ * JS builder registered with `registerQuiz(name, builder)` (see js/scenes.js), referenced here by
+ * `name`. The builder receives a toolkit `{ strings }` — a scene-strings accessor scoped to the
+ * quiz's name (its translatable prose lives in a `scene-strings` block; math stays inline) — and
+ * returns the bank. A question is either:
  *
  *   - multiple-choice — has `options`:
- *       { "prompt": "What is $2 + 3$?", "options": [ { "text": "$5$", "correct": true }, … ] }
- *   - free-text — has `answer` (the learner types into a box). With `variables` it's a
- *     randomized template: `{name}` placeholders in the prompt expand to random values
- *     and `answer` is an expression over them (see js/quiz-vars.js):
- *       { "prompt": "What is ${a} + {b}$?", "variables": "a=[1:10] b=[1:10]", "answer": "a + b" }
+ *       { prompt: () => strings("q0"), options: [ { text: "$5$", correct: true }, … ] }
+ *   - free-text — has `answer` (the learner types into a box). With `variables` it's a randomized
+ *     template; `prompt`/`text`/`answer` may be functions of the drawn bindings (see js/quiz.js):
+ *       { prompt: (b) => `What is $${b.a}+${b.b}$?`, variables: "a=[1:10] b=[1:10]", answer: (b) => b.a + b.b }
  *
- * `count` questions are drawn via the pure logic in js/quiz.js (a variable template can
- * be re-instantiated to produce many questions). Prompts/options may contain LaTeX
- * (wrapped in $…$), typeset with KaTeX.
+ * `count` questions are drawn via the pure logic in js/quiz.js (a variable template can be
+ * re-instantiated to produce many questions). Prompts/options may contain LaTeX (wrapped in $…$),
+ * typeset with KaTeX.
  * @module
  */
 
 import katex from "katex";
 import { attachShared } from "./shared.js";
 import { generateQuiz } from "../quiz.js";
+import { getQuiz } from "../scenes.js";
+import { makeStrings } from "../scene-strings.js";
 import { checkAnswer } from "../quiz-vars.js";
 import { comparePolynomial } from "../poly.js";
 import { gradeEquivalent } from "../grade-math.js";
 import { loadComputeEngine } from "../compute-engine.js";
-import { parseJsonc } from "../jsonc.js";
 import { t } from "../i18n.js";
 import { glitter, glitterIntensity } from "../glitter.js";
 import { playSound } from "../sounds.js";
@@ -35,31 +38,85 @@ import { getMathKeyboard } from "../math-keyboards.js";
 /** @typedef {import("../types/domain.js").GeneratedQuestion} GeneratedQuestion */
 
 export class PrimerQuiz extends HTMLElement {
-  /** @type {AuthoredQuestion[]} The authored bank, kept so "Try again" can re-draw a fresh quiz. */
+  /** @type {AuthoredQuestion[]} The built bank, kept so "Try again" can re-draw a fresh quiz. */
   #bank = [];
   /** @type {number} How many questions to draw. */
   #count = 3;
   /** @type {any} A loaded CortexJS ComputeEngine (for equivalence grading), or null. */
   #ce = null;
+  /** @type {(() => void) | null} Tear-down for a pending "wait for quiz registration". */
+  #stopWaiting = null;
 
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
     this.#count = Number(this.getAttribute("count") ?? "3");
+    this.#resolve(root);
+  }
 
-    // The question bank is authored inline, as a child <script type="application/json">.
-    const bankEl = this.querySelector(':scope > script[type="application/json"]');
-    if (!bankEl || !bankEl.textContent) {
-      root.innerHTML = `<div class="card"><p class="meta">${t("quiz.empty")}</p></div>`;
+  disconnectedCallback() {
+    this.#cancelWait();
+  }
+
+  /**
+   * Resolve the registered quiz builder (waiting for its deferred module script if it hasn't run
+   * yet), build the bank with the i18n toolkit, then render. Mirrors <primer-chart>'s registration
+   * wait: the page's `registerQuiz(...)` is a deferred module script that can execute AFTER this
+   * element first connects.
+   * @param {ShadowRoot} root
+   */
+  #resolve(root) {
+    const name = this.getAttribute("name") ?? "";
+    const builder = getQuiz(name);
+    if (!builder) {
+      this.#awaitRegistration(root, name);
       return;
     }
+    this.#cancelWait();
     try {
-      this.#bank = /** @type {AuthoredQuestion[]} */ (parseJsonc(bankEl.textContent));
+      this.#bank = builder({ strings: makeStrings(name) });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       root.innerHTML = `<div class="card"><p class="meta">${t("quiz.buildError", { error })}</p></div>`;
       return;
     }
+    if (!Array.isArray(this.#bank) || this.#bank.length === 0) {
+      root.innerHTML = `<div class="card"><p class="meta">${t("quiz.empty")}</p></div>`;
+      return;
+    }
     this.#start(root);
+  }
+
+  /**
+   * Wait for the quiz named `name` to register, then build. Mirrors <primer-chart>. Gives up after
+   * a few seconds with the empty-quiz message so a typo'd / missing `name` fails visibly.
+   * @param {ShadowRoot} root
+   * @param {string} name
+   */
+  #awaitRegistration(root, name) {
+    if (this.#stopWaiting) return;
+    /** @param {Event} e */
+    const onReg = (e) => {
+      if (/** @type {CustomEvent} */ (e).detail?.name !== name) return;
+      this.#cancelWait();
+      this.#resolve(root);
+    };
+    const timer = setTimeout(() => {
+      this.#cancelWait();
+      root.innerHTML = `<div class="card"><p class="meta">${t("quiz.empty")}</p></div>`;
+    }, 4000);
+    this.#stopWaiting = () => {
+      document.removeEventListener("primer:quiz-registered", onReg);
+      clearTimeout(timer);
+    };
+    document.addEventListener("primer:quiz-registered", onReg);
+  }
+
+  /** Stop waiting for a pending registration (if any). */
+  #cancelWait() {
+    if (this.#stopWaiting) {
+      this.#stopWaiting();
+      this.#stopWaiting = null;
+    }
   }
 
   /**

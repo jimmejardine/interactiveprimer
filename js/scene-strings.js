@@ -26,21 +26,31 @@ import { parseJsonc } from "./jsonc.js";
 import { fillVars } from "./i18n.js";
 
 /**
- * Parse the scene-strings block matched by `selector` into its keyed object. Returns {} when the
- * block is absent or malformed.
+ * Parse ALL scene-strings blocks matched by `selector` into one keyed object, merged by namespace.
+ * A page may carry several blocks (e.g. quiz strings kept separate from scene/chart strings); their
+ * top-level namespaces are combined and, where two blocks share a namespace, its keys are merged
+ * (a later block wins per-key). Malformed or empty blocks are skipped. Returns {} when none match.
  * @param {Document} doc
  * @param {string} selector
  * @returns {Record<string, Record<string, string>>}
  */
 function readBlock(doc, selector) {
-  const el = doc.querySelector(selector);
-  if (!el || !el.textContent) return {};
-  try {
-    const parsed = parseJsonc(el.textContent);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
+  /** @type {Record<string, Record<string, string>>} */
+  const merged = {};
+  for (const el of doc.querySelectorAll(selector)) {
+    if (!el.textContent) continue;
+    let parsed;
+    try {
+      parsed = parseJsonc(el.textContent);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object") continue;
+    for (const [ns, kv] of Object.entries(parsed)) {
+      if (kv && typeof kv === "object") merged[ns] = { ...merged[ns], ...kv };
+    }
   }
+  return merged;
 }
 
 /**

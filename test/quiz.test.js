@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { shuffle, generateQuestion, generateQuiz } from "../js/quiz.js";
+import { registerQuiz, getQuiz } from "../js/scenes.js";
 
 /** @typedef {import("../js/types/domain.js").QuizQuestion} QuizQuestion */
 
@@ -204,4 +205,81 @@ test("generateQuestion rejects a question with neither options nor answer", () =
     () => generateQuestion(/** @type {any} */ ({ prompt: "empty" }), seededRng(1)),
     /either options or answer/,
   );
+});
+
+test("registerQuiz/getQuiz round-trips a builder, and its bank generates", () => {
+  /** @type {import("../js/scenes.js").QuizBuilder} */
+  const builder = ({ strings }) => [
+    { prompt: () => strings("q"), options: [{ text: "$2$", correct: true }, { text: "$3$", correct: false }] },
+  ];
+  registerQuiz("test/demo@1", builder);
+  assert.equal(getQuiz("test/demo@1"), builder);
+  assert.equal(getQuiz("test/missing@1"), undefined);
+  // The bank a builder returns feeds generateQuiz like any other (strings stubbed here).
+  const bank = builder({ strings: (k) => k });
+  const quiz = generateQuiz(bank, 1, seededRng(5));
+  assert.equal(quiz.questions[0].prompt, "q");
+});
+
+test("free-text: a function answer is computed from the drawn bindings", () => {
+  const quiz = generateQuiz(
+    [{ prompt: (v) => `What is ${v.a} + ${v.b}?`, variables: "a=[1:9] b=[1:9]", answer: (v) => Number(v.a) + Number(v.b) }],
+    1,
+    seededRng(7),
+  );
+  const q = quiz.questions[0];
+  assert.equal(q.kind, "text");
+  // The prompt function ran with the bindings, and `expected` equals their sum.
+  const m = q.prompt.match(/What is (\d+) \+ (\d+)\?/);
+  assert.ok(m, `prompt "${q.prompt}" should be filled from bindings`);
+  assert.equal(q.kind === "text" && q.expected, Number(m[1]) + Number(m[2]));
+});
+
+test("free-text: a function prompt with no variables receives empty bindings", () => {
+  const quiz = generateQuiz([{ prompt: () => "Capital of France?", answer: "Paris" }], 1, seededRng(1));
+  assert.equal(quiz.questions[0].prompt, "Capital of France?");
+});
+
+test("multiple-choice: function prompt and option text resolve from bindings", () => {
+  const quiz = generateQuiz(
+    [
+      {
+        prompt: (v) => `What is ${v.a} + ${v.b}?`,
+        variables: "a=[1:9] b=[1:9]",
+        options: [
+          { text: (v) => String(Number(v.a) + Number(v.b)), correct: true },
+          { text: (v) => String(Number(v.a) * Number(v.b) + 1), correct: false },
+        ],
+      },
+    ],
+    1,
+    seededRng(3),
+  );
+  const q = quiz.questions[0];
+  assert.equal(q.kind, "choice");
+  if (q.kind !== "choice") return;
+  const m = q.prompt.match(/What is (\d+) \+ (\d+)\?/);
+  assert.ok(m, `prompt "${q.prompt}" should be filled from bindings`);
+  // The correct option's resolved text equals the sum.
+  assert.equal(q.options[q.correctIndex].text, String(Number(m[1]) + Number(m[2])));
+});
+
+test("multiple-choice: a chart option (no text) passes through untouched", () => {
+  const quiz = generateQuiz(
+    [
+      {
+        prompt: "Which graph?",
+        options: [
+          { chart: "optA", correct: true },
+          { chart: "optB", correct: false },
+        ],
+      },
+    ],
+    1,
+    seededRng(2),
+  );
+  const q = quiz.questions[0];
+  assert.equal(q.kind, "choice");
+  if (q.kind !== "choice") return;
+  assert.ok(q.options.every((o) => typeof o.chart === "string" && o.text === undefined));
 });

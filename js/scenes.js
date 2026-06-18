@@ -155,3 +155,44 @@ export function registerGeometryScene(name, builder, opts = {}) {
 export function getGeometryScene(name) {
   return geometries.get(name);
 }
+
+/**
+ * A quiz builder, used by <primer-quiz name="…">. It returns the question bank (an array of
+ * authored questions) for the named quiz. Authored once, in the (language-independent) page JS —
+ * so the bank's logic (variable specs, `correct` flags, expressions) lives in ONE place and is
+ * never duplicated across translation overlays. The builder receives a single TOOLKIT object; its
+ * `strings(key, vars?)` accessor (scene-strings, scoped to this quiz's name) resolves localized
+ * prose locale → English → a `"$$name.key$$"` placeholder. Route translatable prose through
+ * `strings`; keep language-neutral math as inline literals. A question's `prompt`, an option's
+ * `text`, and a free-text `answer` may each be a plain value OR a function of the drawn variable
+ * bindings (e.g. `answer: (b) => b.a + b.b`). See js/components/primer-quiz.js for assembly.
+ * @callback QuizBuilder
+ * @param {{ strings: (key: string, vars?: Record<string, string | number>) => string }} toolkit
+ * @returns {import("./types/domain.js").AuthoredQuestion[]}  The question bank.
+ */
+
+/** @type {Map<string, QuizBuilder>} */
+const quizzes = new Map();
+
+/**
+ * Register a named quiz builder. Re-registering a name overwrites it. Announces the registration
+ * (like {@link registerChart}) so a `<primer-quiz>` that connected before this deferred script ran
+ * can finish building.
+ * @param {string} name
+ * @param {QuizBuilder} builder
+ */
+export function registerQuiz(name, builder) {
+  quizzes.set(name, builder);
+  if (typeof document !== "undefined") {
+    document.dispatchEvent(new CustomEvent("primer:quiz-registered", { detail: { name } }));
+  }
+}
+
+/**
+ * Look up a quiz builder by name (or undefined if not registered).
+ * @param {string} name
+ * @returns {QuizBuilder | undefined}
+ */
+export function getQuiz(name) {
+  return quizzes.get(name);
+}

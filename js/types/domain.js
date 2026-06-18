@@ -68,11 +68,18 @@
  */
 
 /**
+ * The drawn variable values for one question instance, keyed by variable name (see
+ * js/quiz-vars.js). Passed to any function-valued `prompt`/`text`/`answer`.
+ * @typedef {Record<string, string | number>} Bindings
+ */
+
+/**
  * One option in a multiple-choice question. An option shows EITHER `text` (typeset, may
  * contain LaTeX) OR a `chart` (the name of a registered chart scene, rendered as a small
  * graph via <primer-chart> — so the choices themselves can be plots). Exactly one is given.
+ * `text` may be a function of the drawn {@link Bindings} (e.g. `(b) => \`$${b.a + b.b}$\``).
  * @typedef {object} QuizOption
- * @property {string} [text]     The text shown to the learner (when not a chart option).
+ * @property {string | ((b: Bindings) => string)} [text]  The text shown to the learner (when not a chart option).
  * @property {string} [chart]    Name of a registered chart scene to render as this option.
  * @property {boolean} correct   Whether this option is the correct answer.
  */
@@ -80,7 +87,8 @@
 /**
  * A multiple-choice question as authored (before option shuffling).
  * @typedef {object} QuizQuestion
- * @property {string} prompt          The question text (may contain LaTeX).
+ * @property {string | ((b: Bindings) => string)} prompt   The question text (may contain LaTeX), or a
+ *   function of the drawn variable bindings.
  * @property {QuizOption[]} options    Two or more options; at least one correct.
  * @property {string} [variables]     Optional spec (see js/quiz-vars.js). When present the
  *   prompt and each option's `text` are evaluated against the drawn values: `{expr}` →
@@ -97,8 +105,9 @@
  * spec string (see js/quiz-vars.js), and `{name}` placeholders in `prompt` expand to
  * the generated values.
  * @typedef {object} TextQuestion
- * @property {string} prompt
- * @property {string | number} answer
+ * @property {string | ((b: Bindings) => string)} prompt   The question text, or a function of the bindings.
+ * @property {string | number | ((b: Bindings) => string | number)} answer   The expected answer: an
+ *   expression/literal over the variables, or a function of the bindings (e.g. `(b) => b.a + b.b`).
  * @property {string} [variables]
  * @property {string} [constraints]   Optional boolean expression over the variables that
  *   must hold; values are re-rolled until true (see js/quiz-vars.js).
@@ -127,11 +136,19 @@
  */
 
 /**
+ * One option after generation: any function/template `text` has been resolved to a final string.
+ * @typedef {object} GeneratedOption
+ * @property {string} [text]     The resolved text shown (when not a chart option).
+ * @property {string} [chart]    Name of a registered chart scene to render as this option.
+ * @property {boolean} correct   Whether this option is the correct answer.
+ */
+
+/**
  * A multiple-choice question after selection + option shuffling, ready to render.
  * @typedef {object} GeneratedChoiceQuestion
  * @property {"choice"} kind
  * @property {string} prompt
- * @property {QuizOption[]} options    Shuffled options.
+ * @property {GeneratedOption[]} options    Shuffled options (text resolved to strings).
  * @property {number} correctIndex     Index into `options` of (a) correct answer.
  */
 

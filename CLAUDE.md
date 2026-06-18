@@ -82,71 +82,79 @@ See `concepts/calculus/README.md` for a worked example of decomposing a subject 
   `prerequisites` — so it must point **backward** to a concept this page builds on. (A wrong-way
   ref makes a cycle, which `npm run graph` flags.) For an incidental/forward link that is *not* a
   prerequisite, use a plain `<a href="/concepts/<id>.html">` instead.
-- `<primer-quiz count="3">` — a random test. Author the bank inline as a JSON array.
-  A question is **multiple-choice** (has `options`) or **free-text** (has `answer`):
+- `<primer-quiz name="…" count="3">` — a random test. The question bank is built in JS by
+  `registerQuiz(name, builder)` (in an inline module script, like `registerManimScene`), and the
+  element references it by `name`. The builder receives a toolkit `{ strings }` and returns the
+  bank. A question is **multiple-choice** (has `options`) or **free-text** (has `answer`):
 
   ```html
-  <primer-quiz count="3">
-    <script type="application/json">
-      [
-        { "prompt": "What is $2 + 3$?",
-          "options": [
-            { "text": "$5$", "correct": true },
-            { "text": "$6$", "correct": false }
-          ] },
-        { "prompt": "What is ${a} + {b}$?",
-          "variables": "a=[1:10] b=[1:10]",
-          "answer": "a + b" }
-      ]
-    </script>
-  </primer-quiz>
+  <primer-quiz name="addingQuiz@1" count="3"></primer-quiz>
+
+  <!-- Translatable prose, keyed by the quiz name (its own scene-strings block). -->
+  <script type="application/json" class="scene-strings">
+    { "addingQuiz@1": { "sumWords": "What is the sum?" } }
+  </script>
+
+  <script type="module">
+    import { registerQuiz } from "primer";
+    registerQuiz("addingQuiz@1", ({ strings }) => [
+      { prompt: () => strings("sumWords"),                 // prose → strings (localized)
+        options: [ { text: "$5$", correct: true }, { text: "$6$", correct: false } ] },
+      { prompt: (v) => `What is $${v.a} + ${v.b}$?`,        // maths → inline literal
+        variables: "a=[1:10] b=[1:10]",
+        answer: (v) => v.a + v.b },                         // computed from the draw
+    ]);
+  </script>
   ```
 
-  `count` questions are picked at random; multiple-choice options are shuffled. Prompts
-  and option text may contain inline LaTeX delimited by `$…$`. Inline JSON blocks (this bank,
-  the `concept-meta`, scene-strings) are parsed with **JSON5**, so `//` and `/* … */` comments
-  and trailing commas are allowed.
+  `count` questions are picked at random; multiple-choice options are shuffled. Prompts and option
+  text may contain inline LaTeX delimited by `$…$`. **Version the `name` (`@1`)** and bump it on an
+  incompatible change (an overlay pinning the old version is then flagged — like a scene pin).
 
-  **Randomized free-text questions** (the second example):
+  **The prose/maths split (this is the i18n contract).** Route every translatable string through
+  `strings("key")` (its English lives in the quiz's `scene-strings` block; an overlay supplies the
+  translation — see Localization). Keep language-neutral maths as **inline literals** in the
+  builder. So a translation overlay carries only the translated `scene-strings` — never the bank —
+  and an all-maths quiz needs no translation at all.
+
+  **`prompt`, option `text`, and `answer` may each be a function** of the drawn variable bindings
+  `v` (e.g. `answer: (v) => v.a + v.b`, `text: (v) => \`$${2 * v.a}$\``), or a plain value. Pass `v`
+  to `strings` to interpolate a `{name}` placeholder into localized prose: `strings("q", v)`.
+
+  **Free-text questions** (`answer`):
   - `variables` — space-separated `name=[…]`; the bracket separator picks the kind:
     `[lo:hi]` integer, `[lo;hi]` real (3 dp), `[v1,v2,…]` a choice. Negatives ok (`[-5:5]`).
-  - `{name}` in the prompt expands to the generated value (it consumes its own braces, so
-    to keep LaTeX braces write `\frac{{a}}{{b}}`).
-  - `answer` — an expression over the variables (`+ - * / % ^`, parentheses, and
-    `sqrt abs round floor ceil min max pow`), e.g. `"a * b"`. With no variables it's a
-    literal (a number, or text like `"Paris"`). Typed answers are graded numerically with
-    a small tolerance, or as case/space-insensitive text.
-  - A template (a free-text question **with** `variables`) is **re-instantiable**, so one
-    template can fill many `count` slots — each with fresh random values.
-  - `"compare": "polynomial"` grades the answer by **algebraic equivalence** via the CortexJS
-    Compute Engine (lazy-loaded), so any equivalent form is accepted — factored, reordered,
-    fractions, etc. (`(x+3)(x+4)` ≡ `x^2+7x+12` ≡ `12+7x+x^2`). The box becomes a MathLive math
-    editor (type `^` for an exponent). `answer` is the expected expression as a string, e.g.
-    `{ "prompt": "Expand $(x+3)(x+4)$", "answer": "x^2 + 7x + 12", "compare": "polynomial" }`.
-    Offline (CE can't load) it falls back to a simple expanded-polynomial comparator.
-    Its on-screen keyboard defaults to `algebra-basic`; set `"keyboard": "<name>"` to pick a
-    different per-module keyboard (see js/math-keyboards.js — add exponents/geometry/trig there).
-  - `constraints` (either question kind) — a boolean expression over the variables that must
-    hold; the values are **re-rolled** (up to 100×) until it does. Uses the same evaluator
-    plus comparisons/logic: `== != < > <= >= && ||`. e.g. `"a != b"`, `"a > b && b > 0"`. If
-    a question's constraints can't be met, the quiz falls back to other questions.
+  - `answer` — a function of `v` (e.g. `(v) => v.a * v.b`), or a literal (a number, or text like
+    `"Paris"`; a function returning text — `() => strings("capital")` — localizes it). Typed
+    answers are graded numerically with a small tolerance, or as case/space-insensitive text.
+  - A question **with** `variables` is **re-instantiable**, so one entry can fill many `count`
+    slots — each with fresh random values.
+  - `compare: "polynomial"` grades the answer by **algebraic equivalence** via the CortexJS Compute
+    Engine (lazy-loaded), so any equivalent form is accepted — factored, reordered, fractions, etc.
+    (`(x+3)(x+4)` ≡ `x^2+7x+12`). The box becomes a MathLive math editor (type `^` for an exponent).
+    `answer` is the expected expression as a string, e.g.
+    `{ prompt: () => \`${strings("expand")} $(x+3)(x+4)$\`, answer: "x^2 + 7x + 12", compare: "polynomial" }`.
+    Offline (CE can't load) it falls back to a simple expanded-polynomial comparator. Its on-screen
+    keyboard defaults to `algebra-basic`; set `keyboard: "<name>"` to pick a different per-module
+    keyboard (see js/math-keyboards.js — add exponents/geometry/trig there).
+  - `constraints` (either kind) — a boolean expression over the variables that must hold; values are
+    **re-rolled** (up to 100×) until it does. `== != < > <= >= && ||`, e.g. `"a != b"`,
+    `"a > b && b > 0"`. If a question's constraints can't be met, the quiz falls back to others.
 
-  **Randomized multiple-choice questions:** a `options` question may ALSO carry `variables`.
-  Then the prompt and each option's `text` evaluate `{expr}` against the drawn values —
-  `{a + b}`, `{2 * a}`, a bare `{a}`, and adjacent groups concatenate (`{a}{b}` → "412").
-  The `correct` flag stays as authored; the question re-instantiates each draw. Double the
-  braces (`{{12}}`) to keep a literal LaTeX `{12}`. Example:
-  `{ "prompt": "What is ${a}+{b}$?", "variables": "a=[1:9] b=[1:9]",
-     "options": [ { "text": "${a+b}$", "correct": true }, { "text": "${2*a}$", "correct": false } ] }`.
-  Use `constraints` to stop distractors colliding — e.g. with `a,b∈[1:20]`, `a==b` makes
-  `{a+b}`, `{2*a}`, `{2*b}` render identically, so add `"constraints": "a != b"`.
+  **Multiple-choice with variables:** an `options` question may carry `variables` too; build each
+  option's `text` from `v` and keep its `correct` flag. Use `constraints` to stop distractors
+  colliding — e.g. with `a,b∈[1:20]`, set `"a != b"` so `v.a+v.b`, `2*v.a`, `2*v.b` don't render
+  identically.
 
   **Chart options** (the choices are graphs, not text): give an option a `chart` (a registered
-  chart-scene name) instead of `text`, and it renders as a small `<primer-chart>` graph. Mix is
-  per-question; `correct` works the same. Example:
-  `{ "prompt": "Which graph shows $y = 2\\sin x$?",
-     "options": [ { "chart": "optSinX", "correct": false }, { "chart": "opt2SinX", "correct": true } ] }`.
-  Don't pair `chart` with `variables` (chart options aren't templated).
+  chart-scene name) instead of `text`, and it renders as a small `<primer-chart>` graph; `correct`
+  works the same. Example:
+  `{ prompt: () => strings("whichSin"),
+     options: [ { chart: "optSinX", correct: false }, { chart: "opt2SinX", correct: true } ] }`.
+  Chart options carry no `text`, so they need no translation.
+
+  Inline JSON blocks (the `concept-meta`, `scene-strings`) are parsed with **JSON5**, so `//` and
+  `/* … */` comments and trailing commas are allowed.
 
 The **confidence control** (a 0–10 star rating, persisted to `localStorage` under
 `primer:confidence:<id>`) is added to every page automatically — do not author it.
@@ -404,7 +412,7 @@ the localized strings, and `parallelMark`/`crossing` the drawing tools.
 ## Helpers re-exported from `primer` (for inline scripts)
 
 `registerManimScene`, `getManimScene`, `registerChart`, `getChart`, `registerCharts`, `registerChartSliders`,
-`computeRange`, `registerGeometryScene`, `getGeometryScene`, `speak`, `cancelSpeech`, `themeColors`, `makeStrings`, `getConceptMeta`,
+`computeRange`, `registerGeometryScene`, `getGeometryScene`, `registerQuiz`, `getQuiz`, `speak`, `cancelSpeech`, `themeColors`, `makeStrings`, `getConceptMeta`,
 `parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`,
 `getTheme`, `applyTheme`, `initTheme`), and the graph helpers (`resolveLevels`,
 `validateGraph`, …). Pinned KaTeX/manim-web/JSXGraph versions live in `js/boot.js`.

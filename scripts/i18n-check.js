@@ -112,6 +112,24 @@ function registeredScenes(html) {
   return out;
 }
 
+/** Quiz names referenced by `<primer-quiz name="…">`. @param {string} html @returns {Set<string>} */
+function referencedQuizzes(html) {
+  const out = new Set();
+  const re = /<primer-quiz\b[^>]*\bname=["']([^"']+)["']/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) out.add(m[1]);
+  return out;
+}
+
+/** Quiz names registered by `registerQuiz("…")`. @param {string} html @returns {Set<string>} */
+function registeredQuizzes(html) {
+  const out = new Set();
+  const re = /registerQuiz\(\s*["']([^"']+)["']/g;
+  let m;
+  while ((m = re.exec(html)) !== null) out.add(m[1]);
+  return out;
+}
+
 /** Load a locale's chrome catalog (the default export). @param {string} locale */
 async function loadCatalog(locale) {
   const url = pathToFileURL(join(CATALOG_DIR, `${locale}.js`)).href;
@@ -164,8 +182,9 @@ async function checkChrome(problems) {
 
 /** @param {Problem[]} problems */
 async function checkLessons(problems) {
-  // Index every English canonical concept by id: its surface hash + registered scene names.
-  /** @type {Map<string, { surfaceHash: string, registered: Set<string> }>} */
+  // Index every English canonical concept by id: its surface hash + the scene and quiz names it
+  // registers (so an overlay can only pin scenes/quizzes the English page still provides).
+  /** @type {Map<string, { surfaceHash: string, registered: Set<string>, quizzes: Set<string> }>} */
   const canonical = new Map();
   for (const file of await listHtml(CONCEPTS_DIR)) {
     const html = await readFile(file, "utf8");
@@ -178,6 +197,7 @@ async function checkLessons(problems) {
     canonical.set(meta.id, {
       surfaceHash: hash(translatableSurface(html, meta.title)),
       registered: registeredScenes(html),
+      quizzes: registeredQuizzes(html),
     });
   }
 
@@ -219,6 +239,14 @@ async function checkLessons(problems) {
           problems.push({
             sev: "error",
             msg: `lesson [${locale}] "${id}" pins scene "${name}" the English page no longer registers — keep it registered (versioned) or re-pin the overlay`,
+          });
+        }
+      }
+      for (const name of referencedQuizzes(ov.html)) {
+        if (!c.quizzes.has(name)) {
+          problems.push({
+            sev: "error",
+            msg: `lesson [${locale}] "${id}" pins quiz "${name}" the English page no longer registers — keep it registered (versioned) or re-pin the overlay`,
           });
         }
       }
