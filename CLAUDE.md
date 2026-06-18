@@ -98,11 +98,11 @@ See `concepts/calculus/README.md` for a worked example of decomposing a subject 
   <script type="module">
     import { registerQuiz } from "primer";
     registerQuiz("addingQuiz@1", ({ sceneStrings }) => [
-      { prompt: () => sceneStrings("sumWords"),                 // prose → sceneStrings (localized)
+      { prompt: () => sceneStrings("sumWords"),                 // localized prose → must be a function
         options: [ { text: "$5$", correct: true }, { text: "$6$", correct: false } ] },
-      { prompt: (v) => `What is $${v.a} + ${v.b}$?`,        // maths → inline literal
+      { prompt: "What is ${a} + {b}$?",                         // simple string: {a},{b} fill from the draw
         variables: "a=[1:10] b=[1:10]",
-        answer: (v) => v.a + v.b },                         // computed from the draw
+        answer: "a + b" },                                      // string expression  ≡  (v) => v.a + v.b
     ]);
   </script>
   ```
@@ -117,9 +117,19 @@ See `concepts/calculus/README.md` for a worked example of decomposing a subject 
   builder. So a translation overlay carries only the translated `scene-strings` — never the bank —
   and an all-maths quiz needs no translation at all.
 
-  **`prompt`, option `text`, and `answer` may each be a function** of the drawn variable bindings
-  `v` (e.g. `answer: (v) => v.a + v.b`, `text: (v) => \`$${2 * v.a}$\``), or a plain value. Pass `v`
-  to `sceneStrings` to interpolate a `{name}` placeholder into localized prose: `sceneStrings("q", v)`.
+  **`prompt`, option `text`, and `answer` each accept two equivalent forms** — use whichever is
+  simpler:
+  - a **string** — any `{…}` inside it is **evaluated against the drawn variables**: `{a + b}`,
+    `{2 * a}`, a bare `{a}`, and adjacent groups concatenate (`{a}{b}` → "412"). For `answer` the
+    whole string is the expression (`"a + b"`) or a literal (`"Paris"`, a number). Double the braces
+    (`{{12}}`) to keep a literal LaTeX `{12}`.
+  - a **function of the drawn bindings `v`** — `text: (v) => \`$${v.a + v.b}$\``,
+    `answer: (v) => v.a + v.b`.
+
+  They are identical — `{ text: "${a + b}$" }` ≡ `{ text: (v) => \`$${v.a + v.b}$\` }` — so strings
+  keep simple quizzes terse and functions handle anything awkward to express inline. **Localized
+  prose is the exception:** it must be a function, so it can call `sceneStrings("key", v)` (passing
+  `v` interpolates a `{name}` placeholder in the translated string).
 
   **Free-text questions** (`answer`):
   - `variables` — space-separated `name=[…]`; the bracket separator picks the kind:
@@ -141,10 +151,10 @@ See `concepts/calculus/README.md` for a worked example of decomposing a subject 
     **re-rolled** (up to 100×) until it does. `== != < > <= >= && ||`, e.g. `"a != b"`,
     `"a > b && b > 0"`. If a question's constraints can't be met, the quiz falls back to others.
 
-  **Multiple-choice with variables:** an `options` question may carry `variables` too; build each
-  option's `text` from `v` and keep its `correct` flag. Use `constraints` to stop distractors
-  colliding — e.g. with `a,b∈[1:20]`, set `"a != b"` so `v.a+v.b`, `2*v.a`, `2*v.b` don't render
-  identically.
+  **Multiple-choice with variables:** an `options` question may carry `variables` too; write each
+  option's `text` as a string with `{expr}` (e.g. `"${a + b}$"`, `"${2 * a}$"`) or as a function,
+  and keep its `correct` flag. Use `constraints` to stop distractors colliding — e.g. with
+  `a,b∈[1:20]`, set `"a != b"` so `{a+b}`, `{2*a}`, `{2*b}` don't render identically.
 
   **Chart options** (the choices are graphs, not text): give an option a `chart` (a registered
   chart-scene name) instead of `text`, and it renders as a small `<primer-chart>` graph; `correct`

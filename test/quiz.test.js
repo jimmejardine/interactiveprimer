@@ -221,6 +221,41 @@ test("registerQuiz/getQuiz round-trips a builder, and its bank generates", () =>
   assert.equal(quiz.questions[0].prompt, "q");
 });
 
+test("string and function forms of `text`/`answer` are identical", () => {
+  // The same variables + seed draw the same bindings and shuffle identically, so the string form
+  // (its `{…}` evaluated) and the function form must resolve to the same option text / expected.
+  /** @type {QuizQuestion} */
+  const stringMc = {
+    prompt: "{a + b}",
+    variables: "a=[1:9] b=[1:9]",
+    options: [{ text: "${a + b}$", correct: true }, { text: "${2 * a}$", correct: false }],
+  };
+  /** @type {QuizQuestion} */
+  const fnMc = {
+    prompt: (v) => `${Number(v.a) + Number(v.b)}`,
+    variables: "a=[1:9] b=[1:9]",
+    options: [
+      { text: (v) => `$${Number(v.a) + Number(v.b)}$`, correct: true },
+      { text: (v) => `$${2 * Number(v.a)}$`, correct: false },
+    ],
+  };
+  const s = generateQuestion(stringMc, seededRng(99));
+  const f = generateQuestion(fnMc, seededRng(99));
+  assert.equal(s.kind, "choice");
+  assert.equal(f.kind, "choice");
+  if (s.kind !== "choice" || f.kind !== "choice") return;
+  assert.equal(s.prompt, f.prompt);
+  assert.deepEqual(s.options.map((o) => o.text), f.options.map((o) => o.text));
+
+  // Free-text answer: string expression vs function, same seed → same expected.
+  const sa = generateQuestion({ prompt: "x", variables: "a=[1:9] b=[1:9]", answer: "a + b" }, seededRng(5));
+  const fa = generateQuestion(
+    { prompt: "x", variables: "a=[1:9] b=[1:9]", answer: (v) => Number(v.a) + Number(v.b) },
+    seededRng(5),
+  );
+  assert.equal(sa.kind === "text" && sa.expected, fa.kind === "text" && fa.expected);
+});
+
 test("free-text: a function answer is computed from the drawn bindings", () => {
   const quiz = generateQuiz(
     [{ prompt: (v) => `What is ${v.a} + ${v.b}?`, variables: "a=[1:9] b=[1:9]", answer: (v) => Number(v.a) + Number(v.b) }],
