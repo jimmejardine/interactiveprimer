@@ -23,7 +23,7 @@ export default {
   "concept.level.declaredTitle": "Declared level",
   "concept.level.implicitTitle": "Implicit level (inherited from prerequisites)",
 
-  "quiz.heading": "Quick test",
+  "quiz.heading": "Quick quiz",
   "quiz.check": "Check answers",
   "quiz.score": "You scored {score} / {total}.",
   "quiz.empty": "No quiz questions provided.",

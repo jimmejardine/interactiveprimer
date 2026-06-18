@@ -85,7 +85,11 @@ See `concepts/calculus/README.md` for a worked example of decomposing a subject 
 - `<primer-quiz name="…" count="3">` — a random test. The question bank is built in JS by
   `registerQuiz(name, builder)` (in an inline module script, like `registerManimScene`), and the
   element references it by `name`. The builder receives a toolkit `{ sceneStrings }` and returns the
-  bank. A question is **multiple-choice** (has `options`) or **free-text** (has `answer`):
+  bank. A question is **multiple-choice** (has `options`) or **free-text** (has `answer`).
+  The quiz renders its **own** standardized golden "Quick quiz" panel (titled card), so place it
+  **directly** — do **not** wrap it in a `<primer-card>` and do **not** add a per-page heading
+  (`<h2>Test yourself</h2>` etc.). Put a one-line intro `<p>` immediately before it only if you need
+  instructions.
 
   ```html
   <primer-quiz name="addingQuiz@1" count="3"></primer-quiz>

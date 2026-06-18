@@ -22,7 +22,7 @@ export default {
   "concept.level.declaredTitle": "Nivel declarado",
   "concept.level.implicitTitle": "Nivel implícito (heredado de los prerrequisitos)",
 
-  "quiz.heading": "Prueba rápida",
+  "quiz.heading": "Cuestionario rápido",
   "quiz.check": "Comprobar respuestas",
   "quiz.score": "Obtuviste {score} / {total}.",
   "quiz.empty": "No hay preguntas para esta prueba.",

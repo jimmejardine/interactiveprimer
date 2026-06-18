@@ -195,6 +195,16 @@ export class PrimerQuiz extends HTMLElement {
         .quiz { position: relative; overflow: hidden; }
         .glitter { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; }
 
+        /* The standardized golden "Quick quiz" panel: override the shared .card surface (.card.quiz
+           is more specific than .card, so it wins regardless of stylesheet order). */
+        .card.quiz { background: var(--primer-quiz-bg, #fdf3d7); border-color: var(--primer-quiz-border, #ecd29a); }
+        .quiz-title {
+          margin: 0 0 0.9rem; font-family: var(--primer-font-display, sans-serif);
+          font-size: 1.15rem; font-weight: 700; color: var(--primer-quiz-ink, #7a5b16);
+          display: flex; align-items: center; gap: 0.45rem;
+        }
+        .quiz-title::before { content: "✏"; }
+
         /* Free-text answer box (class state can recolour the border after marking). */
         .answer-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
         .answer {
@@ -250,7 +260,7 @@ export class PrimerQuiz extends HTMLElement {
           --pct: 0; flex: none; width: 4.5rem; height: 4.5rem; border-radius: 50%;
           display: grid; place-items: center;
           background:
-            radial-gradient(closest-side, var(--primer-surface, #fff) 72%, transparent 73%),
+            radial-gradient(closest-side, var(--primer-quiz-bg, #fff) 72%, transparent 73%),
             conic-gradient(var(--ring, var(--primer-accent, #5b6ee1)) calc(var(--pct) * 1%), var(--primer-border, #ddd) 0);
         }
         .scorecard .ring .pct { font-family: var(--primer-font-display, sans-serif); font-weight: 700; font-size: 1.2rem; color: var(--primer-ink, #111); }
@@ -260,7 +270,7 @@ export class PrimerQuiz extends HTMLElement {
         @media (prefers-reduced-motion: reduce) { .scorecard { animation: none; } }
       </style>
       <form class="card quiz">
-        <h2 style="margin-top:0;">${t("quiz.heading")}</h2>
+        <h2 class="quiz-title">${t("quiz.heading")}</h2>
         <ol class="questions" style="list-style:none; padding:0;">${items}</ol>
         <div class="result-area" role="status" aria-live="polite">
           <button type="submit" disabled>${t("quiz.check")}</button>
