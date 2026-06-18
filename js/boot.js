@@ -213,6 +213,13 @@
     head.appendChild(link);
   }
 
+  // 1b) Cookieless visitor analytics (Cloudflare Web Analytics). Concept pages have no static
+  //     <head>, so load the shared injector here; it's a no-op until a token is configured.
+  const analytics = document.createElement("script");
+  analytics.src = "/js/analytics.js";
+  analytics.defer = true;
+  head.appendChild(analytics);
+
   // 2) Import map resolving the toolchain's bare specifiers. Inserting this element
   //    registers the map for every module script parsed after it.
   const importMap = document.createElement("script");
