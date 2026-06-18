@@ -13,7 +13,8 @@
  */
 
 /** @typedef {{ id: string, x: number, y: number, vx: number, vy: number, fixed?: boolean }} LayoutNode */
-/** @typedef {{ source: string, target: string }} LayoutEdge */
+/** @typedef {{ source: string, target: string, weight?: number }} LayoutEdge */
+// `weight` scales an edge's spring strength (default 1; > 1 pulls its endpoints harder).
 
 /**
  * @typedef {object} LayoutParams
@@ -113,7 +114,7 @@ export function tick(nodes, edges, params = {}) {
     let dy = t.y - s.y;
     const dist = Math.hypot(dx, dy) || 1e-3;
     const stretch = dist - p.springLength;
-    const mag = p.springK * stretch;
+    const mag = p.springK * stretch * (e.weight ?? 1); // heavier (explicit) edges pull harder
     const ux = dx / dist;
     const uy = dy / dist;
     const fs = /** @type {{fx:number,fy:number}} */ (force.get(s));

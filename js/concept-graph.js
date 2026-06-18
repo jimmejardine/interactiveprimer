@@ -21,6 +21,7 @@ const PREWARM = 320; // synchronous ticks before first paint, so the graph opens
 const CLICK_PX = 4; // pointer travel under this (screen px) counts as a click, not a drag
 const PAD_X = 12, PAD_Y = 7, EDGE_GAP = 4; // node text padding; gap between an edge end and a node
 const LABEL_MAXW = 120, LINE_H = 15; // wrap node labels to this width (px); line height
+const EXPLICIT_WEIGHT = 2.2; // spring strength for an explicit (concept-meta) edge vs 1 for implicit
 
 /**
  * @param {string} tag
@@ -112,11 +113,18 @@ export function mountConceptGraph(host, { byId, locale }) {
     nodes.push(n);
     nodeById.set(c.id, n);
   }
-  /** @type {{ source: string, target: string, line: SVGElement }[]} */
+  // Edges are prerequisite→dependent. An edge is "explicit" when the prerequisite was declared in
+  // the concept-meta (vs. only harvested from an inline <primer-ref>): explicit edges pull harder
+  // and draw thicker. Fall back to "explicit" when the graph predates explicitPrerequisites.
+  /** @type {{ source: string, target: string, explicit: boolean, weight: number, line: SVGElement }[]} */
   const edges = [];
   for (const c of byId.values()) {
+    const expl = c.explicitPrerequisites;
     for (const pre of c.prerequisites ?? []) {
-      if (nodeById.has(pre) && pre !== c.id) edges.push(/** @type {any} */ ({ source: pre, target: c.id }));
+      if (nodeById.has(pre) && pre !== c.id) {
+        const explicit = expl ? expl.includes(pre) : true;
+        edges.push(/** @type {any} */ ({ source: pre, target: c.id, explicit, weight: explicit ? EXPLICIT_WEIGHT : 1 }));
+      }
     }
   }
 
@@ -144,6 +152,7 @@ export function mountConceptGraph(host, { byId, locale }) {
     e.line = mk("line", { "marker-end": "url(#cg-arrow)" });
     e.line.setAttribute("data-source", e.source);
     e.line.setAttribute("data-target", e.target);
+    if (e.explicit) e.line.classList.add("cg-explicit");
     edgesG.appendChild(e.line);
   }
   for (const n of nodes) {
@@ -223,7 +232,7 @@ export function mountConceptGraph(host, { byId, locale }) {
     }
     for (const e of edges) {
       e.line.setAttribute("stroke", c.line);
-      e.line.setAttribute("stroke-opacity", "0.35");
+      e.line.setAttribute("stroke-opacity", e.explicit ? "0.5" : "0.28");
     }
     arrowPath.setAttribute("fill", c.line);
     arrowPath.setAttribute("fill-opacity", "0.5");
@@ -454,8 +463,9 @@ function injectStyleOnce() {
     }
     .cg-node rect { transition: stroke-width .1s; stroke-width: 1.5; }
     .cg-node.cg-hot rect { stroke: var(--primer-accent, #46e); stroke-width: 3; }
-    .cg-edges line { stroke-width: 1.5; transition: stroke-width .1s, stroke-opacity .1s; }
-    .cg-edges line.cg-hot { stroke: var(--primer-accent, #46e) !important; stroke-opacity: 0.9 !important; stroke-width: 2.5; }
+    .cg-edges line { stroke-width: 1.2; transition: stroke-width .1s, stroke-opacity .1s; }
+    .cg-edges line.cg-explicit { stroke-width: 2.6; }
+    .cg-edges line.cg-hot { stroke: var(--primer-accent, #46e) !important; stroke-opacity: 0.9 !important; stroke-width: 3; }
   `;
   document.head.appendChild(style);
 }

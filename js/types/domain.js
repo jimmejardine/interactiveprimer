@@ -42,7 +42,9 @@
  * path and the `<primer-title>` element respectively) so both are always present. `titleHtml` is
  * the raw `<primer-title>` markup, present only when the title carries inline elements (e.g. a
  * `<primer-math>` math title) — consumers typeset it while `title` stays plain text for text uses.
- * @typedef {ConceptMeta & { id: string, title: string, titleHtml?: string }} Concept */
+ * `explicitPrerequisites` are just the concept-meta–declared prerequisites (a subset of the unioned
+ * `prerequisites`); the rest are implicit, harvested from inline `<primer-ref>`s in the prose.
+ * @typedef {ConceptMeta & { id: string, title: string, titleHtml?: string, explicitPrerequisites?: string[] }} Concept */
 
 /**
  * A concept whose effective level has been resolved over the tree.

@@ -165,6 +165,10 @@ async function main() {
         ...parsed,
         id, // the node key is the file path under concepts/ (no longer authored in the block)
         title: (rawTitle === null ? null : stripTags(rawTitle)) ?? id, // from <primer-title>
+        // `prerequisites` is the UNION the rest of the system uses; `explicitPrerequisites` keeps
+        // just the concept-meta–declared ones, so implicit (<primer-ref>) edges stay distinguishable
+        // (implicit = prerequisites − explicitPrerequisites).
+        explicitPrerequisites: parsed.prerequisites,
         prerequisites: [...new Set([...parsed.prerequisites, ...refs])],
       };
       if (rawTitle && /<[^>]+>/.test(rawTitle)) meta.titleHtml = rawTitle;

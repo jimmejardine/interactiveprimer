@@ -31,6 +31,22 @@ test("a spring pulls two connected nodes closer together", () => {
   assert.ok(after < before, `expected ${after} < ${before}`);
 });
 
+test("a heavier-weight edge pulls its node closer than a weight-1 edge", () => {
+  // root fixed at centre; b and c start the same distance away. a→c has weight 2, a→b weight 1,
+  // so c should settle closer to the root. Isolate the springs (no outward push).
+  const root = { id: "a", x: 0, y: 0, vx: 0, vy: 0, fixed: true };
+  const nodes = [root, node("b", 0, 320), node("c", 0, -320)];
+  const edges = [
+    { source: "a", target: "b", weight: 1 },
+    { source: "a", target: "c", weight: 2 },
+  ];
+  const params = { outward: 0, gravity: 0, repulsion: 4000 };
+  for (let i = 0; i < 400; i++) tick(nodes, edges, params);
+  const dab = Math.hypot(nodes[1].x - root.x, nodes[1].y - root.y);
+  const dac = Math.hypot(nodes[2].x - root.x, nodes[2].y - root.y);
+  assert.ok(dac < dab, `heavier edge should sit closer: ${dac} < ${dab}`);
+});
+
 test("repulsion pushes two unconnected nodes apart", () => {
   const nodes = [node("a", -5, 0), node("b", 5, 0)]; // close, no edge
   const before = dist(nodes[0], nodes[1]);
