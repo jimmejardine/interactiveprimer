@@ -7,15 +7,16 @@
  *   <primer-geometry scene="pythagoras"></primer-geometry>
  *
  *   <script type="module">
- *     import { registerGeometry } from "primer";
- *     registerGeometry("pythagoras", ({ board, colors, step }) => {
+ *     import { registerGeometryScene } from "primer";
+ *     registerGeometryScene("pythagoras", ({ board, colors, step, sceneStrings }) => {
  *       const A = board.create("point", [0,0], { fixed:true, name:"A" });
- *       step("A right triangle", () => board.create("polygon", [A,B,C], { strokeColor: colors.line }));
- *       step("The right angle",  () => board.create("angle", [B,A,C], { orthoType:"square" }));
+ *       step(sceneStrings("triangle"), () => board.create("polygon", [A,B,C], { strokeColor: colors.line }));
+ *       step(sceneStrings("rightAngle"), () => board.create("angle", [B,A,C], { orthoType:"square" }));
  *     }, { boundingbox:[-1,5,6,-1] });
  *   </script>
  *
- * The builder creates EVERY element up front; each `step(caption, fn)` tags what it drew (see
+ * The builder gets a manim-style toolkit `{ board, JXG, step, sliders, colors, sceneStrings,
+ * parallelMark, crossing }`. It creates EVERY element up front; each `step(caption, fn)` tags what it drew (see
  * js/geometry.js). The timeline reveals steps by a `i < current` threshold, so forward/back/jump are
  * idempotent. Step reveals fade in (JSXGraph `transitionDuration`).
  *
@@ -30,12 +31,14 @@
  */
 
 import { attachShared } from "./shared.js";
-import { getGeometry } from "../scenes.js";
+import { getGeometryScene } from "../scenes.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
+import { makeStrings } from "../scene-strings.js";
 import { adoptJsxCss, wrapBoard } from "./jsx-board.js";
 import { getSliderGroup, subscribeSliders } from "../charts.js";
 import { clampStep, createStepCollector, applyStepVisibility } from "../geometry.js";
+import { makeGeometryTools } from "../geometry-tools.js";
 
 export class PrimerGeometry extends HTMLElement {
   /** @type {any} The active JSXGraph board. */
@@ -141,7 +144,7 @@ export class PrimerGeometry extends HTMLElement {
   async #build(root) {
     const stage = /** @type {HTMLElement} */ (root.querySelector(".stage"));
     const name = this.getAttribute("scene") ?? "";
-    const entry = getGeometry(name);
+    const entry = getGeometryScene(name);
     if (!entry) {
       this.#awaitRegistration(root, stage, name);
       return;
@@ -158,7 +161,7 @@ export class PrimerGeometry extends HTMLElement {
       const JXG = mod.default ?? /** @type {any} */ (mod).JXG ?? mod;
       this.#stepMs = Number.isFinite(entry.opts.stepMs) ? /** @type {number} */ (entry.opts.stepMs) : 450;
 
-      const { board, steps } = this.#runBuilder(stage, JXG, entry);
+      const { board, steps } = this.#runBuilder(stage, JXG, entry, name);
       this.#board = board;
       this.#jsx = JXG.JSXGraph;
       this.#steps = steps;
@@ -212,8 +215,9 @@ export class PrimerGeometry extends HTMLElement {
    * @param {HTMLElement} host
    * @param {Record<string, any>} JXG
    * @param {import("../scenes.js").GeometryEntry} entry
+   * @param {string} name  The scene name (scopes the localized strings).
    */
-  #runBuilder(host, JXG, entry) {
+  #runBuilder(host, JXG, entry, name) {
     const colors = themeColors();
     const { boundingbox = [-5, 5, 5, -5], keepAspect = true } = entry.opts;
     let board = null;
@@ -229,7 +233,11 @@ export class PrimerGeometry extends HTMLElement {
     board.options.line.point2 = { ...board.options.line.point2, visible: false, withLabel: false };
     const { step, steps } = createStepCollector(board);
     const sliders = entry.opts.sliders ? (getSliderGroup(entry.opts.sliders)?.values ?? {}) : {};
-    entry.builder({ board, colors, JXG, step, sliders });
+    // The toolkit, manim-style: the board + palette, the step collector, live slider values, the
+    // scene-scoped localized strings, and the drawing tools.
+    const sceneStrings = makeStrings(name);
+    const { parallelMark, crossing } = makeGeometryTools(board, colors);
+    entry.builder({ board, JXG, step, sliders, colors, sceneStrings, parallelMark, crossing });
     // Read-only: a teaching figure isn't a manipulable construction. Free points (created from
     // coordinates) are draggable by default — fix EVERY element and drop hover highlighting so the
     // mouse can't move anything. (Slider-driven points use functional coords, so they still update
@@ -341,7 +349,7 @@ export class PrimerGeometry extends HTMLElement {
   async #expand() {
     if (this.#expanded || !this.#steps.length) return;
     const name = this.getAttribute("scene") ?? "";
-    const entry = getGeometry(name);
+    const entry = getGeometryScene(name);
     if (!entry) return;
     const root = this.#root;
     const expandedEl = /** @type {HTMLElement} */ (root.querySelector(".expanded"));
@@ -361,7 +369,7 @@ export class PrimerGeometry extends HTMLElement {
         mini.className = "mini";
         block.append(h, mini);
         expandedEl.append(block);
-        const { board, steps } = this.#runBuilder(mini, JXG, entry);
+        const { board, steps } = this.#runBuilder(mini, JXG, entry, name);
         applyStepVisibility(steps, i); // cumulative through step i
         board.update();
         this.#miniBoards.push(board);

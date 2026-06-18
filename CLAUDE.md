@@ -5,6 +5,20 @@
 This file is the cheat-sheet for authoring **concept pages**. A page is a single
 `.html` file under `concepts/`; there is **no build step**.
 
+## Pedagogy: one small idea per page
+
+Concepts are **short and concise** — a page teaches a single, naturally digestible idea,
+then stops. Prefer **many tiny steps** over a few dense lessons: a learner should finish a
+page feeling they mastered one clear thing.
+
+**Split a concept** whenever it grows too long or carries more than one digestible idea —
+make each part its own page and chain them with `prerequisites`. For example, the derivative
+is built power by power: a constant, then `$x$`, then `$x^2$`, then `$x^3$`, *then* the
+general power rule — each its own page, so the pattern is discovered, not asserted. When a
+draft starts covering two things, that's the signal to split.
+
+See `concepts/calculus/README.md` for a worked example of decomposing a subject this way.
+
 ## Page skeleton (copy this)
 
 ```html
@@ -259,6 +273,14 @@ one identical domain + range — no board/axes/plot boilerplate. The markup is j
   A slider def is `{ name, label?, min, max, step?=0.1, value?=min, anchors? }` (the same shape as a
   low-level `params` entry; `anchors` are snap points).
 
+  **Control kinds.** A def defaults to a slider (range + linked number box). Set
+  `type: "choice"` with `options: ["…","…"]` for a **segmented button group** instead — its value
+  is the **index** of the selected option (so a chart/diagram reads `sliders.<name>` as a number,
+  `0,1,2,…`), and `min`/`max`/`step`/`anchors` don't apply. A group's defs may mix sliders and
+  choices in one panel. Use a choice for a discrete switch — e.g. flipping a diagram between two
+  cases. See `concepts/calculus/what-is-a-function.html` (function vs not-a-function, and the
+  curve in the vertical-line test).
+
 ### For full control: the low-level `registerChart`
 
 `registerChart(name, builder)` is the primitive `registerCharts` is built on. The builder receives
@@ -309,33 +331,56 @@ and after a theme change. Drive it from a `<primer-chart>` carrying an inline `p
   then `{ …, title: () => s("title") }` and a slider `{ name: "A", label: () => s("amplitude"), … }`.
   See `concepts/trigonometry/sine-properties.html` for the full showcase.
 
-## Geometry diagrams (`registerGeometry`)
+## Geometry diagrams (`registerGeometryScene`)
 
 For **figures** rather than function plots — lines, angles, polygons, Greek-letter labels — register a
-geometry builder and reference it from a **`<primer-geometry scene="name">`** element (a peer of
+geometry scene and reference it from a **`<primer-geometry scene="name">`** element (a peer of
 `<primer-chart>`, also JSXGraph/SVG). The board is **equal-aspect, grid-less and axis-less** by default, so
-angles/circles aren't distorted. Greek letters and `°` are plain Unicode (no math engine).
+angles/circles aren't distorted; every element is **read-only** (no dragging). Greek letters and `°` are
+plain Unicode (no math engine).
 
 A diagram is a **timeline of waypoints**: the builder draws everything up front, and each `step(caption, fn)`
 tags the elements `fn` creates. The student steps the proof forwards/backwards (elements fade in by an
 `i < current` threshold); elements created outside any `step()` are "base" (always visible).
 
+Like a manim scene, the builder gets a single **toolkit** object: `{ board, JXG, step, sliders, colors,
+sceneStrings, parallelMark, crossing }` — `colors` is the resolved `themeColors()` palette, `sceneStrings`
+the localized strings, and `parallelMark`/`crossing` the drawing tools.
+
 ```html
 <primer-geometry scene="rightTriangle"></primer-geometry>
 
+<!-- Localized text, keyed by scene name → key (same block manim scenes use). -->
+<script type="application/json" class="scene-strings">
+  { "rightTriangle": { "title": "Right triangle", "tri": "A right triangle", "ra": "The right angle" } }
+</script>
+
 <script type="module">
-  import { registerGeometry } from "primer";
-  registerGeometry("rightTriangle", ({ board, colors, step }) => {
+  import { registerGeometryScene, makeStrings } from "primer";
+  registerGeometryScene("rightTriangle", ({ board, colors, step, sceneStrings }) => {
     const A = board.create("point", [0, 0], { fixed: true, name: "A", color: colors.ink });
     const B = board.create("point", [4, 0], { fixed: true, name: "B", color: colors.ink });
     const C = board.create("point", [0, 3], { fixed: true, name: "C", color: colors.ink });
-    step("A right triangle", () => board.create("polygon", [A, B, C], { strokeColor: colors.line, fillOpacity: 0 }));
-    step("The right angle",  () => board.create("angle", [B, A, C], { orthoType: "square", strokeColor: colors.line }));
-    step("Label θ",          () => board.create("text", [2.4, 1.1, "θ"], { strokeColor: colors.ink, fontSize: 18 }));
-  }, { boundingbox: [-1, 4, 5, -1], title: "Right triangle" });
+    step(sceneStrings("tri"), () => board.create("polygon", [A, B, C], { strokeColor: colors.line, fillOpacity: 0 }));
+    step(sceneStrings("ra"),  () => board.create("angle", [B, A, C], { orthoType: "square", strokeColor: colors.line }));
+  }, { boundingbox: [-1, 4, 5, -1], title: () => makeStrings("rightTriangle")("title") });
 </script>
 ```
 
+- **i18n**: `sceneStrings(key, vars?)` resolves a scene-scoped string (locale overlay → English →
+  `$$scene.key$$`), exactly like manim's. Put the English in a `<script class="scene-strings">` block keyed
+  by scene name; titles localize via a `() => makeStrings(name)("title")` thunk (the title is defined outside
+  the builder). Numbers / Greek / `a∥b` stay literal.
+- **Tools** (board-bound, on the toolkit):
+  - `parallelMark(x, y, { dir = "h"|"v", along, count = 1, color })` — the "these are parallel" arrowheads
+    (use `count: 2` for a second, distinct parallel pair; `color` defaults to `colors.line`).
+  - `crossing(vertex, dirA, dirB)` — the four angles where two lines cross. Returns
+    `{ number(corner, text, opts?), wedge(corner, opts?) }`, addressing an angle by screen corner
+    (`"ul"|"ur"|"ll"|"lr"`): `number` writes a label inside the wedge (along its bisector); `wedge`
+    fills/highlights it and returns the element (so a `step` captures it). `vertex`/`dirA`/`dirB` may each
+    be a **function** returning the value — pass functions for a slider-driven figure (a moving crossing /
+    rotating line) and the wedge + label re-plot live on `board.update()`. See the static figures in
+    `concepts/geometry/alternate-interior-angles.html` and the live transversal in `parallel-lines.html`.
 - **Colours** as everywhere: from `themeColors()` (`colors.line`/`colors.cat[i]` strokes, fills
   `colors.cat[i]` at opacity, **text via `strokeColor: colors.ink`**) — never hardcoded.
 - **No endpoint dots**: a `segment`/`line`/`arrow` built from coordinates hides its auto-created endpoint
@@ -359,7 +404,7 @@ tags the elements `fn` creates. The student steps the proof forwards/backwards (
 ## Helpers re-exported from `primer` (for inline scripts)
 
 `registerManimScene`, `getManimScene`, `registerChart`, `getChart`, `registerCharts`, `registerChartSliders`,
-`computeRange`, `registerGeometry`, `getGeometry`, `speak`, `cancelSpeech`, `themeColors`, `makeStrings`, `getConceptMeta`,
+`computeRange`, `registerGeometryScene`, `getGeometryScene`, `speak`, `cancelSpeech`, `themeColors`, `makeStrings`, `getConceptMeta`,
 `parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`,
 `getTheme`, `applyTheme`, `initTheme`), and the graph helpers (`resolveLevels`,
 `validateGraph`, …). Pinned KaTeX/manim-web/JSXGraph versions live in `js/boot.js`.

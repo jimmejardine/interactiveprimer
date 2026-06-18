@@ -136,6 +136,26 @@ test("broker: linkChart maps a chart name to its group", () => {
   assert.equal(b.groupForChart("unknown"), undefined);
 });
 
+test("broker: a mixed slider + choice group seeds the choice index and round-trips it", () => {
+  const b = createSliderBroker();
+  b.ensureGroup("g", [
+    { name: "x", min: -5, max: 5, value: 0 },
+    { name: "rule", type: "choice", options: ["2x+1", "x²", "x/2"], value: 1 },
+  ]);
+  assert.deepEqual(b.getGroup("g")?.values, { x: 0, rule: 1 }); // choice seeded from `value`
+  /** @type {Record<string, number>[]} */
+  const seen = [];
+  b.subscribe("g", (v) => seen.push(v));
+  b.setValues("g", { rule: 2 }); // selecting a different option
+  assert.deepEqual(seen.at(-1), { x: 0, rule: 2 });
+});
+
+test("broker: a choice def with no explicit value seeds to index 0", () => {
+  const b = createSliderBroker();
+  b.ensureGroup("g", [{ name: "mode", type: "choice", options: ["a", "b"] }]);
+  assert.deepEqual(b.getGroup("g")?.values, { mode: 0 });
+});
+
 test("broker: ensureGroup keeps live values when re-registered", () => {
   const b = createSliderBroker();
   b.ensureGroup("g", [{ name: "A", min: 0, max: 3, value: 1 }]);

@@ -24,15 +24,21 @@ import { registerChart } from "./scenes.js";
 import { themeColors } from "./theme.js";
 
 /**
+ * A control in a slider group. Default `type` is `"slider"` — a range input + linked number box,
+ * with optional `anchors`. `type: "choice"` instead renders a segmented button group; its value is
+ * the **index** of the selected option (so a chart/diagram reads it like any other numeric value),
+ * and `min`/`max`/`step`/`anchors` don't apply.
  * @typedef {object} SliderDef
  * @property {string} name
  * @property {string | (() => string)} [label]  A literal, or a thunk resolved when the panel
  *   renders — pass `() => strings("amplitude")` (see js/scene-strings.js `makeStrings`) to localize.
- * @property {number} min
- * @property {number} max
- * @property {number} [step]
- * @property {number} [value]
- * @property {number[]} [anchors]
+ * @property {number} [min]   Slider only.
+ * @property {number} [max]   Slider only.
+ * @property {number} [step]  Slider only (default 0.1).
+ * @property {number} [value]  Initial value — a slider value, or the selected option index for a choice.
+ * @property {number[]} [anchors]  Slider only: snap points (also drawn as labelled ticks).
+ * @property {"slider" | "choice"} [type]  Control kind (default `"slider"`).
+ * @property {string[]} [options]  Choice only: the button labels (value = the chosen index).
  */
 
 /**
@@ -112,13 +118,13 @@ export function createSliderBroker() {
     if (!g) {
       /** @type {Record<string, number>} */
       const values = {};
-      for (const d of defs) values[d.name] = d.value ?? d.min;
+      for (const d of defs) values[d.name] = d.value ?? d.min ?? 0;
       g = { name, defs, values, subscribers: new Set(), inline: !!opts.inline };
       groups.set(name, g);
     } else {
       g.defs = defs;
       g.inline = !!opts.inline;
-      for (const d of defs) if (!(d.name in g.values)) g.values[d.name] = d.value ?? d.min;
+      for (const d of defs) if (!(d.name in g.values)) g.values[d.name] = d.value ?? d.min ?? 0;
     }
     return g;
   }

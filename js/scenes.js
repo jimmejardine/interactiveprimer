@@ -104,12 +104,16 @@ export function getChart(name) {
 }
 
 /**
- * A geometry builder, used by <primer-geometry>. It draws a static figure (lines, angles, polygons,
- * Greek-letter text) into a JSXGraph board, declaring ordered "waypoints" via the `step(caption, fn)`
- * helper so the figure can be played forwards/backwards. See js/geometry.js for the toolkit shape and
- * js/components/primer-geometry.js for how the timeline + board are assembled.
+ * A geometry-scene builder, used by <primer-geometry>. It draws a figure (lines, angles, polygons,
+ * Greek-letter text) into a JSXGraph board, declaring ordered "waypoints" via `step(caption, fn)` so the
+ * figure can be played forwards/backwards. Like a manim scene it receives a single TOOLKIT object — see
+ * js/components/primer-geometry.js for assembly.
  * @callback GeometryBuilder
- * @param {Record<string, any>} toolkit  `{ board, colors, JXG, step, sliders }`.
+ * @param {Record<string, any>} toolkit  `{ board, JXG, step, sliders, colors, sceneStrings, parallelMark,
+ *   crossing }` — `board` the JSXGraph board, `colors` the resolved `themeColors()` palette, `step` the
+ *   waypoint collector, `sliders` live values of the `opts.sliders` group, `sceneStrings(key, vars?)` the
+ *   scene-scoped localized strings (js/scene-strings.js), and `parallelMark` / `crossing` the drawing
+ *   tools (js/geometry-tools.js).
  * @returns {void}
  *
  * @typedef {object} GeometryOptions
@@ -129,14 +133,14 @@ export function getChart(name) {
 const geometries = new Map();
 
 /**
- * Register a named geometry diagram. Re-registering a name overwrites it. Announces the registration
+ * Register a named geometry scene. Re-registering a name overwrites it. Announces the registration
  * (like {@link registerChart}) so a `<primer-geometry>` that connected before this deferred script ran
  * can finish building.
  * @param {string} name
  * @param {GeometryBuilder} builder
  * @param {GeometryOptions} [opts]
  */
-export function registerGeometry(name, builder, opts = {}) {
+export function registerGeometryScene(name, builder, opts = {}) {
   geometries.set(name, { builder, opts });
   if (typeof document !== "undefined") {
     document.dispatchEvent(new CustomEvent("primer:geometry-registered", { detail: { name } }));
@@ -148,6 +152,6 @@ export function registerGeometry(name, builder, opts = {}) {
  * @param {string} name
  * @returns {GeometryEntry | undefined}
  */
-export function getGeometry(name) {
+export function getGeometryScene(name) {
   return geometries.get(name);
 }

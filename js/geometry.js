@@ -73,3 +73,91 @@ export function applyStepVisibility(steps, current) {
     for (const { el, vis } of s.els) el.setAttribute?.({ visible: reveal && vis });
   });
 }
+
+/* ------------------------------------------------------------------ */
+/* Pure math for the geometry TOOLS (js/geometry-tools.js binds these to a board). */
+/* ------------------------------------------------------------------ */
+
+/** @typedef {[number, number]} Vec */
+
+/**
+ * The `[start, end]` segments for `count` "parallel-mark" chevrons centred on `(x, y)`, each `2*d`
+ * long along the unit vector `along`, spaced `gap` apart (so a double tick reads as a tight »»).
+ * @param {number} x @param {number} y @param {Vec} along
+ * @param {number} [count]
+ * @param {{ d?: number, gap?: number }} [opts]
+ * @returns {[Vec, Vec][]}
+ */
+export function chevronSegments(x, y, along, count = 1, { d = 0.16, gap = 0.18 } = {}) {
+  const [ux, uy] = along;
+  /** @type {[Vec, Vec][]} */
+  const out = [];
+  for (let k = 0; k < count; k++) {
+    const off = (k - (count - 1) / 2) * gap;
+    const cx = x + ux * off;
+    const cy = y + uy * off;
+    out.push([
+      [cx - ux * d, cy - uy * d],
+      [cx + ux * d, cy + uy * d],
+    ]);
+  }
+  return out;
+}
+
+/**
+ * Screen quadrant a direction points into: "ur" (x+,y+), "ul" (x−,y+), "ll" (x−,y−), "lr" (x+,y−).
+ * JSXGraph user coords have y pointing UP, so this matches what the eye sees. Boundary angles round
+ * up into the next CCW quadrant.
+ * @param {number} angleRad
+ * @returns {"ur"|"ul"|"ll"|"lr"}
+ */
+export function quadrantOf(angleRad) {
+  let deg = ((angleRad * 180) / Math.PI) % 360;
+  if (deg < 0) deg += 360;
+  if (deg < 90) return "ur";
+  if (deg < 180) return "ul";
+  if (deg < 270) return "ll";
+  return "lr";
+}
+
+/**
+ * The four angles around a crossing of two lines (directions `dirA`, `dirB`). Splits the plane by the
+ * four rays ±dirA / ±dirB, pairs adjacent rays into wedges, and tags each wedge with its bisector and
+ * the screen quadrant ("ul"/"ur"/"ll"/"lr") the bisector points into — so a caller can place a label
+ * or fill an angle "by corner". For two distinct lines the four corners are distinct.
+ * @param {Vec} dirA @param {Vec} dirB
+ * @returns {{ corner: "ur"|"ul"|"ll"|"lr", bisector: Vec, rays: [Vec, Vec] }[]}
+ */
+export function quadrantWedges(dirA, dirB) {
+  /** @param {Vec} v @returns {Vec} */
+  const norm = ([x, y]) => {
+    const m = Math.hypot(x, y) || 1;
+    return [x / m, y / m];
+  };
+  const a = norm(dirA);
+  const b = norm(dirB);
+  /** @type {Vec[]} */
+  const rays = [a, [-a[0], -a[1]], b, [-b[0], -b[1]]];
+  /** @param {Vec} v */
+  const angOf = ([x, y]) => {
+    let d = (Math.atan2(y, x) * 180) / Math.PI;
+    if (d < 0) d += 360;
+    return d;
+  };
+  const sorted = rays.map((r) => ({ r, a: angOf(r) })).sort((p, q) => p.a - q.a);
+  const out = [];
+  for (let i = 0; i < 4; i++) {
+    const cur = sorted[i];
+    const nxt = sorted[(i + 1) % 4];
+    const a1 = cur.a;
+    const a2 = nxt.a < a1 ? nxt.a + 360 : nxt.a;
+    const mid = ((a1 + a2) / 2) % 360;
+    const midRad = (mid * Math.PI) / 180;
+    out.push({
+      corner: quadrantOf(midRad),
+      bisector: /** @type {Vec} */ ([Math.cos(midRad), Math.sin(midRad)]),
+      rays: /** @type {[Vec, Vec]} */ ([cur.r, nxt.r]),
+    });
+  }
+  return out;
+}

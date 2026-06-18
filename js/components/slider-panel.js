@@ -47,6 +47,21 @@ export const SLIDER_PANEL_CSS = `
   /* When labels would crowd, JS adds .sparse-labels — keep every tick MARK but show only every 2nd
      label (the first is kept; even-positioned labels are dropped). */
   .ticks.sparse-labels .tick:nth-child(even) b { display: none; }
+
+  /* A "choice" control: a label and a segmented row of buttons (the selected one is pressed). */
+  .control.choice { grid-template-columns: minmax(6rem, auto) 1fr; }
+  .segmented { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+  .segmented .seg {
+    font: inherit; font-family: var(--primer-font-ui, sans-serif); font-size: 0.85rem;
+    padding: 0.3rem 0.65rem; border-radius: 0.4rem; cursor: pointer;
+    border: 1px solid var(--primer-border, #ccc);
+    background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
+  }
+  .segmented .seg[aria-pressed="true"] {
+    background: var(--primer-accent, #46e); color: var(--primer-accent-ink, #fff);
+    border-color: transparent;
+  }
+  .segmented .seg:focus-visible { outline: 2px solid var(--primer-accent, #46e); outline-offset: 1px; }
 `;
 
 /**
@@ -60,7 +75,7 @@ export const SLIDER_PANEL_CSS = `
 export function mountSliderPanel(host, defs, initialValues, onChange) {
   /** @type {Record<string, number>} */
   const values = {};
-  for (const d of defs) values[d.name] = initialValues?.[d.name] ?? d.value ?? d.min;
+  for (const d of defs) values[d.name] = initialValues?.[d.name] ?? d.value ?? d.min ?? 0;
 
   host.innerHTML = controlsHtml(defs, values);
 
@@ -92,7 +107,7 @@ export function mountSliderPanel(host, defs, initialValues, onChange) {
       const width = input.getBoundingClientRect().width;
       if (p?.anchors && width > 0) {
         const SNAP_PX = 10;
-        value = snapToAnchor(value, p.anchors, (SNAP_PX / width) * (p.max - p.min));
+        value = snapToAnchor(value, p.anchors, (SNAP_PX / width) * ((p.max ?? 0) - (p.min ?? 0)));
       }
     }
     values[name] = value;
@@ -108,6 +123,24 @@ export function mountSliderPanel(host, defs, initialValues, onChange) {
   };
   host.addEventListener("input", onInput);
 
+  // Segmented "choice" controls are buttons, not <input>s, so they report via click. The chosen
+  // option's index becomes the control's (numeric) value, exactly like a slider position.
+  /** @param {Event} e */
+  const onClick = (e) => {
+    const target = /** @type {Element | null} */ (e.target);
+    const btn = /** @type {HTMLElement | null} */ (target?.closest?.('[data-role="choice"]') ?? null);
+    if (!btn) return;
+    const name = btn.dataset.name;
+    const idx = Number(btn.dataset.index);
+    if (!name || !Number.isFinite(idx)) return;
+    values[name] = idx;
+    for (const other of host.querySelectorAll(`.seg[data-name="${name}"]`)) {
+      other.setAttribute("aria-pressed", String(other === btn));
+    }
+    schedule();
+  };
+  host.addEventListener("click", onClick);
+
   // Thin crowded anchor labels as the panel width changes (also fires once on observe, which is when
   // we first know the laid-out slider width).
   /** @type {ResizeObserver | null} */
@@ -120,6 +153,7 @@ export function mountSliderPanel(host, defs, initialValues, onChange) {
   return {
     destroy() {
       host.removeEventListener("input", onInput);
+      host.removeEventListener("click", onClick);
       if (raf) cancelAnimationFrame(raf);
       ro?.disconnect();
       ro = null;
@@ -142,6 +176,21 @@ function controlsHtml(defs, values) {
       // locale even though the slider was registered before the translation overlay applied).
       const raw = typeof p.label === "function" ? p.label() : p.label;
       const label = escapeHtml(raw ?? p.name);
+      // A "choice" control is a segmented row of buttons; its value is the selected option index.
+      if (p.type === "choice") {
+        const buttons = (p.options ?? [])
+          .map(
+            (opt, oi) =>
+              `<button type="button" class="seg" data-name="${escapeHtml(p.name)}" data-role="choice"` +
+              ` data-index="${oi}" aria-pressed="${oi === value}">${escapeHtml(opt)}</button>`,
+          )
+          .join("");
+        return `
+        <div class="control choice">
+          <label>${label}</label>
+          <div class="segmented" role="group" aria-label="${label}">${buttons}</div>
+        </div>`;
+      }
       // Slider and number share a name via `data-name`; `data-role` distinguishes them. The range
       // lives in a `.slider` cell so its anchor ticks can be positioned over the track.
       return `
@@ -168,12 +217,14 @@ function controlsHtml(defs, values) {
  * @returns {string}
  */
 function ticksHtml(p) {
-  const span = p.max - p.min;
+  const min = p.min ?? 0;
+  const max = p.max ?? 0;
+  const span = max - min;
   if (!Array.isArray(p.anchors) || !(span > 0)) return "";
   const ticks = p.anchors
-    .filter((a) => Number.isFinite(a) && a >= p.min && a <= p.max)
+    .filter((a) => Number.isFinite(a) && a >= min && a <= max)
     .map((a) => {
-      const at = (a - p.min) / span;
+      const at = (a - min) / span;
       const label = escapeHtml(String(+a.toFixed(3))); // drop float noise; keep author values clean
       return `<span class="tick" style="--at:${at}"><i></i><b>${label}</b></span>`;
     })
