@@ -79,6 +79,9 @@ export class PrimerGeometry extends HTMLElement {
           font-size: 1.05rem; font-weight: 600; margin: 0 0 0.5rem; color: var(--primer-ink, #111);
         }
         .geo-title[hidden], .bar[hidden], .expanded[hidden] { display: none; }
+        /* In the expanded "all steps" view, only the Collapse button stays in the bar — the
+           step-nav buttons, counter and caption are meaningless when every step is shown at once. */
+        .bar.is-expanded > :not(.expand) { display: none; }
         .stage { width: 100%; aspect-ratio: 7 / 4; position: relative; overflow: hidden;
           background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); }
         .stage.jxgbox { background: var(--primer-viz-bg, #fff); }
@@ -376,6 +379,9 @@ export class PrimerGeometry extends HTMLElement {
       }
       stage.hidden = true;
       expandedEl.hidden = false;
+      // Collapse the bar down to just the Collapse button (CSS hides the rest); each mini board
+      // carries its own heading, so the step-nav buttons, counter and caption are redundant here.
+      root.querySelector(".bar")?.classList.add("is-expanded");
       this.#expanded = true;
       this.#setExpandLabel(true);
     } catch {
@@ -399,6 +405,8 @@ export class PrimerGeometry extends HTMLElement {
     expandedEl.hidden = true;
     const stage = /** @type {HTMLElement} */ (root.querySelector(".stage"));
     if (stage) stage.hidden = false;
+    // Restore the full control bar (the step-nav buttons, counter and caption hidden while expanded).
+    root.querySelector(".bar")?.classList.remove("is-expanded");
     this.#expanded = false;
     this.#setExpandLabel(false);
   }
