@@ -84,7 +84,7 @@ See `concepts/calculus/README.md` for a worked example of decomposing a subject 
   prerequisite, use a plain `<a href="/concepts/<id>.html">` instead.
 - `<primer-quiz name="…" count="3">` — a random test. The question bank is built in JS by
   `registerQuiz(name, builder)` (in an inline module script, like `registerManimScene`), and the
-  element references it by `name`. The builder receives a toolkit `{ strings }` and returns the
+  element references it by `name`. The builder receives a toolkit `{ sceneStrings }` and returns the
   bank. A question is **multiple-choice** (has `options`) or **free-text** (has `answer`):
 
   ```html
@@ -97,8 +97,8 @@ See `concepts/calculus/README.md` for a worked example of decomposing a subject 
 
   <script type="module">
     import { registerQuiz } from "primer";
-    registerQuiz("addingQuiz@1", ({ strings }) => [
-      { prompt: () => strings("sumWords"),                 // prose → strings (localized)
+    registerQuiz("addingQuiz@1", ({ sceneStrings }) => [
+      { prompt: () => sceneStrings("sumWords"),                 // prose → sceneStrings (localized)
         options: [ { text: "$5$", correct: true }, { text: "$6$", correct: false } ] },
       { prompt: (v) => `What is $${v.a} + ${v.b}$?`,        // maths → inline literal
         variables: "a=[1:10] b=[1:10]",
@@ -112,20 +112,20 @@ See `concepts/calculus/README.md` for a worked example of decomposing a subject 
   incompatible change (an overlay pinning the old version is then flagged — like a scene pin).
 
   **The prose/maths split (this is the i18n contract).** Route every translatable string through
-  `strings("key")` (its English lives in the quiz's `scene-strings` block; an overlay supplies the
+  `sceneStrings("key")` (its English lives in the quiz's `scene-strings` block; an overlay supplies the
   translation — see Localization). Keep language-neutral maths as **inline literals** in the
   builder. So a translation overlay carries only the translated `scene-strings` — never the bank —
   and an all-maths quiz needs no translation at all.
 
   **`prompt`, option `text`, and `answer` may each be a function** of the drawn variable bindings
   `v` (e.g. `answer: (v) => v.a + v.b`, `text: (v) => \`$${2 * v.a}$\``), or a plain value. Pass `v`
-  to `strings` to interpolate a `{name}` placeholder into localized prose: `strings("q", v)`.
+  to `sceneStrings` to interpolate a `{name}` placeholder into localized prose: `sceneStrings("q", v)`.
 
   **Free-text questions** (`answer`):
   - `variables` — space-separated `name=[…]`; the bracket separator picks the kind:
     `[lo:hi]` integer, `[lo;hi]` real (3 dp), `[v1,v2,…]` a choice. Negatives ok (`[-5:5]`).
   - `answer` — a function of `v` (e.g. `(v) => v.a * v.b`), or a literal (a number, or text like
-    `"Paris"`; a function returning text — `() => strings("capital")` — localizes it). Typed
+    `"Paris"`; a function returning text — `() => sceneStrings("capital")` — localizes it). Typed
     answers are graded numerically with a small tolerance, or as case/space-insensitive text.
   - A question **with** `variables` is **re-instantiable**, so one entry can fill many `count`
     slots — each with fresh random values.
@@ -133,7 +133,7 @@ See `concepts/calculus/README.md` for a worked example of decomposing a subject 
     Engine (lazy-loaded), so any equivalent form is accepted — factored, reordered, fractions, etc.
     (`(x+3)(x+4)` ≡ `x^2+7x+12`). The box becomes a MathLive math editor (type `^` for an exponent).
     `answer` is the expected expression as a string, e.g.
-    `{ prompt: () => \`${strings("expand")} $(x+3)(x+4)$\`, answer: "x^2 + 7x + 12", compare: "polynomial" }`.
+    `{ prompt: () => \`${sceneStrings("expand")} $(x+3)(x+4)$\`, answer: "x^2 + 7x + 12", compare: "polynomial" }`.
     Offline (CE can't load) it falls back to a simple expanded-polynomial comparator. Its on-screen
     keyboard defaults to `algebra-basic`; set `keyboard: "<name>"` to pick a different per-module
     keyboard (see js/math-keyboards.js — add exponents/geometry/trig there).
@@ -149,7 +149,7 @@ See `concepts/calculus/README.md` for a worked example of decomposing a subject 
   **Chart options** (the choices are graphs, not text): give an option a `chart` (a registered
   chart-scene name) instead of `text`, and it renders as a small `<primer-chart>` graph; `correct`
   works the same. Example:
-  `{ prompt: () => strings("whichSin"),
+  `{ prompt: () => sceneStrings("whichSin"),
      options: [ { chart: "optSinX", correct: false }, { chart: "opt2SinX", correct: true } ] }`.
   Chart options carry no `text`, so they need no translation.
 

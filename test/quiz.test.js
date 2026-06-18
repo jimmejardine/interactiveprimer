@@ -209,14 +209,14 @@ test("generateQuestion rejects a question with neither options nor answer", () =
 
 test("registerQuiz/getQuiz round-trips a builder, and its bank generates", () => {
   /** @type {import("../js/scenes.js").QuizBuilder} */
-  const builder = ({ strings }) => [
-    { prompt: () => strings("q"), options: [{ text: "$2$", correct: true }, { text: "$3$", correct: false }] },
+  const builder = ({ sceneStrings }) => [
+    { prompt: () => sceneStrings("q"), options: [{ text: "$2$", correct: true }, { text: "$3$", correct: false }] },
   ];
   registerQuiz("test/demo@1", builder);
   assert.equal(getQuiz("test/demo@1"), builder);
   assert.equal(getQuiz("test/missing@1"), undefined);
-  // The bank a builder returns feeds generateQuiz like any other (strings stubbed here).
-  const bank = builder({ strings: (k) => k });
+  // The bank a builder returns feeds generateQuiz like any other (sceneStrings stubbed here).
+  const bank = builder({ sceneStrings: (k) => k });
   const quiz = generateQuiz(bank, 1, seededRng(5));
   assert.equal(quiz.questions[0].prompt, "q");
 });

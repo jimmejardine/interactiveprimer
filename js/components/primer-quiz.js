@@ -2,12 +2,12 @@
 /**
  * <primer-quiz name="…" count="3"> — a randomly generated test. The question bank is built by a
  * JS builder registered with `registerQuiz(name, builder)` (see js/scenes.js), referenced here by
- * `name`. The builder receives a toolkit `{ strings }` — a scene-strings accessor scoped to the
- * quiz's name (its translatable prose lives in a `scene-strings` block; math stays inline) — and
- * returns the bank. A question is either:
+ * `name`. The builder receives a toolkit `{ sceneStrings }` — a scene-strings accessor scoped to
+ * the quiz's name (its translatable prose lives in a `scene-strings` block; math stays inline) —
+ * and returns the bank. A question is either:
  *
  *   - multiple-choice — has `options`:
- *       { prompt: () => strings("q0"), options: [ { text: "$5$", correct: true }, … ] }
+ *       { prompt: () => sceneStrings("q0"), options: [ { text: "$5$", correct: true }, … ] }
  *   - free-text — has `answer` (the learner types into a box). With `variables` it's a randomized
  *     template; `prompt`/`text`/`answer` may be functions of the drawn bindings (see js/quiz.js):
  *       { prompt: (b) => `What is $${b.a}+${b.b}$?`, variables: "a=[1:10] b=[1:10]", answer: (b) => b.a + b.b }
@@ -73,7 +73,7 @@ export class PrimerQuiz extends HTMLElement {
     }
     this.#cancelWait();
     try {
-      this.#bank = builder({ strings: makeStrings(name) });
+      this.#bank = builder({ sceneStrings: makeStrings(name) });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       root.innerHTML = `<div class="card"><p class="meta">${t("quiz.buildError", { error })}</p></div>`;

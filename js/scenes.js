@@ -161,13 +161,13 @@ export function getGeometryScene(name) {
  * authored questions) for the named quiz. Authored once, in the (language-independent) page JS —
  * so the bank's logic (variable specs, `correct` flags, expressions) lives in ONE place and is
  * never duplicated across translation overlays. The builder receives a single TOOLKIT object; its
- * `strings(key, vars?)` accessor (scene-strings, scoped to this quiz's name) resolves localized
+ * `sceneStrings(key, vars?)` accessor (scene-strings, scoped to this quiz's name) resolves localized
  * prose locale → English → a `"$$name.key$$"` placeholder. Route translatable prose through
- * `strings`; keep language-neutral math as inline literals. A question's `prompt`, an option's
+ * `sceneStrings`; keep language-neutral math as inline literals. A question's `prompt`, an option's
  * `text`, and a free-text `answer` may each be a plain value OR a function of the drawn variable
  * bindings (e.g. `answer: (b) => b.a + b.b`). See js/components/primer-quiz.js for assembly.
  * @callback QuizBuilder
- * @param {{ strings: (key: string, vars?: Record<string, string | number>) => string }} toolkit
+ * @param {{ sceneStrings: (key: string, vars?: Record<string, string | number>) => string }} toolkit
  * @returns {import("./types/domain.js").AuthoredQuestion[]}  The question bank.
  */
 

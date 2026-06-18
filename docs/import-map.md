@@ -77,7 +77,7 @@ A quiz's question bank is built in JS by `registerQuiz(name, builder)` (an inlin
 script, like a manim scene) and referenced by `<primer-quiz name="…">`. `count` questions are
 chosen at random and options shuffled; prompts/option text may contain inline math wrapped in
 `$…$`. Translatable prose comes from a `scene-strings` block (keyed by the quiz name) via the
-builder's `strings("key")`; language-neutral maths stays inline — so a translation overlay
+builder's `sceneStrings("key")`; language-neutral maths stays inline — so a translation overlay
 carries only the strings, never the bank:
 
 ```html
@@ -87,8 +87,8 @@ carries only the strings, never the bank:
 </script>
 <script type="module">
   import { registerQuiz } from "primer";
-  registerQuiz("addingQuiz@1", ({ strings }) => [
-    { prompt: () => strings("sumWords"),
+  registerQuiz("addingQuiz@1", ({ sceneStrings }) => [
+    { prompt: () => sceneStrings("sumWords"),
       options: [ { text: "$5$", correct: true }, { text: "$6$", correct: false } ] },
   ]);
 </script>
