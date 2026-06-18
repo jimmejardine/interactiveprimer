@@ -1,4 +1,4 @@
-# Interactive Primer - interactiveprimer.com
+# Interactive Primer - [interactiveprimer.com](https://interactiveprimer.com)
 
 ## Overview
 
@@ -125,6 +125,24 @@ build. Authoring a new concept is just adding an `.html` page (copy
 goes in a `<primer-title>`. An optional quiz is authored in JS with `registerQuiz`
 and shown via `<primer-quiz name="…">` (see `addition.html`).
 
+
+## License
+
+The Interactive Primer is a free knowledge commons — copyleft, so it stays free for everyone. It is
+licensed in two complementary parts:
+
+- **Code** — the framework (`js/`, `css/`, `scripts/`, `index.html`, and root config) is licensed
+  under the **GNU Affero General Public License v3.0-or-later** (see [`LICENSE`](LICENSE)). Anyone
+  may use, study, modify, and redistribute it; any modified version — **including one merely run on
+  a server** — must make its source available under the same terms.
+- **Content** — the lessons (`concepts/`, `i18n/`, and the generated `dist/graph.json`) are licensed
+  under **Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)** (see
+  [`LICENSE-CONTENT.md`](LICENSE-CONTENT.md)). Copy, translate, and remix freely; keep the
+  attribution and share derivatives under the same licence.
+
+When reusing the lessons, attribute them as: *"Interactive Primer (interactiveprimer.com),
+CC BY-SA 4.0"*. The small inline `<script>` glue inside a lesson page is also offered under the
+AGPL as part of the code, so the prose/code boundary within a `concepts/*.html` page is clear.
 
 ## Acknowledgements
 
