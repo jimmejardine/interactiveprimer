@@ -432,6 +432,11 @@ translation lives in a per-locale **overlay** at `i18n/<locale>/<id>.html` (tran
 `scene-strings` + a `sourceHash`); `js/render.js` fetches and swaps it in when the locale isn't
 English. `npm run i18n:check` flags stale/missing overlays; `npm run i18n:bless` re-stamps hashes.
 
+**Convention:** put **all** `scene-strings` blocks (scene/chart narration *and* quiz prose)
+together at the **end of the cards, just before the inline `<script>`s** — on both the canonical
+page and its overlays. One block per scene/chart/quiz namespace; `makeStrings` merges them, so
+keeping quiz strings in their own block (separate from scene strings) is encouraged.
+
 The active locale is resolved + persisted (`localStorage["primer:locale"]`) in three in-step
 places: the synchronous pre-paint scripts in `js/boot.js` and `index.html`, and the shared
 post-paint `initLocale()` in `js/i18n.js` (the authority). Two URL entry points:
