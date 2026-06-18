@@ -21,6 +21,12 @@ See `concepts/calculus/README.md` for a worked example of decomposing a subject 
 
 ## Page skeleton (copy this)
 
+The page splits cleanly in two: **everything a translator edits is in the `<body>` (above
+`</html>`)** — the title, the prose cards, and the `scene-strings`. All **language-neutral
+machinery goes _after_ `</html>`**: the `concept-meta` JSON and every inline `<script type="module">`
+(scene/quiz/chart builders). Browsers relocate post-`</html>` content into `<body>`, so the scripts
+still run and the metadata is still read.
+
 ```html
 <!doctype html>
 <html lang="en">
@@ -28,34 +34,39 @@ See `concepts/calculus/README.md` for a worked example of decomposing a subject 
     <!-- 1) The whole toolchain, in one tag. MUST be first in <body>. -->
     <script src="/js/boot.js"></script>
 
-    <!-- 2) Metadata — the single source of truth. `id` MUST equal this file's path
-            under concepts/ minus ".html" (this file: concepts/arithmetic/addition.html). -->
-    <script type="application/json" class="concept-meta">
-      {
-        "id": "arithmetic/addition",
-        "title": "Addition",
-        "prerequisites": ["arithmetic/counting"]
-      }
-    </script>
+    <!-- 2) The title — its own element (translatable; overlays supply a translated one). -->
+    <primer-title>Addition</primer-title>
 
     <!-- 3) Content: one or more cards. The page shell, title, header and confidence
             control are built automatically — do NOT write <head>, <main>,
-            <primer-page> or <primer-concept>. -->
+            <primer-page> or <primer-concept>. A scene-strings block (if any) sits
+            DIRECTLY BEFORE the card that uses it (see Localization). -->
     <primer-card>
       <p>Addition combines two amounts …</p>
       <primer-math display>a + b = c</primer-math>
     </primer-card>
   </body>
 </html>
+
+<!-- 4) Machinery, AFTER </html>: metadata first, then the module script(s). The id is NOT
+        authored — it's this file's path under concepts/ minus ".html". Omit the whole block
+        if the page has no prerequisites/level. -->
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["arithmetic/counting"]
+  }
+</script>
 ```
 
 ## concept-meta fields
 
+The block carries only graph/curation metadata now — **no `id`** (it's the file path under
+`concepts/` minus `.html`) and **no `title`** (that's the `<primer-title>` element). A page with no
+prerequisites or level may omit the block entirely.
+
 | Field | Required | Notes |
 |---|---|---|
-| `id` | yes | Full path, e.g. `arithmetic/addition`. Must match the file path. |
-| `title` | yes | Display title. |
-| `prerequisites` | no (default `[]`) | Array of full-path ids (the DAG edges). The final edge set is the **union of this list and the inline `<primer-ref>`s in the prose** (see below), so a prerequisite you already link to in the copy needn't be repeated here. The tree has exactly **one root**, the page with id `root`; every other concept reaches it through prerequisites. A base concept with no natural prerequisite of its own may simply omit `prerequisites` — the graph build auto-attaches any such page to the `orphans` maintenance node (which hangs off `root`), so it joins the tree instead of failing as an orphan. |
+| `prerequisites` | no (default `[]`) | Array of full-path ids (the DAG edges). The final edge set is the **union of this list and the inline `<primer-ref>`s in the prose** (see below), so a prerequisite you already link to in the copy needn't be repeated here. The tree has exactly **one root**, the page at path `root`; every other concept reaches it through prerequisites. A base concept with no natural prerequisite of its own may simply omit `prerequisites` (or the whole block) — the graph build auto-attaches any such page to the `orphans` maintenance node (which hangs off `root`), so it joins the tree instead of failing as an orphan. |
 | `declaredLevel` | no | Real number. Levels start at 0 and propagate downstream via `max(declared, all prerequisite levels)`. Fractions allowed (e.g. `2.5`). |
 | `completedDate` | no | ISO date `YYYY-MM-DD` — when the lesson content was finished. Surfaced by the graph tool; omit on stubs. |
 | `needsReviewDate` | no | ISO date `YYYY-MM-DD` — when this concept was flagged as needing review (the date the flag was raised, not a deadline). |
@@ -451,14 +462,17 @@ explorer and badges re-theme themselves; the only theme-coupled JS is animations
 ## Localization (automatic)
 
 The hamburger menu carries a language switcher; English is the default + fallback. A lesson's
-translation lives in a per-locale **overlay** at `i18n/<locale>/<id>.html` (translated content +
-`scene-strings` + a `sourceHash`); `js/render.js` fetches and swaps it in when the locale isn't
-English. `npm run i18n:check` flags stale/missing overlays; `npm run i18n:bless` re-stamps hashes.
+translation lives in a per-locale **overlay** at `i18n/<locale>/<id>.html`. An overlay is just the
+**translatable top part**: a translated `<primer-title>`, the translated cards, and the
+`scene-strings` — **no `concept-meta` and no module scripts** (those are canonical-only). It records
+which English version it was translated from in a single trailing **`<!-- sourceHash: … -->` comment
+after `</html>`**. `js/render.js` fetches and swaps the overlay in when the locale isn't English.
+`npm run i18n:check` flags stale/missing overlays (and prints the hash to stamp into that comment).
 
-**Convention:** put **all** `scene-strings` blocks (scene/chart narration *and* quiz prose)
-together at the **end of the cards, just before the inline `<script>`s** — on both the canonical
-page and its overlays. One block per scene/chart/quiz namespace; `makeStrings` merges them, so
-keeping quiz strings in their own block (separate from scene strings) is encouraged.
+**Convention:** put each `scene-strings` block **directly before the card (or element) that uses
+it** — on both the canonical page and its overlays — so the strings travel with the prose they
+annotate. One block per scene/chart/quiz namespace; `makeStrings` merges them, so keeping quiz
+strings in their own block (separate from scene strings) is encouraged.
 
 The active locale is resolved + persisted (`localStorage["primer:locale"]`) in three in-step
 places: the synchronous pre-paint scripts in `js/boot.js` and `index.html`, and the shared
@@ -488,7 +502,7 @@ safety net (e.g. if that maintenance node is deleted).
 
 ## Checklist for a new page
 
-1. File at `concepts/<path>.html`; `concept-meta.id` equals `<path>`.
-2. List `prerequisites` by full-path id; a base concept with no natural prerequisite may omit them (it's auto-attached to the `orphans` node).
-3. Author content as `<primer-card>`s; add math/animation/quiz as needed.
+1. File at `concepts/<path>.html` (the path **is** the id — nothing to declare). Add a `<primer-title>` with the display title.
+2. List `prerequisites` (in a `concept-meta` block **after `</html>`**) by full-path id; a base concept with no natural prerequisite may omit them — or omit the whole block — (it's auto-attached to the `orphans` node).
+3. Author content as `<primer-card>`s; add math/animation/quiz as needed; keep each `scene-strings` block before its card, and put `<script type="module">` builders after `</html>`.
 4. `npm run graph` is clean, then preview with `npm run serve`.

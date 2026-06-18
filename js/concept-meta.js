@@ -25,48 +25,55 @@ export function parseConceptMeta(raw) {
   }
   const obj = /** @type {Record<string, unknown>} */ (raw);
 
+  // `id` and `title` are no longer authored here — `id` is implied by the file path / URL (see
+  // conceptIdFromPath) and `title` lives in the <primer-title> element. They are accepted if
+  // present (legacy pages) but optional; both are populated downstream from the path/element.
   const id = obj.id;
-  if (typeof id !== "string" || id.trim() === "") {
-    throw new Error("concept metadata requires a non-empty string `id`");
-  }
-  if (id !== id.trim() || id.startsWith("/") || id.endsWith("/") || id.includes("//")) {
-    throw new Error(`concept id "${id}" must be a clean full path (no leading/trailing/double slashes)`);
+  if (id !== undefined) {
+    if (typeof id !== "string" || id.trim() === "") {
+      throw new Error("concept metadata `id`, when present, must be a non-empty string");
+    }
+    if (id !== id.trim() || id.startsWith("/") || id.endsWith("/") || id.includes("//")) {
+      throw new Error(`concept id "${id}" must be a clean full path (no leading/trailing/double slashes)`);
+    }
   }
 
   const title = obj.title;
-  if (typeof title !== "string" || title.trim() === "") {
-    throw new Error(`concept "${id}" requires a non-empty string \`title\``);
+  if (title !== undefined && (typeof title !== "string" || title.trim() === "")) {
+    throw new Error("concept metadata `title`, when present, must be a non-empty string");
   }
 
   const rawPre = obj.prerequisites ?? [];
   if (!Array.isArray(rawPre) || rawPre.some((p) => typeof p !== "string")) {
-    throw new Error(`concept "${id}" \`prerequisites\` must be an array of id strings`);
+    throw new Error("concept `prerequisites` must be an array of id strings");
   }
   const prerequisites = /** @type {string[]} */ (rawPre).map((p) => p.trim()).filter(Boolean);
 
   /** @type {ConceptMeta} */
-  const meta = { id, title, prerequisites };
+  const meta = { prerequisites };
+  if (typeof id === "string") meta.id = id;
+  if (typeof title === "string") meta.title = title;
 
   if (obj.declaredLevel !== undefined) {
     const lvl = obj.declaredLevel;
     if (typeof lvl !== "number" || !Number.isFinite(lvl)) {
-      throw new Error(`concept "${id}" \`declaredLevel\` must be a finite number`);
+      throw new Error("concept `declaredLevel` must be a finite number");
     }
     meta.declaredLevel = lvl;
   }
 
   if (obj.completedDate !== undefined) {
-    meta.completedDate = validateDate(obj.completedDate, "completedDate", id);
+    meta.completedDate = validateDate(obj.completedDate, "completedDate");
   }
   if (obj.needsReviewDate !== undefined) {
-    meta.needsReviewDate = validateDate(obj.needsReviewDate, "needsReviewDate", id);
+    meta.needsReviewDate = validateDate(obj.needsReviewDate, "needsReviewDate");
   }
 
-  // Set only on translation overlays: the hash of the English source's translatable
-  // surface this translation was made from (see scripts/i18n-check.js).
+  // Legacy: previously set on translation overlays; overlays now carry a trailing
+  // `<!-- sourceHash: … -->` comment instead. Still accepted if present.
   if (obj.sourceHash !== undefined) {
     if (typeof obj.sourceHash !== "string" || obj.sourceHash.trim() === "") {
-      throw new Error(`concept "${id}" \`sourceHash\` must be a non-empty string`);
+      throw new Error("concept `sourceHash` must be a non-empty string");
     }
     meta.sourceHash = obj.sourceHash;
   }
@@ -79,16 +86,15 @@ export function parseConceptMeta(raw) {
  * date. Throws a clear error otherwise.
  * @param {unknown} value
  * @param {string} field
- * @param {string} id
  * @returns {string}
  */
-function validateDate(value, field, id) {
+function validateDate(value, field) {
   if (
     typeof value !== "string" ||
     !/^\d{4}-\d{2}-\d{2}$/.test(value) ||
     Number.isNaN(Date.parse(value))
   ) {
-    throw new Error(`concept "${id}" \`${field}\` must be an ISO date string "YYYY-MM-DD"`);
+    throw new Error(`concept \`${field}\` must be an ISO date string "YYYY-MM-DD"`);
   }
   return value;
 }
@@ -103,4 +109,16 @@ export function getConceptMeta(doc = document) {
   const el = doc.querySelector("script.concept-meta");
   if (!el || !el.textContent) return null;
   return parseConceptMeta(parseJsonc(el.textContent));
+}
+
+/**
+ * Derive a concept's id from a page URL path. The canonical URL is always
+ * `/concepts/<id>.html`, so the id is implied by the path — it is no longer stored in the
+ * concept-meta block. Returns "" if the path isn't a concept URL.
+ * @param {string} [pathname]
+ * @returns {string}
+ */
+export function conceptIdFromPath(pathname = location.pathname) {
+  const m = pathname.match(/\/concepts\/(.+?)\.html?$/i);
+  return m ? m[1] : "";
 }

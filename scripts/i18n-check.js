@@ -3,11 +3,12 @@
  * i18n staleness checker. Two surfaces, one tool:
  *
  *  1. LESSONS — each English concept page under concepts/ has a "translatable surface"
- *     (its title + prose + quiz + manim captions + scene-strings, but NOT the
- *     language-independent scene JS nor the id/prerequisites/level). We hash that surface
- *     and compare to the `sourceHash` each per-locale overlay (i18n/<locale>/<id>.html)
- *     records, reporting stale / missing / orphan overlays — plus a scene-version retention
- *     check (an overlay must only pin scenes the English page still registers).
+ *     (its `<primer-title>` + prose + quiz + manim captions + scene-strings, but NOT the
+ *     language-independent scene JS nor the concept-meta prerequisites/level). We hash that
+ *     surface and compare to the `sourceHash` each per-locale overlay (i18n/<locale>/<id>.html)
+ *     records in a trailing `<!-- sourceHash: … -->` comment, reporting stale / missing / orphan
+ *     overlays — plus a scene-version retention check (an overlay must only pin scenes the
+ *     English page still registers).
  *
  *  2. CHROME — the UI string catalogs (js/i18n/<locale>.js) vs js/i18n/en.js (the source of
  *     truth), at PER-KEY granularity. Each locale carries a sidecar js/i18n/<locale>.hashes.json
@@ -25,12 +26,10 @@
  */
 
 import { readFile, writeFile, readdir } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
-import { parseConceptMeta } from "../js/concept-meta.js";
 import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
-import { parseJsonc } from "../js/jsonc.js";
 import enCatalog from "../js/i18n/en.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -65,33 +64,36 @@ async function listHtml(dir) {
   return out;
 }
 
-/** Extract + parse the inline concept-meta JSON block. @param {string} html @returns {unknown} */
-function extractMeta(html) {
-  const m = html.match(
-    /<script[^>]*class=["'][^"']*\bconcept-meta\b[^"']*["'][^>]*>([\s\S]*?)<\/script>/i,
-  );
-  if (!m) throw new Error('no <script class="concept-meta"> block found');
-  return parseJsonc(m[1]);
+/** A concept id from a file path under `baseDir` (e.g. concepts/ or i18n/<locale>/).
+ * @param {string} file @param {string} baseDir @returns {string} */
+function idFromPath(file, baseDir) {
+  return relative(baseDir, file).replace(/\.html$/i, "").split(sep).join("/");
+}
+
+/** Read an overlay's declared source hash from its trailing `<!-- sourceHash: … -->` comment.
+ * @param {string} html @returns {string | undefined} */
+function extractSourceHash(html) {
+  const m = html.match(/<!--\s*sourceHash:\s*([0-9a-f]+)\s*-->/i);
+  return m ? m[1] : undefined;
 }
 
 /**
  * The translatable surface of a page: everything a translator must mirror, normalized and
  * hashed. We drop the language-independent / non-translatable parts: the concept-meta block
- * (id/prerequisites/level), external scripts (boot.js), inline module scripts (the scene
- * JS), and HTML comments. What remains — prose, manim captions, the quiz bank, and the
- * scene-strings block — plus the title is the surface.
+ * (prerequisites/level), external scripts (boot.js), inline module scripts (the scene JS),
+ * and HTML comments. What remains — the `<primer-title>`, prose, manim captions, the quiz
+ * bank, and the scene-strings blocks — is the surface.
  * @param {string} html
- * @param {string} title
  * @returns {string}
  */
-function translatableSurface(html, title) {
+function translatableSurface(html) {
   let s = html;
   s = s.replace(/<script[^>]*class=["'][^"']*\bconcept-meta\b[^"']*["'][^>]*>[\s\S]*?<\/script>/i, "");
   s = s.replace(/<script\b[^>]*\bsrc=[^>]*>\s*<\/script>/gi, "");
   s = s.replace(/<script\b[^>]*\btype=["']module["'][^>]*>[\s\S]*?<\/script>/gi, "");
   s = s.replace(/<!--[\s\S]*?-->/g, "");
   s = s.replace(/\s+/g, " ").trim();
-  return `${title}\n${s}`;
+  return s;
 }
 
 /** Scene names referenced by `<primer-manim scene="…">`. @param {string} html @returns {Set<string>} */
@@ -188,14 +190,8 @@ async function checkLessons(problems) {
   const canonical = new Map();
   for (const file of await listHtml(CONCEPTS_DIR)) {
     const html = await readFile(file, "utf8");
-    let meta;
-    try {
-      meta = parseConceptMeta(extractMeta(html));
-    } catch {
-      continue; // build-graph reports canonical metadata errors
-    }
-    canonical.set(meta.id, {
-      surfaceHash: hash(translatableSurface(html, meta.title)),
+    canonical.set(idFromPath(file, CONCEPTS_DIR), {
+      surfaceHash: hash(translatableSurface(html)),
       registered: registeredScenes(html),
       quizzes: registeredQuizzes(html),
     });
@@ -209,16 +205,12 @@ async function checkLessons(problems) {
     const overlays = new Map();
     for (const file of await listHtml(dir)) {
       const html = await readFile(file, "utf8");
-      let meta;
-      try {
-        meta = parseConceptMeta(extractMeta(html));
-      } catch (err) {
-        problems.push({ sev: "error", msg: `overlay [${locale}] ${relative(ROOT, file)}: ${err instanceof Error ? err.message : String(err)}` });
-        continue;
-      }
-      overlays.set(meta.id, { sourceHash: meta.sourceHash, html });
-      if (!canonical.has(meta.id)) {
-        problems.push({ sev: "error", msg: `lesson [${locale}] ORPHAN "${meta.id}" — no English concept at that id` });
+      // The overlay's id is its path under i18n/<locale>/; its declared source hash is the
+      // trailing `<!-- sourceHash: … -->` comment (overlays no longer carry a concept-meta).
+      const id = idFromPath(file, dir);
+      overlays.set(id, { sourceHash: extractSourceHash(html), html });
+      if (!canonical.has(id)) {
+        problems.push({ sev: "error", msg: `lesson [${locale}] ORPHAN "${id}" — no English concept at that id` });
       }
     }
 

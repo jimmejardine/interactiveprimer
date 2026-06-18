@@ -86,10 +86,12 @@ time — **there is no build step**. The toolchain:
 - The knowledge-tree logic — prerequisite resolution and downstream **level propagation** —
   lives in [`js/graph.js`](js/graph.js) and [`js/levels.js`](js/levels.js); quiz generation
   in [`js/quiz.js`](js/quiz.js). All are unit-tested.
-- Each concept's graph data (id, title, prerequisites, declared level, and
-  optional `completedDate` / `needsReviewDate` curation dates) is the inline
-  `<script class="concept-meta">` JSON block on its page — the single source of truth,
-  read both by the page's Web Components and by the graph build script.
+- A concept's **id** is its file path under `concepts/` (minus `.html`) and its **title** is a
+  `<primer-title>` element; the remaining graph data (prerequisites, declared level, and optional
+  `completedDate` / `needsReviewDate` curation dates) is an inline `<script class="concept-meta">`
+  JSON block placed **after `</html>`** (with the page's `<script type="module">` builders) — the
+  language-neutral machinery, separated from the translatable body. Both are read by the page's Web
+  Components and the graph build script.
 
 ### The graph build / validation script
 
@@ -102,11 +104,10 @@ npm run graph        # validate + write dist/graph.json
 npm run check:graph  # validate only, write nothing (use in CI)
 ```
 
-It reports **errors** (fail the build): duplicate ids, an id that doesn't match its file
-path, dangling prerequisite references, prerequisite **cycles**, **orphans** (concepts not
-reachable from **the** root — the single page with id `root`), and a missing `root` concept —
-and **warnings**: a declared level below a prerequisite, or a concept with no declared level
-anywhere in its ancestry.
+It reports **errors** (fail the build): dangling prerequisite references, prerequisite **cycles**,
+**orphans** (concepts not reachable from **the** root — the single page at path `root`), and a
+missing `root` concept — and **warnings**: a declared level below a prerequisite, or a concept with
+no declared level anywhere in its ancestry.
 
 ### Developing
 
@@ -120,8 +121,8 @@ npm run serve      # static file server; open /index.html
 
 Type-checking, tests and graph validation need no compilation; they are *checks*, not a
 build. Authoring a new concept is just adding an `.html` page (copy
-`concepts/arithmetic/counting.html`) — its `concept-meta` id must match the new
-file's path under `concepts/`. An optional quiz is authored in JS with `registerQuiz`
+`concepts/arithmetic/counting.html`) — its id is simply its path under `concepts/`, and its title
+goes in a `<primer-title>`. An optional quiz is authored in JS with `registerQuiz`
 and shown via `<primer-quiz name="…">` (see `addition.html`).
 
 

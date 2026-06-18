@@ -8,10 +8,10 @@
  *   node scripts/build-graph.js --check      # validate only, write nothing (CI)
  *   node scripts/build-graph.js --out x.json # custom output path
  *
- * Each concept's metadata is read from its inline JSON block:
- *   <script type="application/json" class="concept-meta"> { ... } </script>
- * and the concept id is also expected to equal the file path under concepts/
- * (without the .html extension), which is verified as an extra CI check.
+ * Each concept's id is its file path under concepts/ (without .html); its title is read from
+ * the page's `<primer-title>` element; and its prerequisites/level come from the inline JSON
+ * block (which may sit after `</html>`, and may be omitted entirely for a base concept):
+ *   <script type="application/json" class="concept-meta"> { "prerequisites": [...] } </script>
  *
  * Exit code is non-zero when any error-severity diagnostic is found, so this can
  * gate CI.
@@ -56,16 +56,26 @@ async function listHtml(dir) {
 }
 
 /**
- * Extract and parse the inline concept-meta JSON block from page HTML.
+ * Extract and parse the inline concept-meta JSON block from page HTML, or null when the page
+ * carries no such block (a base concept may omit it entirely).
  * @param {string} html
- * @returns {unknown}
+ * @returns {unknown | null}
  */
 function extractMeta(html) {
   const m = html.match(
     /<script[^>]*class=["'][^"']*\bconcept-meta\b[^"']*["'][^>]*>([\s\S]*?)<\/script>/i,
   );
-  if (!m) throw new Error("no <script class=\"concept-meta\"> block found");
-  return parseJsonc(m[1]);
+  return m ? parseJsonc(m[1]) : null;
+}
+
+/**
+ * Read the concept title from the page's `<primer-title>` element (collapsed whitespace).
+ * @param {string} html
+ * @returns {string | null}
+ */
+function extractTitle(html) {
+  const m = html.match(/<primer-title[^>]*>([\s\S]*?)<\/primer-title>/i);
+  return m ? m[1].replace(/\s+/g, " ").trim() : null;
 }
 
 /**
@@ -96,14 +106,14 @@ async function collectTranslatedTitles() {
       continue; // no overlays for this locale yet
     }
     for (const file of files) {
-      try {
-        const meta = parseConceptMeta(extractMeta(await readFile(file, "utf8")));
-        const map = byId.get(meta.id) ?? {};
-        map[locale] = meta.title;
-        byId.set(meta.id, map);
-      } catch {
-        /* malformed overlay — i18n-check reports it */
-      }
+      // The overlay's id is its path under i18n/<locale>/; its title is its <primer-title>.
+      const html = await readFile(file, "utf8");
+      const id = relative(dir, file).replace(/\.html$/i, "").split(sep).join("/");
+      const title = extractTitle(html);
+      if (!title) continue;
+      const map = byId.get(id) ?? {};
+      map[locale] = title;
+      byId.set(id, map);
     }
   }
   return byId;
@@ -117,30 +127,29 @@ async function main() {
 
   const files = (await listHtml(CONCEPTS_DIR)).sort();
   for (const file of files) {
-    const expectedId = idFromPath(file);
+    const id = idFromPath(file);
     try {
       const html = await readFile(file, "utf8");
-      const meta = parseConceptMeta(extractMeta(html));
+      const raw = extractMeta(html);
+      const parsed = raw === null ? { prerequisites: [] } : parseConceptMeta(raw);
       // Prerequisites are the union of the concept-meta header and the inline `<primer-ref>`s
       // in the prose (each ref is a backward edge to a concept this page builds on). A ref to
       // an unknown id then surfaces via the existing dangling-prerequisite check; a ref pointed
       // the wrong way creates a cycle, which detectCycles flags. Self-references are dropped.
-      const refs = extractConceptRefs(html).filter((r) => r !== meta.id);
-      meta.prerequisites = [...new Set([...meta.prerequisites, ...refs])];
-      if (meta.id !== expectedId) {
-        fileDiagnostics.push({
-          severity: "error",
-          code: "id-path-mismatch",
-          concept: meta.id,
-          message: `id "${meta.id}" does not match its path-derived id "${expectedId}" (${relative(ROOT, file)})`,
-        });
-      }
+      const refs = extractConceptRefs(html).filter((r) => r !== id);
+      /** @type {Concept} */
+      const meta = {
+        ...parsed,
+        id, // the node key is the file path under concepts/ (no longer authored in the block)
+        title: extractTitle(html) ?? id, // from <primer-title> (id is a defensive last resort)
+        prerequisites: [...new Set([...parsed.prerequisites, ...refs])],
+      };
       concepts.push(meta);
     } catch (err) {
       fileDiagnostics.push({
         severity: "error",
         code: "metadata-error",
-        concept: expectedId,
+        concept: id,
         message: `${relative(ROOT, file)}: ${err instanceof Error ? err.message : String(err)}`,
       });
     }

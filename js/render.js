@@ -26,11 +26,10 @@
  */
 
 import "primer";
-import { getConceptMeta } from "./concept-meta.js";
+import { getConceptMeta, conceptIdFromPath } from "./concept-meta.js";
 import { initTheme } from "./theme.js";
 import { initLocale, getLocale, DEFAULT_LOCALE, t } from "./i18n.js";
 import { loadGraph } from "./graph-data.js";
-import { parseJsonc } from "./jsonc.js";
 
 /** Build the page shell once the DOM is ready. */
 async function render() {
@@ -48,24 +47,27 @@ async function render() {
   }
 
   const meta = safeMeta();
+  const id = conceptIdFromPath();
 
   // The content is every direct element child of <body> that is authored lesson content —
   // i.e. NOT a <script> (leaving the concept-meta/scene-strings JSON blocks and any inline
-  // scene script in place), and NOT the chrome we just mounted (the fixed <primer-menu>) or
-  // a previously-built shell <main>. Excluding the menu matters: otherwise the overlay swap
-  // would move or even remove it along with the canonical content.
-  const SKIP = new Set(["SCRIPT", "PRIMER-MENU", "MAIN"]);
+  // scene script in place), NOT the <primer-title> (its text is the page title, read below),
+  // and NOT the chrome we just mounted (the fixed <primer-menu>) or a previously-built shell
+  // <main>. Excluding the menu matters: otherwise the overlay swap would move or even remove
+  // it along with the canonical content.
+  const SKIP = new Set(["SCRIPT", "PRIMER-TITLE", "PRIMER-MENU", "MAIN"]);
   let content = /** @type {Element[]} */ ([...body.children].filter((el) => !SKIP.has(el.tagName)));
-  let pageTitle = meta?.title ?? null;
+  // The title lives in the <primer-title> element (translatable, part of the body).
+  let pageTitle = body.querySelector("primer-title")?.textContent?.trim() || null;
 
   // Non-English: apply the translation overlay IF one exists, else fall back to English.
   // We consult the emitted graph (which records a translated `titles[locale]` for every
   // concept that has an overlay) so we only fetch when a translation is actually there —
   // avoiding a noisy 404 in the console for the (common) untranslated case.
   const locale = getLocale();
-  if (meta && locale !== DEFAULT_LOCALE) {
-    const applied = (await hasOverlay(meta.id, locale))
-      ? await applyOverlay(meta.id, locale, content)
+  if (id && locale !== DEFAULT_LOCALE) {
+    const applied = (await hasOverlay(id, locale))
+      ? await applyOverlay(id, locale, content)
       : null;
     if (applied) {
       content = applied.content;
@@ -89,6 +91,10 @@ async function render() {
   main.className = "primer-shell";
   const page = document.createElement("primer-page");
   const concept = document.createElement("primer-concept");
+
+  // Feed <primer-concept> the resolved title + id (it no longer reads them from concept-meta).
+  if (pageTitle) concept.setAttribute("title", pageTitle);
+  if (id) concept.setAttribute("concept-id", id);
 
   // Move the (authored or translated) content into the concept body.
   concept.append(...content);
@@ -143,32 +149,14 @@ async function applyOverlay(id, locale, canonicalContent) {
   }
 
   const doc = new DOMParser().parseFromString(html, "text/html");
-  const translated = [...doc.body.children].filter((el) => el.tagName !== "SCRIPT");
+  const translated = [...doc.body.children].filter(
+    (el) => el.tagName !== "SCRIPT" && el.tagName !== "PRIMER-TITLE",
+  );
   if (translated.length === 0) return null;
 
-  // Translated title from the overlay's own concept-meta block, if present.
-  let title = null;
-  try {
-    title = getConceptMeta(doc)?.title ?? null;
-  } catch {
-    /* malformed overlay metadata — keep the English title */
-  }
-
-  // Update the live concept-meta title so <primer-concept> renders the translated <h1>
-  // (it reads the title from this block). Id/prerequisites/level are left untouched — only
-  // the display title changes, and the graph is built from files, not this live DOM.
-  if (title) {
-    const metaEl = document.querySelector("script.concept-meta");
-    if (metaEl?.textContent) {
-      try {
-        const m = parseJsonc(metaEl.textContent);
-        m.title = title;
-        metaEl.textContent = JSON.stringify(m);
-      } catch {
-        /* leave the English title if the block can't be parsed */
-      }
-    }
-  }
+  // Translated title from the overlay's <primer-title>. The caller sets it on
+  // <primer-concept>; the canonical concept-meta block (prerequisites/level) is untouched.
+  const title = doc.querySelector("primer-title")?.textContent?.trim() || null;
 
   // Remove the canonical (English) content from the DOM…
   for (const el of canonicalContent) el.remove();

@@ -19,7 +19,7 @@
  */
 
 import { attachShared } from "./shared.js";
-import { getConceptMeta } from "../concept-meta.js";
+import { conceptIdFromPath } from "../concept-meta.js";
 import { neighborhood } from "../graph.js";
 import { loadGraph } from "../graph-data.js";
 import { t, getLocale } from "../i18n.js";
@@ -112,12 +112,12 @@ export class PrimerPathway extends HTMLElement {
     /** @type {{ raw:any, byId: Map<string, ResolvedConcept> }} */
     let graph;
     try {
-      const meta = getConceptMeta();
-      if (!meta) return;
+      const id = conceptIdFromPath();
+      if (!id) return;
       graph = await loadGraph();
       // The element may have been disconnected while the graph loaded.
       if (!this.isConnected) return;
-      const hood = neighborhood(meta.id, graph.byId);
+      const hood = neighborhood(id, graph.byId);
       if (!hood) return; // current concept not in the (possibly stale) graph
       this.#render(root, graph.byId, hood);
     } catch (err) {

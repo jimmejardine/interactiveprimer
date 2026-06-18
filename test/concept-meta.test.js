@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseConceptMeta } from "../js/concept-meta.js";
+import { parseConceptMeta, conceptIdFromPath } from "../js/concept-meta.js";
 
 test("parseConceptMeta accepts a full, valid concept", () => {
   const meta = parseConceptMeta({
@@ -21,16 +21,27 @@ test("parseConceptMeta defaults prerequisites to an empty array", () => {
   assert.equal(meta.declaredLevel, undefined);
 });
 
-test("parseConceptMeta rejects bad ids", () => {
-  assert.throws(() => parseConceptMeta({ id: "", title: "X" }));
-  assert.throws(() => parseConceptMeta({ id: "/leading", title: "X" }));
-  assert.throws(() => parseConceptMeta({ id: "trailing/", title: "X" }));
-  assert.throws(() => parseConceptMeta({ id: "a//b", title: "X" }));
+test("parseConceptMeta: id and title are optional (sourced from the path / <primer-title>)", () => {
+  // A page may carry only prerequisites (or an empty block) now — id/title aren't authored here.
+  assert.doesNotThrow(() => parseConceptMeta({ prerequisites: ["a/b"] }));
+  const meta = parseConceptMeta({ prerequisites: [] });
+  assert.equal(meta.id, undefined);
+  assert.equal(meta.title, undefined);
 });
 
-test("parseConceptMeta rejects missing/blank titles", () => {
-  assert.throws(() => parseConceptMeta({ id: "a/b" }));
-  assert.throws(() => parseConceptMeta({ id: "a/b", title: "   " }));
+test("parseConceptMeta still validates id/title WHEN present", () => {
+  // A blank/malformed value is an authoring mistake even though the field is optional.
+  assert.throws(() => parseConceptMeta({ id: "" }));
+  assert.throws(() => parseConceptMeta({ id: "/leading" }));
+  assert.throws(() => parseConceptMeta({ id: "trailing/" }));
+  assert.throws(() => parseConceptMeta({ id: "a//b" }));
+  assert.throws(() => parseConceptMeta({ title: "   " }));
+});
+
+test("conceptIdFromPath derives the id from a /concepts/<id>.html path", () => {
+  assert.equal(conceptIdFromPath("/concepts/arithmetic/addition.html"), "arithmetic/addition");
+  assert.equal(conceptIdFromPath("/concepts/root.html"), "root");
+  assert.equal(conceptIdFromPath("/not/a/concept"), "");
 });
 
 test("parseConceptMeta rejects non-numeric or non-finite levels", () => {

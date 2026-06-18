@@ -3,13 +3,14 @@
  * <primer-concept> — the body of a concept, with a self-attested confidence control
  * (a 0–10 star rating) whose value persists in localStorage.
  *
- * Concept title and id come from the page's inline `<script class="concept-meta">`
- * block (the single source of truth); attributes are only a prototyping fallback.
+ * Concept title and id are supplied by render.js as attributes (`title` from the page's
+ * `<primer-title>` element, `concept-id` from the URL path); a legacy concept-meta title /
+ * slug is only a fallback. The level still comes from the concept-meta block + the graph.
  * @module
  */
 
 import { attachShared, slug } from "./shared.js";
-import { getConceptMeta } from "../concept-meta.js";
+import { getConceptMeta, conceptIdFromPath } from "../concept-meta.js";
 import { formatLevel, BASE_LEVEL } from "../levels.js";
 import { loadGraph } from "../graph-data.js";
 import { t } from "../i18n.js";
@@ -63,8 +64,10 @@ export class PrimerConcept extends HTMLElement {
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
     const meta = safeMeta();
-    const title = meta?.title ?? this.getAttribute("title") ?? "Untitled concept";
-    const id = meta?.id ?? (this.getAttribute("concept-id") || slug(title));
+    // Title + id are supplied by render.js (title attr from <primer-title>, concept-id from the
+    // URL path); a slug of the title is only a last-resort fallback for direct use without render.
+    const title = this.getAttribute("title") ?? "Untitled concept";
+    const id = this.getAttribute("concept-id") || conceptIdFromPath() || slug(title);
 
     // The level sits to the right of the title on EVERY page: bold when declared in
     // metadata, normal weight when implicit (inherited from prerequisites). A declared

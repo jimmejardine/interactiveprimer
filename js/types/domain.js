@@ -26,16 +26,21 @@
  * The authored metadata for one concept (the inline `concept-meta` JSON block on a
  * page, and the unit of the knowledge graph).
  * @typedef {object} ConceptMeta
- * @property {string} id            Full-path id, e.g. "arithmetic/addition".
- * @property {string} title         Human-readable title, e.g. "Addition".
+ * @property {string} [id]          Full-path id, e.g. "arithmetic/addition". No longer authored
+ *   (implied by the file path / URL); populated by the build/runtime from the path.
+ * @property {string} [title]       Human-readable title, e.g. "Addition". No longer authored in
+ *   this block — it lives in the `<primer-title>` element (so it's translatable).
  * @property {string[]} prerequisites  Full-path ids of concepts required first (DAG edges).
  * @property {Level} [declaredLevel]   Optional numeric level explicitly declared.
  * @property {string} [completedDate]    Optional ISO date "YYYY-MM-DD" — when the lesson content was finished.
  * @property {string} [needsReviewDate]  Optional ISO date "YYYY-MM-DD" — when this concept was flagged as needing review.
- * @property {string} [sourceHash]       Set only on translation overlays: hash of the English source's translatable surface this was translated from (see scripts/i18n-check.js).
+ * @property {string} [sourceHash]       Legacy: previously set on translation overlays; overlays now
+ *   carry a trailing `<!-- sourceHash: … -->` comment instead (see scripts/i18n-check.js).
  */
 
-/** A concept in the graph. Currently identical to its authored metadata. @typedef {ConceptMeta} Concept */
+/** A concept in the graph: its authored metadata with `id` and `title` resolved (from the file
+ * path and the `<primer-title>` element respectively) so both are always present.
+ * @typedef {ConceptMeta & { id: string, title: string }} Concept */
 
 /**
  * A concept whose effective level has been resolved over the tree.
