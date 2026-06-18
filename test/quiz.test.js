@@ -160,6 +160,39 @@ test("generateQuiz rejects an empty bank", () => {
   assert.throws(() => generateQuiz([], 3, seededRng(1)));
 });
 
+test("generateQuiz: a static is drawn at most once; a template fills the rest", () => {
+  /** @type {QuizQuestion[]} */
+  const bank = [
+    // One static MCQ (a fixed prompt) …
+    { prompt: "static", options: [{ text: "a", correct: true }, { text: "b", correct: false }] },
+    // … and one template that re-instantiates with fresh values.
+    {
+      prompt: "What is ${a} + {b}$?",
+      variables: "a=[1:9] b=[1:9]",
+      options: [{ text: "${a + b}$", correct: true }, { text: "${2 * a}$", correct: false }],
+    },
+  ];
+  // Across many seeds: count (4) > bank size (2), yet it always fills to 4 because the template
+  // repeats, and the lone static never appears more than once.
+  for (let seed = 1; seed <= 30; seed++) {
+    const quiz = generateQuiz(bank, 4, seededRng(seed));
+    assert.equal(quiz.questions.length, 4);
+    const statics = quiz.questions.filter((q) => q.prompt === "static");
+    assert.ok(statics.length <= 1, `static appeared ${statics.length} times (seed ${seed})`);
+  }
+});
+
+test("generateQuiz returns as many as possible when statics run out and there's no template", () => {
+  /** @type {QuizQuestion[]} */
+  const bank = [
+    { prompt: "Q1", options: [{ text: "a", correct: true }, { text: "b", correct: false }] },
+    { prompt: "Q2", options: [{ text: "a", correct: true }, { text: "b", correct: false }] },
+  ];
+  const quiz = generateQuiz(bank, 5, seededRng(7)); // ask for 5, only 2 statics exist
+  assert.equal(quiz.questions.length, 2);
+  assert.equal(new Set(quiz.questions.map((q) => q.prompt)).size, 2); // distinct
+});
+
 test("free-text template re-instantiates to fill count past bank size", () => {
   const bank = [
     { prompt: "What is ${a} + {b}$?", variables: "a=[1:9] b=[1:9]", answer: "a + b" },

@@ -155,15 +155,17 @@ export function generateQuestion(question, rng) {
 }
 
 /**
- * Generate a test from a bank: fill `count` questions. Static (non-template)
- * questions are used at most once (distinct, capped at how many were authored);
- * variable TEMPLATES are re-instantiable, so when templates are present `count` is
- * always satisfiable — one template can yield many random instances.
+ * Generate a test from a bank: draw up to `count` questions by repeatedly picking a uniformly
+ * random entry from a live pool. When an entry is picked it leaves the pool — UNLESS it's a
+ * variable TEMPLATE (`isTemplate`), which stays and can be drawn again (re-instantiated with fresh
+ * values each time). So a static question appears at most once (a quiz is distinct, capped at how
+ * many statics were authored), while a single template can fill many slots.
  *
- * If a question's `constraints` can't be satisfied (a {@link ConstraintError} after the
- * re-roll limit), that question is dropped and a replacement is drawn from the bank, so the
- * quiz still builds from the others. Throws only if NOTHING can be built; other errors
- * (a malformed question) propagate so authoring mistakes surface.
+ * If a picked question's `constraints` can't be satisfied (a {@link ConstraintError} after the
+ * re-roll limit) it leaves the pool too — even a template, since an unsatisfiable spec can never be
+ * drawn — and selection continues from the rest. If the pool empties before reaching `count`, the
+ * quiz is built from as many as were possible. Throws on an empty bank, or if NOTHING could be built;
+ * other errors (a malformed question) propagate so authoring mistakes surface.
  * @param {AuthoredQuestion[]} bank
  * @param {number} count
  * @param {Rng} rng
@@ -172,37 +174,20 @@ export function generateQuestion(question, rng) {
 export function generateQuiz(bank, count, rng) {
   if (bank.length === 0) throw new Error("Cannot generate a quiz from an empty bank");
 
-  // Each bank entry at most once in a random first pass (statics and templates mixed); to
-  // exceed the bank size, only templates repeat (re-instantiated each time).
-  const order = shuffle(bank, rng);
-  const templates = shuffle(
-    bank.filter((q) => isTemplate(q)),
-    rng,
-  );
-
+  const pool = bank.slice(); // live working copy: statics are spliced out on pick; templates stay
   /** @type {GeneratedQuestion[]} */
   const questions = [];
-  /** @type {Set<AuthoredQuestion>} entries whose constraints proved unsatisfiable */
-  const dead = new Set();
-  let oi = 0; // cursor into the distinct first pass
-  let ti = 0; // cursor into the template repeat pass
 
-  while (questions.length < count) {
-    /** @type {AuthoredQuestion | undefined} */
-    let candidate;
-    if (oi < order.length) {
-      candidate = order[oi++];
-    } else {
-      const alive = templates.filter((q) => !dead.has(q));
-      if (alive.length === 0) break; // statics exhausted, no live templates left
-      candidate = alive[ti++ % alive.length];
-    }
-    if (dead.has(candidate)) continue;
+  while (questions.length < count && pool.length > 0) {
+    const i = Math.floor(rng() * pool.length);
+    const candidate = pool[i];
     try {
       questions.push(generateQuestion(candidate, rng));
+      // A static is used once → remove it. A template stays so it can be drawn again.
+      if (!isTemplate(candidate)) pool.splice(i, 1);
     } catch (err) {
       if (err instanceof ConstraintError) {
-        dead.add(candidate); // unsatisfiable — drop it and draw another
+        pool.splice(i, 1); // unsatisfiable — drop it (even a template) and draw another
         continue;
       }
       throw err; // malformed question, etc. — surface it
