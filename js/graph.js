@@ -151,7 +151,9 @@ export function resolvePrerequisites(id, byId) {
  *  - `successors`   — the concept's direct dependents (immediate successors).
  *  - `peers` — the immediate siblings/co-parents: direct dependents of the concept's
  *    direct prerequisites, plus direct prerequisites of its direct dependents, minus
- *    the concept itself and anything already a direct predecessor or successor.
+ *    the concept itself, anything already a direct predecessor or successor, and anything
+ *    that (transitively) depends on the concept — a downstream node is not a peer you could
+ *    cover next, even when it happens to share a successor or prerequisite with the concept.
  *  - `edges` — undirected, deduped prerequisite edges among all displayed concepts.
  * Returns `null` if `id` is not in the graph (the widget then renders nothing).
  *
@@ -180,15 +182,20 @@ export function neighborhood(id, byId) {
   const predecessors = preOf(id);
   const successors = succOf(id);
   const directSet = new Set([id, ...predecessors, ...successors]);
+  // `id` plus every concept that (transitively) depends on it. A peer that depends on `id` comes
+  // strictly AFTER it, so it isn't a "could-be-covered-next" peer — drop it (see below).
+  const dependentsOfId = reachableFromRoots(byId, [id]);
 
   // Peers: siblings (dependents of my direct prerequisites) + co-parents
   // (prerequisites of my direct dependents), excluding the concept and its direct
-  // predecessors/successors (which already occupy columns 1 and 3).
+  // predecessors/successors (which already occupy columns 1 and 3), AND excluding anything
+  // downstream of the concept (a node that depends on it is not a peer you could cover next).
   /** @type {Set<string>} */
   const peerSet = new Set();
   for (const p of predecessors) for (const sib of succOf(p)) peerSet.add(sib);
   for (const s of successors) for (const cop of preOf(s)) peerSet.add(cop);
-  for (const d of directSet) peerSet.delete(d);
+  for (const d of directSet) peerSet.delete(d); // self + direct predecessors/successors
+  for (const d of dependentsOfId) peerSet.delete(d); // anything that transitively depends on `id`
   const peers = [...peerSet];
 
   // Edges: undirected, deduped prerequisite edges among the displayed concepts.

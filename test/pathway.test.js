@@ -94,6 +94,35 @@ test("a peer that is also a direct successor is not double-listed", () => {
   assert.deepEqual(n?.peers, []); // b excluded from peers because it's a direct successor
 });
 
+test("a co-parent that transitively depends on the current concept is not a peer", () => {
+  // a → b → x, and s needs both a and x. x is a predecessor of the successor s (a co-parent) and is
+  // NOT a direct successor of a — but x depends on a (a → b → x), so it's downstream, not a peer.
+  const byId = idx([
+    { id: "a", prerequisites: [] },
+    { id: "b", prerequisites: ["a"] },
+    { id: "x", prerequisites: ["b"] },
+    { id: "s", prerequisites: ["a", "x"] },
+  ]);
+  const n = neighborhood("a", byId);
+  assert.deepEqual([...(n?.successors ?? [])].sort(), ["b", "s"]); // direct dependents of a
+  assert.deepEqual(n?.peers, []); // x dropped: it depends on a
+});
+
+test("a sibling that transitively depends on the current concept is not a peer", () => {
+  // p → a and p → d make d a sibling of a (both are successors of the parent p). But d also depends
+  // on a (a → c → d), so it is downstream of a — excluded from peers (the symmetric case).
+  const byId = idx([
+    { id: "p", prerequisites: [] },
+    { id: "a", prerequisites: ["p"] },
+    { id: "c", prerequisites: ["a"] },
+    { id: "d", prerequisites: ["p", "c"] },
+  ]);
+  const n = neighborhood("a", byId);
+  assert.deepEqual(n?.predecessors, ["p"]);
+  assert.deepEqual(n?.successors, ["c"]);
+  assert.deepEqual(n?.peers, []); // d dropped: it depends on a
+});
+
 test("edges are undirected, deduped, and never self-referential", () => {
   const byId = idx([
     { id: "p", prerequisites: [] },
