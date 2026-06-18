@@ -166,9 +166,14 @@ export function getGeometryScene(name) {
  * `sceneStrings`; keep language-neutral math as inline literals. A question's `prompt`, an option's
  * `text`, and a free-text `answer` may each be a plain value OR a function of the drawn variable
  * bindings (e.g. `answer: (b) => b.a + b.b`). See js/components/primer-quiz.js for assembly.
+ *
+ * The OPTIONAL first item may be a config object `{ num_questions, preamble }` (a {@link QuizConfig},
+ * recognized by lacking both `options` and `answer`): it sets how many questions to draw (default 5)
+ * and an instructions sentence shown under the heading. Keeping it in the builder means the count is
+ * common to every locale.
  * @callback QuizBuilder
  * @param {{ sceneStrings: (key: string, vars?: Record<string, string | number>) => string }} toolkit
- * @returns {import("./types/domain.js").AuthoredQuestion[]}  The question bank.
+ * @returns {Array<import("./types/domain.js").AuthoredQuestion | import("./types/domain.js").QuizConfig>}  The question bank (optional leading config).
  */
 
 /** @type {Map<string, QuizBuilder>} */

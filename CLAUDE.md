@@ -82,26 +82,35 @@ See `concepts/calculus/README.md` for a worked example of decomposing a subject 
   `prerequisites` — so it must point **backward** to a concept this page builds on. (A wrong-way
   ref makes a cycle, which `npm run graph` flags.) For an incidental/forward link that is *not* a
   prerequisite, use a plain `<a href="/concepts/<id>.html">` instead.
-- `<primer-quiz name="…" count="3">` — a random test. The question bank is built in JS by
+- `<primer-quiz name="…">` — a random test. The question bank is built in JS by
   `registerQuiz(name, builder)` (in an inline module script, like `registerManimScene`), and the
   element references it by `name`. The builder receives a toolkit `{ sceneStrings }` and returns the
   bank. A question is **multiple-choice** (has `options`) or **free-text** (has `answer`).
   The quiz renders its **own** standardized golden "Quick quiz" panel (titled card), so place it
   **directly** — do **not** wrap it in a `<primer-card>` and do **not** add a per-page heading
-  (`<h2>Test yourself</h2>` etc.). Put a one-line intro `<p>` immediately before it only if you need
-  instructions.
+  (`<h2>Test yourself</h2>` etc.).
+
+  **Quiz settings live in the builder, not on the element.** The builder's optional **first** item is
+  a config object `{ num_questions, preamble }` — recognized by having **no `options` and no
+  `answer`** (so it isn't mistaken for a question). `num_questions` is how many questions to draw at
+  random (**defaults to 5** when omitted, or when there's no config item); `preamble` is an
+  instructions sentence rendered in normal font directly under the heading. Both live in the
+  language-neutral builder, so the count + instructions are **common to every locale** — there is no
+  `count` attribute and no separate intro `<p>` to keep in sync with a translation overlay. Route a
+  `preamble` through `sceneStrings` so it translates (an all-maths quiz needs none).
 
   ```html
-  <primer-quiz name="addingQuiz@1" count="3"></primer-quiz>
+  <primer-quiz name="addingQuiz@1"></primer-quiz>
 
   <!-- Translatable prose, keyed by the quiz name (its own scene-strings block). -->
   <script type="application/json" class="scene-strings">
-    { "addingQuiz@1": { "sumWords": "What is the sum?" } }
+    { "addingQuiz@1": { "instructions": "Add the two numbers.", "sumWords": "What is the sum?" } }
   </script>
 
   <script type="module">
     import { registerQuiz } from "primer";
     registerQuiz("addingQuiz@1", ({ sceneStrings }) => [
+      { num_questions: 3, preamble: sceneStrings("instructions") },  // config: no options/answer
       { prompt: () => sceneStrings("sumWords"),                 // localized prose → must be a function
         options: [ { text: "$5$", correct: true }, { text: "$6$", correct: false } ] },
       { prompt: "What is ${a} + {b}$?",                         // simple string: {a},{b} fill from the draw
@@ -111,9 +120,9 @@ See `concepts/calculus/README.md` for a worked example of decomposing a subject 
   </script>
   ```
 
-  `count` questions are picked at random; multiple-choice options are shuffled. Prompts and option
-  text may contain inline LaTeX delimited by `$…$`. **Version the `name` (`@1`)** and bump it on an
-  incompatible change (an overlay pinning the old version is then flagged — like a scene pin).
+  `num_questions` questions are picked at random; multiple-choice options are shuffled. Prompts and
+  option text may contain inline LaTeX delimited by `$…$`. **Version the `name` (`@1`)** and bump it on
+  an incompatible change (an overlay pinning the old version is then flagged — like a scene pin).
 
   **The prose/maths split (this is the i18n contract).** Route every translatable string through
   `sceneStrings("key")` (its English lives in the quiz's `scene-strings` block; an overlay supplies the

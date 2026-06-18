@@ -24,6 +24,7 @@ import {
 } from "./quiz-vars.js";
 
 /** @typedef {import("./types/domain.js").QuizOption} QuizOption */
+/** @typedef {import("./types/domain.js").QuizConfig} QuizConfig */
 /** @typedef {import("./types/domain.js").QuizQuestion} QuizQuestion */
 /** @typedef {import("./types/domain.js").TextQuestion} TextQuestion */
 /** @typedef {import("./types/domain.js").AuthoredQuestion} AuthoredQuestion */
@@ -66,6 +67,23 @@ function isChoice(q) {
 /** @param {AuthoredQuestion} q @returns {boolean} Whether it's a free-text question. */
 function isText(q) {
   return /** @type {any} */ (q).answer !== undefined;
+}
+
+/**
+ * Split a builder's returned array into an optional config object + the question bank. The
+ * builder may return a CONFIG object as its FIRST item — recognized by having neither `options`
+ * nor `answer` (so it isn't a question). It carries quiz-level settings: `num_questions` (how many
+ * to draw) and `preamble` (an instructions sentence shown under the heading). When the first item
+ * is a real question, there's no config and the whole array is the bank.
+ * @param {Array<AuthoredQuestion | QuizConfig>} bank
+ * @returns {{ config: QuizConfig, questions: AuthoredQuestion[] }}
+ */
+export function extractConfig(bank) {
+  const first = /** @type {AuthoredQuestion} */ (bank[0]);
+  if (first && !isChoice(first) && !isText(first)) {
+    return { config: /** @type {QuizConfig} */ (bank[0]), questions: /** @type {AuthoredQuestion[]} */ (bank.slice(1)) };
+  }
+  return { config: {}, questions: /** @type {AuthoredQuestion[]} */ (bank) };
 }
 /** A question with a non-empty `variables` spec can be re-instantiated (either kind —
  * free-text or multiple-choice).

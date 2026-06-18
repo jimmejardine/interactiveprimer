@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { shuffle, generateQuestion, generateQuiz } from "../js/quiz.js";
+import { shuffle, generateQuestion, generateQuiz, extractConfig } from "../js/quiz.js";
 import { registerQuiz, getQuiz } from "../js/scenes.js";
 
 /** @typedef {import("../js/types/domain.js").QuizQuestion} QuizQuestion */
@@ -215,9 +215,10 @@ test("registerQuiz/getQuiz round-trips a builder, and its bank generates", () =>
   registerQuiz("test/demo@1", builder);
   assert.equal(getQuiz("test/demo@1"), builder);
   assert.equal(getQuiz("test/missing@1"), undefined);
-  // The bank a builder returns feeds generateQuiz like any other (sceneStrings stubbed here).
-  const bank = builder({ sceneStrings: (k) => k });
-  const quiz = generateQuiz(bank, 1, seededRng(5));
+  // The bank a builder returns feeds generateQuiz like any other (sceneStrings stubbed here),
+  // after extractConfig splits off any leading config item (none here).
+  const { questions } = extractConfig(builder({ sceneStrings: (k) => k }));
+  const quiz = generateQuiz(questions, 1, seededRng(5));
   assert.equal(quiz.questions[0].prompt, "q");
 });
 
@@ -297,6 +298,44 @@ test("multiple-choice: function prompt and option text resolve from bindings", (
   assert.ok(m, `prompt "${q.prompt}" should be filled from bindings`);
   // The correct option's resolved text equals the sum.
   assert.equal(q.options[q.correctIndex].text, String(Number(m[1]) + Number(m[2])));
+});
+
+test("extractConfig: a leading config item (no options/answer) is split from the questions", () => {
+  /** @type {Array<any>} */
+  const bank = [
+    { num_questions: 4, preamble: "Solve each." },
+    { prompt: "Q1", options: [{ text: "a", correct: true }, { text: "b", correct: false }] },
+    { prompt: "Q2", answer: "Paris" },
+  ];
+  const { config, questions } = extractConfig(bank);
+  assert.equal(config.num_questions, 4);
+  assert.equal(config.preamble, "Solve each.");
+  assert.equal(questions.length, 2);
+  assert.equal(questions[0].prompt, "Q1");
+});
+
+test("extractConfig: no config item → empty config and the whole bank is questions", () => {
+  /** @type {Array<any>} */
+  const bank = [
+    { prompt: "Q1", options: [{ text: "a", correct: true }, { text: "b", correct: false }] },
+    { prompt: "Q2", answer: "Paris" },
+  ];
+  const { config, questions } = extractConfig(bank);
+  assert.deepEqual(config, {});
+  assert.equal(questions.length, 2);
+  // The generated quiz draws from exactly these questions.
+  const quiz = generateQuiz(questions, 2, seededRng(1));
+  assert.equal(quiz.questions.length, 2);
+});
+
+test("extractConfig: a config carrying only preamble leaves num_questions undefined (component defaults to 5)", () => {
+  const { config, questions } = extractConfig([
+    { preamble: "Read carefully." },
+    { prompt: "Q1", answer: "x" },
+  ]);
+  assert.equal(config.preamble, "Read carefully.");
+  assert.equal(config.num_questions, undefined);
+  assert.equal(questions.length, 1);
 });
 
 test("multiple-choice: a chart option (no text) passes through untouched", () => {

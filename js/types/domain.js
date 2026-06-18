@@ -123,6 +123,17 @@
  * @typedef {QuizQuestion | TextQuestion} AuthoredQuestion */
 
 /**
+ * Quiz-level settings, supplied as the OPTIONAL FIRST item returned by a `registerQuiz` builder.
+ * It is recognized by having neither `options` nor `answer` (so it is not mistaken for a question).
+ * Lives in the language-neutral builder, so it's shared across every locale (never overlaid).
+ * @typedef {object} QuizConfig
+ * @property {number} [num_questions]   How many questions to draw. Defaults to 5 when omitted.
+ * @property {string | (() => string)} [preamble]   An instructions sentence rendered in normal
+ *   font directly under the "Quick quiz" heading. Route translatable prose through `sceneStrings`
+ *   (so the string resolves per locale); may contain inline `$…$` LaTeX.
+ */
+
+/**
  * One random variable parsed from a question's `variables` spec.
  * @typedef {{ name: string, kind: "int", lo: number, hi: number }
  *   | { name: string, kind: "real", lo: number, hi: number }

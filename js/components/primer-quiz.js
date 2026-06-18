@@ -1,10 +1,10 @@
 // @ts-check
 /**
- * <primer-quiz name="…" count="3"> — a randomly generated test. The question bank is built by a
- * JS builder registered with `registerQuiz(name, builder)` (see js/scenes.js), referenced here by
- * `name`. The builder receives a toolkit `{ sceneStrings }` — a scene-strings accessor scoped to
- * the quiz's name (its translatable prose lives in a `scene-strings` block; math stays inline) —
- * and returns the bank. A question is either:
+ * <primer-quiz name="…"> — a randomly generated test. The question bank is built by a JS builder
+ * registered with `registerQuiz(name, builder)` (see js/scenes.js), referenced here by `name`. The
+ * builder receives a toolkit `{ sceneStrings }` — a scene-strings accessor scoped to the quiz's name
+ * (its translatable prose lives in a `scene-strings` block; math stays inline) — and returns the
+ * bank. A question is either:
  *
  *   - multiple-choice — has `options`:
  *       { prompt: () => sceneStrings("q0"), options: [ { text: "$5$", correct: true }, … ] }
@@ -12,15 +12,19 @@
  *     template; `prompt`/`text`/`answer` may be functions of the drawn bindings (see js/quiz.js):
  *       { prompt: (b) => `What is $${b.a}+${b.b}$?`, variables: "a=[1:10] b=[1:10]", answer: (b) => b.a + b.b }
  *
- * `count` questions are drawn via the pure logic in js/quiz.js (a variable template can be
- * re-instantiated to produce many questions). Prompts/options may contain LaTeX (wrapped in $…$),
- * typeset with KaTeX.
+ * The builder's OPTIONAL first item is a config object `{ num_questions, preamble }` (recognized by
+ * having neither `options` nor `answer`; see extractConfig in js/quiz.js): `num_questions` sets how
+ * many to draw (default 5) and `preamble` is an instructions sentence rendered under the heading.
+ * Living in the (language-neutral) builder, the count is common to every locale — there's no `count`
+ * attribute to drift between a page and its translation overlay. Questions are drawn via the pure
+ * logic in js/quiz.js (a variable template can be re-instantiated to produce many). Prompts/options
+ * may contain LaTeX (wrapped in $…$), typeset with KaTeX.
  * @module
  */
 
 import katex from "katex";
 import { attachShared } from "./shared.js";
-import { generateQuiz } from "../quiz.js";
+import { generateQuiz, extractConfig } from "../quiz.js";
 import { getQuiz } from "../scenes.js";
 import { makeStrings } from "../scene-strings.js";
 import { checkAnswer } from "../quiz-vars.js";
@@ -40,8 +44,10 @@ import { getMathKeyboard } from "../math-keyboards.js";
 export class PrimerQuiz extends HTMLElement {
   /** @type {AuthoredQuestion[]} The built bank, kept so "Try again" can re-draw a fresh quiz. */
   #bank = [];
-  /** @type {number} How many questions to draw. */
-  #count = 3;
+  /** @type {number} How many questions to draw (from the builder's config item; default 5). */
+  #count = 5;
+  /** @type {string | null} An instructions sentence shown under the heading (from the config). */
+  #preamble = null;
   /** @type {any} A loaded CortexJS ComputeEngine (for equivalence grading), or null. */
   #ce = null;
   /** @type {(() => void) | null} Tear-down for a pending "wait for quiz registration". */
@@ -49,7 +55,6 @@ export class PrimerQuiz extends HTMLElement {
 
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
-    this.#count = Number(this.getAttribute("count") ?? "3");
     this.#resolve(root);
   }
 
@@ -72,14 +77,28 @@ export class PrimerQuiz extends HTMLElement {
       return;
     }
     this.#cancelWait();
+    /** @type {Array<AuthoredQuestion | import("../types/domain.js").QuizConfig>} */
+    let raw;
     try {
-      this.#bank = builder({ sceneStrings: makeStrings(name) });
+      raw = builder({ sceneStrings: makeStrings(name) });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       root.innerHTML = `<div class="card"><p class="meta">${t("quiz.buildError", { error })}</p></div>`;
       return;
     }
-    if (!Array.isArray(this.#bank) || this.#bank.length === 0) {
+    if (!Array.isArray(raw) || raw.length === 0) {
+      root.innerHTML = `<div class="card"><p class="meta">${t("quiz.empty")}</p></div>`;
+      return;
+    }
+    // The builder's optional first item is a config object (num_questions + preamble); the rest
+    // are questions. Settings live in the language-neutral builder, so the count is common to
+    // every locale (no count attribute to drift between a page and its translation overlay).
+    const { config, questions } = extractConfig(raw);
+    this.#bank = questions;
+    const n = Number(config.num_questions);
+    this.#count = Number.isFinite(n) && n > 0 ? n : 5;
+    this.#preamble = typeof config.preamble === "function" ? config.preamble() : (config.preamble ?? null);
+    if (this.#bank.length === 0) {
       root.innerHTML = `<div class="card"><p class="meta">${t("quiz.empty")}</p></div>`;
       return;
     }
@@ -205,6 +224,16 @@ export class PrimerQuiz extends HTMLElement {
         }
         .quiz-title::before { content: "✏"; }
 
+        /* Optional instructions sentence under the heading — normal prose, not the display font. */
+        .quiz-instructions { margin: -0.3rem 0 1rem; color: var(--primer-ink, #111); }
+
+        /* Faint dividers bracketing every question — a soft hairline above each one (so the
+           first is fenced off from the title) and a closing line under the last. The golden
+           border token reads as a soft hairline on the golden panel. */
+        .q { margin-top: 0.9rem; padding-top: 0.9rem; border-top: 1px solid var(--primer-quiz-border, #ecd29a); }
+        .q:first-child { margin-top: 0; }
+        .q:last-child { padding-bottom: 0.9rem; border-bottom: 1px solid var(--primer-quiz-border, #ecd29a); }
+
         /* Free-text answer box (class state can recolour the border after marking). */
         .answer-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
         .answer {
@@ -271,6 +300,7 @@ export class PrimerQuiz extends HTMLElement {
       </style>
       <form class="card quiz">
         <h2 class="quiz-title">${t("quiz.heading")}</h2>
+        ${this.#preamble ? `<p class="quiz-instructions">${tex(this.#preamble)}</p>` : ""}
         <ol class="questions" style="list-style:none; padding:0;">${items}</ol>
         <div class="result-area" role="status" aria-live="polite">
           <button type="submit" disabled>${t("quiz.check")}</button>
