@@ -81,9 +81,19 @@ async function render() {
   // Title from the (possibly translated) concept title (the page writes no <head>/<title>).
   if (pageTitle) document.title = `${pageTitle} — ${t("app.name")}`;
 
+  // Which locales this concept is translated into (per the emitted graph) — the hreflang set.
+  /** @type {string[]} */
+  let altLocales = [];
+  try {
+    const { byId } = await loadGraph();
+    altLocales = Object.keys(byId.get(id)?.titles ?? {});
+  } catch {
+    /* graph unavailable → no hreflang alternates (English-only indexing) */
+  }
+
   // SEO metadata. Concept pages carry no static <head>, so inject it here; crawlers that
   // render JS (e.g. Googlebot) index the result. See README → SEO.
-  injectSeo(pageTitle ?? meta?.title ?? "", firstText(content), getLocale(), meta?.declaredLevel);
+  injectSeo(pageTitle ?? "", firstText(content), getLocale(), meta?.declaredLevel, altLocales);
 
   if (content.length === 0) return;
 
@@ -213,15 +223,24 @@ function headTag(selector, make) {
 }
 
 /**
- * Inject SEO tags into `<head>`: a description, a canonical link, and a LearningResource
- * JSON-LD. Idempotent (re-running updates the same elements).
+ * Inject SEO tags into `<head>`: a description, a per-language self-referential canonical, the
+ * `hreflang` alternates linking every language version, and a LearningResource JSON-LD. Idempotent
+ * (re-running updates the same elements).
+ *
+ * A translation is the same path with `?lang=<locale>`, so the canonical for a non-default locale is
+ * the `?lang=` URL (self-referential) — without this Google would fold every language into the bare
+ * English URL and never index the translations. `altLocales` (from the graph) are the locales this
+ * concept is translated into; we emit `en` + each of them + `x-default` so the set cross-links.
  * @param {string} title
  * @param {string} description
  * @param {string} locale
  * @param {number} [level]
+ * @param {string[]} [altLocales]
  */
-function injectSeo(title, description, locale, level) {
-  const canonical = location.origin + location.pathname; // clean URL (drops any ?lang)
+function injectSeo(title, description, locale, level, altLocales = []) {
+  const cleanUrl = location.origin + location.pathname; // ?lang has been stripped by initLocale
+  const langUrl = (/** @type {string} */ loc) => (loc === DEFAULT_LOCALE ? cleanUrl : `${cleanUrl}?lang=${loc}`);
+  const canonical = langUrl(locale); // self-referential: this rendering's own language URL
 
   if (description) {
     headTag('meta[name="description"]', () => {
@@ -236,6 +255,23 @@ function injectSeo(title, description, locale, level) {
     l.setAttribute("rel", "canonical");
     return l;
   }).setAttribute("href", canonical);
+
+  // hreflang alternates — only meaningful when the concept actually has translations.
+  const translated = altLocales.filter((l) => l !== DEFAULT_LOCALE);
+  if (translated.length > 0) {
+    for (const [hreflang, href] of [
+      ["en", cleanUrl],
+      ...translated.map((l) => [l, langUrl(l)]),
+      ["x-default", cleanUrl],
+    ]) {
+      headTag(`link[rel="alternate"][hreflang="${hreflang}"]`, () => {
+        const l = document.createElement("link");
+        l.setAttribute("rel", "alternate");
+        l.setAttribute("hreflang", hreflang);
+        return l;
+      }).setAttribute("href", href);
+    }
+  }
 
   /** @type {Record<string, any>} */
   const ld = {

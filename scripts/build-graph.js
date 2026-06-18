@@ -28,6 +28,7 @@ import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
 import { parseJsonc } from "../js/jsonc.js";
 
 /** @typedef {import("../js/types/domain.js").Concept} Concept */
+/** @typedef {import("../js/types/domain.js").ResolvedConcept} ResolvedConcept */
 /** @typedef {import("../js/types/domain.js").Diagnostic} Diagnostic */
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -216,7 +217,13 @@ async function main() {
  * Emit /sitemap.xml and /robots.txt at the repo root for SEO. There's no server build,
  * so these are committed artifacts refreshed by `npm run graph` (like dist/graph.json).
  * The production origin is read from the committed CNAME file (single source of truth).
- * @param {Concept[]} concepts
+ *
+ * A translated lesson is the same URL with `?lang=<locale>` (see js/render.js). For each
+ * concept that has translations (a non-empty `titles`), we emit a `<url>` for the English
+ * version AND for each `?lang=<locale>` variant, every entry carrying the SAME `xhtml:link`
+ * hreflang alternate set (Google's bidirectional requirement) so each language is indexed as
+ * its own page rather than a duplicate of English. Untranslated concepts stay plain.
+ * @param {ResolvedConcept[]} concepts
  */
 async function writeSeoFiles(concepts) {
   let origin = "https://interactiveprimer.com";
@@ -227,19 +234,44 @@ async function writeSeoFiles(concepts) {
     /* no CNAME (e.g. a fork) — fall back to the default origin */
   }
 
-  // English URLs only (translations are applied client-side at the same URL).
-  const urls = ["/", ...concepts.map((c) => `/concepts/${c.id}.html`)];
+  /** The shared hreflang alternate block for a concept (en + each translated locale + x-default).
+   * @param {string} enUrl @param {string[]} locales @returns {string} */
+  const alternates = (enUrl, locales) =>
+    [
+      `    <xhtml:link rel="alternate" hreflang="en" href="${enUrl}"/>`,
+      ...locales.map((l) => `    <xhtml:link rel="alternate" hreflang="${l}" href="${enUrl}?lang=${l}"/>`),
+      `    <xhtml:link rel="alternate" hreflang="x-default" href="${enUrl}"/>`,
+    ].join("\n");
+
+  /** @type {string[]} */
+  const entries = [`  <url><loc>${origin}/</loc></url>`];
+  for (const c of concepts) {
+    const enUrl = `${origin}/concepts/${c.id}.html`;
+    const locales = Object.keys(c.titles ?? {})
+      .filter((l) => l !== DEFAULT_LOCALE)
+      .sort();
+    if (locales.length === 0) {
+      entries.push(`  <url><loc>${enUrl}</loc></url>`);
+      continue;
+    }
+    const alt = alternates(enUrl, locales);
+    // The English version plus each translated variant, all sharing the alternate set.
+    for (const loc of [enUrl, ...locales.map((l) => `${enUrl}?lang=${l}`)]) {
+      entries.push(`  <url>\n    <loc>${loc}</loc>\n${alt}\n  </url>`);
+    }
+  }
+
   const sitemap =
     `<?xml version="1.0" encoding="UTF-8"?>\n` +
-    `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
-    urls.map((u) => `  <url><loc>${origin}${u}</loc></url>`).join("\n") +
+    `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">\n` +
+    entries.join("\n") +
     `\n</urlset>\n`;
   await writeFile(join(ROOT, "sitemap.xml"), sitemap, "utf8");
 
   const robots = `User-agent: *\nAllow: /\nSitemap: ${origin}/sitemap.xml\n`;
   await writeFile(join(ROOT, "robots.txt"), robots, "utf8");
 
-  console.log(`Wrote sitemap.xml (${urls.length} urls) + robots.txt for ${origin}.`);
+  console.log(`Wrote sitemap.xml (${entries.length} urls) + robots.txt for ${origin}.`);
 }
 
 main().catch((err) => {
