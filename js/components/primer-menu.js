@@ -1,8 +1,9 @@
 // @ts-check
 /**
- * <primer-menu> — a fixed top-right hamburger button that opens a small menu with the
- * Theme switcher (Light / Dark / Fun) and the Language switcher. It is mounted once per
- * page (by js/render.js on concept pages, and by index.html on the landing page).
+ * <primer-menu> — a fixed top-right hamburger button that opens a small drill-down menu.
+ * The root lists three sections — Theme (Light / Dark / Fun), Language, and Progress
+ * (save / restore) — and each opens a sub-view with the choices and a back header. It is
+ * mounted once per page (by js/render.js on concept pages, and by index.html on the landing).
  *
  * Its own labels are localized via i18n's `t(...)`; the language options use each locale's
  * endonym (e.g. "Español"), which is conventionally not translated.
@@ -50,13 +51,23 @@ const STYLE = `
   }
   .panel.open { display: block; }
 
-  .group + .group { margin-top: 0.75rem; }
-  .group-label {
-    font-family: var(--primer-font-ui, sans-serif);
+  /* The panel is a small drill-down: a root list of sections (Theme / Language / Progress),
+     each opening a sub-view (.menu-view) with a back header and that section's choices. */
+  .menu-view[hidden] { display: none; }
+
+  .nav {
+    display: flex; align-items: center; justify-content: space-between;
+    width: 100%; text-align: left;
+  }
+  .nav + .nav { margin-top: 0.35rem; }
+  .nav .chev { opacity: 0.55; margin-left: 0.75rem; }
+
+  .back {
+    width: 100%; text-align: left; margin-bottom: 0.5rem;
     font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em;
     color: var(--primer-ink-soft, #667);
-    margin: 0 0 0.4rem;
   }
+
   .choices { display: flex; flex-direction: column; gap: 0.35rem; }
   .choices button { text-align: left; }
 
@@ -120,17 +131,22 @@ export class PrimerMenu extends HTMLElement {
         ${HAMBURGER_SVG}
       </button>
       <div class="panel" role="menu">
-        <div class="group">
-          <p class="group-label" id="theme-label">${t("menu.theme")}</p>
-          <div class="choices" role="group" aria-labelledby="theme-label">${themeButtons}</div>
+        <div class="menu-view view-root">
+          <button type="button" class="nav" data-target="theme">${t("menu.theme")}<span class="chev" aria-hidden="true">›</span></button>
+          <button type="button" class="nav" data-target="lang">${t("menu.language")}<span class="chev" aria-hidden="true">›</span></button>
+          <button type="button" class="nav" data-target="progress">${t("menu.progress")}<span class="chev" aria-hidden="true">›</span></button>
         </div>
-        <div class="group">
-          <p class="group-label" id="lang-label">${t("menu.language")}</p>
-          <div class="choices" role="group" aria-labelledby="lang-label">${langButtons}</div>
+        <div class="menu-view view-theme" hidden>
+          <button type="button" class="back"><span aria-hidden="true">‹ </span>${t("menu.theme")}</button>
+          <div class="choices" role="group" aria-label="${t("menu.theme")}">${themeButtons}</div>
         </div>
-        <div class="group">
-          <p class="group-label" id="progress-label">${t("menu.progress")}</p>
-          <div class="choices" role="group" aria-labelledby="progress-label">
+        <div class="menu-view view-lang" hidden>
+          <button type="button" class="back"><span aria-hidden="true">‹ </span>${t("menu.language")}</button>
+          <div class="choices" role="group" aria-label="${t("menu.language")}">${langButtons}</div>
+        </div>
+        <div class="menu-view view-progress" hidden>
+          <button type="button" class="back"><span aria-hidden="true">‹ </span>${t("menu.progress")}</button>
+          <div class="choices" role="group" aria-label="${t("menu.progress")}">
             <button type="button" class="save">${t("menu.save")}</button>
             <button type="button" class="restore">${t("menu.restore")}</button>
           </div>
@@ -172,13 +188,33 @@ export class PrimerMenu extends HTMLElement {
     };
     reflect();
 
+    // Drill-down navigation: a root list, then one sub-view per section.
+    const menuViews = /** @type {Record<string, HTMLElement>} */ ({
+      root: /** @type {HTMLElement} */ (root.querySelector(".view-root")),
+      theme: /** @type {HTMLElement} */ (root.querySelector(".view-theme")),
+      lang: /** @type {HTMLElement} */ (root.querySelector(".view-lang")),
+      progress: /** @type {HTMLElement} */ (root.querySelector(".view-progress")),
+    });
+    /** @param {string} name */
+    const showView = (name) => {
+      for (const [key, el] of Object.entries(menuViews)) el.hidden = key !== name;
+    };
+
     /** @param {boolean} open */
     const setOpen = (open) => {
+      if (open) showView("root"); // always reopen at the top level
       panel.classList.toggle("open", open);
       toggle.setAttribute("aria-expanded", String(open));
     };
 
     toggle.addEventListener("click", () => setOpen(!panel.classList.contains("open")));
+
+    for (const b of /** @type {HTMLButtonElement[]} */ ([...root.querySelectorAll(".nav")])) {
+      b.addEventListener("click", () => showView(/** @type {string} */ (b.dataset.target)));
+    }
+    for (const b of /** @type {HTMLButtonElement[]} */ ([...root.querySelectorAll(".back")])) {
+      b.addEventListener("click", () => showView("root"));
+    }
 
     for (const b of themeEls) {
       b.addEventListener("click", () => {
