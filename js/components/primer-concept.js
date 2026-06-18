@@ -89,7 +89,7 @@ export class PrimerConcept extends HTMLElement {
     root.innerHTML = `
       <style>${STAR_CSS}</style>
       <article>
-        <div class="title-row"><h1>${title}</h1>${levelBadge}</div>
+        <div class="title-row"><h1><slot name="title">${title}</slot></h1>${levelBadge}</div>
         <div class="body"><slot></slot></div>
         <section class="confidence card" aria-label="${t("concept.confidence.legend")}">
           <p class="meta" id="conf-label" style="margin-top:0;">${t("concept.confidence.prompt")}</p>

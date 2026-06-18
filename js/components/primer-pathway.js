@@ -143,10 +143,19 @@ export class PrimerPathway extends HTMLElement {
     // Label nodes in the active language: a node's translated title when the overlays
     // provided one (harvested into graph.json by build-graph), else the English title.
     const locale = getLocale();
-    /** @param {string} id */
+    /** Plain-text label (translated when available) — used for the tooltip + sorting. @param {string} id */
     const title = (id) => {
       const c = byId.get(id);
       return c?.titles?.[locale] ?? c?.title ?? leaf(id);
+    };
+    // The pill's inner HTML: a concept's title markup (typeset by its <primer-math>) when it has a
+    // math title AND we're not overriding it with a translated (plain) title; else the escaped
+    // plain text. Title markup is authored/trusted, so it's injected unescaped on purpose.
+    /** @param {string} id */
+    const label = (id) => {
+      const c = byId.get(id);
+      if (c?.titleHtml && !c?.titles?.[locale]) return c.titleHtml;
+      return esc(title(id));
     };
     /** Sort ids by resolved level, then title. @param {string[]} ids */
     const byLevel = (ids) =>
@@ -163,8 +172,8 @@ export class PrimerPathway extends HTMLElement {
 
     /** @param {string} id */
     const link = (id) =>
-      `<a class="node" href="/concepts/${id}.html" data-id="${esc(id)}" title="${esc(title(id))}">${esc(title(id))}</a>`;
-    const current = `<span class="node node--current" data-id="${esc(hood.id)}" aria-current="page" title="${esc(title(hood.id))}">${esc(title(hood.id))}</span>`;
+      `<a class="node" href="/concepts/${id}.html" data-id="${esc(id)}" title="${esc(title(id))}">${label(id)}</a>`;
+    const current = `<span class="node node--current" data-id="${esc(hood.id)}" aria-current="page" title="${esc(title(hood.id))}">${label(hood.id)}</span>`;
 
     /** Render a column with an overflow "+k more" chip past MAX_PER_COL.
      * @param {string} cls @param {string[]} ids */
@@ -177,7 +186,21 @@ export class PrimerPathway extends HTMLElement {
 
     const col2 = `<div class="col col2">${[...above.map(link), current, ...below.map(link)].join("")}</div>`;
 
+    // A math title (titleHtml) typesets via <primer-math>, whose KaTeX output relies on the
+    // document-level katex.min.css — which can't cross into this shadow root. When any displayed
+    // node has a math label, clone the KaTeX <link> (already injected into <head> by boot.js) so
+    // the typeset math is styled inside the shadow boundary; no math → no extra stylesheet.
+    const katexHref = document.querySelector('link[href*="katex.min.css"]')?.getAttribute("href") ?? null;
+    const hasMath =
+      katexHref &&
+      [hood.id, ...col1, ...col3, ...peers].some((id) => {
+        const c = byId.get(id);
+        return c?.titleHtml && !c?.titles?.[locale];
+      });
+    const katexLink = hasMath ? `<link rel="stylesheet" href="${katexHref}">` : "";
+
     root.innerHTML = `
+      ${katexLink}
       <style>${STYLE}</style>
       <div class="scroll">
         <nav class="pathway" aria-label="${t("pathway.label")}">

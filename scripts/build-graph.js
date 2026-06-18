@@ -70,13 +70,31 @@ function extractMeta(html) {
 }
 
 /**
- * Read the concept title from the page's `<primer-title>` element (collapsed whitespace).
+ * Read the raw inner markup of the page's `<primer-title>` element (collapsed whitespace), which
+ * may contain inline elements such as `<primer-math>`. Returns null when there is no title element.
+ * @param {string} html
+ * @returns {string | null}
+ */
+function extractTitleRaw(html) {
+  const m = html.match(/<primer-title[^>]*>([\s\S]*?)<\/primer-title>/i);
+  return m ? m[1].replace(/\s+/g, " ").trim() : null;
+}
+
+/** Strip HTML tags to plain text (and collapse whitespace). @param {string} s */
+function stripTags(s) {
+  return s.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Read the concept's plain-text title from `<primer-title>` (tags stripped) — what every text
+ * consumer (tooltip, sort, SEO, SVG graph fallback) wants. See {@link extractTitleRaw} for the
+ * markup form used to typeset a math title.
  * @param {string} html
  * @returns {string | null}
  */
 function extractTitle(html) {
-  const m = html.match(/<primer-title[^>]*>([\s\S]*?)<\/primer-title>/i);
-  return m ? m[1].replace(/\s+/g, " ").trim() : null;
+  const raw = extractTitleRaw(html);
+  return raw === null ? null : stripTags(raw);
 }
 
 /**
@@ -138,13 +156,18 @@ async function main() {
       // an unknown id then surfaces via the existing dangling-prerequisite check; a ref pointed
       // the wrong way creates a cycle, which detectCycles flags. Self-references are dropped.
       const refs = extractConceptRefs(html).filter((r) => r !== id);
+      // The title is read as plain text; when the <primer-title> carries inline markup (e.g.
+      // <primer-math> for a math title) we ALSO keep the raw markup as `titleHtml`, so the page
+      // header and the explorers can typeset it while `title` stays clean for text uses.
+      const rawTitle = extractTitleRaw(html);
       /** @type {Concept} */
       const meta = {
         ...parsed,
         id, // the node key is the file path under concepts/ (no longer authored in the block)
-        title: extractTitle(html) ?? id, // from <primer-title> (id is a defensive last resort)
+        title: (rawTitle === null ? null : stripTags(rawTitle)) ?? id, // from <primer-title>
         prerequisites: [...new Set([...parsed.prerequisites, ...refs])],
       };
+      if (rawTitle && /<[^>]+>/.test(rawTitle)) meta.titleHtml = rawTitle;
       concepts.push(meta);
     } catch (err) {
       fileDiagnostics.push({

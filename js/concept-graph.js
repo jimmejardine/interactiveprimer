@@ -11,6 +11,9 @@
 import { seedPositions, tick, bounds } from "./force-layout.js";
 import { themeColors } from "./theme.js";
 import { confidenceColor } from "./confidence-color.js";
+// Defines <primer-math> on this page (concepts.html doesn't load boot.js) so a node with a math
+// title can typeset inside a <foreignObject>. concepts.html supplies the KaTeX CSS + import map.
+import "./components/primer-math.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ENERGY_MIN = 0.04; // below this the layout is "settled" and the rAF loop pauses
@@ -90,9 +93,16 @@ export function mountConceptGraph(host, { byId, locale }) {
     const c = byId.get(id);
     return c?.titles?.[locale] ?? c?.title ?? (id.split("/").pop() ?? id);
   };
+  // The raw title markup for a math title — but only when we're showing the English title (a
+  // translated, plain title takes precedence). Drives the foreignObject path below.
+  /** @param {string} id */
+  const titleHtmlOf = (id) => {
+    const c = byId.get(id);
+    return c?.titleHtml && !c?.titles?.[locale] ? c.titleHtml : null;
+  };
 
   // ---- model: layout nodes (+ render refs) and directed prerequisite→dependent edges ----
-  /** @typedef {{ id: string, x: number, y: number, vx: number, vy: number, fixed?: boolean, pinned?: boolean, hw: number, hh: number, g: SVGGElement, rect: SVGElement, text: SVGElement }} GNode */
+  /** @typedef {{ id: string, x: number, y: number, vx: number, vy: number, fixed?: boolean, pinned?: boolean, hw: number, hh: number, g: SVGGElement, rect: SVGElement, text?: SVGElement, fo?: SVGElement, div?: HTMLElement }} GNode */
   /** @type {GNode[]} */
   const nodes = [];
   /** @type {Map<string, GNode>} */
@@ -140,26 +150,64 @@ export function mountConceptGraph(host, { byId, locale }) {
     const g = /** @type {SVGGElement} */ (mk("g", { class: "cg-node" }));
     g.setAttribute("data-id", n.id);
     const rect = mk("rect", { rx: "10", ry: "10" });
-    const text = mk("text", { "text-anchor": "middle", "dominant-baseline": "central" });
-    g.append(rect, text);
-    nodesG.appendChild(g); // in the DOM before wrapping so glyph widths resolve
-    wrapLabel(text, titleOf(n.id), LABEL_MAXW);
+    g.appendChild(rect);
+    nodesG.appendChild(g); // in the DOM before measuring so glyph widths / KaTeX layout resolve
+    const html = titleHtmlOf(n.id);
+    if (html) {
+      // Math title → foreignObject HTML so its <primer-math> can typeset (SVG <text> can't show
+      // KaTeX). Give the fo a generous sandbox first so the inline-block label lays out at its
+      // natural width; the measure pass below shrinks it to fit.
+      const fo = mk("foreignObject", { x: -1000, y: -100, width: 2000, height: 200 });
+      const wrap = document.createElement("div");
+      wrap.className = "cg-fo-wrap"; // fills the pill and flex-centres the label (see measure pass)
+      const span = document.createElement("span");
+      span.className = "cg-fo-label";
+      span.innerHTML = html; // trusted authored markup; <primer-math> upgrades + typesets on insert
+      wrap.appendChild(span);
+      fo.appendChild(wrap);
+      g.appendChild(fo);
+      n.fo = fo;
+      n.div = span; // the measured + coloured label; the wrap centres it within the pill
+    } else {
+      const text = mk("text", { "text-anchor": "middle", "dominant-baseline": "central" });
+      g.appendChild(text);
+      wrapLabel(text, titleOf(n.id), LABEL_MAXW);
+      n.text = text;
+    }
     n.g = g;
     n.rect = rect;
-    n.text = text;
   }
 
   // ---- measure each label and size its pill (titles are static until a locale reload) ----
   for (const n of nodes) {
-    const bb = /** @type {SVGGraphicsElement} */ (/** @type {unknown} */ (n.text)).getBBox();
-    const w = Math.max(36, bb.width + PAD_X * 2);
-    const h = Math.max(24, bb.height + PAD_Y * 2);
+    let cw, ch;
+    if (n.div) {
+      // The HTML label's natural size (rendered KaTeX included). At build time the view transform
+      // is identity, so a client rect ≈ user units.
+      const r = n.div.getBoundingClientRect();
+      cw = r.width;
+      ch = r.height;
+    } else {
+      const bb = /** @type {SVGGraphicsElement} */ (/** @type {unknown} */ (n.text)).getBBox();
+      cw = bb.width;
+      ch = bb.height;
+    }
+    const w = Math.max(36, cw + PAD_X * 2);
+    const h = Math.max(24, ch + PAD_Y * 2);
     n.hw = w / 2;
     n.hh = h / 2;
     n.rect.setAttribute("x", String(-n.hw));
     n.rect.setAttribute("y", String(-n.hh));
     n.rect.setAttribute("width", String(w));
     n.rect.setAttribute("height", String(h));
+    // A foreignObject label fills the WHOLE pill (not just the content box) and flex-centres its
+    // wrap, so the typeset math sits dead-centre with PAD margin — no baseline drift, no clipping.
+    if (n.fo) {
+      n.fo.setAttribute("x", String(-n.hw));
+      n.fo.setAttribute("y", String(-n.hh));
+      n.fo.setAttribute("width", String(w));
+      n.fo.setAttribute("height", String(h));
+    }
   }
 
   // ---- colours (re-applied on theme / confidence change) ----
@@ -169,7 +217,9 @@ export function mountConceptGraph(host, { byId, locale }) {
     for (const n of nodes) {
       n.rect.setAttribute("fill", confidenceColor(n.id) ?? c.surface);
       n.rect.setAttribute("stroke", c.border);
-      n.text.setAttribute("fill", c.ink);
+      // SVG text colours via `fill`; a foreignObject HTML label (incl. KaTeX) via CSS `color`.
+      if (n.div) n.div.style.color = c.ink;
+      else n.text?.setAttribute("fill", c.ink);
     }
     for (const e of edges) {
       e.line.setAttribute("stroke", c.line);
@@ -386,6 +436,20 @@ function injectStyleOnce() {
     .cg-node { cursor: pointer; }
     .cg-node text {
       font-family: var(--primer-font-ui, sans-serif); font-size: 13px;
+      pointer-events: none; user-select: none;
+    }
+    /* HTML label inside a node's foreignObject (math titles). The wrap fills the pill and
+       flex-centres the label both ways (no SVG dominant-baseline for HTML); the label shrink-wraps
+       its content for measuring. KaTeX inherits the colour paint() sets via color. pointer-events:
+       none so drag/click fall through to the node g/rect. */
+    .cg-node .cg-fo-wrap {
+      width: 100%; height: 100%;
+      display: flex; align-items: center; justify-content: center;
+      pointer-events: none;
+    }
+    .cg-node .cg-fo-label {
+      display: inline-block; white-space: nowrap;
+      font-family: var(--primer-font-ui, sans-serif); font-size: 13px; line-height: 1;
       pointer-events: none; user-select: none;
     }
     .cg-node rect { transition: stroke-width .1s; stroke-width: 1.5; }

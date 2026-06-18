@@ -57,8 +57,13 @@ async function render() {
   // it along with the canonical content.
   const SKIP = new Set(["SCRIPT", "PRIMER-TITLE", "PRIMER-MENU", "MAIN"]);
   let content = /** @type {Element[]} */ ([...body.children].filter((el) => !SKIP.has(el.tagName)));
-  // The title lives in the <primer-title> element (translatable, part of the body).
-  let pageTitle = body.querySelector("primer-title")?.textContent?.trim() || null;
+  // The title lives in the <primer-title> element (translatable, part of the body). We keep its
+  // plain text (for <title>/SEO) AND the element itself: its child nodes — which may include a
+  // <primer-math> for a math title — are slotted into the header below so the math typesets.
+  const canonicalTitleEl = body.querySelector("primer-title");
+  let pageTitle = canonicalTitleEl?.textContent?.trim() || null;
+  /** @type {Element | null} */
+  let titleEl = canonicalTitleEl;
 
   // Non-English: apply the translation overlay IF one exists, else fall back to English.
   // We consult the emitted graph (which records a translated `titles[locale]` for every
@@ -72,6 +77,7 @@ async function render() {
     if (applied) {
       content = applied.content;
       pageTitle = applied.title ?? pageTitle;
+      if (applied.titleEl) titleEl = applied.titleEl; // slot the translated title (may carry math)
     } else {
       // No translation for this concept → render the whole page in English.
       document.documentElement.lang = DEFAULT_LOCALE;
@@ -108,6 +114,17 @@ async function render() {
 
   // Move the (authored or translated) content into the concept body.
   concept.append(...content);
+
+  // Slot the title element's child nodes (which may include a <primer-math>) into the header's
+  // named slot. They remain in the LIGHT DOM — so the document-level KaTeX CSS styles any math —
+  // while being projected into the shadow <h1>. The plain `title` attribute set above is the
+  // fallback shown when there is no slotted title (e.g. direct use without render.js).
+  if (titleEl && titleEl.childNodes.length) {
+    const titleSlot = document.createElement("span");
+    titleSlot.setAttribute("slot", "title");
+    titleSlot.append(...titleEl.childNodes);
+    concept.appendChild(titleSlot);
+  }
 
   // A navigation pathway at the top and bottom of the lesson; both slot into
   // <primer-page>'s single <slot> in order. Each fetches the graph and renders itself.
@@ -146,7 +163,7 @@ async function hasOverlay(id, locale) {
  * @param {string} id
  * @param {string} locale
  * @param {Element[]} canonicalContent
- * @returns {Promise<{ content: Element[], title: string | null } | null>}
+ * @returns {Promise<{ content: Element[], title: string | null, titleEl: Element | null } | null>}
  */
 async function applyOverlay(id, locale, canonicalContent) {
   let html;
@@ -164,9 +181,12 @@ async function applyOverlay(id, locale, canonicalContent) {
   );
   if (translated.length === 0) return null;
 
-  // Translated title from the overlay's <primer-title>. The caller sets it on
-  // <primer-concept>; the canonical concept-meta block (prerequisites/level) is untouched.
-  const title = doc.querySelector("primer-title")?.textContent?.trim() || null;
+  // Translated title from the overlay's <primer-title>. The caller sets the plain text on
+  // <primer-concept> and slots the (imported) element so a translated math title typesets; the
+  // canonical concept-meta block (prerequisites/level) is untouched.
+  const titleSrc = doc.querySelector("primer-title");
+  const title = titleSrc?.textContent?.trim() || null;
+  const titleEl = titleSrc ? /** @type {Element} */ (document.importNode(titleSrc, true)) : null;
 
   // Remove the canonical (English) content from the DOM…
   for (const el of canonicalContent) el.remove();
@@ -181,7 +201,7 @@ async function applyOverlay(id, locale, canonicalContent) {
   }
 
   const content = translated.map((el) => /** @type {Element} */ (document.importNode(el, true)));
-  return { content, title };
+  return { content, title, titleEl };
 }
 
 /** @returns {import("./types/domain.js").ConceptMeta | null} */
