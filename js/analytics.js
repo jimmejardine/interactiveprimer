@@ -1,10 +1,9 @@
 // @ts-check
 /**
- * Cloudflare Web Analytics — cookieless and collects no personal data, so it needs NO EU consent
- * banner. Loaded on every page (boot.js injects it on concept pages; index.html and concepts.html
- * include it directly). The beacon token is the single thing to configure: paste it from the
- * Cloudflare dashboard (Analytics → Web Analytics → your site → JS snippet) in place of the
- * placeholder below. Until then this is a safe no-op.
+ * Cookieless visitor analytics — Cloudflare Web Analytics + GoatCounter. Both are cookieless and
+ * collect no personal data, so NO EU consent banner is needed. Loaded on every page (boot.js injects
+ * it on concept pages; index.html and concepts.html include it directly), but only ACTUALLY fires on
+ * the real production domain — never localhost, preview deploys, forks, or mirrors.
  * @module
  */
 (function () {
@@ -21,4 +20,12 @@
   s.src = "https://static.cloudflareinsights.com/beacon.min.js";
   s.setAttribute("data-cf-beacon", JSON.stringify({ token: TOKEN }));
   document.head.appendChild(s);
+
+  // GoatCounter — same idea: count.js auto-counts the pageview, reading its endpoint from the
+  // data-goatcounter attribute on its own tag (so dynamic injection works). https-pinned.
+  var gc = document.createElement("script");
+  gc.async = true;
+  gc.src = "https://gc.zgo.at/count.js";
+  gc.setAttribute("data-goatcounter", "https://interactiveprimer.goatcounter.com/count");
+  document.head.appendChild(gc);
 })();
