@@ -44,6 +44,9 @@ const STYLE = `
      page or squashing pills. #render centres this on the current concept after layout. */
   .scroll {
     overflow-x: auto; overflow-y: hidden; max-width: 100%; margin: 1.25rem 0;
+    /* Room inside the clip box so a hovered node's highlight ring (box-shadow) and the current
+       node's thicker border aren't sliced off at the edges of the map. */
+    padding: 0.3rem;
     scrollbar-width: thin; overscroll-behavior-x: contain;
   }
   /* The scrolled CONTENT (carries the wires overlay): width is auto, so it fills the
