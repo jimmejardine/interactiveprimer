@@ -14,6 +14,7 @@ import { formatLevel, BASE_LEVEL } from "../levels.js";
 import { loadGraph } from "../graph-data.js";
 import { t } from "../i18n.js";
 import { combineRating } from "../confidence.js";
+import { readEntry, writeEntry } from "../confidence-store.js";
 
 /** Number of stars in the confidence rating (0 = unrated/none, MAX = full mastery). */
 const MAX_STARS = 10;
@@ -64,7 +65,6 @@ export class PrimerConcept extends HTMLElement {
     const meta = safeMeta();
     const title = meta?.title ?? this.getAttribute("title") ?? "Untitled concept";
     const id = meta?.id ?? (this.getAttribute("concept-id") || slug(title));
-    const storageKey = `primer:confidence:${id}`;
 
     // The level sits to the right of the title on EVERY page: bold when declared in
     // metadata, normal weight when implicit (inherited from prerequisites). A declared
@@ -96,7 +96,7 @@ export class PrimerConcept extends HTMLElement {
 
     const starEls = /** @type {HTMLButtonElement[]} */ ([...root.querySelectorAll(".star")]);
 
-    let rating = readConfidence(storageKey) ?? 0;
+    let rating = readEntry(id)?.stars ?? 0;
     paint(starEls, rating);
 
     for (const star of starEls) {
@@ -104,7 +104,7 @@ export class PrimerConcept extends HTMLElement {
       // Clicking the star equal to the current rating clears back to 0; otherwise set.
       star.addEventListener("click", () => {
         rating = rating === value ? value - 1 : value;
-        writeConfidence(storageKey, rating);
+        writeEntry(id, rating);
         paint(starEls, rating);
         this.dispatchEvent(
           // composed so it escapes this shadow root and reaches the pathway widget,
@@ -130,7 +130,7 @@ export class PrimerConcept extends HTMLElement {
       const fraction = /** @type {any} */ (e).detail?.fraction;
       if (typeof fraction !== "number") return;
       rating = combineRating(rating, fraction, MAX_STARS);
-      writeConfidence(storageKey, rating);
+      writeEntry(id, rating);
       paint(starEls, rating);
       this.dispatchEvent(
         new CustomEvent("confidence-change", {
@@ -192,33 +192,6 @@ function safeMeta() {
 function paint(stars, upto) {
   for (const s of stars) {
     s.classList.toggle("filled", Number(s.dataset.value) <= upto);
-  }
-}
-
-/**
- * @param {string} key
- * @returns {number | null}  The stored rating, or null if never rated.
- */
-function readConfidence(key) {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw === null) return null;
-    const n = Number(raw);
-    return Number.isFinite(n) ? Math.min(MAX_STARS, Math.max(0, Math.round(n))) : null;
-  } catch {
-    return null; // localStorage may be unavailable (private mode, file://)
-  }
-}
-
-/**
- * @param {string} key
- * @param {number} value
- */
-function writeConfidence(key, value) {
-  try {
-    localStorage.setItem(key, String(value));
-  } catch {
-    /* best-effort persistence */
   }
 }
 

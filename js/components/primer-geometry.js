@@ -230,6 +230,11 @@ export class PrimerGeometry extends HTMLElement {
     const { step, steps } = createStepCollector(board);
     const sliders = entry.opts.sliders ? (getSliderGroup(entry.opts.sliders)?.values ?? {}) : {};
     entry.builder({ board, colors, JXG, step, sliders });
+    // Read-only: a teaching figure isn't a manipulable construction. Free points (created from
+    // coordinates) are draggable by default — fix EVERY element and drop hover highlighting so the
+    // mouse can't move anything. (Slider-driven points use functional coords, so they still update
+    // on board.update(); `fixed` only stops dragging.)
+    for (const el of board.objectsList) el.setAttribute?.({ fixed: true, highlight: false });
     return { board, steps };
   }
 

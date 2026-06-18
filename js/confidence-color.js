@@ -8,11 +8,10 @@
  * @module
  */
 
-/** Confidence (star) storage key prefix — mirrors js/components/primer-concept.js. */
-export const CONFIDENCE_PREFIX = "primer:confidence:";
+import { readEntry, MAX_STARS, CONFIDENCE_PREFIX } from "./confidence-store.js";
 
-/** Stars at full mastery — must match primer-concept.js. */
-const MAX_STARS = 10;
+// Re-exported so existing importers of this module keep resolving the prefix here.
+export { CONFIDENCE_PREFIX };
 
 /**
  * A concept's colour from its star rating: a RED→YELLOW→GREEN hue ramp proportional to the
@@ -22,16 +21,9 @@ const MAX_STARS = 10;
  * @returns {string | null}
  */
 export function confidenceColor(id) {
-  let raw;
-  try {
-    raw = localStorage.getItem(CONFIDENCE_PREFIX + id);
-  } catch {
-    return null; // localStorage unavailable (private mode, file://)
-  }
-  if (raw === null) return null; // not yet rated → default look
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return null;
-  const stars = Math.min(MAX_STARS, Math.max(0, n));
+  const entry = readEntry(id);
+  if (entry === null) return null; // not yet rated → default look
+  const stars = Math.min(MAX_STARS, Math.max(0, entry.stars));
   const hue = (stars / MAX_STARS) * 120; // 0 → red, 60 → yellow, 120 → green
   // Saturation/lightness are theme-driven so the ramp stays legible in every theme.
   const s = getComputedStyle(document.documentElement);
