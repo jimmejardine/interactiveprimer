@@ -110,10 +110,12 @@ export function getChart(name) {
  * js/components/primer-geometry.js for assembly.
  * @callback GeometryBuilder
  * @param {Record<string, any>} toolkit  `{ board, JXG, step, sliders, colors, sceneStrings, parallelMark,
- *   crossing }` — `board` the JSXGraph board, `colors` the resolved `themeColors()` palette, `step` the
- *   waypoint collector, `sliders` live values of the `opts.sliders` group, `sceneStrings(key, vars?)` the
- *   scene-scoped localized strings (js/scene-strings.js), and `parallelMark` / `crossing` the drawing
- *   tools (js/geometry-tools.js).
+ *   crossing, makeGraph }` — `board` the JSXGraph board, `colors` the resolved `themeColors()` palette,
+ *   `step` the waypoint collector, `sliders` live values of the `opts.sliders` group,
+ *   `sceneStrings(key, vars?)` the scene-scoped localized strings (js/scene-strings.js), `parallelMark` /
+ *   `crossing` the drawing tools, and `makeGraph(opts?)` which draws standardized Cartesian axes
+ *   (themed lines, arrowheads, tick numbers, "x"/"y" labels) auto-spanning the board — the same axes the
+ *   `registerCharts` charts use (js/geometry-tools.js, js/graph-axes.js).
  * @returns {void}
  *
  * @typedef {object} GeometryOptions

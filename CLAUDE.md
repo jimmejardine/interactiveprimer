@@ -391,8 +391,8 @@ tags the elements `fn` creates. The student steps the proof forwards/backwards (
 `i < current` threshold); elements created outside any `step()` are "base" (always visible).
 
 Like a manim scene, the builder gets a single **toolkit** object: `{ board, JXG, step, sliders, colors,
-sceneStrings, parallelMark, crossing }` — `colors` is the resolved `themeColors()` palette, `sceneStrings`
-the localized strings, and `parallelMark`/`crossing` the drawing tools.
+sceneStrings, parallelMark, crossing, makeGraph }` — `colors` is the resolved `themeColors()` palette,
+`sceneStrings` the localized strings, and `parallelMark`/`crossing`/`makeGraph` the drawing tools.
 
 ```html
 <primer-geometry scene="rightTriangle"></primer-geometry>
@@ -428,6 +428,14 @@ the localized strings, and `parallelMark`/`crossing` the drawing tools.
     be a **function** returning the value — pass functions for a slider-driven figure (a moving crossing /
     rotating line) and the wedge + label re-plot live on `board.update()`. See the static figures in
     `concepts/geometry/alternate-interior-angles.html` and the live transversal in `parallel-lines.html`.
+  - `makeGraph(opts?)` — for a **graph diagram** (a function plotted on Cartesian axes), draws the
+    standard themed axes (faint lines, arrowheads at the positive ends, tick numbers, `"x"`/`"y"` labels)
+    that auto-span the board — the **same axes the `registerCharts` charts use**, so don't hand-roll
+    `segment` axes + `"x"`/`"y"` text. Set the board's `boundingbox` (usually `keepAspect: false`) in the
+    scene options; then call `makeGraph()` and plot your curve. Options (all defaulted, see
+    js/graph-axes.js): `xName`/`yName` (axis labels, `""` hides one), `xticks`/`yticks` (spacing, null =
+    auto), `ticks` (false → clean unticked axes), `arrows` (false → no arrowheads). E.g.
+    `makeGraph({ yName: "f(x)" })`. See `concepts/calculus/functions/what-is-a-function.html`.
 - **Colours** as everywhere: from `themeColors()` (`colors.line`/`colors.cat[i]` strokes, fills
   `colors.cat[i]` at opacity, **text via `strokeColor: colors.ink`**) — never hardcoded.
 - **No endpoint dots**: a `segment`/`line`/`arrow` built from coordinates hides its auto-created endpoint

@@ -22,6 +22,7 @@
 
 import { registerChart } from "./scenes.js";
 import { themeColors } from "./theme.js";
+import { drawAxes } from "./graph-axes.js";
 
 /**
  * A control in a slider group. Default `type` is `"slider"` — a range input + linked number box,
@@ -267,41 +268,9 @@ function makeChartBoard(host, JXG, opts) {
     axis: false,
     grid: false,
   });
-  // Axis lines thin + faint so the full-ink number labels read clearly. An axis's MAJOR ticks
-  // default to majorHeight -1 (full board height) → they render as faint grid lines; we keep that at
-  // low opacity. `ticksDistance` null → JSXGraph auto-spacing (insertTicks), so any window shows
-  // ticks; a number pins a fixed spacing. Labels: x centred below the axis, y right-aligned to its
-  // left (set per axis via the `label` override).
-  /** @param {number|null} ticksDistance @param {number} minorTicks @param {Record<string, any>} label */
-  const axisOpts = (ticksDistance, minorTicks, label) => ({
-    strokeColor: colors.line,
-    strokeOpacity: 0.45,
-    strokeWidth: 1,
-    highlight: false,
-    ticks: {
-      ...(ticksDistance == null ? { insertTicks: true } : { ticksDistance, insertTicks: false }),
-      minorTicks,
-      minorHeight: 4,
-      drawZero: false,
-      strokeColor: colors.line,
-      strokeOpacity: 0.12,
-      strokeWidth: 1,
-      label: { strokeColor: colors.ink, strokeOpacity: 1, fontSize: 13, anchorX: "middle", offset: [0, -2], ...label },
-    },
-  });
-  // Name the axis itself (distinct from the tick numbers): "x" tucked inside the right end, "y" just
-  // right of the top. `position: "rt"` is JSXGraph's "far positive end" for an axis.
-  /** @param {string} name @param {Record<string, any>} label */
-  const nameLabel = (name, label) =>
-    name ? { name, withLabel: true, label: { strokeColor: colors.ink, strokeOpacity: 1, fontSize: 14, ...label } } : {};
-  board.create("axis", [[0, 0], [1, 0]], {
-    ...axisOpts(xticks, 1, { anchorX: "middle", anchorY: "top", offset: [0, -8] }),
-    ...nameLabel(xName, { position: "rt", anchorX: "right", offset: [8, 12] }),
-  });
-  board.create("axis", [[0, 0], [0, 1]], {
-    ...axisOpts(yticks, 0, { anchorX: "right", anchorY: "middle", offset: [-8, 0] }),
-    ...nameLabel(yName, { position: "rt", anchorX: "left", offset: [8, 6] }),
-  });
+  // Axes via the shared helper so charts and geometry graph diagrams look identical (see
+  // js/graph-axes.js). `ticksDistance` null → JSXGraph auto-spacing; a number pins a fixed spacing.
+  drawAxes(board, colors, { xName, yName, xticks, yticks });
   return { board, colors, domain: [xmin, xmax] };
 }
 

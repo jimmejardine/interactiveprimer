@@ -240,8 +240,8 @@ export class PrimerGeometry extends HTMLElement {
     // The toolkit, manim-style: the board + palette, the step collector, live slider values, the
     // scene-scoped localized strings, and the drawing tools.
     const sceneStrings = makeStrings(name);
-    const { parallelMark, crossing } = makeGeometryTools(board, colors);
-    entry.builder({ board, JXG, step, sliders, colors, sceneStrings, parallelMark, crossing });
+    const { parallelMark, crossing, makeGraph } = makeGeometryTools(board, colors);
+    entry.builder({ board, JXG, step, sliders, colors, sceneStrings, parallelMark, crossing, makeGraph });
     // Read-only: a teaching figure isn't a manipulable construction. Free points (created from
     // coordinates) are draggable by default — fix EVERY element and drop hover highlighting so the
     // mouse can't move anything. (Slider-driven points use functional coords, so they still update

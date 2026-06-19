@@ -13,6 +13,7 @@
  */
 
 import { chevronSegments, quadrantWedges } from "./geometry.js";
+import { drawAxes } from "./graph-axes.js";
 
 /**
  * @typedef {[number, number]} Vec
@@ -108,5 +109,17 @@ export function makeGeometryTools(board, colors) {
     };
   };
 
-  return { parallelMark, crossing };
+  /**
+   * Draw standardized Cartesian axes on the board — themed lines, arrowheads at the positive ends,
+   * tick numbers, and "x"/"y" axis-name labels — so a graph diagram doesn't hand-roll its axes and
+   * matches every `registerCharts` chart. The axes auto-span the board's bounding box, so no
+   * endpoints are needed; just set the board's `boundingbox` (and usually `keepAspect: false`) in
+   * the `registerGeometryScene` options. See {@link drawAxes} for the options + defaults
+   * (e.g. `makeGraph({ yName: "f(x)" })`, `makeGraph({ ticks: false })`).
+   * @param {import("./graph-axes.js").AxesOptions} [opts]
+   * @returns {{ x: any, y: any }}
+   */
+  const makeGraph = (opts = {}) => drawAxes(board, colors, opts);
+
+  return { parallelMark, crossing, makeGraph };
 }
