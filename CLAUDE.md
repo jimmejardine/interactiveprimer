@@ -300,10 +300,15 @@ one identical domain + range — no board/axes/plot boilerplate. The markup is j
   - an **array** of slider defs — inline, allowed only for a **single-chart** series; the panel
     renders inside that chart.
 
+  **Placement convention — sliders go BELOW the diagram.** Always put the
+  `<primer-chart-sliders>` element **after** the `<primer-chart>` / `<primer-geometry>` it drives, so
+  the controls sit *under* the visual they change (you watch the diagram, then reach down for the
+  knobs). This holds everywhere a slider group is used (charts and geometry scenes alike).
+
   ```html
-  <primer-chart-sliders name="wave"></primer-chart-sliders>
   <primer-chart scene="chartA"></primer-chart>
   <primer-chart scene="chartB"></primer-chart>
+  <primer-chart-sliders name="wave"></primer-chart-sliders>   <!-- controls go below the chart(s) -->
   <script type="module">
     import { registerCharts, registerChartSliders } from "primer";
     registerChartSliders("wave", [ { name: "A", label: "Amplitude", min: 0, max: 3, step: 0.1, value: 1 } ]);
