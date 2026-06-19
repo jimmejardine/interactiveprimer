@@ -23,6 +23,7 @@ const CLICK_PX = 4; // pointer travel under this (screen px) counts as a click, 
 const PAD_X = 12, PAD_Y = 7, EDGE_GAP = 4; // node text padding; gap between an edge end and a node
 const LABEL_MAXW = 120, LINE_H = 15; // wrap node labels to this width (px); line height
 const EXPLICIT_WEIGHT = 2.2; // spring strength for an explicit (concept-meta) edge vs 1 for implicit
+const LAYOUT = { outwardPerDepth: 0.45 }; // extra outward push per depth level → edges fan outward
 
 /**
  * @param {string} tag
@@ -41,9 +42,9 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 /**
  * Word-wrap an SVG <text> label into vertically-centred <tspan> lines that each fit `maxWidth` px.
  * The element must already be in the DOM (so glyph widths resolve). Returns the line count.
- * @param {SVGElement} textEl @param {string} label @param {number} maxWidth
+ * @param {SVGElement} textEl @param {string} label @param {number} maxWidth @param {number} [lineH]
  */
-function wrapLabel(textEl, label, maxWidth) {
+function wrapLabel(textEl, label, maxWidth, lineH = LINE_H) {
   const words = String(label).split(/\s+/).filter(Boolean);
   textEl.textContent = "";
   const ruler = /** @type {SVGTextContentElement} */ (/** @type {unknown} */ (mk("tspan")));
@@ -65,9 +66,9 @@ function wrapLabel(textEl, label, maxWidth) {
   if (!lines.length) lines.push(String(label));
 
   textEl.textContent = "";
-  const top = -((lines.length - 1) * LINE_H) / 2; // centre the block on the node's middle
+  const top = -((lines.length - 1) * lineH) / 2; // centre the block on the node's middle
   lines.forEach((ln, i) => {
-    const ts = mk("tspan", { x: 0, dy: i === 0 ? top : LINE_H });
+    const ts = mk("tspan", { x: 0, dy: i === 0 ? top : lineH });
     ts.textContent = ln;
     textEl.appendChild(ts);
   });
@@ -104,7 +105,7 @@ export function mountConceptGraph(host, { byId, locale }) {
   };
 
   // ---- model: layout nodes (+ render refs) and directed prerequisite→dependent edges ----
-  /** @typedef {{ id: string, x: number, y: number, vx: number, vy: number, fixed?: boolean, pinned?: boolean, hw: number, hh: number, g: SVGGElement, rect: SVGElement, text?: SVGElement, fo?: SVGElement, div?: HTMLElement }} GNode */
+  /** @typedef {{ id: string, x: number, y: number, vx: number, vy: number, fixed?: boolean, pinned?: boolean, depth?: number, hw: number, hh: number, g: SVGGElement, rect: SVGElement, text?: SVGElement, fo?: SVGElement, div?: HTMLElement }} GNode */
   /** @type {GNode[]} */
   const nodes = [];
   /** @type {Map<string, GNode>} */
@@ -159,6 +160,7 @@ export function mountConceptGraph(host, { byId, locale }) {
   for (const n of nodes) {
     const g = /** @type {SVGGElement} */ (mk("g", { class: "cg-node" }));
     g.setAttribute("data-id", n.id);
+    if (n.id === "root") g.classList.add("cg-node--root"); // bigger, bold central node
     const rect = mk("rect", { rx: "10", ry: "10" });
     g.appendChild(rect);
     nodesG.appendChild(g); // in the DOM before measuring so glyph widths / KaTeX layout resolve
@@ -181,7 +183,9 @@ export function mountConceptGraph(host, { byId, locale }) {
     } else {
       const text = mk("text", { "text-anchor": "middle", "dominant-baseline": "central" });
       g.appendChild(text);
-      wrapLabel(text, titleOf(n.id), LABEL_MAXW);
+      // The root's label is larger/bold (21px), so it needs a wider wrap + roomier line spacing.
+      const isRoot = n.id === "root";
+      wrapLabel(text, titleOf(n.id), isRoot ? 170 : LABEL_MAXW, isRoot ? 26 : LINE_H);
       n.text = text;
     }
     n.g = g;
@@ -278,7 +282,33 @@ export function mountConceptGraph(host, { byId, locale }) {
     rootNode.fixed = true; // skipped by the sim → it never moves from the origin
     rootNode.pinned = true; // and the pointer handlers won't drag it
   }
-  for (let i = 0; i < PREWARM; i++) tick(nodes, edges);
+
+  // Depth = graph distance from the root, by BFS along prerequisite→dependent edges (every concept
+  // descends from the single root). Feeds `outwardPerDepth`, so deeper (successor) nodes are pushed
+  // further out and the edges fan radially outward.
+  const adj = new Map(nodes.map((n) => [n.id, /** @type {string[]} */ ([])]));
+  for (const e of edges) adj.get(e.source)?.push(e.target);
+  /** @type {string[]} */
+  let frontier = rootNode ? ["root"] : [];
+  if (rootNode) rootNode.depth = 0;
+  const seen = new Set(frontier);
+  for (let d = 1; frontier.length; d++) {
+    /** @type {string[]} */
+    const next = [];
+    for (const id of frontier) {
+      for (const t of adj.get(id) ?? []) {
+        if (seen.has(t)) continue;
+        seen.add(t);
+        const tn = nodeById.get(t);
+        if (tn) tn.depth = d;
+        next.push(t);
+      }
+    }
+    frontier = next;
+  }
+  for (const n of nodes) if (n.depth === undefined) n.depth = 1; // any node not reached from root
+
+  for (let i = 0; i < PREWARM; i++) tick(nodes, edges, LAYOUT);
   const fit = () => {
     const b = bounds(nodes);
     const w = host.clientWidth || svg.clientWidth || 900;
@@ -297,7 +327,7 @@ export function mountConceptGraph(host, { byId, locale }) {
   let raf = 0;
   let running = false;
   const frame = () => {
-    const e = tick(nodes, edges);
+    const e = tick(nodes, edges, LAYOUT);
     render();
     if (e > ENERGY_MIN || dragNode) raf = requestAnimationFrame(frame);
     else { running = false; raf = 0; }
@@ -548,6 +578,9 @@ function injectStyleOnce() {
     }
     .cg-node rect { transition: stroke-width .1s; stroke-width: 1.5; }
     .cg-node.cg-hot rect { stroke: var(--primer-accent, #46e); stroke-width: 3; }
+    /* The central root node, bigger and bold (the pill auto-sizes to the larger label). */
+    .cg-node--root text, .cg-node--root .cg-fo-label { font-size: 21px; font-weight: 700; }
+    .cg-node--root rect { stroke-width: 2.5; }
     .cg-edges line { stroke-width: 1.2; transition: stroke-width .1s, stroke-opacity .1s; }
     .cg-edges line.cg-explicit { stroke-width: 2.6; }
     .cg-edges line.cg-hot { stroke: var(--primer-accent, #46e) !important; stroke-opacity: 0.9 !important; stroke-width: 3; }

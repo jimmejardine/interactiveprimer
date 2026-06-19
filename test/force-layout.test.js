@@ -63,6 +63,18 @@ test("outward force pushes a node away from the centre", () => {
   assert.ok(after > before, `expected radius to grow: ${after} > ${before}`);
 });
 
+test("outwardPerDepth pushes a deeper node further from the centre than a shallower one", () => {
+  // Two non-interacting nodes (no edges, no repulsion) at the same spot: the depth-3 node should
+  // settle further out than the depth-1 node, so prerequisite→dependent edges point outward.
+  const shallow = { id: "a", x: 10, y: 0, vx: 0, vy: 0, depth: 1 };
+  const deep = { id: "b", x: 10, y: 0, vx: 0, vy: 0, depth: 3 };
+  const params = { outward: 0, gravity: 0.05, outwardPerDepth: 1, repulsion: 0 };
+  for (let i = 0; i < 300; i++) tick([shallow, deep], [], params);
+  const rShallow = Math.hypot(shallow.x, shallow.y);
+  const rDeep = Math.hypot(deep.x, deep.y);
+  assert.ok(rDeep > rShallow + 1, `deeper node should sit further out: ${rDeep} > ${rShallow}`);
+});
+
 test("a pinned (fixed) node at the origin stays put under outward force", () => {
   const root = { id: "root", x: 0, y: 0, vx: 0, vy: 0, fixed: true };
   const nodes = [root, node("a", 5, 0), node("b", -5, 0)];

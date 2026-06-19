@@ -12,7 +12,9 @@
  * @module
  */
 
-/** @typedef {{ id: string, x: number, y: number, vx: number, vy: number, fixed?: boolean }} LayoutNode */
+/** @typedef {{ id: string, x: number, y: number, vx: number, vy: number, fixed?: boolean, depth?: number }} LayoutNode */
+// `depth` is a node's graph distance from the pinned root (root = 0); deeper nodes get more
+// outward push (see `outwardPerDepth`), so prerequisite→dependent edges point radially outward.
 /** @typedef {{ source: string, target: string, weight?: number }} LayoutEdge */
 // `weight` scales an edge's spring strength (default 1; > 1 pulls its endpoints harder).
 
@@ -23,6 +25,7 @@
  * @property {number} [springK]      Edge spring stiffness (0–1ish).
  * @property {number} [gravity]      Inward pull toward the origin (∝ distance; a soft outer cap).
  * @property {number} [outward]      Constant radial push away from the origin (hollows the centre).
+ * @property {number} [outwardPerDepth] Extra outward push per unit of a node's `depth` (radial layering).
  * @property {number} [downBias]     Downward force on a dependent relative to its prerequisite.
  * @property {number} [damping]      Velocity retained each step (0–1); lower = cools faster.
  * @property {number} [maxStep]      Max distance a node may move in one step (stability clamp).
@@ -35,6 +38,7 @@ export const DEFAULT_PARAMS = {
   springK: 0.06,
   gravity: 0.01, // gentle inward cap so the spread stays bounded…
   outward: 1.5, // …while this pushes nodes radially off the centre (root sits pinned at 0,0)
+  outwardPerDepth: 0, // off by default; the explorer turns this on to splay deeper nodes outward
   downBias: 0, // off by default: the graph spreads evenly in every direction
   damping: 0.82,
   maxStep: 60,
@@ -128,18 +132,20 @@ export function tick(nodes, edges, params = {}) {
     ft.fy += p.downBias * 0.5;
   }
 
-  // 3) Centering gravity (inward, ∝ distance) + a constant outward radial push (separates nodes
-  //    from the centre). With a pinned node at the origin holding the structure, these balance
-  //    into a spread-out halo rather than a dense blob.
+  // 3) Centering gravity (inward, ∝ distance) + an outward radial push that GROWS with a node's
+  //    depth from the root, so a deeper (successor) node sits further out than its predecessor and
+  //    the edge between them points radially outward. With the root pinned at the origin these
+  //    balance into a spread-out radial tree rather than a dense blob.
   for (const n of nodes) {
     const f = /** @type {{fx:number,fy:number}} */ (force.get(n));
     f.fx -= n.x * p.gravity;
     f.fy -= n.y * p.gravity;
-    if (p.outward) {
+    const ow = p.outward + p.outwardPerDepth * (n.depth ?? 0);
+    if (ow) {
       const d = Math.hypot(n.x, n.y);
       if (d > 1e-3) {
-        f.fx += (n.x / d) * p.outward;
-        f.fy += (n.y / d) * p.outward;
+        f.fx += (n.x / d) * ow;
+        f.fy += (n.y / d) * ow;
       }
     }
   }

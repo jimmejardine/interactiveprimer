@@ -94,8 +94,9 @@ const STYLE = `
     position: absolute; inset: 0; width: 100%; height: 100%;
     pointer-events: none; z-index: 0; overflow: visible;
   }
-  .wires line { stroke: var(--primer-border, #ccc); stroke-width: 1.5; transition: stroke .1s, stroke-width .1s, opacity .12s; }
-  .wires line.is-hot { stroke: var(--primer-accent, #46e); stroke-width: 3; }
+  .wires line { stroke: var(--primer-border, #ccc); stroke-width: 1.2; stroke-opacity: 0.65; transition: stroke .1s, stroke-width .1s, opacity .12s; }
+  .wires line.is-explicit { stroke-width: 2.8; stroke-opacity: 1; } /* explicit (concept-meta) prerequisite — clearly thicker */
+  .wires line.is-hot { stroke: var(--primer-accent, #46e); stroke-width: 3.4; stroke-opacity: 1; }
   .wires line.is-dim { opacity: 0.2; }
 `;
 
@@ -216,7 +217,13 @@ export class PrimerPathway extends HTMLElement {
     const scroll = /** @type {HTMLElement} */ (root.querySelector(".scroll"));
     const pathway = /** @type {HTMLElement} */ (root.querySelector(".pathway"));
     const svg = /** @type {SVGSVGElement} */ (root.querySelector(".wires"));
-    const draw = () => this.#drawWires(pathway, svg, hood.edges);
+    // Tag each prerequisite edge as explicit (declared in the concept-meta) vs implicit (only a
+    // `<primer-ref>` in the prose), so explicit ones can draw slightly thicker — like the full
+    // explorer. The edge is undirected, so check the explicit list of whichever end is the dependent.
+    const isExplicit = (/** @type {string} */ a, /** @type {string} */ b) =>
+      !!(byId.get(a)?.explicitPrerequisites?.includes(b) || byId.get(b)?.explicitPrerequisites?.includes(a));
+    const drawEdges = hood.edges.map((e) => ({ ...e, explicit: isExplicit(e.a, e.b) }));
+    const draw = () => this.#drawWires(pathway, svg, drawEdges);
 
     // Scroll the strip so the current concept starts centred (only meaningful when the map
     // is wider than the viewport; on a wide screen it's already centred so this is ~0).
@@ -293,7 +300,7 @@ export class PrimerPathway extends HTMLElement {
    * Measure each node's centre and draw a line per edge into the SVG layer.
    * @param {HTMLElement} pathway
    * @param {SVGSVGElement} svg
-   * @param {{ a: string, b: string }[]} edges
+   * @param {{ a: string, b: string, explicit?: boolean }[]} edges
    */
   #drawWires(pathway, svg, edges) {
     const box = pathway.getBoundingClientRect();
@@ -309,7 +316,7 @@ export class PrimerPathway extends HTMLElement {
     };
 
     while (svg.firstChild) svg.removeChild(svg.firstChild);
-    for (const { a, b } of edges) {
+    for (const { a, b, explicit } of edges) {
       const p = centre(a);
       const q = centre(b);
       if (!p || !q) continue;
@@ -320,6 +327,7 @@ export class PrimerPathway extends HTMLElement {
       line.setAttribute("y2", String(q.y));
       line.setAttribute("data-a", a);
       line.setAttribute("data-b", b);
+      if (explicit) line.classList.add("is-explicit");
       svg.appendChild(line);
     }
   }
