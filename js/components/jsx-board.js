@@ -88,10 +88,17 @@ export function wrapBoard(JXG, colors, onBoard) {
   /** @param {any} box @param {any} [attributes] */
   wrappedJSXGraph.initBoard = (box, attributes) => {
     const board = JSXGraph.initBoard(box, { ...defaults, ...(attributes || {}) });
-    // These are read-only teaching figures (no panning/dragging), but JSXGraph forces
-    // `touch-action: none` on its container to claim every gesture — which swallows the
-    // page's vertical scroll on touch devices. Override it back to `pan-y` so a finger drag
-    // over the figure scrolls the page (the board needs no touch gestures of its own).
+    // These are read-only teaching figures (no panning/dragging, sliders live in external DOM),
+    // but JSXGraph still binds pointer/touch listeners that `preventDefault()` on every touch —
+    // swallowing the page's vertical scroll on phones. Drop just those two handler sets (NOT the
+    // broad removeEventHandlers(), which would also stop the resize ResizeObserver we rely on to
+    // re-fit), and un-claim the gesture for the browser via `touch-action: pan-y`.
+    try {
+      board.removePointerEventHandlers?.();
+      board.removeTouchEventHandlers?.();
+    } catch {
+      /* best-effort: a board without input handlers is fine, these figures are static */
+    }
     if (board.containerObj) board.containerObj.style.touchAction = "pan-y";
     onBoard(board, JSXGraph);
     return board;
