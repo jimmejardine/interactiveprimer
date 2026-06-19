@@ -323,6 +323,31 @@ export function mountConceptGraph(host, { byId, locale }) {
   fit();
   render();
 
+  // Keep the SAME layout point centred across host resizes (window resize, devtools, rotation): the
+  // view transform is in pixels, so without this the content would stay pinned to the top-left and
+  // the visible centre would drift. We re-anchor tx/ty (scale unchanged — no re-fit).
+  let lastW = svg.clientWidth || host.clientWidth || 0;
+  let lastH = svg.clientHeight || host.clientHeight || 0;
+  /** @type {ResizeObserver | null} */
+  let ro = null;
+  if (typeof ResizeObserver !== "undefined") {
+    ro = new ResizeObserver(() => {
+      const w = svg.clientWidth || host.clientWidth || 0;
+      const h = svg.clientHeight || host.clientHeight || 0;
+      if (!w || !h) return;
+      if (lastW && lastH && (w !== lastW || h !== lastH)) {
+        const cx = (lastW / 2 - view.tx) / view.scale; // layout point centred before the resize
+        const cy = (lastH / 2 - view.ty) / view.scale;
+        view.tx = w / 2 - cx * view.scale; // …kept centred after it
+        view.ty = h / 2 - cy * view.scale;
+        applyView();
+      }
+      lastW = w;
+      lastH = h;
+    });
+    ro.observe(host);
+  }
+
   // ---- animation loop: run while hot, pause when settled, reheat on demand ----
   let raf = 0;
   let running = false;
@@ -535,6 +560,7 @@ export function mountConceptGraph(host, { byId, locale }) {
   return {
     destroy() {
       searchBox.destroy();
+      ro?.disconnect();
       if (raf) cancelAnimationFrame(raf);
       svg.removeEventListener("pointerdown", onDown);
       svg.removeEventListener("pointermove", onMove);
