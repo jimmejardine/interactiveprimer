@@ -91,8 +91,11 @@ prerequisites or level may omit the block entirely.
   dot; leave the body empty to auto-fill the target's title. **Every `<primer-ref>` also declares
   a prerequisite** — it's harvested by the graph build and unioned into this concept's
   `prerequisites` — so it must point **backward** to a concept this page builds on. (A wrong-way
-  ref makes a cycle, which `npm run graph` flags.) For an incidental/forward link that is *not* a
-  prerequisite, use a plain `<a href="/concepts/<id>.html">` instead.
+  ref makes a cycle, which `npm run graph` flags.) To point **forward** — mention a concept that
+  comes *later* — use `<primer-ref forward to="full/path/id">`: it shows the **same control** but
+  **reverses** the edge, so *this* page becomes a prerequisite of the target (a weak/implicit edge,
+  like any harvested ref; a `forward` ref to an unknown id fails the build). For an incidental link
+  that should create **no** edge at all, use a plain `<a href="/concepts/<id>.html">` instead.
 - `<primer-quiz name="…">` — a random test. The question bank is built in JS by
   `registerQuiz(name, builder)` (in an inline module script, like `registerManimScene`), and the
   element references it by `name`. The builder receives a toolkit `{ sceneStrings }` and returns the

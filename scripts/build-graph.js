@@ -22,7 +22,7 @@ import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseConceptMeta } from "../js/concept-meta.js";
-import { extractConceptRefs } from "../js/concept-refs.js";
+import { extractConceptRefs, extractForwardRefs } from "../js/concept-refs.js";
 import { validateGraph, indexConcepts, buildDependents, attachOrphans } from "../js/graph.js";
 import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
 import { parseJsonc } from "../js/jsonc.js";
@@ -143,6 +143,10 @@ async function main() {
   const concepts = [];
   /** @type {Diagnostic[]} */
   const fileDiagnostics = [];
+  // `<primer-ref forward to="X">` on page P means P is a prerequisite of X — the reverse of a
+  // normal ref. Collect them here, then wire them into the targets after every page is read.
+  /** @type {Map<string, string[]>} concept id → ids it forward-refs */
+  const forwardByConcept = new Map();
 
   const files = (await listHtml(CONCEPTS_DIR)).sort();
   for (const file of files) {
@@ -173,6 +177,9 @@ async function main() {
       };
       if (rawTitle && /<[^>]+>/.test(rawTitle)) meta.titleHtml = rawTitle;
       concepts.push(meta);
+      // Stash this page's forward refs; they're reversed onto their targets below.
+      const fwd = extractForwardRefs(html).filter((r) => r !== id);
+      if (fwd.length) forwardByConcept.set(id, fwd);
     } catch (err) {
       fileDiagnostics.push({
         severity: "error",
@@ -180,6 +187,27 @@ async function main() {
         concept: id,
         message: `${relative(ROOT, file)}: ${err instanceof Error ? err.message : String(err)}`,
       });
+    }
+  }
+
+  // Reverse-wire forward refs: a `<primer-ref forward to="X">` on page P makes P an IMPLICIT
+  // prerequisite of X (added to X's `prerequisites`, NOT its `explicitPrerequisites`, so it stays
+  // a weak/thin edge like any harvested ref). Done before attachOrphans/validateGraph so X stops
+  // being an orphan and any cycle the reverse edge creates is still caught by detectCycles.
+  const indexed = indexConcepts(concepts);
+  for (const [p, targets] of forwardByConcept) {
+    for (const x of targets) {
+      const target = indexed.get(x);
+      if (!target) {
+        fileDiagnostics.push({
+          severity: "error",
+          code: "dangling-prerequisite",
+          concept: p,
+          message: `forward <primer-ref to="${x}"> names no concept`,
+        });
+        continue;
+      }
+      if (!target.prerequisites.includes(p)) target.prerequisites.push(p);
     }
   }
 

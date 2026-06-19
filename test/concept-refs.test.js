@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractConceptRefs } from "../js/concept-refs.js";
+import { extractConceptRefs, extractForwardRefs } from "../js/concept-refs.js";
 
 test("extracts the `to` id of a single ref", () => {
   assert.deepEqual(
@@ -40,4 +40,25 @@ test("ignores other tags and plain anchors", () => {
 
 test("returns an empty array when there are no refs", () => {
   assert.deepEqual(extractConceptRefs("<p>nothing here</p>"), []);
+});
+
+test("a `forward` ref is excluded from backward refs and returned by forward refs", () => {
+  const html = `<primer-ref forward to="calculus/limits/idea-of-a-limit">later</primer-ref>`;
+  assert.deepEqual(extractConceptRefs(html), []); // not a backward prerequisite of this page
+  assert.deepEqual(extractForwardRefs(html), ["calculus/limits/idea-of-a-limit"]);
+});
+
+test("splits mixed backward + forward refs in one page", () => {
+  const html = `
+    <primer-ref to="arithmetic/division">div</primer-ref>
+    <primer-ref to="arithmetic/addition" forward>add</primer-ref>
+    <primer-ref forward to='arithmetic/subtraction'>sub</primer-ref>`;
+  assert.deepEqual(extractConceptRefs(html), ["arithmetic/division"]);
+  assert.deepEqual(extractForwardRefs(html), ["arithmetic/addition", "arithmetic/subtraction"]);
+});
+
+test("`forward` matcher isn't fooled by the word inside a `to` value", () => {
+  const html = `<primer-ref to="calculus/forward-references">x</primer-ref>`;
+  assert.deepEqual(extractConceptRefs(html), ["calculus/forward-references"]); // still backward
+  assert.deepEqual(extractForwardRefs(html), []);
 });
