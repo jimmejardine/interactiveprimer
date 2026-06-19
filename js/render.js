@@ -30,6 +30,7 @@ import { getConceptMeta, conceptIdFromPath } from "./concept-meta.js";
 import { initTheme } from "./theme.js";
 import { initLocale, getLocale, DEFAULT_LOCALE, t } from "./i18n.js";
 import { loadGraph } from "./graph-data.js";
+import { mountSearchBox, SEARCH_BOX_CSS } from "./concept-search-box.js";
 
 /** Build the page shell once the DOM is ready. */
 async function render() {
@@ -133,6 +134,36 @@ async function render() {
   page.append(topPathway, concept, bottomPathway);
   main.appendChild(page);
   body.appendChild(main);
+
+  // A fixed top-left concept search, mirroring the top-right hamburger — jump to any concept by
+  // name from any lesson. Mounted after the content scan above so it isn't treated as lesson body.
+  void mountConceptSearch(body, locale);
+}
+
+/**
+ * Mount the fixed top-left search box once on a lesson page. Loads the graph for the concept-name
+ * list; selecting a result navigates to that concept.
+ * @param {HTMLElement} body
+ * @param {string} locale
+ */
+async function mountConceptSearch(body, locale) {
+  if (body.querySelector(".cg-search")) return; // already mounted
+  if (!document.getElementById("concept-search-style")) {
+    const s = document.createElement("style");
+    s.id = "concept-search-style";
+    s.textContent = SEARCH_BOX_CSS;
+    document.head.appendChild(s);
+  }
+  const graph = await loadGraph().catch(() => null);
+  if (!graph) return; // no graph → no search (the page is otherwise fine)
+  const items = [...graph.byId.values()].map((c) => ({ id: c.id, title: c.titles?.[locale] ?? c.title ?? c.id }));
+  mountSearchBox(body, {
+    items,
+    placement: "fixed",
+    onSelect: (id) => {
+      window.location.href = `/concepts/${id}.html`;
+    },
+  });
 }
 
 /**

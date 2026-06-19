@@ -11,7 +11,7 @@
 import { seedPositions, tick, bounds } from "./force-layout.js";
 import { themeColors } from "./theme.js";
 import { confidenceColor } from "./confidence-color.js";
-import { searchConcepts } from "./concept-search.js";
+import { mountSearchBox, SEARCH_BOX_CSS } from "./concept-search-box.js";
 // Defines <primer-math> on this page (concepts.html doesn't load boot.js) so a node with a math
 // title can typeset inside a <foreignObject>. concepts.html supplies the KaTeX CSS + import map.
 import "./components/primer-math.js";
@@ -309,11 +309,24 @@ export function mountConceptGraph(host, { byId, locale }) {
     }
   };
 
-  // ---- pointer interaction: drag a node, pan the background, click to open ----
+  // ---- pointer interaction: drag a node, pan the background, click to open, pinch to zoom ----
   /** @type {GNode | null} */
   let dragNode = null;
   let panning = false;
   let lastX = 0, lastY = 0, travel = 0;
+  // Multi-touch: track every active pointer so two fingers can pinch-zoom. The SVG sets
+  // touch-action: none, so the browser does no native pinch — we drive it here.
+  /** @type {Map<number, { x: number, y: number }>} */
+  const pointers = new Map();
+  let pinchDist = 0; // last two-finger distance (client px); 0 = not pinching
+  let gesturePinched = false; // a pinch occurred this touch sequence → suppress tap-to-open
+  /** The first two active pointers (only called when ≥2 are down). @returns {Array<{ x: number, y: number }>} */
+  const twoPointers = () => {
+    const it = pointers.values();
+    const a = /** @type {{ x: number, y: number }} */ (it.next().value);
+    const b = /** @type {{ x: number, y: number }} */ (it.next().value);
+    return [a, b];
+  };
 
   /** Screen (client) → layout coordinates. @param {PointerEvent} ev */
   const toLayout = (ev) => {
@@ -323,12 +336,28 @@ export function mountConceptGraph(host, { byId, locale }) {
 
   /** @param {PointerEvent} ev */
   const onDown = (ev) => {
+    pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    try { svg.setPointerCapture(ev.pointerId); } catch { /* pointer already gone */ }
+
+    if (pointers.size >= 2) {
+      // Two fingers down → pinch-zoom. Abandon any single-finger drag/pan in progress.
+      if (dragNode) {
+        if (!dragNode.pinned) dragNode.fixed = false;
+        dragNode = null;
+      }
+      panning = false;
+      gesturePinched = true;
+      const [a, b] = twoPointers();
+      pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+      return;
+    }
+
+    // Single pointer: drag the node under it, else pan the background.
     const target = /** @type {Element} */ (ev.target);
     const g = target.closest(".cg-node");
     lastX = ev.clientX;
     lastY = ev.clientY;
     travel = 0;
-    svg.setPointerCapture(ev.pointerId);
     if (g) {
       dragNode = nodeById.get(g.getAttribute("data-id") ?? "") ?? null;
       if (dragNode) dragNode.fixed = true;
@@ -338,6 +367,30 @@ export function mountConceptGraph(host, { byId, locale }) {
   };
   /** @param {PointerEvent} ev */
   const onMove = (ev) => {
+    const tracked = pointers.get(ev.pointerId);
+    if (tracked) {
+      tracked.x = ev.clientX;
+      tracked.y = ev.clientY;
+    }
+
+    if (pointers.size >= 2) {
+      // Pinch: scale about the midpoint of the two fingers (which also pans as they move),
+      // reusing the same anchored-zoom math as the wheel handler.
+      const [a, b] = twoPointers();
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinchDist > 0 && dist > 0) {
+        const r = svg.getBoundingClientRect();
+        const mx = (a.x + b.x) / 2 - r.left, my = (a.y + b.y) / 2 - r.top;
+        const lx = (mx - view.tx) / view.scale, ly = (my - view.ty) / view.scale;
+        view.scale = clamp(view.scale * (dist / pinchDist), 0.08, 4);
+        view.tx = mx - lx * view.scale;
+        view.ty = my - ly * view.scale;
+        applyView();
+      }
+      pinchDist = dist;
+      return;
+    }
+
     if (dragNode) {
       travel += Math.hypot(ev.clientX - lastX, ev.clientY - lastY);
       lastX = ev.clientX;
@@ -361,14 +414,37 @@ export function mountConceptGraph(host, { byId, locale }) {
   /** @param {PointerEvent} ev */
   const onUp = (ev) => {
     try { svg.releasePointerCapture(ev.pointerId); } catch { /* not captured */ }
+    pointers.delete(ev.pointerId);
+
+    if (pointers.size >= 2) {
+      // Still pinching with the remaining fingers — re-seed the baseline distance.
+      const [a, b] = twoPointers();
+      pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+      return;
+    }
+    if (pointers.size === 1) {
+      // Dropped from a pinch to one finger → continue as a pan from where it is (no jump, no grab).
+      pinchDist = 0;
+      const rem = /** @type {{ x: number, y: number }} */ (pointers.values().next().value);
+      lastX = rem.x;
+      lastY = rem.y;
+      panning = true;
+      dragNode = null;
+      return;
+    }
+
+    // Last pointer up — end of the gesture.
+    pinchDist = 0;
     if (dragNode) {
       const n = dragNode;
       dragNode = null;
       if (!n.pinned) n.fixed = false; // keep the pinned root fixed
-      if (travel < CLICK_PX) window.open(`/concepts/${n.id}.html`, "_blank", "noopener");
+      // A pinch never counts as a click-to-open.
+      if (!gesturePinched && travel < CLICK_PX) window.open(`/concepts/${n.id}.html`, "_blank", "noopener");
       reheat();
     }
     panning = false;
+    gesturePinched = false;
   };
   svg.addEventListener("pointerdown", onDown);
   svg.addEventListener("pointermove", onMove);
@@ -418,112 +494,16 @@ export function mountConceptGraph(host, { byId, locale }) {
   document.addEventListener("theme-change", onTheme);
   document.addEventListener("confidence-change", onConfidence);
 
-  // ---- top-left search: filter concept names, click/Enter to open the concept ----
-  const searchIndex = nodes.map((n) => ({ id: n.id, title: titleOf(n.id) }));
-  const search = document.createElement("div");
-  search.className = "cg-search";
-  search.innerHTML =
-    `<input class="cg-search-input" type="search" autocomplete="off" spellcheck="false"` +
-    ` placeholder="Search concepts…" aria-label="Search concepts" role="combobox"` +
-    ` aria-expanded="false" aria-controls="cg-search-list" aria-autocomplete="list" />` +
-    `<ul class="cg-results" id="cg-search-list" role="listbox" hidden></ul>`;
-  host.appendChild(search);
-  const input = /** @type {HTMLInputElement} */ (search.querySelector(".cg-search-input"));
-  const list = /** @type {HTMLElement} */ (search.querySelector(".cg-results"));
-
-  /** @type {{ id: string, title: string }[]} */
-  let results = [];
-  let activeIdx = -1;
-
-  const closeList = () => {
-    list.hidden = true;
-    list.replaceChildren();
-    results = [];
-    activeIdx = -1;
-    input.setAttribute("aria-expanded", "false");
-    input.removeAttribute("aria-activedescendant");
-  };
-  /** Move the active row (wrapping); -1 clears it. @param {number} i */
-  const setActive = (i) => {
-    const items = [...list.children];
-    activeIdx = items.length ? ((i % items.length) + items.length) % items.length : -1;
-    items.forEach((el, idx) => el.classList.toggle("is-active", idx === activeIdx));
-    if (activeIdx >= 0) {
-      const el = /** @type {HTMLElement} */ (items[activeIdx]);
-      input.setAttribute("aria-activedescendant", el.id);
-      el.scrollIntoView({ block: "nearest" });
-    } else input.removeAttribute("aria-activedescendant");
-  };
-  /** @param {number} i */
-  const select = (i) => {
-    const r = results[i];
-    if (!r) return;
-    window.open(`/concepts/${r.id}.html`, "_blank", "noopener"); // matches a node click
-    input.value = "";
-    closeList();
-  };
-  const renderResults = () => {
-    results = searchConcepts(searchIndex, input.value, 10);
-    list.replaceChildren();
-    if (!results.length) return closeList();
-    results.forEach((r, i) => {
-      const li = document.createElement("li");
-      li.className = "cg-result";
-      li.id = `cg-result-${i}`;
-      li.setAttribute("role", "option");
-      li.dataset.id = r.id;
-      const title = document.createElement("span");
-      title.className = "cg-result-title";
-      title.textContent = r.title;
-      const sub = document.createElement("span");
-      sub.className = "cg-result-id";
-      sub.textContent = r.id;
-      li.append(title, sub);
-      list.appendChild(li);
-    });
-    list.hidden = false;
-    input.setAttribute("aria-expanded", "true");
-    setActive(0);
-  };
-
-  const onSearchInput = () => renderResults();
-  /** @param {KeyboardEvent} e */
-  const onSearchKey = (e) => {
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      if (list.hidden) renderResults();
-      else setActive(activeIdx + 1);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setActive(activeIdx - 1);
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      select(activeIdx >= 0 ? activeIdx : 0);
-    } else if (e.key === "Escape") {
-      input.value = "";
-      closeList();
-      input.blur();
-    }
-  };
-  // Select on pointerdown (before the input blurs) so a click reliably opens the row.
-  const onListDown = (/** @type {Event} */ e) => {
-    const li = /** @type {Element} */ (e.target).closest?.(".cg-result");
-    if (!li) return;
-    e.preventDefault();
-    const idx = [...list.children].indexOf(li);
-    if (idx >= 0) select(idx);
-  };
-  const onDocDown = (/** @type {Event} */ e) => {
-    if (!e.composedPath().includes(search)) closeList();
-  };
-  input.addEventListener("input", onSearchInput);
-  input.addEventListener("keydown", onSearchKey);
-  list.addEventListener("pointerdown", onListDown);
-  document.addEventListener("pointerdown", onDocDown);
+  // ---- top-left search: filter concept names, select to open the concept in a new tab ----
+  const searchBox = mountSearchBox(host, {
+    items: nodes.map((n) => ({ id: n.id, title: titleOf(n.id) })),
+    placement: "overlay",
+    onSelect: (id) => window.open(`/concepts/${id}.html`, "_blank", "noopener"), // matches a node click
+  });
 
   return {
     destroy() {
-      document.removeEventListener("pointerdown", onDocDown);
+      searchBox.destroy();
       if (raf) cancelAnimationFrame(raf);
       svg.removeEventListener("pointerdown", onDown);
       svg.removeEventListener("pointermove", onMove);
@@ -571,30 +551,7 @@ function injectStyleOnce() {
     .cg-edges line { stroke-width: 1.2; transition: stroke-width .1s, stroke-opacity .1s; }
     .cg-edges line.cg-explicit { stroke-width: 2.6; }
     .cg-edges line.cg-hot { stroke: var(--primer-accent, #46e) !important; stroke-opacity: 0.9 !important; stroke-width: 3; }
-
-    /* Top-left search overlay. Sits above the SVG; themed via the --primer-* tokens. */
-    .cg-search { position: absolute; top: 0.7rem; left: 0.7rem; z-index: 5; width: min(20rem, 70vw); font-family: var(--primer-font-ui, sans-serif); }
-    .cg-search-input {
-      width: 100%; box-sizing: border-box; font: inherit; font-size: 0.92rem;
-      padding: 0.45rem 0.6rem; border-radius: var(--primer-radius, 0.6rem);
-      border: 1px solid var(--primer-border, #ccc);
-      background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
-    }
-    .cg-search-input:focus { outline: 2px solid var(--primer-accent, #46e); outline-offset: 1px; }
-    .cg-results {
-      list-style: none; margin: 0.35rem 0 0; padding: 0.25rem;
-      max-height: 16rem; overflow-y: auto;
-      background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
-      border: 1px solid var(--primer-border, #ccc); border-radius: var(--primer-radius, 0.6rem);
-      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
-    }
-    .cg-results[hidden] { display: none; }
-    .cg-result { display: flex; flex-direction: column; gap: 0.05rem; padding: 0.35rem 0.5rem; border-radius: 0.4rem; cursor: pointer; }
-    .cg-result:hover, .cg-result.is-active { background: var(--primer-accent, #46e); color: var(--primer-accent-ink, #fff); }
-    .cg-result-title { font-size: 0.92rem; }
-    .cg-result-id { font-size: 0.72rem; opacity: 0.7; }
-    .cg-result:hover .cg-result-id, .cg-result.is-active .cg-result-id { opacity: 0.85; }
+    ${SEARCH_BOX_CSS}
   `;
   document.head.appendChild(style);
 }

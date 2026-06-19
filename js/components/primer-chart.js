@@ -80,6 +80,7 @@ export class PrimerChart extends HTMLElement {
         .chart-title {
           font-family: var(--primer-font-display, var(--primer-font-body, sans-serif));
           font-size: 1.05rem; font-weight: 600; margin: 0 0 0.5rem; color: var(--primer-ink, #111);
+          text-align: center;
         }
         .chart-title[hidden] { display: none; }
         /* The board fills a 7:4 stage; JSXGraph adds class "jxgbox" to this same element and draws

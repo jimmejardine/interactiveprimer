@@ -77,6 +77,7 @@ export class PrimerGeometry extends HTMLElement {
         .geo-title {
           font-family: var(--primer-font-display, var(--primer-font-body, sans-serif));
           font-size: 1.05rem; font-weight: 600; margin: 0 0 0.5rem; color: var(--primer-ink, #111);
+          text-align: center;
         }
         .geo-title[hidden], .bar[hidden], .expanded[hidden] { display: none; }
         /* In the expanded "all steps" view, only the Collapse button stays in the bar — the
@@ -86,14 +87,14 @@ export class PrimerGeometry extends HTMLElement {
           background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); }
         .stage.jxgbox { background: var(--primer-viz-bg, #fff); }
         .stage svg { display: block; width: 100% !important; height: 100% !important; }
-        .bar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-top: 0.6rem;
+        .bar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; justify-content: center; margin-bottom: 0.6rem;
           font-family: var(--primer-font-ui, sans-serif); }
         .bar button { padding: 0.2rem 0.6rem; }
         .bar .count { font-size: 0.85rem; color: var(--primer-ink-soft, #667); min-width: 3.2rem; text-align: center; }
-        .bar .caption { flex: 1 1 100%; font-size: 0.92rem; color: var(--primer-ink, #111); margin-top: 0.1rem; }
+        .bar .caption { flex: 1 1 100%; font-size: 0.92rem; font-weight: 700; color: var(--primer-ink, #111); margin-top: 0.1rem; text-align: center; }
         .expanded { margin-top: 0.6rem; display: grid; gap: 1rem; }
         .expanded .block h4 { font-family: var(--primer-font-ui, sans-serif); font-size: 0.95rem;
-          margin: 0 0 0.3rem; color: var(--primer-ink, #111); }
+          margin: 0 0 0.3rem; color: var(--primer-ink, #111); text-align: center; }
         .expanded .mini { width: 100%; aspect-ratio: 7 / 4; overflow: hidden;
           background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); }
         .expanded .mini svg { display: block; width: 100% !important; height: 100% !important; }
@@ -101,7 +102,6 @@ export class PrimerGeometry extends HTMLElement {
       </style>
       <div class="geo">
         <h3 class="geo-title" part="title" hidden></h3>
-        <div class="stage" part="stage"></div>
         <div class="bar" part="controls" hidden>
           <button class="rewind" type="button" aria-label="${t("geometry.rewind")}">«</button>
           <button class="prev" type="button" aria-label="${t("geometry.prev")}">‹</button>
@@ -112,6 +112,7 @@ export class PrimerGeometry extends HTMLElement {
           <button class="expand" type="button">${t("geometry.expand")}</button>
           <span class="caption"></span>
         </div>
+        <div class="stage" part="stage"></div>
         <div class="expanded" part="expanded" hidden></div>
       </div>`;
 
@@ -325,7 +326,7 @@ export class PrimerGeometry extends HTMLElement {
     const count = /** @type {HTMLElement} */ (root.querySelector(".count"));
     count.textContent = `${this.#current} / ${n}`;
     const caption = /** @type {HTMLElement} */ (root.querySelector(".caption"));
-    caption.textContent = this.#current > 0 ? (this.#steps[this.#current - 1]?.caption ?? "") : "";
+    caption.textContent = this.#current > 0 ? `${this.#current}. ${this.#steps[this.#current - 1]?.caption ?? ""}` : "";
     /** @type {HTMLButtonElement} */ (root.querySelector(".rewind")).disabled = this.#current <= 0;
     /** @type {HTMLButtonElement} */ (root.querySelector(".prev")).disabled = this.#current <= 0;
     /** @type {HTMLButtonElement} */ (root.querySelector(".next")).disabled = this.#current >= n;
