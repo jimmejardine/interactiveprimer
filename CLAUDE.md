@@ -17,7 +17,7 @@ is built power by power: a constant, then `$x$`, then `$x^2$`, then `$x^3$`, *th
 general power rule — each its own page, so the pattern is discovered, not asserted. When a
 draft starts covering two things, that's the signal to split.
 
-See `concepts/calculus/README.md` for a worked example of decomposing a subject this way.
+See `concepts/mathematics/calculus/README.md` for a worked example of decomposing a subject this way.
 
 ## Page skeleton (copy this)
 
@@ -262,7 +262,7 @@ what you need — so the only `primer` import is `registerManimScene`:
   Reference it by a **relative** path (`source: "frog.png"`, resolved against the page URL) — don't
   hotlink, don't use an absolute `/concepts/…` path. manim only honours the PNG's transparency when
   `opacity < 1`, so pass `opacity: 0.999` (looks opaque; drops the transparent background). See
-  `concepts/arithmetic/counting.html` (counting frogs).
+  `concepts/mathematics/arithmetic/counting.html` (counting frogs).
 
 ## Charts (JSXGraph plots)
 
@@ -344,7 +344,7 @@ one identical domain + range — no board/axes/plot boilerplate. The markup is j
   is the **index** of the selected option (so a chart/diagram reads `sliders.<name>` as a number,
   `0,1,2,…`), and `min`/`max`/`step`/`anchors` don't apply. A group's defs may mix sliders and
   choices in one panel. Use a choice for a discrete switch — e.g. flipping a diagram between two
-  cases. See `concepts/calculus/what-is-a-function.html` (function vs not-a-function, and the
+  cases. See `concepts/mathematics/calculus/what-is-a-function.html` (function vs not-a-function, and the
   curve in the vertical-line test).
 
 ### For full control: the low-level `registerChart`
@@ -395,7 +395,7 @@ and after a theme change. Drive it from a `<primer-chart>` carrying an inline `p
   `makeStrings(namespace)` and pass them as thunks so they resolve when the chart RENDERS — after a
   translation overlay has been applied — not at registration: `const s = makeStrings("sinLab");`
   then `{ …, title: () => s("title") }` and a slider `{ name: "A", label: () => s("amplitude"), … }`.
-  See `concepts/trigonometry/sine-properties.html` for the full showcase.
+  See `concepts/mathematics/trigonometry/sine-properties.html` for the full showcase.
 
 ## Geometry diagrams (`registerGeometryScene`)
 
@@ -446,7 +446,7 @@ sceneStrings, parallelMark, crossing, makeGraph }` — `colors` is the resolved 
     fills/highlights it and returns the element (so a `step` captures it). `vertex`/`dirA`/`dirB` may each
     be a **function** returning the value — pass functions for a slider-driven figure (a moving crossing /
     rotating line) and the wedge + label re-plot live on `board.update()`. See the static figures in
-    `concepts/geometry/alternate-interior-angles.html` and the live transversal in `parallel-lines.html`.
+    `concepts/mathematics/geometry/alternate-interior-angles.html` and the live transversal in `parallel-lines.html`.
   - `makeGraph(opts?)` — for a **graph diagram** (a function plotted on Cartesian axes), draws the
     standard themed axes (faint lines, arrowheads at the positive ends, tick numbers, `"x"`/`"y"` labels)
     that auto-span the board — the **same axes the `registerCharts` charts use**, so don't hand-roll
@@ -454,7 +454,7 @@ sceneStrings, parallelMark, crossing, makeGraph }` — `colors` is the resolved 
     scene options; then call `makeGraph()` and plot your curve. Options (all defaulted, see
     js/graph-axes.js): `xName`/`yName` (axis labels, `""` hides one), `xticks`/`yticks` (spacing, null =
     auto), `ticks` (false → clean unticked axes), `arrows` (false → no arrowheads). E.g.
-    `makeGraph({ yName: "f(x)" })`. See `concepts/calculus/functions/what-is-a-function.html`.
+    `makeGraph({ yName: "f(x)" })`. See `concepts/mathematics/calculus/functions/what-is-a-function.html`.
 - **Colours** as everywhere: from `themeColors()` (`colors.line`/`colors.cat[i]` strokes, fills
   `colors.cat[i]` at opacity, **text via `strokeColor: colors.ink`**) — never hardcoded.
 - **No endpoint dots**: a `segment`/`line`/`arrow` built from coordinates hides its auto-created endpoint
@@ -473,7 +473,7 @@ sceneStrings, parallelMark, crossing, makeGraph }` — `colors` is the resolved 
 - **External control / manim sync**: the element exposes `goTo(k)`, `next()`, `prev()`, `play()`, `reset()`,
   and `step`/`stepCount`, and fires `primer:geometry-step` `{ detail: { name, step, stepCount } }`. A manim
   scene (or any script) can `document.querySelector('primer-geometry[scene="x"]').goTo(k)` to drive a proof
-  in lockstep. See `concepts/geometry/parallel-lines.html` for the showcase.
+  in lockstep. See `concepts/mathematics/geometry/parallel-lines.html` for the showcase.
 
 ## Helpers re-exported from `primer` (for inline scripts)
 

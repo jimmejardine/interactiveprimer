@@ -121,7 +121,7 @@ npm run serve      # static file server; open /index.html
 
 Type-checking, tests and graph validation need no compilation; they are *checks*, not a
 build. Authoring a new concept is just adding an `.html` page (copy
-`concepts/arithmetic/counting.html`) — its id is simply its path under `concepts/`, and its title
+`concepts/mathematics/arithmetic/counting.html`) — its id is simply its path under `concepts/`, and its title
 goes in a `<primer-title>`. An optional quiz is authored in JS with `registerQuiz`
 and shown via `<primer-quiz name="…">` (see `addition.html`).
 
