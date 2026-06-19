@@ -11,6 +11,7 @@
 import { seedPositions, tick, bounds } from "./force-layout.js";
 import { themeColors } from "./theme.js";
 import { confidenceColor } from "./confidence-color.js";
+import { searchConcepts } from "./concept-search.js";
 // Defines <primer-math> on this page (concepts.html doesn't load boot.js) so a node with a math
 // title can typeset inside a <foreignObject>. concepts.html supplies the KaTeX CSS + import map.
 import "./components/primer-math.js";
@@ -417,8 +418,112 @@ export function mountConceptGraph(host, { byId, locale }) {
   document.addEventListener("theme-change", onTheme);
   document.addEventListener("confidence-change", onConfidence);
 
+  // ---- top-left search: filter concept names, click/Enter to open the concept ----
+  const searchIndex = nodes.map((n) => ({ id: n.id, title: titleOf(n.id) }));
+  const search = document.createElement("div");
+  search.className = "cg-search";
+  search.innerHTML =
+    `<input class="cg-search-input" type="search" autocomplete="off" spellcheck="false"` +
+    ` placeholder="Search concepts…" aria-label="Search concepts" role="combobox"` +
+    ` aria-expanded="false" aria-controls="cg-search-list" aria-autocomplete="list" />` +
+    `<ul class="cg-results" id="cg-search-list" role="listbox" hidden></ul>`;
+  host.appendChild(search);
+  const input = /** @type {HTMLInputElement} */ (search.querySelector(".cg-search-input"));
+  const list = /** @type {HTMLElement} */ (search.querySelector(".cg-results"));
+
+  /** @type {{ id: string, title: string }[]} */
+  let results = [];
+  let activeIdx = -1;
+
+  const closeList = () => {
+    list.hidden = true;
+    list.replaceChildren();
+    results = [];
+    activeIdx = -1;
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+  };
+  /** Move the active row (wrapping); -1 clears it. @param {number} i */
+  const setActive = (i) => {
+    const items = [...list.children];
+    activeIdx = items.length ? ((i % items.length) + items.length) % items.length : -1;
+    items.forEach((el, idx) => el.classList.toggle("is-active", idx === activeIdx));
+    if (activeIdx >= 0) {
+      const el = /** @type {HTMLElement} */ (items[activeIdx]);
+      input.setAttribute("aria-activedescendant", el.id);
+      el.scrollIntoView({ block: "nearest" });
+    } else input.removeAttribute("aria-activedescendant");
+  };
+  /** @param {number} i */
+  const select = (i) => {
+    const r = results[i];
+    if (!r) return;
+    window.open(`/concepts/${r.id}.html`, "_blank", "noopener"); // matches a node click
+    input.value = "";
+    closeList();
+  };
+  const renderResults = () => {
+    results = searchConcepts(searchIndex, input.value, 10);
+    list.replaceChildren();
+    if (!results.length) return closeList();
+    results.forEach((r, i) => {
+      const li = document.createElement("li");
+      li.className = "cg-result";
+      li.id = `cg-result-${i}`;
+      li.setAttribute("role", "option");
+      li.dataset.id = r.id;
+      const title = document.createElement("span");
+      title.className = "cg-result-title";
+      title.textContent = r.title;
+      const sub = document.createElement("span");
+      sub.className = "cg-result-id";
+      sub.textContent = r.id;
+      li.append(title, sub);
+      list.appendChild(li);
+    });
+    list.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+    setActive(0);
+  };
+
+  const onSearchInput = () => renderResults();
+  /** @param {KeyboardEvent} e */
+  const onSearchKey = (e) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (list.hidden) renderResults();
+      else setActive(activeIdx + 1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActive(activeIdx - 1);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      select(activeIdx >= 0 ? activeIdx : 0);
+    } else if (e.key === "Escape") {
+      input.value = "";
+      closeList();
+      input.blur();
+    }
+  };
+  // Select on pointerdown (before the input blurs) so a click reliably opens the row.
+  const onListDown = (/** @type {Event} */ e) => {
+    const li = /** @type {Element} */ (e.target).closest?.(".cg-result");
+    if (!li) return;
+    e.preventDefault();
+    const idx = [...list.children].indexOf(li);
+    if (idx >= 0) select(idx);
+  };
+  const onDocDown = (/** @type {Event} */ e) => {
+    if (!e.composedPath().includes(search)) closeList();
+  };
+  input.addEventListener("input", onSearchInput);
+  input.addEventListener("keydown", onSearchKey);
+  list.addEventListener("pointerdown", onListDown);
+  document.addEventListener("pointerdown", onDocDown);
+
   return {
     destroy() {
+      document.removeEventListener("pointerdown", onDocDown);
       if (raf) cancelAnimationFrame(raf);
       svg.removeEventListener("pointerdown", onDown);
       svg.removeEventListener("pointermove", onMove);
@@ -466,6 +571,30 @@ function injectStyleOnce() {
     .cg-edges line { stroke-width: 1.2; transition: stroke-width .1s, stroke-opacity .1s; }
     .cg-edges line.cg-explicit { stroke-width: 2.6; }
     .cg-edges line.cg-hot { stroke: var(--primer-accent, #46e) !important; stroke-opacity: 0.9 !important; stroke-width: 3; }
+
+    /* Top-left search overlay. Sits above the SVG; themed via the --primer-* tokens. */
+    .cg-search { position: absolute; top: 0.7rem; left: 0.7rem; z-index: 5; width: min(20rem, 70vw); font-family: var(--primer-font-ui, sans-serif); }
+    .cg-search-input {
+      width: 100%; box-sizing: border-box; font: inherit; font-size: 0.92rem;
+      padding: 0.45rem 0.6rem; border-radius: var(--primer-radius, 0.6rem);
+      border: 1px solid var(--primer-border, #ccc);
+      background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+    }
+    .cg-search-input:focus { outline: 2px solid var(--primer-accent, #46e); outline-offset: 1px; }
+    .cg-results {
+      list-style: none; margin: 0.35rem 0 0; padding: 0.25rem;
+      max-height: 16rem; overflow-y: auto;
+      background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
+      border: 1px solid var(--primer-border, #ccc); border-radius: var(--primer-radius, 0.6rem);
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+    }
+    .cg-results[hidden] { display: none; }
+    .cg-result { display: flex; flex-direction: column; gap: 0.05rem; padding: 0.35rem 0.5rem; border-radius: 0.4rem; cursor: pointer; }
+    .cg-result:hover, .cg-result.is-active { background: var(--primer-accent, #46e); color: var(--primer-accent-ink, #fff); }
+    .cg-result-title { font-size: 0.92rem; }
+    .cg-result-id { font-size: 0.72rem; opacity: 0.7; }
+    .cg-result:hover .cg-result-id, .cg-result.is-active .cg-result-id { opacity: 0.85; }
   `;
   document.head.appendChild(style);
 }
