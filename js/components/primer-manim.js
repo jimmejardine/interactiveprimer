@@ -23,6 +23,18 @@ import { speak, cancelSpeech, pauseSpeech, resumeSpeech } from "../speech.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
 
+/**
+ * Monochrome control icons as inline SVG (24×24, `fill: currentColor`) — they render identically on
+ * every platform and recolour with the theme, unlike the Unicode media glyphs (▶ ⏸ ↻) which each OS
+ * draws with its own font/emoji (often colour, inconsistent).
+ */
+const ICON = {
+  play: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
+  pause: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>',
+  replay:
+    '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg>',
+};
+
 export class PrimerManim extends HTMLElement {
   /** @type {"idle" | "playing" | "paused" | "done"} */
   #state = "idle";
@@ -56,24 +68,41 @@ export class PrimerManim extends HTMLElement {
            sized from this container's box. So the stage MUST carry that same aspect
            ratio: on a mismatched box the frame is squashed/clipped and every mobject's
            position and shape comes out wrong. Keep 7/4 in sync with manim's frame. */
-        .stage { width: 100%; aspect-ratio: 7 / 4; display: grid; place-items: center; overflow: hidden; background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); }
+        .stage { position: relative; width: 100%; aspect-ratio: 7 / 4; display: grid; place-items: center; overflow: hidden; background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); }
         /* manim (three.js setSize) writes an inline px width/height on the canvas; override
            it so the canvas always FILLS the responsive 7:4 stage and scales down on narrow
            screens instead of clipping. object-fit:contain preserves aspect (no distortion).
            The drawing-buffer resolution still tracks the stage via manim's autoResize. */
         .stage canvas { display: block; width: 100% !important; height: 100% !important; object-fit: contain; }
         .controls { margin-top: 0.4rem; display: flex; gap: 0.75rem; align-items: center; }
+        /* Control button: just the SVG icon, themed via currentColor (no font glyphs). */
+        .play { display: inline-flex; padding: 0; border: 0; background: none; color: var(--primer-ink, #111); cursor: pointer; line-height: 0; }
+        .play svg { width: 1.5rem; height: 1.5rem; display: block; }
+        /* Big centred play button, shown on the idle stage so it's obvious the animation plays.
+           Removed once it first starts (replay uses the small control). */
+        .big-play { position: absolute; inset: 0; display: grid; place-items: center; padding: 0; border: 0; background: transparent; cursor: pointer; }
+        .big-play .disc { width: 4.5rem; height: 4.5rem; border-radius: 50%; background: var(--primer-accent, #5b6ee1); display: grid; place-items: center; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25); }
+        .big-play svg { width: 2.4rem; height: 2.4rem; fill: #fff; margin-left: 0.25rem; /* optical-centre the triangle */ }
+        .big-play:hover .disc, .big-play:focus-visible .disc { filter: brightness(1.1); }
+        @keyframes primer-manim-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
+        @media (prefers-reduced-motion: no-preference) { .big-play .disc { animation: primer-manim-pulse 1.8s ease-in-out infinite; } }
       </style>
       <div class="card frame">
-        <div class="stage" part="stage"></div>
+        <div class="stage" part="stage">
+          <button type="button" class="big-play" aria-label="${t("manim.play")}" title="${t("manim.play")}">
+            <span class="disc">${ICON.play}</span>
+          </button>
+        </div>
         <div class="controls">
-          <button type="button" class="play" aria-label="${t("manim.play")}" title="${t("manim.play")}">▶</button>
+          <button type="button" class="play" aria-label="${t("manim.play")}" title="${t("manim.play")}">${ICON.play}</button>
           ${caption ? `<span class="meta">${caption}</span>` : ""}
         </div>
       </div>`;
 
     const playBtn = /** @type {HTMLButtonElement} */ (root.querySelector(".play"));
     playBtn.addEventListener("click", () => this.#onClick(root, playBtn));
+    // The big centre overlay starts the scene just like the small control (idle → #start).
+    root.querySelector(".big-play")?.addEventListener("click", () => this.#onClick(root, playBtn));
   }
 
   disconnectedCallback() {
@@ -101,7 +130,7 @@ export class PrimerManim extends HTMLElement {
     }
     pauseSpeech();
     this.#state = "paused";
-    face(btn, "▶", t("manim.resume"));
+    face(btn, ICON.play, t("manim.resume"));
   }
 
   /** @param {HTMLButtonElement} btn */
@@ -113,7 +142,7 @@ export class PrimerManim extends HTMLElement {
     }
     resumeSpeech();
     this.#state = "playing";
-    face(btn, "⏸", t("manim.pause"));
+    face(btn, ICON.pause, t("manim.pause"));
   }
 
   /**
@@ -130,12 +159,13 @@ export class PrimerManim extends HTMLElement {
     }
 
     // Clear any previous render (and stop any prior narration) so replaying doesn't
-    // stack a second scene or overlap the old voice with the new run.
+    // stack a second scene or overlap the old voice with the new run. replaceChildren also
+    // drops the big centre play overlay — it only shows on the first idle load.
     cancelSpeech();
     stage.replaceChildren();
     this.#scene = null;
     this.#state = "playing";
-    face(btn, "⏸", "Pause");
+    face(btn, ICON.pause, t("manim.pause"));
 
     try {
       const manim = await import("manim-web");
@@ -155,26 +185,26 @@ export class PrimerManim extends HTMLElement {
         themeColors,
       });
       this.#state = "done";
-      face(btn, "↻", "Replay");
+      face(btn, ICON.replay, t("manim.replay"));
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       stage.innerHTML = `<span class="meta">${t("manim.runError", { error })}</span>`;
       this.#state = "idle";
-      face(btn, "▶", t("manim.play"));
+      face(btn, ICON.play, t("manim.play"));
     }
   }
 
 }
 
 /**
- * Set a control's visible icon plus an accessible label (the words live in
- * `aria-label`/`title` only, so the button shows just the glyph).
+ * Set a control's visible icon plus an accessible label. `icon` is an inline-SVG string (see
+ * {@link ICON}), so it's assigned as `innerHTML`; the words live in `aria-label`/`title` only.
  * @param {HTMLButtonElement} btn
  * @param {string} icon
  * @param {string} label
  */
 function face(btn, icon, label) {
-  btn.textContent = icon;
+  btn.innerHTML = icon;
   btn.setAttribute("aria-label", label);
   btn.title = label;
 }
