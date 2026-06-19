@@ -147,3 +147,4 @@ AGPL as part of the code, so the prose/code boundary within a `concepts/*.html` 
 ## Acknowledgements
 
 - https://www.svgrepo.com
+- https://openclipart.org — public-domain cartoon art (e.g. the counting frogs)

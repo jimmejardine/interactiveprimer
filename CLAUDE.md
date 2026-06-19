@@ -247,6 +247,22 @@ what you need — so the only `primer` import is `registerManimScene`:
   feature-detection fallbacks (`const Grow = GrowFromCenter ?? FadeIn`, `Integer ? … : Text`,
   `if (MoveAlongPath) … else …`): the exports are guaranteed present, so those branches are dead
   code. Keep scenes simple; the component already shows a friendly message if a scene throws.
+- **Cartoon images (the exception to the colour rule).** A scene can show a picture with
+  `new manim.ImageMobject({ source: "foo.png", height, center, opacity: 0.999 })` (it grows / fades
+  like any mobject; `await img.waitForLoad()` before animating so it doesn't pop in). Such a
+  **content image keeps its own colours** — it is *not* themed. Workflow for getting one:
+  1. Find art on [OpenClipart](https://openclipart.org) (100% public domain) — always pick the
+     **most cartoonish** image available.
+  2. **Download the "small" PNG** (the PNG render, e.g. `https://openclipart.org/image/800px/<id>`)
+     **into the same directory as the page that uses it**. Use a **PNG, not the SVG**: manim's WebGL
+     texture loader can't decode an SVG (it shows a black box).
+  3. The image **must be transparent** — if it has no alpha / is fully opaque, pick a different one.
+  4. **Crop it tight** to the subject: `node scripts/trim-png.js <file.png>` (trims the transparent
+     padding OpenClipart leaves; it also rejects a non-transparent PNG).
+  Reference it by a **relative** path (`source: "frog.png"`, resolved against the page URL) — don't
+  hotlink, don't use an absolute `/concepts/…` path. manim only honours the PNG's transparency when
+  `opacity < 1`, so pass `opacity: 0.999` (looks opaque; drops the transparent background). See
+  `concepts/arithmetic/counting.html` (counting frogs).
 
 ## Charts (JSXGraph plots)
 
