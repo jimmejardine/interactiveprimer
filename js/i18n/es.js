@@ -60,6 +60,8 @@ export default {
   "pathway.more": "+{extra} más",
 
   "menu.label": "Menú",
+  "menu.home": "Inicio",
+  "menu.explore": "Explorar",
   "menu.theme": "Tema",
   "menu.language": "Idioma",
   "menu.progress": "Progreso",

@@ -132,6 +132,8 @@ export class PrimerMenu extends HTMLElement {
       </button>
       <div class="panel" role="menu">
         <div class="menu-view view-root">
+          <button type="button" class="nav" data-href="/">${t("menu.home")}</button>
+          <button type="button" class="nav" data-href="/concepts.html">${t("menu.explore")}</button>
           <button type="button" class="nav" data-target="theme">${t("menu.theme")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="lang">${t("menu.language")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="progress">${t("menu.progress")}<span class="chev" aria-hidden="true">›</span></button>
@@ -210,7 +212,8 @@ export class PrimerMenu extends HTMLElement {
     toggle.addEventListener("click", () => setOpen(!panel.classList.contains("open")));
 
     for (const b of /** @type {HTMLButtonElement[]} */ ([...root.querySelectorAll(".nav")])) {
-      b.addEventListener("click", () => showView(/** @type {string} */ (b.dataset.target)));
+      if (b.dataset.target) b.addEventListener("click", () => showView(/** @type {string} */ (b.dataset.target)));
+      else if (b.dataset.href) b.addEventListener("click", () => { window.location.href = /** @type {string} */ (b.dataset.href); });
     }
     for (const b of /** @type {HTMLButtonElement[]} */ ([...root.querySelectorAll(".back")])) {
       b.addEventListener("click", () => showView("root"));
