@@ -524,10 +524,11 @@ export function mountConceptGraph(host, { byId, locale }) {
   document.addEventListener("theme-change", onTheme);
   document.addEventListener("confidence-change", onConfidence);
 
-  // ---- top-left search: filter concept names, select to open the concept in a new tab ----
+  // ---- top-left search: filter concept names, select to open the concept in a new tab.
+  //      "fixed" pins it to the viewport top-left at the same inset as the top-right hamburger. ----
   const searchBox = mountSearchBox(host, {
     items: nodes.map((n) => ({ id: n.id, title: titleOf(n.id) })),
-    placement: "overlay",
+    placement: "fixed",
     onSelect: (id) => window.open(`/concepts/${id}.html`, "_blank", "noopener"), // matches a node click
   });
 
