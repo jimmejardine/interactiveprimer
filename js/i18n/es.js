@@ -14,6 +14,8 @@ export default {
   "app.name": "Cartilla Interactiva",
 
   "concept.confidence.prompt": "¿Qué tan seguro te sientes con este concepto?",
+  "feedback.needsAttention": "Esta página necesita atención",
+  "feedback.thanks": "Gracias — marcada para revisión.",
   "concept.confidence.legend": "Tu confianza",
   "concept.confidence.rate": "Califica {n} de {max}",
   "concept.confidence.rateTitle": "{n} / {max}",

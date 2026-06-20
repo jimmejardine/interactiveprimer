@@ -16,6 +16,7 @@ import { loadGraph } from "../graph-data.js";
 import { t } from "../i18n.js";
 import { combineRating } from "../confidence.js";
 import { readEntry, writeEntry } from "../confidence-store.js";
+import { attentionEvent, flaggedToday, markFlagged } from "../feedback.js";
 
 /** Number of stars in the confidence rating (0 = unrated/none, MAX = full mastery). */
 const MAX_STARS = 10;
@@ -55,6 +56,16 @@ const STAR_CSS = `
   .star svg { width: 100%; height: 100%; fill: currentColor; transition: color 0.08s ease; }
   .star.filled { color: var(--primer-star, #f5b301); }   /* selected or previewed */
   .star:focus-visible { outline: 2px solid var(--primer-accent, #46e); border-radius: 0.25rem; }
+  /* A quiet "this page needs attention" link-button under the stars (lightweight feedback). */
+  .feedback { margin-top: 0.9rem; }
+  .feedback .attn {
+    font-family: var(--primer-font-ui, sans-serif); font-size: 0.82rem;
+    padding: 0.2rem 0.5rem; border: none; background: none; cursor: pointer;
+    color: var(--primer-ink-soft, #667); text-decoration: underline; text-underline-offset: 2px;
+  }
+  .feedback .attn:hover { color: var(--primer-ink, #111); }
+  .feedback .attn:focus-visible { outline: 2px solid var(--primer-accent, #46e); border-radius: 0.25rem; }
+  .feedback .attn[disabled] { text-decoration: none; cursor: default; opacity: 0.8; }
 `;
 
 export class PrimerConcept extends HTMLElement {
@@ -94,6 +105,9 @@ export class PrimerConcept extends HTMLElement {
         <section class="confidence card" aria-label="${t("concept.confidence.legend")}">
           <p class="meta" id="conf-label" style="margin-top:0;">${t("concept.confidence.prompt")}</p>
           <div class="stars" role="group" aria-labelledby="conf-label">${stars}</div>
+          <div class="feedback">
+            <button type="button" class="attn">${t("feedback.needsAttention")}</button>
+          </div>
         </section>
       </article>`;
 
@@ -125,6 +139,25 @@ export class PrimerConcept extends HTMLElement {
       star.addEventListener("mouseleave", () => paint(starEls, rating));
       star.addEventListener("blur", () => paint(starEls, rating));
     }
+
+    // "This page needs attention" — fire a GoatCounter event so the most-flagged pages surface in
+    // the dashboard (analytics is prod-only, so this no-ops locally). Once-per-day per browser.
+    const attn = /** @type {HTMLButtonElement} */ (root.querySelector(".attn"));
+    const markDone = () => {
+      attn.disabled = true;
+      attn.textContent = t("feedback.thanks");
+    };
+    if (flaggedToday(id)) markDone();
+    attn.addEventListener("click", () => {
+      if (flaggedToday(id)) return;
+      try {
+        /** @type {any} */ (window).goatcounter?.count?.(attentionEvent(id, title));
+      } catch {
+        /* analytics absent (localhost) or not yet loaded — the flag is still recorded below */
+      }
+      markFlagged(id);
+      markDone();
+    });
 
     // A graded quiz folds its result into the stars: the new rating is the average of the
     // current stars and the test percentage, or just the percentage when there are no stars

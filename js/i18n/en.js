@@ -15,6 +15,8 @@ export default {
   "app.name": "Interactive Primer",
 
   "concept.confidence.prompt": "How confident are you with this concept?",
+  "feedback.needsAttention": "This page needs attention",
+  "feedback.thanks": "Thanks — flagged for review.",
   "concept.confidence.legend": "Your confidence",
   "concept.confidence.rate": "Rate {n} out of {max}",
   "concept.confidence.rateTitle": "{n} / {max}",
