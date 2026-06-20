@@ -65,6 +65,7 @@ export default {
   "menu.label": "Menu",
   "menu.home": "Home",
   "menu.explore": "Explore",
+  "menu.feedback": "Feedback",
   "menu.theme": "Theme",
   "menu.language": "Language",
   "menu.progress": "Progress",

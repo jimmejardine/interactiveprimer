@@ -134,6 +134,7 @@ export class PrimerMenu extends HTMLElement {
         <div class="menu-view view-root">
           <button type="button" class="nav" data-href="/">${t("menu.home")}</button>
           <button type="button" class="nav" data-href="/concepts.html">${t("menu.explore")}</button>
+          <button type="button" class="nav" data-extern="https://github.com/jimmejardine/interactiveprimer/discussions">${t("menu.feedback")}<span class="chev" aria-hidden="true">↗</span></button>
           <button type="button" class="nav" data-target="theme">${t("menu.theme")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="lang">${t("menu.language")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="progress">${t("menu.progress")}<span class="chev" aria-hidden="true">›</span></button>
@@ -214,6 +215,10 @@ export class PrimerMenu extends HTMLElement {
     for (const b of /** @type {HTMLButtonElement[]} */ ([...root.querySelectorAll(".nav")])) {
       if (b.dataset.target) b.addEventListener("click", () => showView(/** @type {string} */ (b.dataset.target)));
       else if (b.dataset.href) b.addEventListener("click", () => { window.location.href = /** @type {string} */ (b.dataset.href); });
+      else if (b.dataset.extern) b.addEventListener("click", () => {
+        window.open(/** @type {string} */ (b.dataset.extern), "_blank", "noopener");
+        setOpen(false);
+      });
     }
     for (const b of /** @type {HTMLButtonElement[]} */ ([...root.querySelectorAll(".back")])) {
       b.addEventListener("click", () => showView("root"));
