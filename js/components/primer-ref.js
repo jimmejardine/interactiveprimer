@@ -21,6 +21,11 @@
  *
  * The `to` ids are a machine-readable record of cross-references: like `prerequisites`,
  * they can later be harvested, and build-graph could flag a `to` that names no concept.
+ *
+ * The optional `forward` / `soft` attributes only affect the GRAPH BUILD (js/concept-refs.js),
+ * not this control — it renders the same styled link + confidence dot regardless. `forward`
+ * reverses the harvested edge (this page becomes a prerequisite of the target); `soft` harvests
+ * no edge at all (a plain "see also" between concepts with no learning dependency).
  * @module
  */
 

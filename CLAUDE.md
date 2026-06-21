@@ -94,8 +94,11 @@ prerequisites or level may omit the block entirely.
   ref makes a cycle, which `npm run graph` flags.) To point **forward** — mention a concept that
   comes *later* — use `<primer-ref forward to="full/path/id">`: it shows the **same control** but
   **reverses** the edge, so *this* page becomes a prerequisite of the target (a weak/implicit edge,
-  like any harvested ref; a `forward` ref to an unknown id fails the build). For an incidental link
-  that should create **no** edge at all, use a plain `<a href="/concepts/<id>.html">` instead.
+  like any harvested ref; a `forward` ref to an unknown id fails the build). For an incidental "see
+  also" between concepts with **no** learning dependency either way (e.g. two peers), use
+  `<primer-ref soft to="full/path/id">`: same styled link + confidence dot, but it harvests **no
+  edge** (the build still fails if the id names no concept). `soft` wins if combined with `forward`.
+  (A plain `<a href="/concepts/<id>.html">` also makes no edge, but without the confidence dot.)
 - `<primer-quiz name="…">` — a random test. The question bank is built in JS by
   `registerQuiz(name, builder)` (in an inline module script, like `registerManimScene`), and the
   element references it by `name`. The builder receives a toolkit `{ sceneStrings }` and returns the
@@ -294,6 +297,10 @@ one identical domain + range — no board/axes/plot boilerplate. The markup is j
       // line: one style object (all curves) | array (per curve) | (colors, i) => style. The FUNCTION
       // form is the theme-safe way to colour curves — it gets fresh themeColors + the curve index.
       line: (colors, i) => i === 0 ? { strokeColor: colors.line, strokeOpacity: 0.35 } : { strokeColor: colors.cat[0] },
+      // legend (optional): one label per curve (parallel to f). Renders a swatch + label row at the
+      // BOTTOM of the chart; each swatch mirrors that curve's colour + solid/dashed style. A label is
+      // a string or a thunk (() => …) — route translatable text through sceneStrings like a title.
+      legend: [ "sin(x)", "A·sin(fx + φ)" ],
     }],
     { id: "sinLab", xmin: -360, xmax: 360, xticks: 180, yticks: 1, ymin: -3.2, ymax: 3.2 },
     // sliders: inline defs (single chart only). They render inside this chart; values feed every f.

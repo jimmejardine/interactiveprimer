@@ -26,7 +26,7 @@ import { getChart } from "../scenes.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
 import { SLIDER_PANEL_CSS, mountSliderPanel } from "./slider-panel.js";
-import { groupForChart, getSliderGroup, subscribeSliders, setSliderValues, getChartMeta } from "../charts.js";
+import { groupForChart, getSliderGroup, subscribeSliders, setSliderValues, getChartMeta, resolveLegend } from "../charts.js";
 import { adoptJsxCss, wrapBoard } from "./jsx-board.js";
 
 /**
@@ -89,12 +89,29 @@ export class PrimerChart extends HTMLElement {
         .stage { width: 100%; aspect-ratio: 7 / 4; position: relative; overflow: hidden; background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
         .stage.jxgbox { background: var(--primer-viz-bg, #fff); }
         .stage svg { display: block; width: 100% !important; height: 100% !important; }
+        /* Legend: a centred row of curve swatches + labels, sitting directly under the plot
+           (above any sliders). Each swatch is a short line that mirrors its curve's colour and
+           solid/dashed style, so the legend can't drift from what's drawn. */
+        .legend {
+          display: flex; flex-wrap: wrap; justify-content: center; align-items: center;
+          gap: 0.4rem 1rem; margin: 0.55rem 0 0;
+          font-family: var(--primer-font-ui, sans-serif); font-size: 0.85rem;
+          color: var(--primer-ink, #111);
+        }
+        .legend[hidden] { display: none; }
+        .legend .item { display: inline-flex; align-items: center; gap: 0.4rem; }
+        .legend .swatch {
+          display: inline-block; width: 1.3rem; height: 0;
+          border-top: 3px solid currentColor; /* colour set inline per entry */
+        }
+        .legend .swatch.dashed { border-top-style: dashed; }
         ${SLIDER_PANEL_CSS}
         .meta { display: block; }
       </style>
       <div class="chart">
         <h3 class="chart-title" part="title" hidden></h3>
         <div class="stage" part="stage"></div>
+        <div class="legend" part="legend" hidden></div>
         <div class="controls" part="controls"></div>
       </div>`;
 
@@ -191,6 +208,11 @@ export class PrimerChart extends HTMLElement {
     heading.textContent = title;
     heading.hidden = !title;
 
+    // Legend (optional, any chart): a swatch + label per curve, drawn under the plot. Resolved
+    // here (at render, with live theme colours) so it re-themes on rebuild and any label thunk
+    // reflects the active locale. Runs before the control branches below, which each `return`.
+    this.#renderLegend(root, name);
+
     // Legacy inline params win over any group.
     if (this.#params.length) {
       this.#panel = mountSliderPanel(controls, this.#params, this.#values, (vals) => {
@@ -228,6 +250,32 @@ export class PrimerChart extends HTMLElement {
 
     // Static chart — one draw, no controls.
     this.#update?.({});
+  }
+
+  /**
+   * Render this chart's legend (if it declared one) into the `.legend` row under the plot. Each
+   * entry is a colour/dash swatch matching its curve, plus the label. Cleared + hidden when the
+   * chart has no legend.
+   * @param {ShadowRoot} root
+   * @param {string} name
+   */
+  #renderLegend(root, name) {
+    const box = /** @type {HTMLElement} */ (root.querySelector(".legend"));
+    const meta = getChartMeta(name);
+    const entries = resolveLegend(meta?.legend, meta?.line, themeColors());
+    box.replaceChildren();
+    box.hidden = entries.length === 0;
+    for (const { label, color, dashed } of entries) {
+      const item = document.createElement("span");
+      item.className = "item";
+      const swatch = document.createElement("span");
+      swatch.className = dashed ? "swatch dashed" : "swatch";
+      swatch.style.color = color; // currentColor → the swatch's border
+      const text = document.createElement("span");
+      text.textContent = label;
+      item.append(swatch, text);
+      box.appendChild(item);
+    }
   }
 
   /**

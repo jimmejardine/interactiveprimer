@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { computeRange, resolveLineStyle, createSliderBroker } from "../js/charts.js";
+import { computeRange, resolveLineStyle, resolveLegend, createSliderBroker } from "../js/charts.js";
 
 const DEG = Math.PI / 180;
 /** @param {number} a @param {number} b */
@@ -69,6 +69,37 @@ test("resolveLineStyle: a function receives live colours and the index", () => {
   /** @param {{ line: string }} colors @param {number} i */
   const line = (colors, i) => ({ strokeColor: colors.line, dash: i });
   assert.deepEqual(resolveLineStyle(line, COLORS, 2), { strokeColor: "#line", dash: 2 });
+});
+
+/* ------------------------------ resolveLegend --------------------------- */
+
+test("resolveLegend: non-array legend yields no entries", () => {
+  assert.deepEqual(resolveLegend(null, undefined, COLORS), []);
+  assert.deepEqual(resolveLegend(undefined, undefined, COLORS), []);
+});
+
+test("resolveLegend: colour + dash come from the matching curve style (per-index array)", () => {
+  const line = [{ strokeColor: "#z" }, { dash: 2 }];
+  assert.deepEqual(resolveLegend(["A", "B"], line, COLORS), [
+    { label: "A", color: "#z", dashed: false }, // no dash → solid
+    { label: "B", color: "#c1", dashed: true }, // default cat[1], dashed
+  ]);
+});
+
+test("resolveLegend: a function line style is evaluated per index", () => {
+  /** @param {{ cat: string[] }} colors @param {number} i */
+  const line = (colors, i) => ({ strokeColor: colors.cat[i], dash: i === 0 ? 0 : 2 });
+  assert.deepEqual(resolveLegend(["x", "x′"], line, COLORS), [
+    { label: "x", color: "#c0", dashed: false }, // dash 0 → solid
+    { label: "x′", color: "#c1", dashed: true },
+  ]);
+});
+
+test("resolveLegend: label thunks are resolved at call time", () => {
+  assert.deepEqual(resolveLegend([() => "lazy", "plain"], undefined, COLORS), [
+    { label: "lazy", color: "#c0", dashed: false },
+    { label: "plain", color: "#c1", dashed: false },
+  ]);
 });
 
 /* -------------------------------- broker -------------------------------- */

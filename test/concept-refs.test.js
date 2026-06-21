@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractConceptRefs, extractForwardRefs } from "../js/concept-refs.js";
+import { extractConceptRefs, extractForwardRefs, extractSoftRefs } from "../js/concept-refs.js";
 
 test("extracts the `to` id of a single ref", () => {
   assert.deepEqual(
@@ -61,4 +61,33 @@ test("`forward` matcher isn't fooled by the word inside a `to` value", () => {
   const html = `<primer-ref to="calculus/forward-references">x</primer-ref>`;
   assert.deepEqual(extractConceptRefs(html), ["calculus/forward-references"]); // still backward
   assert.deepEqual(extractForwardRefs(html), []);
+});
+
+test("a `soft` ref makes no edge: excluded from both backward and forward refs", () => {
+  const html = `<primer-ref soft to="people/leibniz">Leibniz</primer-ref>`;
+  assert.deepEqual(extractConceptRefs(html), []);
+  assert.deepEqual(extractForwardRefs(html), []);
+  assert.deepEqual(extractSoftRefs(html), ["people/leibniz"]);
+});
+
+test("`soft` wins over `forward` (an edgeless ref is never a forward edge)", () => {
+  const html = `<primer-ref soft forward to="people/newton">Newton</primer-ref>`;
+  assert.deepEqual(extractForwardRefs(html), []);
+  assert.deepEqual(extractSoftRefs(html), ["people/newton"]);
+});
+
+test("`soft` matcher isn't fooled by the word inside a `to` value", () => {
+  const html = `<primer-ref to="calculus/soft-margins">x</primer-ref>`;
+  assert.deepEqual(extractConceptRefs(html), ["calculus/soft-margins"]); // still backward
+  assert.deepEqual(extractSoftRefs(html), []);
+});
+
+test("splits backward, forward and soft refs in one page", () => {
+  const html = `
+    <primer-ref to="arithmetic/division">div</primer-ref>
+    <primer-ref forward to="arithmetic/addition">add</primer-ref>
+    <primer-ref soft to="arithmetic/subtraction">sub</primer-ref>`;
+  assert.deepEqual(extractConceptRefs(html), ["arithmetic/division"]);
+  assert.deepEqual(extractForwardRefs(html), ["arithmetic/addition"]);
+  assert.deepEqual(extractSoftRefs(html), ["arithmetic/subtraction"]);
 });

@@ -22,7 +22,7 @@ import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseConceptMeta } from "../js/concept-meta.js";
-import { extractConceptRefs, extractForwardRefs } from "../js/concept-refs.js";
+import { extractConceptRefs, extractForwardRefs, extractSoftRefs } from "../js/concept-refs.js";
 import { validateGraph, indexConcepts, buildDependents, attachOrphans } from "../js/graph.js";
 import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
 import { parseJsonc } from "../js/jsonc.js";
@@ -147,6 +147,9 @@ async function main() {
   // normal ref. Collect them here, then wire them into the targets after every page is read.
   /** @type {Map<string, string[]>} concept id → ids it forward-refs */
   const forwardByConcept = new Map();
+  // `<primer-ref soft to="X">` creates NO edge — we collect them only to validate X exists.
+  /** @type {Map<string, string[]>} concept id → ids it soft-refs */
+  const softByConcept = new Map();
 
   const files = (await listHtml(CONCEPTS_DIR)).sort();
   for (const file of files) {
@@ -180,6 +183,9 @@ async function main() {
       // Stash this page's forward refs; they're reversed onto their targets below.
       const fwd = extractForwardRefs(html).filter((r) => r !== id);
       if (fwd.length) forwardByConcept.set(id, fwd);
+      // Stash this page's soft refs; they add no edge, just an existence check below.
+      const soft = extractSoftRefs(html).filter((r) => r !== id);
+      if (soft.length) softByConcept.set(id, soft);
     } catch (err) {
       fileDiagnostics.push({
         severity: "error",
@@ -208,6 +214,20 @@ async function main() {
         continue;
       }
       if (!target.prerequisites.includes(p)) target.prerequisites.push(p);
+    }
+  }
+
+  // Soft refs add no edge — but a typo'd target should still fail the build, like forward refs do.
+  for (const [p, targets] of softByConcept) {
+    for (const x of targets) {
+      if (!indexed.get(x)) {
+        fileDiagnostics.push({
+          severity: "error",
+          code: "dangling-prerequisite",
+          concept: p,
+          message: `soft <primer-ref to="${x}"> names no concept`,
+        });
+      }
     }
   }
 

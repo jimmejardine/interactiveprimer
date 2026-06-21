@@ -66,6 +66,13 @@ import { drawAxes } from "./graph-axes.js";
  * @property {string} name  Chart id referenced by `<primer-chart scene="name">`.
  * @property {CurveFn | CurveFn[]} f  One lambda `(x, sliders) => y`, or an array (one curve each).
  * @property {LineStyle} [line]  Stroke style for the curve(s).
+ * @property {Array<string | (() => string)>} [legend]  Per-curve labels (parallel to `f`). When
+ *   present, the component renders a legend at the bottom of the chart — a colour/dash swatch
+ *   (matching each curve) beside its label. Each label is a plain string or a thunk (for i18n).
+ * @property {(board: any, colors: ThemeColors, sliders: () => Record<string, number>) => void} [decorate]
+ *   Optional hook to draw extra JSXGraph elements after the curves (a live value readout, a point
+ *   marker, a shaded band…). `sliders()` returns the chart's live values; give an element a function
+ *   content/coordinate so it re-plots on `board.update()` as the sliders move. Colours from `colors`.
  */
 
 /**
@@ -180,7 +187,16 @@ export function createSliderBroker() {
 /** The app-wide broker singleton (ES modules are singletons, so every importer shares it). */
 const broker = createSliderBroker();
 
-/** @type {Map<string, { title?: string | (() => string) }>} chart name → display metadata (e.g. title heading). */
+/**
+ * @typedef {object} ChartMeta
+ * @property {string | (() => string)} [title] Title heading shown above the chart.
+ * @property {Array<string | (() => string)> | null} [legend] Per-curve legend labels (parallel
+ *   to the chart's `f`), each a plain string or a thunk (resolved at render, for i18n).
+ * @property {any} [line] The chart's `line` styling — so the component can resolve each legend
+ *   swatch's colour/dash via `resolveLineStyle` (keeping the swatches in step with the curves).
+ */
+
+/** @type {Map<string, ChartMeta>} chart name → display metadata (title + legend). */
 const chartMeta = new Map();
 
 /* ------------------------------------------------------------------ */
@@ -195,7 +211,7 @@ export const groupForChart = (name) => broker.groupForChart(name);
 export const subscribeSliders = (name, fn) => broker.subscribe(name, fn);
 /** @param {string} name @param {Record<string, number>} partial */
 export const setSliderValues = (name, partial) => broker.setValues(name, partial);
-/** @param {string} name @returns {{ title?: string | (() => string) } | undefined} */
+/** @param {string} name @returns {ChartMeta | undefined} */
 export const getChartMeta = (name) => chartMeta.get(name);
 
 /* ------------------------------------------------------------------ */
@@ -242,6 +258,29 @@ export function resolveLineStyle(line, colors, i) {
   else if (Array.isArray(line)) style = line[i] ?? {};
   else style = line ?? {};
   return { strokeColor: colors.cat[i], ...style };
+}
+
+/**
+ * Resolve a chart's legend into render-ready entries — one per label, in order. Each swatch's
+ * colour and dashed-ness are pulled from the SAME {@link resolveLineStyle} the curves use, so a
+ * legend can never drift from the plot (and both re-theme together on a rebuild). Label thunks are
+ * invoked here (at render) so a localized label reflects the active locale. A non-array `legend`
+ * (the common "no legend" case) yields `[]`, which the component renders as nothing.
+ * @param {Array<string | (() => string)> | null | undefined} legend
+ * @param {LineStyle | undefined} line
+ * @param {ThemeColors} colors
+ * @returns {{ label: string, color: string, dashed: boolean }[]}
+ */
+export function resolveLegend(legend, line, colors) {
+  if (!Array.isArray(legend)) return [];
+  return legend.map((lab, i) => {
+    const style = resolveLineStyle(line, colors, i);
+    return {
+      label: typeof lab === "function" ? lab() : lab,
+      color: style.strokeColor,
+      dashed: Boolean(style.dash),
+    };
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -369,7 +408,9 @@ export function registerCharts(charts, chartOptions = {}, sliders) {
     const fns = Array.isArray(c.f) ? c.f : [c.f];
     const line = c.line;
     if (groupName) broker.linkChart(c.name, groupName);
-    chartMeta.set(c.name, { title });
+    // Title is series-level; legend + line are per-chart so the component can resolve each
+    // swatch's colour/dash from the same styling the curves use (see resolveLegend).
+    chartMeta.set(c.name, { title, legend: c.legend ?? null, line });
     registerChart(c.name, (host, JXG) => {
       const { board, colors, domain } = makeChartBoard(host, JXG, {
         xmin,
@@ -387,6 +428,15 @@ export function registerCharts(charts, chartOptions = {}, sliders) {
           : /** @param {number} x */ (x) => fn(x, {});
         plotFn(board, domain, wrapped, resolveLineStyle(line, colors, i));
       });
+      // Optional decoration: extra JSXGraph elements (a live readout, a marker, a shaded region…)
+      // drawn once after the curves. It gets the board, the theme palette, and a `sliders()` getter
+      // for the chart's live values — so a JSXGraph element with a function content/coordinate
+      // re-evaluates on `board.update()` (which the returned updater calls on every slider change).
+      if (typeof c.decorate === "function") {
+        c.decorate(board, colors, () =>
+          groupName ? broker.getGroup(/** @type {string} */ (groupName))?.values ?? {} : {},
+        );
+      }
       return () => board.update();
     });
   }
