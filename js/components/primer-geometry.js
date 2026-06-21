@@ -84,7 +84,8 @@ export class PrimerGeometry extends HTMLElement {
            step-nav buttons, counter and caption are meaningless when every step is shown at once. */
         .bar.is-expanded > :not(.expand) { display: none; }
         .stage { width: 100%; aspect-ratio: 7 / 4; position: relative; overflow: hidden;
-          background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); }
+          background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem);
+          box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
         .stage.jxgbox { background: var(--primer-viz-bg, #fff); }
         .stage svg { display: block; width: 100% !important; height: 100% !important; }
         .bar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; justify-content: center; margin-bottom: 0.6rem;

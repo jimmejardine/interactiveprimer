@@ -74,15 +74,17 @@ const STYLE = `
     font-family: var(--primer-font-ui, sans-serif);
     font-size: 0.8rem; line-height: 1.15;
     max-width: 100%;
-    padding: 0.3rem 0.6rem;
+    padding: 0.32rem 0.66rem;
     border: 1px solid var(--primer-border, #ddd);
     border-radius: 999px;
     background: var(--primer-surface, #fff);
     color: var(--primer-ink, #111);
     text-decoration: none;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    transition: border-color .1s, box-shadow .1s, opacity .12s;
+    box-shadow: var(--primer-shadow-sm, 0 1px 2px rgba(0,0,0,0.05));
+    transition: border-color .1s, box-shadow .1s, opacity .12s, transform .1s;
   }
+  .node:not(.node--current):hover { border-color: var(--primer-accent, #46e); transform: translateY(-1px); }
   .node--current { border: 2px solid var(--primer-accent, #46e); font-weight: 600; }
   .more { font-size: 0.72rem; color: var(--primer-ink-soft, #667); padding: 0.15rem 0.4rem; }
 

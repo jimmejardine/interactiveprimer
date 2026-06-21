@@ -21,18 +21,22 @@ export const SEARCH_BOX_CSS = `
   .cg-search--fixed { position: fixed; top: 0.75rem; left: 0.75rem; z-index: 1000; width: min(17rem, 58vw); }
   .cg-search-input {
     width: 100%; box-sizing: border-box; font: inherit; font-size: 0.92rem;
-    padding: 0.45rem 0.6rem; border-radius: var(--primer-radius, 0.6rem);
+    padding: 0.5rem 0.7rem; border-radius: var(--primer-radius, 0.6rem);
     border: 1px solid var(--primer-border, #ccc);
     background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+    box-shadow: var(--primer-shadow-md, 0 2px 8px rgba(0, 0, 0, 0.12));
+    transition: box-shadow 0.13s ease, border-color 0.13s ease;
   }
-  .cg-search-input:focus { outline: 2px solid var(--primer-accent, #46e); outline-offset: 1px; }
+  .cg-search-input:focus {
+    outline: none; border-color: var(--primer-accent, #46e);
+    box-shadow: var(--primer-shadow-md, 0 2px 8px rgba(0,0,0,0.12)), 0 0 0 3px var(--primer-ring, rgba(70,90,230,0.4));
+  }
   .cg-results {
-    position: absolute; top: calc(100% + 0.35rem); left: 0; right: 0; z-index: 6;
-    list-style: none; margin: 0; padding: 0.25rem; max-height: 16rem; overflow-y: auto;
+    position: absolute; top: calc(100% + 0.4rem); left: 0; right: 0; z-index: 6;
+    list-style: none; margin: 0; padding: 0.3rem; max-height: 16rem; overflow-y: auto;
     background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
     border: 1px solid var(--primer-border, #ccc); border-radius: var(--primer-radius, 0.6rem);
-    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+    box-shadow: var(--primer-shadow-lg, 0 12px 36px rgba(0, 0, 0, 0.18));
   }
   .cg-results[hidden] { display: none; }
   .cg-result { display: flex; flex-direction: column; gap: 0.05rem; padding: 0.35rem 0.5rem; border-radius: 0.4rem; cursor: pointer; }

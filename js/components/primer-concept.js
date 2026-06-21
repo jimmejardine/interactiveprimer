@@ -32,15 +32,25 @@ const STAR_CSS = `
   /* "(Level x)" trails the title, in the same display font as the caption — bold when the
      level is declared, normal when implicit. The parentheses are presentational (so the
      text stays "Level x"). */
-  .title-row { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
-  .title-row h1 { margin: 0; }
-  .level-badge {
-    font-family: var(--primer-font-display, var(--primer-font-body));
-    font-size: 1.1rem; font-weight: 400; white-space: nowrap;
+  .title-row { display: flex; align-items: baseline; gap: 0.7rem; flex-wrap: wrap; margin-bottom: 0.6rem; }
+  .title-row h1 {
+    margin: 0;
+    font-size: clamp(2rem, 1.55rem + 1.9vw, 2.65rem);
+    line-height: 1.1;
+    letter-spacing: -0.018em;
   }
-  .level-badge::before { content: "("; }
-  .level-badge::after { content: ")"; }
-  .level-badge.is-declared { font-weight: 700; }
+  /* The level sits in a small pill beside the title (uppercase, accent-tinted), bolder when
+     the level is declared in metadata, lighter when implicit (inherited from prerequisites). */
+  .level-badge {
+    align-self: center;
+    font-family: var(--primer-font-ui, sans-serif);
+    font-size: 0.7rem; font-weight: 600; white-space: nowrap;
+    text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--primer-badge-ink, #3a45a6);
+    background: var(--primer-badge-bg, #eceefb);
+    border-radius: 999px; padding: 0.22rem 0.62rem;
+  }
+  .level-badge.is-declared { box-shadow: inset 0 0 0 1.5px var(--primer-badge-ink, #3a45a6); }
   .level-badge[hidden] { display: none; }
   /* Centre the prompt and the star row within the confidence card. */
   .confidence { text-align: center; }

@@ -86,7 +86,7 @@ export class PrimerChart extends HTMLElement {
         /* The board fills a 7:4 stage; JSXGraph adds class "jxgbox" to this same element and draws
            the SVG inside it. Keep our themed background (our inline <style> outranks the adopted
            jsxgraph.css .jxgbox rule, which cascades before shadow-root styles). */
-        .stage { width: 100%; aspect-ratio: 7 / 4; position: relative; overflow: hidden; background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); }
+        .stage { width: 100%; aspect-ratio: 7 / 4; position: relative; overflow: hidden; background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
         .stage.jxgbox { background: var(--primer-viz-bg, #fff); }
         .stage svg { display: block; width: 100% !important; height: 100% !important; }
         ${SLIDER_PANEL_CSS}

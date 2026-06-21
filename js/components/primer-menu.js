@@ -33,19 +33,20 @@ const STYLE = `
 
   .toggle {
     display: grid; place-items: center;
-    width: 2.5rem; height: 2.5rem; padding: 0;
-    border-radius: 0.6rem;
+    width: 2.6rem; height: 2.6rem; padding: 0;
+    border-radius: 0.7rem;
     color: var(--primer-ink, #111);
-    box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+    box-shadow: var(--primer-shadow-md, 0 2px 8px rgba(0,0,0,0.12));
   }
+  .toggle:hover { transform: translateY(-1px); }
 
   .panel {
-    position: absolute; right: 0; top: calc(100% + 0.4rem);
-    min-width: 11rem;
+    position: absolute; right: 0; top: calc(100% + 0.45rem);
+    min-width: 11.5rem;
     background: var(--primer-surface, #fff);
     border: 1px solid var(--primer-border, #ddd);
     border-radius: var(--primer-radius, 0.6rem);
-    box-shadow: 0 6px 24px rgba(0,0,0,0.18);
+    box-shadow: var(--primer-shadow-lg, 0 12px 36px rgba(0,0,0,0.18));
     padding: 0.75rem;
     display: none;
   }

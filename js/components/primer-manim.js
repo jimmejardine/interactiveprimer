@@ -68,7 +68,7 @@ export class PrimerManim extends HTMLElement {
            sized from this container's box. So the stage MUST carry that same aspect
            ratio: on a mismatched box the frame is squashed/clipped and every mobject's
            position and shape comes out wrong. Keep 7/4 in sync with manim's frame. */
-        .stage { position: relative; width: 100%; aspect-ratio: 7 / 4; display: grid; place-items: center; overflow: hidden; background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); }
+        .stage { position: relative; width: 100%; aspect-ratio: 7 / 4; display: grid; place-items: center; overflow: hidden; background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem); box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
         /* manim (three.js setSize) writes an inline px width/height on the canvas; override
            it so the canvas always FILLS the responsive 7:4 stage and scales down on narrow
            screens instead of clipping. object-fit:contain preserves aspect (no distortion).
