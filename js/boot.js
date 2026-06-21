@@ -195,6 +195,28 @@
     head.appendChild(icon);
   }
 
+  // 0b) The reading typeface: STIX Two Text, a modern serif co-designed with the STIX math
+  //     fonts, so the prose harmonises with KaTeX's Computer-Modern math. Loaded eagerly here
+  //     (light + dark both use it); `display=swap` shows the Georgia fallback first, then swaps
+  //     in with no blocking. The fun theme's rounded display font is still loaded on demand by
+  //     js/theme.js. preconnect warms the font CDN so the swap lands fast.
+  const FONT_CSS =
+    "https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,500;0,600;0,700;1,400;1,600&display=swap";
+  for (const [rel, href, cross] of [
+    ["preconnect", "https://fonts.googleapis.com", false],
+    ["preconnect", "https://fonts.gstatic.com", true],
+  ]) {
+    const l = document.createElement("link");
+    l.rel = /** @type {string} */ (rel);
+    l.href = /** @type {string} */ (href);
+    if (cross) l.crossOrigin = "anonymous";
+    head.appendChild(l);
+  }
+  const fontLink = document.createElement("link");
+  fontLink.rel = "stylesheet";
+  fontLink.href = FONT_CSS;
+  head.appendChild(fontLink);
+
   // 1) Stylesheets: the Primer look-and-feel plus KaTeX's font glyph CSS. The local
   //    primer.css gates the anti-FOUC reveal (treat an error as "ready" too, so a
   //    failed stylesheet never leaves the page hidden).
