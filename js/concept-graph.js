@@ -12,6 +12,8 @@ import { seedPositions, tick, bounds } from "./force-layout.js";
 import { themeColors } from "./theme.js";
 import { confidenceColor } from "./confidence-color.js";
 import { mountSearchBox, SEARCH_BOX_CSS } from "./concept-search-box.js";
+import { createContextMenu } from "./context-menu.js";
+import { t } from "./i18n.js";
 // Defines <primer-math> on this page (concepts.html doesn't load boot.js) so a node with a math
 // title can typeset inside a <foreignObject>. concepts.html supplies the KaTeX CSS + import map.
 import "./components/primer-math.js";
@@ -87,10 +89,12 @@ function palette() {
  * Mount the concept graph into `host` (a block element that has a real height). Returns a handle
  * with `destroy()` to tear down listeners and the animation loop.
  * @param {HTMLElement} host
- * @param {{ byId: Map<string, import("./types/domain.js").ResolvedConcept>, locale: string }} opts
+ * @param {{ byId: Map<string, import("./types/domain.js").ResolvedConcept>, locale: string, focusId?: string }} opts
+ *   `focusId` (optional): centre the map on this concept (the fixed/bold node) instead of `root`.
+ *   An absent or unknown id falls back to `root` — the default, unchanged behaviour.
  * @returns {{ destroy: () => void }}
  */
-export function mountConceptGraph(host, { byId, locale }) {
+export function mountConceptGraph(host, { byId, locale, focusId }) {
   /** @param {string} id */
   const titleOf = (id) => {
     const c = byId.get(id);
@@ -115,6 +119,9 @@ export function mountConceptGraph(host, { byId, locale }) {
     nodes.push(n);
     nodeById.set(c.id, n);
   }
+  // The concept pinned at the centre (bold, larger, immovable). Normally `root`; a valid `focusId`
+  // (e.g. from a pathway's "Explore" link) re-centres the whole map on that concept instead.
+  const centerId = focusId && nodeById.has(focusId) ? focusId : "root";
   // Edges are prerequisite→dependent. An edge is "explicit" when the prerequisite was declared in
   // the concept-meta (vs. only harvested from an inline <primer-ref>): explicit edges pull harder
   // and draw thicker. Fall back to "explicit" when the graph predates explicitPrerequisites.
@@ -160,7 +167,7 @@ export function mountConceptGraph(host, { byId, locale }) {
   for (const n of nodes) {
     const g = /** @type {SVGGElement} */ (mk("g", { class: "cg-node" }));
     g.setAttribute("data-id", n.id);
-    if (n.id === "root") g.classList.add("cg-node--root"); // bigger, bold central node
+    if (n.id === centerId) g.classList.add("cg-node--root"); // bigger, bold central node
     const rect = mk("rect", { rx: "10", ry: "10" });
     g.appendChild(rect);
     nodesG.appendChild(g); // in the DOM before measuring so glyph widths / KaTeX layout resolve
@@ -183,8 +190,8 @@ export function mountConceptGraph(host, { byId, locale }) {
     } else {
       const text = mk("text", { "text-anchor": "middle", "dominant-baseline": "central" });
       g.appendChild(text);
-      // The root's label is larger/bold (21px), so it needs a wider wrap + roomier line spacing.
-      const isRoot = n.id === "root";
+      // The centre node's label is larger/bold (21px), so it needs a wider wrap + roomier spacing.
+      const isRoot = n.id === centerId;
       wrapLabel(text, titleOf(n.id), isRoot ? 170 : LABEL_MAXW, isRoot ? 26 : LINE_H);
       n.text = text;
     }
@@ -273,24 +280,30 @@ export function mountConceptGraph(host, { byId, locale }) {
     }
   };
 
-  // ---- seed, pin the root at the centre, pre-warm, fit-to-view ----
+  // ---- seed, pin the centre node at the origin, pre-warm, fit-to-view ----
   seedPositions(nodes, 46);
-  const rootNode = nodeById.get("root");
-  if (rootNode) {
-    rootNode.x = 0;
-    rootNode.y = 0;
-    rootNode.fixed = true; // skipped by the sim → it never moves from the origin
-    rootNode.pinned = true; // and the pointer handlers won't drag it
+  const centerNode = nodeById.get(centerId);
+  if (centerNode) {
+    centerNode.x = 0;
+    centerNode.y = 0;
+    centerNode.fixed = true; // skipped by the sim → it never moves from the origin
+    centerNode.pinned = true; // and the pointer handlers won't drag it
   }
 
-  // Depth = graph distance from the root, by BFS along prerequisite→dependent edges (every concept
-  // descends from the single root). Feeds `outwardPerDepth`, so deeper (successor) nodes are pushed
-  // further out and the edges fan radially outward.
+  // Depth = graph distance from the centre node, feeding `outwardPerDepth` so deeper nodes are
+  // pushed further out and the edges fan radially outward. From `root` everything is downstream, so
+  // a DIRECTED BFS (prerequisite→dependent) suffices and is the unchanged default. When centred on
+  // an arbitrary concept its ancestors are *upstream*, so we walk the graph UNDIRECTED — depth is
+  // then distance in either direction and the map fans out evenly around the focus.
+  const undirected = centerId !== "root";
   const adj = new Map(nodes.map((n) => [n.id, /** @type {string[]} */ ([])]));
-  for (const e of edges) adj.get(e.source)?.push(e.target);
+  for (const e of edges) {
+    adj.get(e.source)?.push(e.target);
+    if (undirected) adj.get(e.target)?.push(e.source);
+  }
   /** @type {string[]} */
-  let frontier = rootNode ? ["root"] : [];
-  if (rootNode) rootNode.depth = 0;
+  let frontier = centerNode ? [centerId] : [];
+  if (centerNode) centerNode.depth = 0;
   const seen = new Set(frontier);
   for (let d = 1; frontier.length; d++) {
     /** @type {string[]} */
@@ -306,7 +319,7 @@ export function mountConceptGraph(host, { byId, locale }) {
     }
     frontier = next;
   }
-  for (const n of nodes) if (n.depth === undefined) n.depth = 1; // any node not reached from root
+  for (const n of nodes) if (n.depth === undefined) n.depth = 1; // any node not reached from centre
 
   for (let i = 0; i < PREWARM; i++) tick(nodes, edges, LAYOUT);
   const fit = () => {
@@ -364,11 +377,24 @@ export function mountConceptGraph(host, { byId, locale }) {
     }
   };
 
+  // ---- context menu: right-click / long-press a node → "Explore" (re-centre the map on it) ----
+  const ctxMenu = createContextMenu(document.body, [
+    {
+      label: t("menu.explore"),
+      run: (id) => {
+        window.location.href = `/concepts.html?id=${encodeURIComponent(id)}`;
+      },
+    },
+  ]);
+
   // ---- pointer interaction: drag a node, pan the background, click to open, pinch to zoom ----
   /** @type {GNode | null} */
   let dragNode = null;
   let panning = false;
   let lastX = 0, lastY = 0, travel = 0;
+  // Touch long-press → context menu (the mouse uses the native `contextmenu` event below).
+  let longPressTimer = 0;
+  let longPressed = false;
   // Multi-touch: track every active pointer so two fingers can pinch-zoom. The SVG sets
   // touch-action: none, so the browser does no native pinch — we drive it here.
   /** @type {Map<number, { x: number, y: number }>} */
@@ -389,13 +415,23 @@ export function mountConceptGraph(host, { byId, locale }) {
     return { x: (ev.clientX - r.left - view.tx) / view.scale, y: (ev.clientY - r.top - view.ty) / view.scale };
   };
 
+  /** Cancel a pending touch long-press (movement, second finger, or release). */
+  const cancelLongPress = () => {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = 0;
+    }
+  };
+
   /** @param {PointerEvent} ev */
   const onDown = (ev) => {
+    if (ev.button === 2) return; // right-click is handled by the `contextmenu` listener below
     pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
     try { svg.setPointerCapture(ev.pointerId); } catch { /* pointer already gone */ }
 
     if (pointers.size >= 2) {
       // Two fingers down → pinch-zoom. Abandon any single-finger drag/pan in progress.
+      cancelLongPress();
       if (dragNode) {
         if (!dragNode.pinned) dragNode.fixed = false;
         dragNode = null;
@@ -413,9 +449,22 @@ export function mountConceptGraph(host, { byId, locale }) {
     lastX = ev.clientX;
     lastY = ev.clientY;
     travel = 0;
+    longPressed = false;
     if (g) {
       dragNode = nodeById.get(g.getAttribute("data-id") ?? "") ?? null;
       if (dragNode) dragNode.fixed = true;
+      // Touch/pen: hold still for ~500ms over a node to open its context menu instead of dragging.
+      if (dragNode && ev.pointerType !== "mouse") {
+        const id = g.getAttribute("data-id") ?? "";
+        const lx = ev.clientX, ly = ev.clientY;
+        longPressTimer = window.setTimeout(() => {
+          longPressTimer = 0;
+          longPressed = true; // checked in onUp so the release doesn't also open the lesson
+          if (dragNode && !dragNode.pinned) dragNode.fixed = false;
+          dragNode = null;
+          if (id) ctxMenu.open(id, lx, ly);
+        }, 500);
+      }
     } else {
       panning = true;
     }
@@ -450,6 +499,7 @@ export function mountConceptGraph(host, { byId, locale }) {
       travel += Math.hypot(ev.clientX - lastX, ev.clientY - lastY);
       lastX = ev.clientX;
       lastY = ev.clientY;
+      if (longPressTimer && travel > CLICK_PX) cancelLongPress(); // a real drag, not a hold
       // The pinned root stays at the origin — track travel (so a tap still opens it) but don't move.
       if (!dragNode.pinned) {
         const p = toLayout(ev);
@@ -490,21 +540,34 @@ export function mountConceptGraph(host, { byId, locale }) {
 
     // Last pointer up — end of the gesture.
     pinchDist = 0;
+    cancelLongPress();
     if (dragNode) {
       const n = dragNode;
       dragNode = null;
       if (!n.pinned) n.fixed = false; // keep the pinned root fixed
-      // A pinch never counts as a click-to-open.
-      if (!gesturePinched && travel < CLICK_PX) window.open(`/concepts/${n.id}.html`, "_blank", "noopener");
+      // Neither a pinch nor a long-press counts as a click-to-open.
+      if (!gesturePinched && !longPressed && travel < CLICK_PX) window.open(`/concepts/${n.id}.html`, "_blank", "noopener");
       reheat();
     }
     panning = false;
     gesturePinched = false;
+    longPressed = false;
   };
   svg.addEventListener("pointerdown", onDown);
   svg.addEventListener("pointermove", onMove);
   svg.addEventListener("pointerup", onUp);
   svg.addEventListener("pointercancel", onUp);
+
+  // Right-click a node → the context menu at the cursor (the background keeps its native menu).
+  /** @param {MouseEvent} ev */
+  const onContextMenu = (ev) => {
+    const g = /** @type {Element} */ (ev.target).closest?.(".cg-node");
+    if (!g) return;
+    ev.preventDefault();
+    const id = g.getAttribute("data-id");
+    if (id) ctxMenu.open(id, ev.clientX, ev.clientY);
+  };
+  svg.addEventListener("contextmenu", onContextMenu);
 
   /** @param {WheelEvent} ev */
   const onWheel = (ev) => {
@@ -566,7 +629,10 @@ export function mountConceptGraph(host, { byId, locale }) {
       svg.removeEventListener("pointermove", onMove);
       svg.removeEventListener("pointerup", onUp);
       svg.removeEventListener("pointercancel", onUp);
+      svg.removeEventListener("contextmenu", onContextMenu);
       svg.removeEventListener("wheel", onWheel);
+      cancelLongPress();
+      ctxMenu.destroy();
       nodesG.removeEventListener("pointerover", onOver);
       nodesG.removeEventListener("pointerout", onOut);
       document.removeEventListener("theme-change", onTheme);

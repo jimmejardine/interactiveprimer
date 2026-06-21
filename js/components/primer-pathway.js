@@ -24,6 +24,7 @@ import { neighborhood } from "../graph.js";
 import { loadGraph } from "../graph-data.js";
 import { t, getLocale } from "../i18n.js";
 import { confidenceColor } from "../confidence-color.js";
+import { createContextMenu } from "../context-menu.js";
 
 /** @typedef {import("../types/domain.js").ResolvedConcept} ResolvedConcept */
 
@@ -109,6 +110,10 @@ export class PrimerPathway extends HTMLElement {
   #onConfidence = null;
   /** @type {(() => void) | null} */
   #onTheme = null;
+  /** @type {{ destroy: () => void } | null} The shared right-click / long-press context menu. */
+  #ctxMenu = null;
+  /** @type {(() => void) | null} Removes the context-menu trigger listeners. */
+  #ctxCleanup = null;
 
   async connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
@@ -135,6 +140,10 @@ export class PrimerPathway extends HTMLElement {
     this.#onConfidence = null;
     if (this.#onTheme) document.removeEventListener("theme-change", this.#onTheme);
     this.#onTheme = null;
+    this.#ctxCleanup?.();
+    this.#ctxCleanup = null;
+    this.#ctxMenu?.destroy();
+    this.#ctxMenu = null;
   }
 
   /**
@@ -296,6 +305,100 @@ export class PrimerPathway extends HTMLElement {
       el.addEventListener("mouseenter", () => setHot(id, true));
       el.addEventListener("mouseleave", () => setHot(id, false));
     }
+
+    // Right-click / long-press a node → an "Explore" popup that opens it in the full map.
+    this.#wireContextMenu(root, pathway, scroll);
+  }
+
+  /**
+   * Wire the shared context menu to the pathway's nodes: right-click (desktop) or a touch
+   * long-press opens a popup whose "Explore" item re-centres the full explorer on that concept
+   * (`/concepts.html?id=<id>`). Listeners are delegated on the `.pathway` element and torn down in
+   * disconnectedCallback via `#ctxCleanup`.
+   * @param {ShadowRoot} root
+   * @param {HTMLElement} pathway
+   * @param {HTMLElement} scroll
+   */
+  #wireContextMenu(root, pathway, scroll) {
+    const menu = createContextMenu(root, [
+      {
+        label: t("menu.explore"),
+        run: (id) => {
+          window.location.href = `/concepts.html?id=${encodeURIComponent(id)}`;
+        },
+      },
+    ]);
+    this.#ctxMenu = menu;
+
+    let timer = 0;
+    let startX = 0, startY = 0;
+    let suppressClick = false;
+    const clearTimer = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = 0;
+      }
+    };
+    /** @param {Event} e @returns {Element | null} */
+    const nodeOf = (e) => /** @type {Element} */ (e.target)?.closest?.(".node") ?? null;
+
+    /** @param {MouseEvent} e */
+    const onCtx = (e) => {
+      const node = nodeOf(e);
+      if (!node) return;
+      e.preventDefault();
+      const id = node.getAttribute("data-id");
+      if (id) menu.open(id, e.clientX, e.clientY);
+    };
+    /** @param {PointerEvent} e */
+    const onDown = (e) => {
+      suppressClick = false;
+      if (e.pointerType === "mouse") return; // mouse uses the native contextmenu (right-click)
+      const node = nodeOf(e);
+      if (!node) return;
+      startX = e.clientX;
+      startY = e.clientY;
+      clearTimer();
+      timer = window.setTimeout(() => {
+        timer = 0;
+        const id = node.getAttribute("data-id");
+        if (id) {
+          suppressClick = true; // the finger-up will fire a click on the <a>; swallow it below
+          menu.open(id, startX, startY);
+        }
+      }, 500);
+    };
+    /** @param {PointerEvent} e */
+    const onMove = (e) => {
+      if (timer && Math.hypot(e.clientX - startX, e.clientY - startY) > 10) clearTimer();
+    };
+    /** @param {Event} e */
+    const onClick = (e) => {
+      if (suppressClick) {
+        e.preventDefault();
+        e.stopPropagation();
+        suppressClick = false;
+      }
+    };
+
+    pathway.addEventListener("contextmenu", onCtx);
+    pathway.addEventListener("pointerdown", onDown);
+    pathway.addEventListener("pointermove", onMove);
+    pathway.addEventListener("pointerup", clearTimer);
+    pathway.addEventListener("pointercancel", clearTimer);
+    pathway.addEventListener("click", onClick, true); // capture: beat the <a>'s navigation
+    scroll.addEventListener("scroll", clearTimer, { passive: true });
+
+    this.#ctxCleanup = () => {
+      clearTimer();
+      pathway.removeEventListener("contextmenu", onCtx);
+      pathway.removeEventListener("pointerdown", onDown);
+      pathway.removeEventListener("pointermove", onMove);
+      pathway.removeEventListener("pointerup", clearTimer);
+      pathway.removeEventListener("pointercancel", clearTimer);
+      pathway.removeEventListener("click", onClick, true);
+      scroll.removeEventListener("scroll", clearTimer);
+    };
   }
 
   /**
