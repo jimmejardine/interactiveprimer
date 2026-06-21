@@ -62,6 +62,8 @@ export default {
   "pathway.label": "Concept pathway",
   "pathway.more": "+{extra} more",
 
+  "contextmenu.open": "Open",
+
   "menu.label": "Menu",
   "menu.home": "Home",
   "menu.explore": "Explore",

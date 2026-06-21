@@ -61,6 +61,8 @@ export default {
   "pathway.label": "Ruta de conceptos",
   "pathway.more": "+{extra} más",
 
+  "contextmenu.open": "Abrir",
+
   "menu.label": "Menú",
   "menu.home": "Inicio",
   "menu.explore": "Explorar",

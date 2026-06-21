@@ -377,8 +377,16 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     }
   };
 
-  // ---- context menu: right-click / long-press a node → "Explore" (re-centre the map on it) ----
+  // ---- context menu: right-click / long-press a node → Open (the lesson) or Explore (re-centre) ----
   const ctxMenu = createContextMenu(document.body, [
+    // "Open" — same as clicking the node: open the concept's lesson (in a new tab, as a click does).
+    {
+      label: t("contextmenu.open"),
+      run: (id) => {
+        window.open(`/concepts/${id}.html`, "_blank", "noopener");
+      },
+    },
+    // "Explore" — re-centre the whole map on this concept.
     {
       label: t("menu.explore"),
       run: (id) => {

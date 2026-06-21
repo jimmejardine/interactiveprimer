@@ -321,6 +321,14 @@ export class PrimerPathway extends HTMLElement {
    */
   #wireContextMenu(root, pathway, scroll) {
     const menu = createContextMenu(root, [
+      // "Open" — same as clicking the node: go to the concept's lesson page.
+      {
+        label: t("contextmenu.open"),
+        run: (id) => {
+          window.location.href = `/concepts/${id}.html`;
+        },
+      },
+      // "Explore" — open the full map centred on this concept.
       {
         label: t("menu.explore"),
         run: (id) => {
