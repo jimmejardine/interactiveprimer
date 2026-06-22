@@ -31,6 +31,7 @@ import { initTheme } from "./theme.js";
 import { initLocale, getLocale, DEFAULT_LOCALE, t } from "./i18n.js";
 import { loadGraph } from "./graph-data.js";
 import { mountSearchBox, SEARCH_BOX_CSS } from "./concept-search-box.js";
+import { runProgressMigration } from "./progress-migration.js";
 
 /** Build the page shell once the DOM is ready. */
 async function render() {
@@ -41,6 +42,11 @@ async function render() {
   initTheme();
   // Reconcile the synchronously-set locale (boot.js) with storage + browser languages.
   initLocale();
+
+  // Recover confidence scores stranded by a moved concept BEFORE the shell (and its star control +
+  // pathways) reads them, so a relocated lesson shows its stars on this very load. Uses the same
+  // memoized graph the render below awaits, so it adds no extra fetch; never throws.
+  await runProgressMigration();
 
   // Global page chrome: the top-right hamburger menu (theme + language), mounted once.
   if (!body.querySelector("primer-menu")) {
