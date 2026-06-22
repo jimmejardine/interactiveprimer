@@ -152,7 +152,7 @@ async function main() {
   // `<primer-ref soft to="X">` creates NO edge — we collect them only to validate X exists.
   /** @type {Map<string, string[]>} concept id → ids it soft-refs */
   const softByConcept = new Map();
-  // `<primer-ref to="todo/…">` placeholders — no edge, never validated; tracked only to report how
+  // `<primer-ref todo to="…">` placeholders — no edge, never validated; tracked only to report how
   // many planned-but-unwritten concepts are still referenced.
   /** @type {Set<string>} */
   const todoTargets = new Set();
@@ -193,7 +193,7 @@ async function main() {
       // Stash this page's soft refs; they add no edge, just an existence check below.
       const soft = extractSoftRefs(html).filter((r) => r !== id);
       if (soft.length) softByConcept.set(id, soft);
-      // Tally `todo/…` placeholder refs (no edge, no validation — just reported).
+      // Tally `<primer-ref todo>` placeholder refs (no edge, no validation — just reported).
       const todos = extractTodoRefs(html);
       if (todos.length) {
         todoPages++;

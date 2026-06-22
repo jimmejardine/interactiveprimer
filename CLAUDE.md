@@ -99,11 +99,11 @@ prerequisites or level may omit the block entirely.
   `<primer-ref soft to="full/path/id">`: same styled link + confidence dot, but it harvests **no
   edge** (the build still fails if the id names no concept). `soft` wins if combined with `forward`.
   (A plain `<a href="/concepts/<id>.html">` also makes no edge, but without the confidence dot.)
-  To reference a concept you **intend to write but haven't yet**, use the reserved **`todo/`**
-  namespace: `<primer-ref to="todo/stochastic-calculus">`. It harvests **no edge** and is **never
-  validated** (so it can't fail the build), and renders as a muted **"todo"** chip (not a working
-  link, no confidence dot). `npm run graph` reports a tally of outstanding `todo/…` placeholders.
-  Don't create real pages under `concepts/todo/` — the namespace is reserved.
+  To reference a concept you **intend to write but haven't yet**, add the **`todo`** attribute:
+  `<primer-ref todo to="stochastic-calculus">`. It harvests **no edge** and is **never validated**
+  (so it can't fail the build — `to` is just a label, need not name a real page), and renders as a
+  muted **"todo"** chip (not a working link, no confidence dot). `todo` wins if combined with
+  `forward`/`soft`. `npm run graph` reports a tally of outstanding `todo` placeholders.
 - `<primer-quiz name="…">` — a random test. The question bank is built in JS by
   `registerQuiz(name, builder)` (in an inline module script, like `registerManimScene`), and the
   element references it by `name`. The builder receives a toolkit `{ sceneStrings }` and returns the

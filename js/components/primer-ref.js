@@ -33,7 +33,6 @@ import { loadGraph } from "../graph-data.js";
 import { getLocale, t } from "../i18n.js";
 import { confidenceColor } from "../confidence-color.js";
 import { createContextMenu } from "../context-menu.js";
-import { isTodoRef } from "../concept-refs.js";
 
 /** Last path segment of an id — a readable label before/without the graph. @param {string} id */
 function leaf(id) {
@@ -59,12 +58,13 @@ function ensureRefContextMenu() {
     { label: t("menu.explore"), run: (id) => { window.location.href = `/concepts.html?id=${encodeURIComponent(id)}`; } },
   ]);
 
-  /** The real concept id of the <primer-ref> under an event (empty/`todo/…` → null, so a placeholder
-   * gets no Open/Explore menu — there's no page to open). @param {Event} e */
+  /** The real concept id of the <primer-ref> under an event (empty / a `todo` placeholder → null, so
+   * a placeholder gets no Open/Explore menu — there's no page to open). @param {Event} e */
   const refIdAt = (e) => {
     const ref = /** @type {Element} */ (e.target)?.closest?.("primer-ref");
-    const id = ref?.getAttribute("to")?.trim();
-    return id && !isTodoRef(id) ? id : null;
+    if (!ref || ref.hasAttribute("todo")) return null;
+    const id = ref.getAttribute("to")?.trim();
+    return id || null;
   };
 
   // Right-click a concept reference → our menu (in place of the browser's default link menu).
@@ -120,9 +120,9 @@ export class PrimerRef extends HTMLElement {
 
     const id = (this.getAttribute("to") ?? "").trim();
 
-    // A `todo/…` placeholder: a planned-but-unwritten concept. Render a muted, NON-link "todo" chip —
-    // there's no page to open, no rating to show, and no graph entry to look up.
-    if (isTodoRef(id)) {
+    // A `todo` placeholder (`<primer-ref todo to="…">`): a planned-but-unwritten concept. Render a
+    // muted, NON-link "todo" chip — no page to open, no rating to show, no graph entry to look up.
+    if (this.hasAttribute("todo")) {
       const span = document.createElement("span");
       span.className = "concept-ref concept-todo";
       span.title = t("ref.todoTitle");
