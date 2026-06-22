@@ -185,12 +185,13 @@
     head.appendChild(vp);
   }
 
-  // The site favicon (a "tree of knowledge"). Concept pages write no <head>, and while browsers
-  // auto-request /favicon.ico anyway, an explicit link makes it unambiguous across browsers.
+  // The site favicon (a "tree of knowledge"), served from /images. Concept pages write no <head>,
+  // so inject an explicit link (browsers only auto-request /favicon.ico at the root, which we don't
+  // ship there — the icon lives at /images/favicon.ico).
   if (!document.querySelector('link[rel~="icon"]')) {
     const icon = document.createElement("link");
     icon.rel = "icon";
-    icon.href = "/favicon.ico";
+    icon.href = "/images/favicon.ico";
     icon.setAttribute("sizes", "any");
     head.appendChild(icon);
   }
