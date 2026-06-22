@@ -23,6 +23,7 @@ import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseConceptMeta } from "../js/concept-meta.js";
 import { extractConceptRefs, extractForwardRefs, extractSoftRefs } from "../js/concept-refs.js";
+import { decodeEntities } from "../js/html-entities.js";
 import { validateGraph, indexConcepts, buildDependents, attachOrphans } from "../js/graph.js";
 import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
 import { parseJsonc } from "../js/jsonc.js";
@@ -80,9 +81,10 @@ function extractTitleRaw(html) {
   return m ? m[1].replace(/\s+/g, " ").trim() : null;
 }
 
-/** Strip HTML tags to plain text (and collapse whitespace). @param {string} s */
+/** Strip HTML tags to plain text — decode entities + collapse whitespace (so a title like
+ * `Forces &amp; Motion` becomes `Forces & Motion`, not the literal entity). @param {string} s */
 function stripTags(s) {
-  return s.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+  return decodeEntities(s.replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim();
 }
 
 /**
