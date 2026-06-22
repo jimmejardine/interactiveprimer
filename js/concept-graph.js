@@ -322,7 +322,10 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
   }
   for (const n of nodes) if (n.depth === undefined) n.depth = 1; // any node not reached from centre
 
-  for (let i = 0; i < PREWARM; i++) tick(nodes, edges, LAYOUT);
+  // Pre-warm until the layout settles (or PREWARM caps it) so `fit()` frames the SETTLED layout.
+  // The on-open animation below re-seeds and re-settles deterministically to this same state, so
+  // the view it's fitted to stays correct once the motion ends.
+  for (let i = 0; i < PREWARM; i++) if (tick(nodes, edges, LAYOUT) <= ENERGY_MIN) break;
   const fit = () => {
     const b = bounds(nodes);
     const w = host.clientWidth || svg.clientWidth || 900;
@@ -377,6 +380,21 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
       raf = requestAnimationFrame(frame);
     }
   };
+
+  // Auto-play the settling animation on open — the same loop a drag reheats. Re-scatter the nodes
+  // to the deterministic seed and let the simulation settle them back into the already-fitted
+  // layout, so the graph visibly organises itself instead of appearing static. Skipped under
+  // prefers-reduced-motion: the graph stays in its settled, fitted state.
+  const prefersReduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  if (!prefersReduced) {
+    seedPositions(nodes, 46); // identical spiral scatter (also zeroes velocities → starts from rest)
+    if (centerNode) {
+      centerNode.x = 0; // keep the centre node at the origin (still fixed/pinned from above)
+      centerNode.y = 0;
+    }
+    render(); // paint the scatter first…
+    reheat(); // …then animate it settling
+  }
 
   // ---- context menu: right-click / long-press a node → Open (the lesson) or Explore (re-centre) ----
   const ctxMenu = createContextMenu(document.body, [

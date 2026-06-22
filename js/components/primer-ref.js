@@ -30,12 +30,74 @@
  */
 
 import { loadGraph } from "../graph-data.js";
-import { getLocale } from "../i18n.js";
+import { getLocale, t } from "../i18n.js";
 import { confidenceColor } from "../confidence-color.js";
+import { createContextMenu } from "../context-menu.js";
 
 /** Last path segment of an id — a readable label before/without the graph. @param {string} id */
 function leaf(id) {
   return id.split("/").pop() ?? id;
+}
+
+/** Whether the document-wide concept-ref context menu has been wired (do it once). */
+let refTriggersWired = false;
+
+/**
+ * Make right-click (and touch long-press) on any concept reference open the same Open/Explore popup
+ * the graph explorers use. Delegated at the document level so it covers every <primer-ref> with a
+ * single set of listeners, no matter how many are on the page. Idempotent.
+ */
+function ensureRefContextMenu() {
+  if (refTriggersWired) return;
+  refTriggersWired = true;
+
+  const menu = createContextMenu(document.body, [
+    // "Open" — same as clicking the reference: go to that concept's lesson.
+    { label: t("contextmenu.open"), run: (id) => { window.location.href = `/concepts/${id}.html`; } },
+    // "Explore" — open the full map centred on that concept.
+    { label: t("menu.explore"), run: (id) => { window.location.href = `/concepts.html?id=${encodeURIComponent(id)}`; } },
+  ]);
+
+  /** The concept id of the <primer-ref> under an event (empty `to` → null). @param {Event} e */
+  const refIdAt = (e) => {
+    const ref = /** @type {Element} */ (e.target)?.closest?.("primer-ref");
+    const id = ref?.getAttribute("to")?.trim();
+    return id || null;
+  };
+
+  // Right-click a concept reference → our menu (in place of the browser's default link menu).
+  document.addEventListener("contextmenu", (e) => {
+    const id = refIdAt(e);
+    if (!id) return;
+    e.preventDefault();
+    menu.open(id, /** @type {MouseEvent} */ (e).clientX, /** @type {MouseEvent} */ (e).clientY);
+  });
+
+  // Touch long-press → the same menu; the finger-up's click on the <a> is swallowed so it doesn't
+  // also navigate. (A mouse uses the native `contextmenu` event above.)
+  let timer = 0, sx = 0, sy = 0, suppressClick = false;
+  const clearTimer = () => { if (timer) { clearTimeout(timer); timer = 0; } };
+  document.addEventListener("pointerdown", (e) => {
+    suppressClick = false;
+    if (e.pointerType === "mouse") return;
+    const id = refIdAt(e);
+    if (!id) return;
+    sx = e.clientX; sy = e.clientY;
+    clearTimer();
+    timer = window.setTimeout(() => {
+      timer = 0;
+      suppressClick = true;
+      menu.open(id, sx, sy);
+    }, 500);
+  }, true);
+  document.addEventListener("pointermove", (e) => {
+    if (timer && Math.hypot(e.clientX - sx, e.clientY - sy) > 10) clearTimer();
+  }, true);
+  document.addEventListener("pointerup", clearTimer, true);
+  document.addEventListener("pointercancel", clearTimer, true);
+  document.addEventListener("click", (e) => {
+    if (suppressClick) { e.preventDefault(); e.stopPropagation(); suppressClick = false; }
+  }, true);
 }
 
 export class PrimerRef extends HTMLElement {
@@ -47,6 +109,10 @@ export class PrimerRef extends HTMLElement {
   #onTheme = null;
 
   async connectedCallback() {
+    // Right-click / long-press on any concept ref opens the same Open/Explore menu as the explorers
+    // (wired once, document-wide).
+    ensureRefContextMenu();
+
     // Idempotent: if we've already wrapped the contents, do nothing on re-connect.
     if (this.querySelector("a.concept-ref")) return;
 
