@@ -24,7 +24,8 @@ const PREWARM = 320; // synchronous ticks before first paint, so the graph opens
 const CLICK_PX = 4; // pointer travel under this (screen px) counts as a click, not a drag
 const PAD_X = 12, PAD_Y = 7, EDGE_GAP = 4; // node text padding; gap between an edge end and a node
 const LABEL_MAXW = 120, LINE_H = 15; // wrap node labels to this width (px); line height
-const EXPLICIT_WEIGHT = 2.2; // spring strength for an explicit (concept-meta) edge vs 1 for implicit
+const EXPLICIT_WEIGHT = 2.2; // spring strength for an explicit (concept-meta) prerequisite edge
+const IMPLICIT_WEIGHT = 0.3; // a much weaker pull for an implicit edge (only a prose <primer-ref>)
 const LAYOUT = { outwardPerDepth: 0.45 }; // extra outward push per depth level → edges fan outward
 
 /**
@@ -132,7 +133,7 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     for (const pre of c.prerequisites ?? []) {
       if (nodeById.has(pre) && pre !== c.id) {
         const explicit = expl ? expl.includes(pre) : true;
-        edges.push(/** @type {any} */ ({ source: pre, target: c.id, explicit, weight: explicit ? EXPLICIT_WEIGHT : 1 }));
+        edges.push(/** @type {any} */ ({ source: pre, target: c.id, explicit, weight: explicit ? EXPLICIT_WEIGHT : IMPLICIT_WEIGHT }));
       }
     }
   }
