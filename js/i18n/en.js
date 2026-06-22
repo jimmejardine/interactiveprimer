@@ -55,6 +55,7 @@ export default {
   "geometry.pause": "Pause",
   "geometry.expand": "All steps",
   "geometry.collapse": "Collapse",
+  "geometry.refresh": "Refresh",
 
   "video.play": "Play video",
   "video.unavailable": "Couldn't load this video.",

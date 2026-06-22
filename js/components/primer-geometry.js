@@ -39,6 +39,7 @@ import { adoptJsxCss, wrapBoard } from "./jsx-board.js";
 import { getSliderGroup, subscribeSliders } from "../charts.js";
 import { clampStep, createStepCollector, applyStepVisibility } from "../geometry.js";
 import { makeGeometryTools } from "../geometry-tools.js";
+import { makeRng } from "../rng.js";
 
 export class PrimerGeometry extends HTMLElement {
   /** @type {any} The active JSXGraph board. */
@@ -67,6 +68,10 @@ export class PrimerGeometry extends HTMLElement {
   #expanded = false;
   /** @type {boolean} Whether the initial step has been chosen (so rebuilds keep the student's place). */
   #started = false;
+  /** @type {number | null} Per-run seed for the toolkit `rng` (bumped by Refresh; stable otherwise). */
+  #seed = null;
+  /** @type {boolean} Whether this scene opted into random (shows the Refresh button). */
+  #random = false;
 
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
@@ -80,9 +85,13 @@ export class PrimerGeometry extends HTMLElement {
           text-align: center;
         }
         .geo-title[hidden], .bar[hidden], .expanded[hidden] { display: none; }
-        /* In the expanded "all steps" view, only the Collapse button stays in the bar — the
-           step-nav buttons, counter and caption are meaningless when every step is shown at once. */
-        .bar.is-expanded > :not(.expand) { display: none; }
+        /* In the expanded "all steps" view, only the Collapse button (and Refresh, so a random
+           figure can be re-rolled while expanded) stay in the bar — the step-nav buttons, counter and
+           caption are meaningless when every step is shown at once. */
+        .bar.is-expanded > :not(.expand):not(.refresh) { display: none; }
+        /* A static (step-less) random figure shows only the Refresh button — the step-nav, Play and
+           All-steps controls have nothing to act on. */
+        .bar.is-static > :not(.refresh) { display: none; }
         .stage { width: 100%; aspect-ratio: 7 / 4; position: relative; overflow: hidden;
           background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem);
           box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
@@ -111,6 +120,7 @@ export class PrimerGeometry extends HTMLElement {
           <button class="forward" type="button" aria-label="${t("geometry.forward")}">»</button>
           <button class="play" type="button">${t("geometry.play")}</button>
           <button class="expand" type="button">${t("geometry.expand")}</button>
+          <button class="refresh" type="button" hidden>${t("geometry.refresh")}</button>
           <span class="caption"></span>
         </div>
         <div class="stage" part="stage"></div>
@@ -123,6 +133,7 @@ export class PrimerGeometry extends HTMLElement {
     bar.querySelector(".next")?.addEventListener("click", () => this.next());
     bar.querySelector(".forward")?.addEventListener("click", () => this.goTo(this.#steps.length));
     bar.querySelector(".play")?.addEventListener("click", () => this.#togglePlay());
+    bar.querySelector(".refresh")?.addEventListener("click", () => void this.#refresh());
     bar.querySelector(".expand")?.addEventListener("click", () => this.#toggleExpand());
 
     this.#onTheme = () => void this.#build(root);
@@ -155,6 +166,11 @@ export class PrimerGeometry extends HTMLElement {
       return;
     }
     this.#cancelWait();
+    // Whether this scene opted into random initial conditions (shows the Refresh button), and a
+    // per-run seed for the toolkit `rng` — chosen once (so each page load is a fresh example, but a
+    // theme-change rebuild reuses it), then bumped only by Refresh.
+    this.#random = Boolean(entry.opts.random);
+    if (this.#seed === null) this.#seed = (Math.random() * 0x100000000) >>> 0;
     const gen = ++this.#buildGen;
     this.#collapse(); // a rebuild (e.g. theme change) returns to the single board
     this.#dispose();
@@ -242,7 +258,11 @@ export class PrimerGeometry extends HTMLElement {
     // scene-scoped localized strings, and the drawing tools.
     const sceneStrings = makeStrings(name);
     const { parallelMark, crossing, makeGraph } = makeGeometryTools(board, colors);
-    entry.builder({ board, JXG, step, sliders, colors, sceneStrings, parallelMark, crossing, makeGraph });
+    // A seeded RNG for random scenes: built from the same per-run #seed for the main board AND every
+    // mini-board of the "All steps" view, so a single run is internally coherent; Refresh bumps the
+    // seed for a fresh example. Builders use rng()/rng.int/rng.pick instead of Math.random().
+    const rng = makeRng(/** @type {number} */ (this.#seed ?? 0));
+    entry.builder({ board, JXG, step, sliders, colors, sceneStrings, parallelMark, crossing, makeGraph, rng });
     // Read-only: a teaching figure isn't a manipulable construction. Free points (created from
     // coordinates) are draggable by default — fix EVERY element and drop hover highlighting so the
     // mouse can't move anything. (Slider-driven points use functional coords, so they still update
@@ -322,8 +342,11 @@ export class PrimerGeometry extends HTMLElement {
     if (!root) return;
     const bar = /** @type {HTMLElement} */ (root.querySelector(".bar"));
     const n = this.#steps.length;
-    // No steps (a purely static figure) or opted out → no bar.
-    bar.hidden = n === 0 || this.hasAttribute("no-controls");
+    // No steps (a purely static figure) or opted out → no bar — UNLESS the scene is random, which
+    // still wants its Refresh button (then the bar collapses to just that, via `.is-static`).
+    bar.hidden = (n === 0 && !this.#random) || this.hasAttribute("no-controls");
+    bar.classList.toggle("is-static", n === 0 && this.#random);
+    /** @type {HTMLElement} */ (root.querySelector(".refresh")).hidden = !this.#random;
     const count = /** @type {HTMLElement} */ (root.querySelector(".count"));
     count.textContent = `${this.#current} / ${n}`;
     const caption = /** @type {HTMLElement} */ (root.querySelector(".caption"));
@@ -348,6 +371,19 @@ export class PrimerGeometry extends HTMLElement {
   #toggleExpand() {
     if (this.#expanded) this.#collapse();
     else void this.#expand();
+  }
+
+  /**
+   * Refresh a random scene: bump the seed, re-run the builder (new random values), reset to the
+   * figure's start, and restore the "All steps" view if it was open. Reuses the #build rebuild path.
+   */
+  async #refresh() {
+    this.#stopPlay();
+    this.#seed = ((this.#seed ?? 0) + 0x9e3779b1) >>> 0; // a fresh seed → a fresh-but-coherent example
+    const wasExpanded = this.#expanded;
+    this.#started = false; // so the rebuild resets to opts.start rather than keeping the place
+    await this.#build(this.#root);
+    if (wasExpanded) await this.#expand();
   }
 
   /** Render one captioned mini board per step, each cumulative through that step. */

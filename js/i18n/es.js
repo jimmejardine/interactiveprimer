@@ -54,6 +54,7 @@ export default {
   "geometry.pause": "Pausa",
   "geometry.expand": "Todos los pasos",
   "geometry.collapse": "Contraer",
+  "geometry.refresh": "Actualizar",
 
   "video.play": "Reproducir vídeo",
   "video.unavailable": "No se pudo cargar este vídeo.",

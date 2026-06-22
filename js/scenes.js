@@ -110,12 +110,14 @@ export function getChart(name) {
  * js/components/primer-geometry.js for assembly.
  * @callback GeometryBuilder
  * @param {Record<string, any>} toolkit  `{ board, JXG, step, sliders, colors, sceneStrings, parallelMark,
- *   crossing, makeGraph }` — `board` the JSXGraph board, `colors` the resolved `themeColors()` palette,
- *   `step` the waypoint collector, `sliders` live values of the `opts.sliders` group,
+ *   crossing, makeGraph, rng }` — `board` the JSXGraph board, `colors` the resolved `themeColors()`
+ *   palette, `step` the waypoint collector, `sliders` live values of the `opts.sliders` group,
  *   `sceneStrings(key, vars?)` the scene-scoped localized strings (js/scene-strings.js), `parallelMark` /
- *   `crossing` the drawing tools, and `makeGraph(opts?)` which draws standardized Cartesian axes
+ *   `crossing` the drawing tools, `makeGraph(opts?)` which draws standardized Cartesian axes
  *   (themed lines, arrowheads, tick numbers, "x"/"y" labels) auto-spanning the board — the same axes the
- *   `registerCharts` charts use (js/geometry-tools.js, js/graph-axes.js).
+ *   `registerCharts` charts use (js/geometry-tools.js, js/graph-axes.js) — and `rng` a seeded random
+ *   (`rng()` → [0,1), `rng.int(lo,hi)`, `rng.pick(arr)`) to use INSTEAD of `Math.random()` for a
+ *   `random: true` scene, so the Refresh button gives a fresh, internally-coherent example.
  * @returns {void}
  *
  * @typedef {object} GeometryOptions
@@ -125,6 +127,8 @@ export function getChart(name) {
  * @property {string} [sliders]  Name of a registered slider group the diagram listens to.
  * @property {number} [start]    Initial revealed-step count (default: all steps revealed).
  * @property {number} [stepMs]   Fade duration for a step reveal in ms (default 450).
+ * @property {boolean} [random]  This scene draws random initial conditions (via the toolkit `rng`):
+ *   shows a "Refresh" button that re-draws a fresh example.
  *
  * @typedef {object} GeometryEntry
  * @property {GeometryBuilder} builder

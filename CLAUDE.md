@@ -466,13 +466,19 @@ sceneStrings, parallelMark, crossing, makeGraph }` — `colors` is the resolved 
   `colors.cat[i]` at opacity, **text via `strokeColor: colors.ink`**) — never hardcoded.
 - **No endpoint dots**: a `segment`/`line`/`arrow` built from coordinates hides its auto-created endpoint
   points by default (teaching figures draw lines, not points). To show a dot, create an explicit `point`.
-- **`opts`**: `{ boundingbox, keepAspect = true, title, sliders, start, stepMs = 450 }`. A figure opens
-  **fully revealed** by default (the finished render); set `start: 0` to begin collapsed and play through, or
-  any step count. A single-`step` (or zero-`step`) figure is static — the control bar auto-hides. `stepMs` is
-  the reveal fade.
-- **Controls**: the element shows « Rewind · ‹ Prev · k/N · Next › · » Skip-to-end · Play · **All steps** (Expand → a vertical
-  comic-strip of every step, each cumulative, under its caption). Add the **`no-controls`** attribute to hide
-  the bar for an externally-driven figure.
+- **`opts`**: `{ boundingbox, keepAspect = true, title, sliders, start, stepMs = 450, random = false }`.
+  A figure opens **fully revealed** by default (the finished render); set `start: 0` to begin collapsed and
+  play through, or any step count. A single-`step` (or zero-`step`) figure is static — the control bar
+  auto-hides. `stepMs` is the reveal fade.
+- **Random scenes**: set `opts.random: true` for a figure with random initial conditions, and draw them with
+  the toolkit's **`rng`** — `rng()` → `[0,1)`, `rng.int(lo, hi)` (inclusive), `rng.pick(arr)` — **inside** the
+  builder (never `Math.random()`, and never outside the builder). This shows a **Refresh** button (between
+  Play and All steps) that re-draws a fresh example. The `rng` is seeded per *run* and reused for the main
+  board AND every "All steps" mini-board, so a run is internally coherent; Refresh bumps the seed (a page
+  reload also gives a fresh one; a theme switch does not). See `concepts/mathematics/arithmetic/operations/number-bonds.html`.
+- **Controls**: the element shows « Rewind · ‹ Prev · k/N · Next › · » Skip-to-end · Play · [**Refresh** — random
+  scenes only] · **All steps** (Expand → a vertical comic-strip of every step, each cumulative, under its
+  caption). Add the **`no-controls`** attribute to hide the bar for an externally-driven figure.
 - **External sliders** (no draggable points): set `opts.sliders = "groupName"` (a `registerChartSliders`
   group rendered by a separate `<primer-chart-sliders name="groupName">`); the builder gets the live values
   as `sliders` — read them in **functional coordinates** so the figure re-plots as the sliders move:
