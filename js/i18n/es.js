@@ -64,6 +64,9 @@ export default {
 
   "contextmenu.open": "Abrir",
 
+  "ref.todo": "pendiente",
+  "ref.todoTitle": "Planificado — aún sin escribir",
+
   "menu.label": "Menú",
   "menu.home": "Inicio",
   "menu.explore": "Explorar",

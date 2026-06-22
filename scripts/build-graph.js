@@ -22,7 +22,7 @@ import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseConceptMeta } from "../js/concept-meta.js";
-import { extractConceptRefs, extractForwardRefs, extractSoftRefs } from "../js/concept-refs.js";
+import { extractConceptRefs, extractForwardRefs, extractSoftRefs, extractTodoRefs } from "../js/concept-refs.js";
 import { decodeEntities } from "../js/html-entities.js";
 import { validateGraph, indexConcepts, buildDependents, attachOrphans } from "../js/graph.js";
 import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
@@ -152,6 +152,11 @@ async function main() {
   // `<primer-ref soft to="X">` creates NO edge — we collect them only to validate X exists.
   /** @type {Map<string, string[]>} concept id → ids it soft-refs */
   const softByConcept = new Map();
+  // `<primer-ref to="todo/…">` placeholders — no edge, never validated; tracked only to report how
+  // many planned-but-unwritten concepts are still referenced.
+  /** @type {Set<string>} */
+  const todoTargets = new Set();
+  let todoPages = 0;
 
   const files = (await listHtml(CONCEPTS_DIR)).sort();
   for (const file of files) {
@@ -188,6 +193,12 @@ async function main() {
       // Stash this page's soft refs; they add no edge, just an existence check below.
       const soft = extractSoftRefs(html).filter((r) => r !== id);
       if (soft.length) softByConcept.set(id, soft);
+      // Tally `todo/…` placeholder refs (no edge, no validation — just reported).
+      const todos = extractTodoRefs(html);
+      if (todos.length) {
+        todoPages++;
+        for (const tdo of todos) todoTargets.add(tdo);
+      }
     } catch (err) {
       fileDiagnostics.push({
         severity: "error",
@@ -252,6 +263,9 @@ async function main() {
     `\nScanned ${files.length} page(s) → ${concepts.length} concept(s); ` +
       `${errors.length} error(s), ${warnings.length} warning(s).`,
   );
+  if (todoTargets.size > 0) {
+    console.log(`📝 ${todoTargets.size} todo placeholder(s) referenced across ${todoPages} page(s).`);
+  }
 
   if (errors.length > 0) {
     console.error("\nGraph is invalid — not emitting output.");

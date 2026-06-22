@@ -11,6 +11,11 @@
  *    confidence dot). For an incidental "see also" between concepts with no learning dependency
  *    either way (e.g. two peers). The build still checks X names a real concept.
  *
+ * The reserved **`todo/`** namespace is the escape hatch for a concept you intend to write but
+ * haven't yet: `<primer-ref to="todo/stochastic-calculus">` adds NO edge and is NEVER validated
+ * (so it can't fail the build), and renders as a muted "todo" placeholder. Such ids are stripped
+ * from all three extractors below and surfaced by {@link extractTodoRefs}.
+ *
  * The control renders identically for all three (the attributes are build-only). `soft` takes
  * precedence over `forward` if both are somehow present (no edge wins).
  *
@@ -30,6 +35,15 @@ const TO_ATTR = /\bto\s*=\s*(?:"([^"]*)"|'([^']*)')/i;
 const FORWARD_ATTR = /(?:^|\s)forward(?![\w-])/i;
 /** A standalone `soft` boolean attribute — the "no edge, link only" variant. */
 const SOFT_ATTR = /(?:^|\s)soft(?![\w-])/i;
+
+/** The reserved namespace for not-yet-written placeholder concepts. */
+export const TODO_PREFIX = "todo/";
+
+/** Whether `id` is a `todo/…` placeholder (edgeless, unvalidated, rendered as a "todo" chip).
+ * @param {string} id */
+export function isTodoRef(id) {
+  return typeof id === "string" && id.startsWith(TODO_PREFIX);
+}
 
 /**
  * Parse every `<primer-ref>` in the HTML to `{ id, forward, soft }` (in first-seen order). Empty
@@ -62,7 +76,7 @@ function parseRefs(html) {
  * @returns {string[]}
  */
 export function extractConceptRefs(html) {
-  return [...new Set(parseRefs(html).filter((r) => !r.forward && !r.soft).map((r) => r.id))];
+  return [...new Set(parseRefs(html).filter((r) => !r.forward && !r.soft && !isTodoRef(r.id)).map((r) => r.id))];
 }
 
 /**
@@ -72,7 +86,7 @@ export function extractConceptRefs(html) {
  * @returns {string[]}
  */
 export function extractForwardRefs(html) {
-  return [...new Set(parseRefs(html).filter((r) => r.forward).map((r) => r.id))];
+  return [...new Set(parseRefs(html).filter((r) => r.forward && !isTodoRef(r.id)).map((r) => r.id))];
 }
 
 /**
@@ -82,5 +96,15 @@ export function extractForwardRefs(html) {
  * @returns {string[]}
  */
 export function extractSoftRefs(html) {
-  return [...new Set(parseRefs(html).filter((r) => r.soft).map((r) => r.id))];
+  return [...new Set(parseRefs(html).filter((r) => r.soft && !isTodoRef(r.id)).map((r) => r.id))];
+}
+
+/**
+ * The de-duped `todo/…` placeholder ids referenced on a page (any ref form). These add no edge and
+ * are never validated — they just track concepts an author intends to write. First-seen order.
+ * @param {string} html
+ * @returns {string[]}
+ */
+export function extractTodoRefs(html) {
+  return [...new Set(parseRefs(html).filter((r) => isTodoRef(r.id)).map((r) => r.id))];
 }

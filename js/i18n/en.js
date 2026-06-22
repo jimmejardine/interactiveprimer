@@ -65,6 +65,9 @@ export default {
 
   "contextmenu.open": "Open",
 
+  "ref.todo": "todo",
+  "ref.todoTitle": "Planned — not written yet",
+
   "menu.label": "Menu",
   "menu.home": "Home",
   "menu.explore": "Explore",

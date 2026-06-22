@@ -33,6 +33,7 @@ import { loadGraph } from "../graph-data.js";
 import { getLocale, t } from "../i18n.js";
 import { confidenceColor } from "../confidence-color.js";
 import { createContextMenu } from "../context-menu.js";
+import { isTodoRef } from "../concept-refs.js";
 
 /** Last path segment of an id — a readable label before/without the graph. @param {string} id */
 function leaf(id) {
@@ -58,11 +59,12 @@ function ensureRefContextMenu() {
     { label: t("menu.explore"), run: (id) => { window.location.href = `/concepts.html?id=${encodeURIComponent(id)}`; } },
   ]);
 
-  /** The concept id of the <primer-ref> under an event (empty `to` → null). @param {Event} e */
+  /** The real concept id of the <primer-ref> under an event (empty/`todo/…` → null, so a placeholder
+   * gets no Open/Explore menu — there's no page to open). @param {Event} e */
   const refIdAt = (e) => {
     const ref = /** @type {Element} */ (e.target)?.closest?.("primer-ref");
     const id = ref?.getAttribute("to")?.trim();
-    return id || null;
+    return id && !isTodoRef(id) ? id : null;
   };
 
   // Right-click a concept reference → our menu (in place of the browser's default link menu).
@@ -114,9 +116,24 @@ export class PrimerRef extends HTMLElement {
     ensureRefContextMenu();
 
     // Idempotent: if we've already wrapped the contents, do nothing on re-connect.
-    if (this.querySelector("a.concept-ref")) return;
+    if (this.querySelector(".concept-ref")) return;
 
     const id = (this.getAttribute("to") ?? "").trim();
+
+    // A `todo/…` placeholder: a planned-but-unwritten concept. Render a muted, NON-link "todo" chip —
+    // there's no page to open, no rating to show, and no graph entry to look up.
+    if (isTodoRef(id)) {
+      const span = document.createElement("span");
+      span.className = "concept-ref concept-todo";
+      span.title = t("ref.todoTitle");
+      while (this.firstChild) span.appendChild(this.firstChild);
+      if (!(span.textContent ?? "").trim()) span.textContent = leaf(id).replace(/-/g, " ");
+      const tag = document.createElement("span");
+      tag.className = "concept-todo-tag";
+      tag.textContent = t("ref.todo");
+      this.append(span, tag);
+      return;
+    }
 
     const a = document.createElement("a");
     a.className = "concept-ref";

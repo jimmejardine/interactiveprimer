@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractConceptRefs, extractForwardRefs, extractSoftRefs } from "../js/concept-refs.js";
+import { extractConceptRefs, extractForwardRefs, extractSoftRefs, extractTodoRefs, isTodoRef } from "../js/concept-refs.js";
 
 test("extracts the `to` id of a single ref", () => {
   assert.deepEqual(
@@ -90,4 +90,40 @@ test("splits backward, forward and soft refs in one page", () => {
   assert.deepEqual(extractConceptRefs(html), ["arithmetic/division"]);
   assert.deepEqual(extractForwardRefs(html), ["arithmetic/addition"]);
   assert.deepEqual(extractSoftRefs(html), ["arithmetic/subtraction"]);
+});
+
+/* ------------------------------ todo refs ------------------------------- */
+
+test("isTodoRef recognises the reserved todo/ namespace", () => {
+  assert.equal(isTodoRef("todo/stochastic-calculus"), true);
+  assert.equal(isTodoRef("mathematics/calculus/calculus"), false);
+  assert.equal(isTodoRef("todoish/x"), false); // must be the `todo/` prefix, not just "todo"
+  assert.equal(isTodoRef(""), false);
+});
+
+test("a `todo/` ref is excluded from every edge extractor and returned by extractTodoRefs", () => {
+  const html = `<primer-ref to="todo/stochastic-calculus">stochastic calculus</primer-ref>`;
+  assert.deepEqual(extractConceptRefs(html), []);
+  assert.deepEqual(extractForwardRefs(html), []);
+  assert.deepEqual(extractSoftRefs(html), []);
+  assert.deepEqual(extractTodoRefs(html), ["todo/stochastic-calculus"]);
+});
+
+test("`todo/` placeholders are edgeless whatever the ref form (plain/forward/soft)", () => {
+  const html = `
+    <primer-ref to="todo/a">a</primer-ref>
+    <primer-ref forward to="todo/b">b</primer-ref>
+    <primer-ref soft to="todo/c">c</primer-ref>`;
+  assert.deepEqual(extractConceptRefs(html), []);
+  assert.deepEqual(extractForwardRefs(html), []);
+  assert.deepEqual(extractSoftRefs(html), []);
+  assert.deepEqual(extractTodoRefs(html), ["todo/a", "todo/b", "todo/c"]);
+});
+
+test("real refs and todo placeholders coexist on one page", () => {
+  const html = `
+    <primer-ref to="arithmetic/division">div</primer-ref>
+    <primer-ref to="todo/group-theory">groups</primer-ref>`;
+  assert.deepEqual(extractConceptRefs(html), ["arithmetic/division"]);
+  assert.deepEqual(extractTodoRefs(html), ["todo/group-theory"]);
 });
