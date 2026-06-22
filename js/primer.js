@@ -29,7 +29,7 @@ import "./components/primer-menu.js";
 
 // Re-exports for page scripts.
 export { registerManimScene, getManimScene, registerChart, getChart, registerGeometryScene, getGeometryScene, registerQuiz, getQuiz } from "./scenes.js";
-export { registerCharts, registerChartSliders, computeRange } from "./charts.js";
+export { registerCharts, registerChartSliders, computeRange, subscribeSliders, getSliderGroup } from "./charts.js";
 export { THEMES, getTheme, applyTheme, initTheme, themeColors } from "./theme.js";
 export { LOCALES, getLocale, applyLocale, t } from "./i18n.js";
 export { getSceneStrings, makeStrings } from "./scene-strings.js";
