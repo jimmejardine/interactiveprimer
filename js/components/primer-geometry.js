@@ -100,6 +100,9 @@ export class PrimerGeometry extends HTMLElement {
         .bar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; justify-content: center; margin-bottom: 0.6rem;
           font-family: var(--primer-font-ui, sans-serif); }
         .bar button { padding: 0.2rem 0.6rem; }
+        /* "Next" is the primary step-through action — make it stand out. */
+        .bar .next { font-weight: 800; font-size: 1.15rem; line-height: 1; color: var(--primer-accent, #4d5bd1); }
+        .bar .next:disabled { color: inherit; font-weight: 600; }
         .bar .count { font-size: 0.85rem; color: var(--primer-ink-soft, #667); min-width: 3.2rem; text-align: center; }
         .bar .caption { flex: 1 1 100%; font-size: 0.92rem; font-weight: 700; color: var(--primer-ink, #111); margin-top: 0.1rem; text-align: center; }
         .expanded { margin-top: 0.6rem; display: grid; gap: 1rem; }
@@ -194,13 +197,13 @@ export class PrimerGeometry extends HTMLElement {
       heading.textContent = title;
       heading.hidden = !title;
 
-      // Initial step. By default a figure opens FULLY revealed (the finished render) — the student
-      // sees the deltas only by rewinding and stepping forward; an author can override with opts.start.
-      // A rebuild (e.g. theme change) keeps the student's current position (including 0), so the
-      // #started flag distinguishes "first build" from "rewound to 0". Apply instantly, THEN enable
-      // fades so the first hide doesn't flash a fade-out.
+      // Initial step. By default a figure opens at the FIRST step (collapsed) so the student plays
+      // it through forward; an author can override with opts.start (e.g. start: <steps.length> to
+      // open fully revealed). A rebuild (e.g. theme change) keeps the student's current position
+      // (including 0), so the #started flag distinguishes "first build" from "rewound to 0". Apply
+      // instantly, THEN enable fades so the first hide doesn't flash a fade-out.
       if (!this.#started) {
-        this.#current = clampStep(entry.opts.start ?? this.#steps.length, this.#steps.length);
+        this.#current = clampStep(entry.opts.start ?? 0, this.#steps.length);
         this.#started = true;
       } else {
         this.#current = clampStep(this.#current, this.#steps.length);
