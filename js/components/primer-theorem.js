@@ -20,8 +20,23 @@
  */
 
 export class PrimerTheorem extends HTMLElement {
+  #built = false;
+
   connectedCallback() {
     this.classList.add("theorem");
+    if (this.#built) return; // prepend the eyebrow once
+    this.#built = true;
+    const name = this.getAttribute("name");
+    const eyebrow = document.createElement("div");
+    eyebrow.className = "eyebrow";
+    const icon = document.createElement("span");
+    icon.className = "eyebrow-icon"; // gears icon, masked + tinted via css/primer.css
+    icon.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = "eyebrow-label";
+    label.textContent = name ? `Theorem — ${name}` : "Theorem";
+    eyebrow.append(icon, label);
+    this.prepend(eyebrow);
   }
 }
 
