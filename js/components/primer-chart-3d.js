@@ -42,7 +42,7 @@ export class PrimerChart3d extends HTMLElement {
 
     root.innerHTML = `
       <style>
-        .chart { padding: 0; }
+        .chart { padding: 0; position: relative; }
         .chart-title {
           font-family: var(--primer-font-display, var(--primer-font-body, sans-serif));
           font-size: 1.05rem; font-weight: 600; margin: 0 0 0.5rem; color: var(--primer-ink, #111);
@@ -56,8 +56,11 @@ export class PrimerChart3d extends HTMLElement {
           border-radius: var(--primer-radius, 0.6rem); box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
         .stage.jxgbox { background: var(--primer-viz-bg, #fff); }
         .stage svg { display: block; width: 100% !important; height: 100% !important; }
-        .hint { margin: 0.4rem 0 0; text-align: center; font-family: var(--primer-font-ui, sans-serif);
-          font-size: 0.72rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--primer-ink-soft, #667); }
+        /* A tiny hint tucked into the chart's bottom-right corner (pointer-transparent so it
+           doesn't intercept a rotate drag). */
+        .hint { position: absolute; right: 0.55rem; bottom: 0.45rem; margin: 0; pointer-events: none;
+          font-family: var(--primer-font-ui, sans-serif); font-size: 0.58rem; letter-spacing: 0.05em;
+          text-transform: uppercase; color: var(--primer-ink-soft, #667); opacity: 0.7; }
         .meta { display: block; }
       </style>
       <div class="chart">

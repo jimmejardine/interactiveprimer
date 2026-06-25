@@ -31,6 +31,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
 import enCatalog from "../js/i18n/en.js";
+import { parseJsonc } from "../js/jsonc.js";
+import { parseVariables } from "../js/quiz-vars.js";
+import { placeholderNames, expressionPlaceholders } from "../js/scene-string-lint.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CONCEPTS_DIR = join(ROOT, "concepts");
@@ -130,6 +133,102 @@ function registeredQuizzes(html) {
   let m;
   while ((m = re.exec(html)) !== null) out.add(m[1]);
   return out;
+}
+
+/** Every (namespace, key, string-value) triple across a page's `class="scene-strings"` blocks.
+ * @param {string} html @returns {{ ns: string, key: string, value: string }[]} */
+function sceneStringValues(html) {
+  /** @type {{ ns: string, key: string, value: string }[]} */
+  const out = [];
+  const re = /<script\b[^>]*class=["'][^"']*\bscene-strings\b[^"']*["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    let parsed;
+    try {
+      parsed = parseJsonc(m[1]);
+    } catch {
+      continue; // malformed block; render.js would skip it too
+    }
+    if (!parsed || typeof parsed !== "object") continue;
+    for (const [ns, kv] of Object.entries(parsed)) {
+      if (!kv || typeof kv !== "object") continue;
+      for (const [key, value] of Object.entries(kv)) {
+        if (typeof value === "string") out.push({ ns, key, value });
+      }
+    }
+  }
+  return out;
+}
+
+/** The union of quiz variable names declared by `variables: "…"` specs on a page. @param {string} html @returns {Set<string>} */
+function quizVarNames(html) {
+  const names = new Set();
+  const re = /variables:\s*["']([^"']+)["']/g;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    try {
+      for (const v of parseVariables(m[1])) names.add(v.name);
+    } catch {
+      // a malformed spec is reported by the quiz engine at runtime; ignore here.
+    }
+  }
+  return names;
+}
+
+/**
+ * Scene-strings guardrails (the i18n "prose/maths split" contract):
+ *   A. No EXPRESSIONS in a translatable string — a `{…}` over the page's drawn quiz variables
+ *      (e.g. `{10*t + o}`) is not evaluated by fillVars and renders literally. Precompute it in
+ *      the builder and pass a named value instead.
+ *   B. A locale overlay must reference the SAME `{placeholders}` as its English source (a dropped
+ *      or renamed token silently breaks interpolation in that one locale).
+ * @param {Problem[]} problems
+ */
+async function checkSceneStrings(problems) {
+  // English canonical: id → Map("ns.key" → placeholder set). Run Check A while reading.
+  /** @type {Map<string, Map<string, Set<string>>>} */
+  const canonical = new Map();
+  for (const file of await listHtml(CONCEPTS_DIR)) {
+    const html = await readFile(file, "utf8");
+    const id = idFromPath(file, CONCEPTS_DIR);
+    const vars = quizVarNames(html);
+    /** @type {Map<string, Set<string>>} */
+    const keys = new Map();
+    for (const { ns, key, value } of sceneStringValues(html)) {
+      for (const expr of expressionPlaceholders(value, vars)) {
+        problems.push({
+          sev: "error",
+          msg: `lesson "${id}" scene-string "${ns}.${key}" contains expression {${expr}} — sceneStrings interpolates only simple {name} placeholders; precompute it in the builder and pass it as a named variable`,
+        });
+      }
+      keys.set(`${ns}.${key}`, placeholderNames(value));
+    }
+    canonical.set(id, keys);
+  }
+
+  // Check B — every locale overlay's scene-strings must keep the English placeholders.
+  for (const { id: locale } of LOCALES) {
+    if (locale === DEFAULT_LOCALE) continue;
+    const dir = join(I18N_DIR, locale);
+    for (const file of await listHtml(dir)) {
+      const id = idFromPath(file, dir);
+      const enKeys = canonical.get(id);
+      if (!enKeys) continue; // ORPHAN overlay — already reported by checkLessons
+      const html = await readFile(file, "utf8");
+      for (const { ns, key, value } of sceneStringValues(html)) {
+        const en = enKeys.get(`${ns}.${key}`);
+        if (!en) continue; // key absent from English — not a placeholder-consistency concern
+        const loc = placeholderNames(value);
+        const same = en.size === loc.size && [...en].every((k) => loc.has(k));
+        if (!same) {
+          problems.push({
+            sev: "error",
+            msg: `lesson [${locale}] "${id}" scene-string "${ns}.${key}" placeholders differ from English (en: {${[...en].sort().join(", ")}}; ${locale}: {${[...loc].sort().join(", ")}})`,
+          });
+        }
+      }
+    }
+  }
 }
 
 /** Load a locale's chrome catalog (the default export). @param {string} locale */
@@ -285,6 +384,7 @@ async function main() {
   const problems = [];
   await checkChrome(problems);
   await checkLessons(problems);
+  await checkSceneStrings(problems);
 
   for (const p of problems) {
     console.log(`${p.sev === "error" ? "✖ ERROR" : "⚠ WARN "} ${p.msg}`);

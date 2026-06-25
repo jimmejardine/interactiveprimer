@@ -156,6 +156,17 @@ prerequisites or level may omit the block entirely.
   builder. So a translation overlay carries only the translated `scene-strings` — never the bank —
   and an all-maths quiz needs no translation at all.
 
+  **A `sceneStrings` string only interpolates simple `{name}` placeholders — never expressions.**
+  A *translatable* string is filled by `fillVars`, which substitutes a bare `{name}` and nothing else.
+  So `sceneStrings("q", v)` on a string like `"the number ${10*t + o}$"` does **not** compute — it
+  renders the literal `10*t+o`. (This is the opposite of a *literal* `prompt`/`text`/`answer` string,
+  whose `{…}` the quiz engine evaluates — see below — because those aren't translated.) When a prompt
+  must show a *computed* value, precompute it in the builder and pass it as a named variable:
+  `prompt: (v) => sceneStrings("q", { ...v, n: 10*v.t + v.o })` with `"q": "the number ${n}$…"`. Keep
+  language collisions out with the `{{…}}` literal escape. `npm run check` enforces this two ways: a
+  scene-string containing a `{…}` expression over the quiz's variables fails the build, and every
+  locale overlay must reference the **same** `{placeholders}` as its English source.
+
   **`prompt`, option `text`, and `answer` each accept two equivalent forms** — use whichever is
   simpler:
   - a **string** — any `{…}` inside it is **evaluated against the drawn variables**: `{a + b}`,
@@ -440,9 +451,9 @@ never hardcoded. The view's axes + x/y/z labels are drawn and themed for you.
   import { register3dChart, registerChartSliders } from "primer";
   registerChartSliders("vec3d", [ { name: "vx", min: -4, max: 4, step: 1, value: 3 }, /* vy, vz … */ ]);
   register3dChart("vec3d", ({ view, colors, sliders }) => {
-    const O = view.create("point3d", [0, 0, 0], { visible: false });
+    const O = view.create("point3d", [0, 0, 0], { visible: false, fixed: true });
     const tip = view.create("point3d", [() => sliders.vx, () => sliders.vy, () => sliders.vz],
-      { size: 4, strokeColor: colors.cat[1], fillColor: colors.cat[1], withLabel: false });
+      { size: 4, strokeColor: colors.cat[1], fillColor: colors.cat[1], withLabel: false, fixed: true, highlight: false });
     view.create("line3d", [O, tip], { strokeColor: colors.cat[1], strokeWidth: 4, straightFirst: false, straightLast: false });
   }, { bounds: [[-4.5, 4.5], [-4.5, 4.5], [-4.5, 4.5]], sliders: "vec3d", title: "a 3D vector" });
 </script>
@@ -451,7 +462,9 @@ never hardcoded. The view's axes + x/y/z labels are drawn and themed for you.
 See `concepts/mathematics/linear-algebra/spaces/vectors-in-3d.html` and
 `concepts/computer-science/machine-learning/foundations/the-feature-vector.html` (a 3D scatter +
 vector). The 2D `<primer-chart>`/`<primer-geometry>` boards strip pointer handlers (static figures);
-`<primer-chart-3d>` keeps them so the view can rotate.
+`<primer-chart-3d>` keeps them so the view can rotate. **Because those handlers stay live, every
+`point3d` is draggable by default** — always pass `fixed: true` (and `highlight: false`) on points
+the learner shouldn't grab, so the only interaction is rotating the box.
 
 ## Geometry diagrams (`registerGeometryScene`)
 
