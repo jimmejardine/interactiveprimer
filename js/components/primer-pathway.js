@@ -25,6 +25,7 @@ import { loadGraph } from "../graph-data.js";
 import { t, getLocale } from "../i18n.js";
 import { confidenceColor } from "../confidence-color.js";
 import { createContextMenu } from "../context-menu.js";
+import { getCurrentCourse } from "../course.js";
 
 /** @typedef {import("../types/domain.js").ResolvedConcept} ResolvedConcept */
 
@@ -87,6 +88,8 @@ const STYLE = `
   }
   .node:not(.node--current):hover { border-color: var(--primer-accent, #46e); transform: translateY(-1px); }
   .node--current { border: 2px solid var(--primer-accent, #46e); font-weight: 600; }
+  /* The active course's predecessor / successor of the current concept — a distinct ring colour. */
+  .node--course { border-color: var(--primer-course, #b8860b); box-shadow: 0 0 0 2px var(--primer-course, #b8860b); }
   .more { font-size: 0.72rem; color: var(--primer-ink-soft, #667); padding: 0.15rem 0.4rem; }
 
   /* Hover emphasis: bolder connected nodes + edges, dimmed rest. */
@@ -114,6 +117,8 @@ export class PrimerPathway extends HTMLElement {
   #ctxMenu = null;
   /** @type {(() => void) | null} Removes the context-menu trigger listeners. */
   #ctxCleanup = null;
+  /** @type {((e: Event) => void) | null} Re-renders when the active course changes. */
+  #onCourse = null;
 
   async connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
@@ -128,9 +133,30 @@ export class PrimerPathway extends HTMLElement {
       const hood = neighborhood(id, graph.byId);
       if (!hood) return; // current concept not in the (possibly stale) graph
       this.#render(root, graph.byId, hood);
+      // Re-render when the learner enters/leaves a course (recolours the course pred/succ).
+      this.#onCourse = () => this.#refresh();
+      document.addEventListener("course-change", this.#onCourse);
     } catch (err) {
       console.warn("primer-pathway: could not build the navigation map —", err);
     }
+  }
+
+  /** Tear down the previous render's dynamic listeners and re-render (for a course change). */
+  async #refresh() {
+    if (this.#onConfidence) document.removeEventListener("confidence-change", this.#onConfidence);
+    if (this.#onTheme) document.removeEventListener("theme-change", this.#onTheme);
+    this.#observer?.disconnect();
+    this.#ctxCleanup?.();
+    this.#ctxMenu?.destroy();
+    const root = this.shadowRoot;
+    if (!root) return;
+    const id = conceptIdFromPath();
+    if (!id) return;
+    const graph = await loadGraph();
+    if (!this.isConnected) return;
+    const hood = neighborhood(id, graph.byId);
+    if (!hood) return;
+    this.#render(root, graph.byId, hood);
   }
 
   disconnectedCallback() {
@@ -140,6 +166,8 @@ export class PrimerPathway extends HTMLElement {
     this.#onConfidence = null;
     if (this.#onTheme) document.removeEventListener("theme-change", this.#onTheme);
     this.#onTheme = null;
+    if (this.#onCourse) document.removeEventListener("course-change", this.#onCourse);
+    this.#onCourse = null;
     this.#ctxCleanup?.();
     this.#ctxCleanup = null;
     this.#ctxMenu?.destroy();
@@ -176,15 +204,32 @@ export class PrimerPathway extends HTMLElement {
           (byId.get(a)?.level ?? 0) - (byId.get(b)?.level ?? 0) || title(a).localeCompare(title(b)),
       );
 
-    const col1 = byLevel(hood.predecessors);
-    const col3 = byLevel(hood.successors);
+    let col1 = byLevel(hood.predecessors);
+    let col3 = byLevel(hood.successors);
     const peers = byLevel(hood.peers);
     const above = peers.slice(0, Math.ceil(peers.length / 2));
     const below = peers.slice(above.length);
 
+    // Course overlay: when a course is active and the current concept is on its path, find the
+    // course-order predecessor/successor and surface them at the FRONT of col1/col3 (so they're not
+    // truncated), tinted with the course colour. Course order ≠ prerequisite order, so a course
+    // neighbour may not otherwise appear in these columns — hence we ensure it's present.
+    const courseId = getCurrentCourse();
+    const members = courseId ? byId.get(courseId)?.courseMembers : undefined;
+    /** @type {Set<string>} */
+    const courseHL = new Set();
+    if (members && members.length) {
+      const i = members.indexOf(hood.id);
+      const isHub = hood.id === courseId;
+      const pred = i > 0 ? members[i - 1] : undefined;
+      const succ = isHub ? members[0] : i >= 0 && i < members.length - 1 ? members[i + 1] : undefined;
+      if (pred && byId.has(pred)) { courseHL.add(pred); col1 = [pred, ...col1.filter((x) => x !== pred)]; }
+      if (succ && byId.has(succ)) { courseHL.add(succ); col3 = [succ, ...col3.filter((x) => x !== succ)]; }
+    }
+
     /** @param {string} id */
     const link = (id) =>
-      `<a class="node" href="/concepts/${id}.html" data-id="${esc(id)}" title="${esc(title(id))}">${label(id)}</a>`;
+      `<a class="node${courseHL.has(id) ? " node--course" : ""}" href="/concepts/${id}.html" data-id="${esc(id)}" title="${esc(title(id))}">${label(id)}</a>`;
     const current = `<span class="node node--current" data-id="${esc(hood.id)}" aria-current="page" title="${esc(title(hood.id))}">${label(hood.id)}</span>`;
 
     /** Render a column with an overflow "+k more" chip past MAX_PER_COL.

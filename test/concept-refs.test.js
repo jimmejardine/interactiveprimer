@@ -1,7 +1,7 @@
 // @ts-check
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractConceptRefs, extractForwardRefs, extractSoftRefs, extractTodoRefs } from "../js/concept-refs.js";
+import { extractConceptRefs, extractForwardRefs, extractSoftRefs, extractTodoRefs, extractCourseMembers } from "../js/concept-refs.js";
 
 test("extracts the `to` id of a single ref", () => {
   assert.deepEqual(
@@ -124,4 +124,20 @@ test("real refs and todo placeholders coexist on one page", () => {
     <primer-ref todo to="group-theory">groups</primer-ref>`;
   assert.deepEqual(extractConceptRefs(html), ["arithmetic/division"]);
   assert.deepEqual(extractTodoRefs(html), ["group-theory"]);
+});
+
+test("extractCourseMembers takes normal + soft refs in document order, deduped, excluding forward/todo", () => {
+  const html = `
+    <primer-ref to="a/one">one</primer-ref>
+    <primer-ref soft to="a/two">two</primer-ref>
+    <primer-ref forward to="a/skip-fwd">fwd</primer-ref>
+    <primer-ref todo to="a/skip-todo">todo</primer-ref>
+    <primer-ref soft to="a/one">dup of one</primer-ref>
+    <primer-ref to="a/three">three</primer-ref>`;
+  assert.deepEqual(extractCourseMembers(html), ["a/one", "a/two", "a/three"]);
+});
+
+test("extractCourseMembers is empty for a page with only forward/todo refs", () => {
+  const html = `<primer-ref forward to="x">f</primer-ref><primer-ref todo to="y">t</primer-ref>`;
+  assert.deepEqual(extractCourseMembers(html), []);
 });

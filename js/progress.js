@@ -18,6 +18,7 @@ import {
   todayISO,
   MAX_STARS,
 } from "./confidence-store.js";
+import { getCurrentCourse } from "./course.js";
 
 /** @typedef {{ id: string, stars: number, first: string, last: string }} ProgressEntry */
 
@@ -113,12 +114,13 @@ export function validateImport(obj) {
 
 // ---- browser IO ------------------------------------------------------------------------
 
-/** @returns {{ type: string, version: number, exported: string, entries: ProgressEntry[] }} */
+/** @returns {{ type: string, version: number, exported: string, course: string, entries: ProgressEntry[] }} */
 export function collectProgress() {
   return {
     type: FILE_TYPE,
     version: FILE_VERSION,
     exported: todayISO(),
+    course: getCurrentCourse(), // the learner's current course id, "" if none
     entries: allEntries(),
   };
 }
@@ -172,14 +174,18 @@ export async function exportProgress() {
 }
 
 /**
- * Read + validate a picked progress file into its entries (throws on a bad/corrupt file).
+ * Read + validate a picked progress file into its entries and current-course id (throws on a
+ * bad/corrupt file). `course` is "" when the file predates courses or carried none.
  * @param {File} file
- * @returns {Promise<ProgressEntry[]>}
+ * @returns {Promise<{ entries: ProgressEntry[], course: string }>}
  */
 export async function readProgressFile(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const text = await gunzip(bytes);
-  return validateImport(JSON.parse(text));
+  const obj = JSON.parse(text);
+  const entries = validateImport(obj);
+  const course = typeof obj?.course === "string" ? obj.course : "";
+  return { entries, course };
 }
 
 /**

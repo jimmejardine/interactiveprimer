@@ -14,6 +14,8 @@ import { confidenceColor } from "./confidence-color.js";
 import { mountSearchBox, SEARCH_BOX_CSS } from "./concept-search-box.js";
 import { createContextMenu } from "./context-menu.js";
 import { t } from "./i18n.js";
+import { getCurrentCourse } from "./course.js";
+import { courseVisibleSet } from "./graph.js";
 // Defines <primer-math> on this page (concepts.html doesn't load boot.js) so a node with a math
 // title can typeset inside a <foreignObject>. concepts.html supplies the KaTeX CSS + import map.
 import "./components/primer-math.js";
@@ -26,6 +28,13 @@ const PAD_X = 12, PAD_Y = 7, EDGE_GAP = 4; // node text padding; gap between an 
 const LABEL_MAXW = 120, LINE_H = 15; // wrap node labels to this width (px); line height
 const EXPLICIT_WEIGHT = 2.2; // spring strength for an explicit (concept-meta) prerequisite edge
 const IMPLICIT_WEIGHT = 0.3; // a much weaker pull for an implicit edge (only a prose <primer-ref>)
+// A course's own edges dominate the layout: members shove each other a bit harder apart (charge)
+// while the gold edges between them pull harder together, so the course tends toward a clean linear
+// spine with its prerequisite foundations off to the side. Kept moderate so the layout still SETTLES
+// — too stiff a spring (or too high a charge) makes the explicit-Euler integrator oscillate forever.
+const COURSE_EDGE_WEIGHT = 3.4; // spring strength for a member→member (gold) course edge (> explicit's 2.2)
+const COURSE_CHARGE = 1.7; // repulsion multiplier on a course-member node (shoves ancestors off the spine)
+const COURSE_GAP = 95; // vertical centre-to-centre spacing of pinned course members (the spine)
 const LAYOUT = { outwardPerDepth: 0.45 }; // extra outward push per depth level → edges fan outward
 
 /**
@@ -83,7 +92,7 @@ function palette() {
   const tc = themeColors();
   const cs = getComputedStyle(document.documentElement);
   const get = (/** @type {string} */ name, /** @type {string} */ fb) => cs.getPropertyValue(name).trim() || fb;
-  return { ink: tc.ink, line: tc.line, surface: get("--primer-surface", "#fff"), border: get("--primer-border", "#ccc") };
+  return { ink: tc.ink, line: tc.line, surface: get("--primer-surface", "#fff"), border: get("--primer-border", "#ccc"), course: get("--primer-course", "#e3b15c") };
 }
 
 /**
@@ -109,33 +118,64 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     return c?.titleHtml && !c?.titles?.[locale] ? c.titleHtml : null;
   };
 
+  // Course focus: when a course is active, restrict the graph to the course's members + their
+  // recursive prerequisite ancestors (`courseVisibleSet`), and tint the member nodes with the
+  // course colour. No course → show everything (`visibleIds` null = no filter).
+  const activeCourse = getCurrentCourse();
+  const courseNode = activeCourse ? byId.get(activeCourse) : undefined;
+  const visibleIds = courseNode ? courseVisibleSet(activeCourse, byId) : null;
+  const courseMembers = new Set(courseNode?.courseMembers ?? []);
+  // The course as an ORDERED list (course/document order). The gold "course edges" are the
+  // consecutive links of this sequence (member[i]→member[i+1]) — a linear, non-cyclic spine — and
+  // the members are pinned into a vertical column in this order (see pinCourseColumn below).
+  const orderedMembers = (courseNode?.courseMembers ?? []).filter((id) => id !== activeCourse);
+
   // ---- model: layout nodes (+ render refs) and directed prerequisite→dependent edges ----
-  /** @typedef {{ id: string, x: number, y: number, vx: number, vy: number, fixed?: boolean, pinned?: boolean, depth?: number, hw: number, hh: number, g: SVGGElement, rect: SVGElement, text?: SVGElement, fo?: SVGElement, div?: HTMLElement }} GNode */
+  /** @typedef {{ id: string, x: number, y: number, vx: number, vy: number, fixed?: boolean, pinned?: boolean, depth?: number, charge?: number, hw: number, hh: number, g: SVGGElement, rect: SVGElement, text?: SVGElement, fo?: SVGElement, div?: HTMLElement }} GNode */
   /** @type {GNode[]} */
   const nodes = [];
   /** @type {Map<string, GNode>} */
   const nodeById = new Map();
   for (const c of byId.values()) {
-    const n = /** @type {GNode} */ ({ id: c.id, x: 0, y: 0, vx: 0, vy: 0, hw: 0, hh: 0 });
+    if (visibleIds && !visibleIds.has(c.id)) continue; // hidden outside the active course's scope
+    const n = /** @type {GNode} */ ({ id: c.id, x: 0, y: 0, vx: 0, vy: 0, hw: 0, hh: 0, charge: courseMembers.has(c.id) ? COURSE_CHARGE : 1 });
     nodes.push(n);
     nodeById.set(c.id, n);
   }
   // The concept pinned at the centre (bold, larger, immovable). Normally `root`; a valid `focusId`
-  // (e.g. from a pathway's "Explore" link) re-centres the whole map on that concept instead.
-  const centerId = focusId && nodeById.has(focusId) ? focusId : "root";
+  // (e.g. from a pathway's "Explore" link) re-centres the whole map on that concept instead. In
+  // course mode root is always present (it's an ancestor of everything), but fall back to the
+  // course node just in case. (Edges below auto-filter: they only link nodes present in nodeById.)
+  const centerId = focusId && nodeById.has(focusId) ? focusId : nodeById.has("root") ? "root" : activeCourse || "root";
   // Edges are prerequisite→dependent. An edge is "explicit" when the prerequisite was declared in
   // the concept-meta (vs. only harvested from an inline <primer-ref>): explicit edges pull harder
   // and draw thicker. Fall back to "explicit" when the graph predates explicitPrerequisites.
-  /** @type {{ source: string, target: string, explicit: boolean, weight: number, line: SVGElement }[]} */
+  /** @type {{ source: string, target: string, explicit: boolean, course: boolean, weight: number, line: SVGElement }[]} */
   const edges = [];
+  // The gold course spine: consecutive links of the ordered member list (member[i]→member[i+1]).
+  // We dedupe these against prerequisite edges by unordered pair, so a consecutive pair that also
+  // happens to be a prerequisite is drawn ONCE, in gold — the course tier supersedes explicit/implicit.
+  const chainMembers = orderedMembers.filter((id) => nodeById.has(id));
+  /** @param {string} a @param {string} b */
+  const pairKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+  const coursePairs = new Set(chainMembers.slice(1).map((id, i) => pairKey(chainMembers[i], id)));
   for (const c of byId.values()) {
     const expl = c.explicitPrerequisites;
     for (const pre of c.prerequisites ?? []) {
       if (nodeById.has(pre) && pre !== c.id) {
+        if (coursePairs.has(pairKey(pre, c.id))) continue; // a course-chain link draws this pair in gold below
         const explicit = expl ? expl.includes(pre) : true;
-        edges.push(/** @type {any} */ ({ source: pre, target: c.id, explicit, weight: explicit ? EXPLICIT_WEIGHT : IMPLICIT_WEIGHT }));
+        const weight = explicit ? EXPLICIT_WEIGHT : IMPLICIT_WEIGHT;
+        edges.push(/** @type {any} */ ({ source: pre, target: c.id, explicit, course: false, weight }));
       }
     }
+  }
+  // Append the gold chain after the prerequisite edges. Direction is course order (earlier→later),
+  // so with the members pinned top→bottom the arrowheads point down the sequence.
+  for (let i = 1; i < chainMembers.length; i++) {
+    edges.push(/** @type {any} */ ({
+      source: chainMembers[i - 1], target: chainMembers[i], explicit: false, course: true, weight: COURSE_EDGE_WEIGHT,
+    }));
   }
 
   // ---- SVG scaffold ----
@@ -150,6 +190,14 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
   const arrowPath = mk("path", { d: "M0,0 L10,5 L0,10 z" });
   marker.appendChild(arrowPath);
   defs.appendChild(marker);
+  // A second, gold arrowhead for course edges (its fill is set to --primer-course in paint()).
+  const markerCourse = mk("marker", {
+    id: "cg-arrow-course", viewBox: "0 0 10 10", refX: "9", refY: "5",
+    markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse",
+  });
+  const arrowPathCourse = mk("path", { d: "M0,0 L10,5 L0,10 z" });
+  markerCourse.appendChild(arrowPathCourse);
+  defs.appendChild(markerCourse);
   const viewport = /** @type {SVGGElement} */ (mk("g", { class: "cg-viewport" }));
   const edgesG = mk("g", { class: "cg-edges" });
   const nodesG = mk("g", { class: "cg-nodes" });
@@ -157,18 +205,30 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
   svg.append(defs, viewport);
   host.appendChild(svg);
 
+  // When a course is active, name it in gold at the bottom-centre of the canvas. host is positioned
+  // (concepts.html: position:fixed), so this absolutely-positioned child anchors to it; it's cleared
+  // with the rest of host on a course-change rebuild.
+  if (activeCourse) {
+    const banner = document.createElement("div");
+    banner.className = "cg-course-banner";
+    banner.textContent = `${t("course.filtered")} ${titleOf(activeCourse)}`;
+    host.appendChild(banner);
+  }
+
   // ---- build edge + node DOM ----
   for (const e of edges) {
-    e.line = mk("line", { "marker-end": "url(#cg-arrow)" });
+    e.line = mk("line", { "marker-end": e.course ? "url(#cg-arrow-course)" : "url(#cg-arrow)" });
     e.line.setAttribute("data-source", e.source);
     e.line.setAttribute("data-target", e.target);
     if (e.explicit) e.line.classList.add("cg-explicit");
+    if (e.course) e.line.classList.add("cg-course");
     edgesG.appendChild(e.line);
   }
   for (const n of nodes) {
     const g = /** @type {SVGGElement} */ (mk("g", { class: "cg-node" }));
     g.setAttribute("data-id", n.id);
     if (n.id === centerId) g.classList.add("cg-node--root"); // bigger, bold central node
+    if (courseMembers.has(n.id)) g.classList.add("cg-node--course"); // gold outline (stroke set in paint)
     const rect = mk("rect", { rx: "10", ry: "10" });
     g.appendChild(rect);
     nodesG.appendChild(g); // in the DOM before measuring so glyph widths / KaTeX layout resolve
@@ -237,18 +297,24 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     const c = palette();
     svg.style.background = "var(--primer-bg, #fff)";
     for (const n of nodes) {
+      // A course member keeps its CONFIDENCE fill (so the learner's star progress still shows) and
+      // is marked instead by a gold OUTLINE (stroke); non-members keep the normal border.
       n.rect.setAttribute("fill", confidenceColor(n.id) ?? c.surface);
-      n.rect.setAttribute("stroke", c.border);
+      n.rect.setAttribute("stroke", courseMembers.has(n.id) ? c.course : c.border);
       // SVG text colours via `fill`; a foreignObject HTML label (incl. KaTeX) via CSS `color`.
       if (n.div) n.div.style.color = c.ink;
       else n.text?.setAttribute("fill", c.ink);
     }
     for (const e of edges) {
-      e.line.setAttribute("stroke", c.line);
-      e.line.setAttribute("stroke-opacity", e.explicit ? "0.5" : "0.28");
+      // An edge linking two course members is drawn in the course colour (gold), so the course's
+      // internal spine stands out from the prerequisite foundations beneath it.
+      e.line.setAttribute("stroke", e.course ? c.course : c.line);
+      e.line.setAttribute("stroke-opacity", e.course ? "0.95" : e.explicit ? "0.5" : "0.28");
     }
     arrowPath.setAttribute("fill", c.line);
     arrowPath.setAttribute("fill-opacity", "0.5");
+    arrowPathCourse.setAttribute("fill", c.course); // gold arrowheads on course edges
+    arrowPathCourse.setAttribute("fill-opacity", "0.95");
   };
   paint();
 
@@ -281,10 +347,27 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     }
   };
 
-  // ---- seed, pin the centre node at the origin, pre-warm, fit-to-view ----
+  // ---- seed, pin the anchor (course column, or the centre node), pre-warm, fit-to-view ----
   seedPositions(nodes, 46);
   const centerNode = nodeById.get(centerId);
-  if (centerNode) {
+  // In course mode the rigid, evenly-spaced vertical member column IS the layout's anchor (so we
+  // don't ALSO pin root at the origin). Members are `fixed`, so the sim never moves them — the gold
+  // spine is a clean top→bottom line and the layout always settles. Re-applied after the on-open
+  // re-seed below, because seedPositions overwrites x/y for every node.
+  const pinCourseColumn = () => {
+    const n = chainMembers.length;
+    chainMembers.forEach((id, i) => {
+      const node = nodeById.get(id);
+      if (!node) return;
+      node.x = 0;
+      node.y = (i - (n - 1) / 2) * COURSE_GAP; // member[0] at the top, last member at the bottom
+      node.fixed = true;
+      node.pinned = true;
+    });
+  };
+  if (chainMembers.length) {
+    pinCourseColumn();
+  } else if (centerNode) {
     centerNode.x = 0;
     centerNode.y = 0;
     centerNode.fixed = true; // skipped by the sim → it never moves from the origin
@@ -388,7 +471,9 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
   const prefersReduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
   if (!prefersReduced) {
     seedPositions(nodes, 46); // identical spiral scatter (also zeroes velocities → starts from rest)
-    if (centerNode) {
+    if (chainMembers.length) {
+      pinCourseColumn(); // re-pin the course spine the scatter just overwrote
+    } else if (centerNode) {
       centerNode.x = 0; // keep the centre node at the origin (still fixed/pinned from above)
       centerNode.y = 0;
     }
@@ -632,8 +717,8 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     const id = /** @type {any} */ (ev).detail?.conceptId;
     const n = id && nodeById.get(id);
     if (n) {
-      const c = palette();
-      n.rect.setAttribute("fill", confidenceColor(n.id) ?? c.surface);
+      // A course member keeps its gold outline; only the confidence FILL updates here.
+      n.rect.setAttribute("fill", confidenceColor(n.id) ?? palette().surface);
     }
   };
   document.addEventListener("theme-change", onTheme);
@@ -701,9 +786,16 @@ function injectStyleOnce() {
     /* The central root node, bigger and bold (the pill auto-sizes to the larger label). */
     .cg-node--root text, .cg-node--root .cg-fo-label { font-size: 21px; font-weight: 700; }
     .cg-node--root rect { stroke-width: 2.5; }
+    .cg-node--course rect { stroke-width: 3; } /* gold outline marks a course member (stroke colour in paint) */
     .cg-edges line { stroke-width: 1.2; transition: stroke-width .1s, stroke-opacity .1s; }
     .cg-edges line.cg-explicit { stroke-width: 2.6; }
     .cg-edges line.cg-hot { stroke: var(--primer-accent, #46e) !important; stroke-opacity: 0.9 !important; stroke-width: 3; }
+    .cg-edges line.cg-course { stroke-width: 4.5; } /* the course spine: thicker than an explicit edge */
+    .cg-course-banner {
+      position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+      color: var(--primer-course, #e3b15c); font-family: var(--primer-font-ui, sans-serif);
+      font-weight: 600; font-size: 0.95rem; pointer-events: none; white-space: nowrap;
+    }
     ${SEARCH_BOX_CSS}
   `;
   document.head.appendChild(style);

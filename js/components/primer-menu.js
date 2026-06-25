@@ -19,6 +19,9 @@ import {
   applyProgress,
   hasExistingProgress,
 } from "../progress.js";
+import { getCurrentCourse, setCurrentCourse, clearCourse } from "../course.js";
+import { loadGraph } from "../graph-data.js";
+import { confirmDialog } from "../confirm-dialog.js";
 
 /** @typedef {import("../theme.js").ThemeId} ThemeId */
 /** @typedef {import("../i18n.js").LocaleId} LocaleId */
@@ -72,6 +75,14 @@ const STYLE = `
   .choices { display: flex; flex-direction: column; gap: 0.35rem; }
   .choices button { text-align: left; }
 
+  /* The active course's name in the Course sub-view: a link to its page, tinted with the course colour. */
+  .course-name {
+    display: block; text-align: left; font-weight: 600;
+    color: var(--primer-ink, #111); text-decoration: none;
+    padding: 0.3rem 0.4rem; border-left: 3px solid var(--primer-course, #e3b15c);
+  }
+  .course-name:hover { text-decoration: underline; }
+
   .file-input { display: none; }
   .status { margin: 0.5rem 0 0; font-size: 0.8rem; color: var(--primer-ink-soft, #667); }
   .status[hidden] { display: none; }
@@ -110,6 +121,8 @@ export class PrimerMenu extends HTMLElement {
   #onThemeChange = null;
   /** @type {((e: KeyboardEvent) => void) | null} */
   #onKeydown = null;
+  /** @type {(() => void) | null} */
+  #onCourseChange = null;
 
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
@@ -139,6 +152,7 @@ export class PrimerMenu extends HTMLElement {
           <button type="button" class="nav" data-target="theme">${t("menu.theme")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="lang">${t("menu.language")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="progress">${t("menu.progress")}<span class="chev" aria-hidden="true">›</span></button>
+          <button type="button" class="nav nav-course" data-target="course" hidden>${t("menu.course")}<span class="chev" aria-hidden="true">›</span></button>
         </div>
         <div class="menu-view view-theme" hidden>
           <button type="button" class="back"><span aria-hidden="true">‹ </span>${t("menu.theme")}</button>
@@ -156,6 +170,13 @@ export class PrimerMenu extends HTMLElement {
           </div>
           <p class="status" role="status" aria-live="polite" hidden></p>
           <input type="file" class="file-input" accept=".gz,.json,application/gzip,application/json" />
+        </div>
+        <div class="menu-view view-course" hidden>
+          <button type="button" class="back"><span aria-hidden="true">‹ </span>${t("menu.course")}</button>
+          <div class="choices" role="group" aria-label="${t("menu.course")}">
+            <a class="course-name" href="#"></a>
+            <button type="button" class="exit-course">${t("course.exit")}</button>
+          </div>
         </div>
       </div>
       <div class="backdrop" role="dialog" aria-modal="true" aria-labelledby="restore-title">
@@ -198,6 +219,7 @@ export class PrimerMenu extends HTMLElement {
       theme: /** @type {HTMLElement} */ (root.querySelector(".view-theme")),
       lang: /** @type {HTMLElement} */ (root.querySelector(".view-lang")),
       progress: /** @type {HTMLElement} */ (root.querySelector(".view-progress")),
+      course: /** @type {HTMLElement} */ (root.querySelector(".view-course")),
     });
     /** @param {string} name */
     const showView = (name) => {
@@ -240,6 +262,32 @@ export class PrimerMenu extends HTMLElement {
         applyLocale(/** @type {LocaleId} */ (b.dataset.localeId));
       });
     }
+
+    // --- Course: show the active course's name + an Exit; the root item only appears in a course.
+    const navCourse = /** @type {HTMLButtonElement} */ (root.querySelector(".nav-course"));
+    const courseNameEl = /** @type {HTMLAnchorElement} */ (root.querySelector(".course-name"));
+    const reflectCourse = async () => {
+      const course = getCurrentCourse();
+      navCourse.hidden = !course;
+      if (!course) return;
+      courseNameEl.href = `/concepts/${course}.html`;
+      courseNameEl.textContent = t("course.none"); // placeholder until the title resolves
+      try {
+        const { byId } = await loadGraph();
+        const c = byId.get(course);
+        courseNameEl.textContent = c ? (c.titles?.[getLocale()] ?? c.title) : (course.split("/").pop() ?? course);
+      } catch {
+        courseNameEl.textContent = course.split("/").pop() ?? course;
+      }
+    };
+    void reflectCourse();
+    /** @type {HTMLButtonElement} */ (root.querySelector(".exit-course")).addEventListener("click", () => {
+      clearCourse();
+      showView("root");
+      setOpen(false);
+    });
+    this.#onCourseChange = () => void reflectCourse();
+    document.addEventListener("course-change", this.#onCourseChange);
 
     // --- Save / restore progress -------------------------------------------------------
     const saveBtn = /** @type {HTMLButtonElement} */ (root.querySelector(".save"));
@@ -284,7 +332,24 @@ export class PrimerMenu extends HTMLElement {
       fileInput.value = ""; // reset so re-picking the same file fires `change` again
       if (!file) return;
       try {
-        const entries = await readProgressFile(file);
+        const { entries, course: importedCourse } = await readProgressFile(file);
+        // A course clash: the file carries a course different from the current one. Ask whether to
+        // adopt it. (No current course → adopt silently; same course → nothing to ask.)
+        const cur = getCurrentCourse();
+        if (importedCourse && cur && importedCourse !== cur) {
+          let importedTitle = importedCourse.split("/").pop() ?? importedCourse;
+          try {
+            const { byId } = await loadGraph();
+            importedTitle = byId.get(importedCourse)?.title ?? importedTitle;
+          } catch {
+            /* fall back to the leaf id */
+          }
+          if (await confirmDialog({ message: t("course.importClash", { course: importedTitle }), confirm: t("course.switch"), cancel: t("course.keep") })) {
+            setCurrentCourse(importedCourse);
+          }
+        } else if (importedCourse && !cur) {
+          setCurrentCourse(importedCourse);
+        }
         if (hasExistingProgress()) {
           pending = entries; // let the learner choose merge vs overwrite
           openDialog();
@@ -348,7 +413,8 @@ export class PrimerMenu extends HTMLElement {
     if (this.#onThemeChange) document.removeEventListener("theme-change", this.#onThemeChange);
     if (this.#onKeydown) document.removeEventListener("keydown", this.#onKeydown);
     if (this.#onDocClick) document.removeEventListener("click", this.#onDocClick);
-    this.#onThemeChange = this.#onKeydown = this.#onDocClick = null;
+    if (this.#onCourseChange) document.removeEventListener("course-change", this.#onCourseChange);
+    this.#onThemeChange = this.#onKeydown = this.#onDocClick = this.#onCourseChange = null;
   }
 }
 

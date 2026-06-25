@@ -102,3 +102,15 @@ export function extractSoftRefs(html) {
 export function extractTodoRefs(html) {
   return [...new Set(parseRefs(html).filter((r) => r.todo).map((r) => r.id))];
 }
+
+/**
+ * The de-duped ids a course page lists as its members: every **normal or soft** `<primer-ref>`, in
+ * DOCUMENT order (forward and todo refs are excluded). This is the ordered concept list of a course
+ * (a page with `"course": true` in its concept-meta) — used for the course's predecessor/successor
+ * navigation and the focused graph view.
+ * @param {string} html
+ * @returns {string[]}
+ */
+export function extractCourseMembers(html) {
+  return [...new Set(parseRefs(html).filter((r) => !r.forward && !r.todo).map((r) => r.id))];
+}

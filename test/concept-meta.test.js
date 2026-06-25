@@ -75,3 +75,9 @@ test("parseConceptMeta rejects malformed or non-string dates", () => {
   assert.throws(() => parseConceptMeta({ id: "a/b", title: "B", completedDate: "2026-13-40" }));
   assert.throws(() => parseConceptMeta({ id: "a/b", title: "B", needsReviewDate: 20260615 }));
 });
+
+test("parseConceptMeta accepts `course: true` and rejects a non-boolean", () => {
+  assert.equal(parseConceptMeta({ prerequisites: [], course: true }).course, true);
+  assert.equal(parseConceptMeta({ prerequisites: [] }).course, undefined);
+  assert.throws(() => parseConceptMeta({ prerequisites: [], course: "yes" }), /course.*boolean/);
+});

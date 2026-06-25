@@ -12,6 +12,7 @@ import {
   effectiveLevel,
   resolveLevels,
   validateGraph,
+  courseVisibleSet,
 } from "../js/graph.js";
 
 /** @typedef {import("../js/types/domain.js").Concept} Concept */
@@ -189,4 +190,23 @@ test("validateGraph warns about ungrounded levels", () => {
     { id: "root", title: "Root", prerequisites: [] },
   ]);
   assert.ok(diagnostics.some((d) => d.code === "ungrounded-level"));
+});
+
+test("courseVisibleSet = the course node + members + their recursive prerequisite ancestors", () => {
+  /** @type {Concept[]} */
+  const concepts = [
+    { id: "root", title: "Root", prerequisites: [] },
+    { id: "a", title: "A", prerequisites: ["root"] },
+    { id: "b", title: "B", prerequisites: ["a"] },
+    { id: "c", title: "C (unrelated)", prerequisites: ["root"] },
+    { id: "course/x", title: "Course", prerequisites: ["root"], course: true, courseMembers: ["b"] },
+  ];
+  const byId = indexConcepts(concepts);
+  const visible = courseVisibleSet("course/x", byId);
+  assert.deepEqual([...visible].sort(), ["a", "b", "course/x", "root"]); // c excluded
+});
+
+test("courseVisibleSet returns an empty set for an unknown course id", () => {
+  const byId = indexConcepts(sample());
+  assert.equal(courseVisibleSet("does/not/exist", byId).size, 0);
 });

@@ -17,6 +17,8 @@ import { t } from "../i18n.js";
 import { combineRating } from "../confidence.js";
 import { readEntry, writeEntry } from "../confidence-store.js";
 import { attentionEvent, flaggedToday, markFlagged } from "../feedback.js";
+import { getCurrentCourse, setCurrentCourse, clearCourse } from "../course.js";
+import { confirmDialog } from "../confirm-dialog.js";
 
 /** Number of stars in the confidence rating (0 = unrated/none, MAX = full mastery). */
 const MAX_STARS = 10;
@@ -76,11 +78,25 @@ const STAR_CSS = `
   .feedback .attn:hover { color: var(--primer-ink, #111); }
   .feedback .attn:focus-visible { outline: 2px solid var(--primer-accent, #46e); border-radius: 0.25rem; }
   .feedback .attn[disabled] { text-decoration: none; cursor: default; opacity: 0.8; }
+
+  /* "Focus on this course" — shown below the title only on a course page (course: true). */
+  .course-focus { margin: -0.1rem 0 1rem; }
+  .course-focus[hidden] { display: none; }
+  .focus-course {
+    font-family: var(--primer-font-ui, sans-serif); font-size: 0.9rem; cursor: pointer;
+    padding: 0.45rem 0.95rem; border-radius: 999px;
+    border: 1.5px solid var(--primer-course, #e3b15c);
+    background: var(--primer-course, #e3b15c); color: var(--primer-ink, #111);
+  }
+  .focus-course.is-active { background: transparent; color: var(--primer-ink-soft, #667); }
+  .focus-course:hover { filter: brightness(0.96); }
 `;
 
 export class PrimerConcept extends HTMLElement {
   /** @type {((e: Event) => void) | null} */
   #onQuizGraded = null;
+  /** @type {(() => void) | null} */
+  #onCourse = null;
 
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
@@ -111,6 +127,7 @@ export class PrimerConcept extends HTMLElement {
       <style>${STAR_CSS}</style>
       <article>
         <div class="title-row"><h1><slot name="title">${title}</slot></h1>${levelBadge}</div>
+        <div class="course-focus" hidden><button type="button" class="focus-course"></button></div>
         <div class="body"><slot></slot></div>
         <section class="confidence card" aria-label="${t("concept.confidence.legend")}">
           <p class="meta" id="conf-label" style="margin-top:0;">${t("concept.confidence.prompt")}</p>
@@ -188,13 +205,40 @@ export class PrimerConcept extends HTMLElement {
     };
     document.addEventListener("quiz-graded", this.#onQuizGraded);
 
+    // "Focus on this course" — only on a course page (`course: true`). Focusing sets the learner's
+    // current course (id = this course's page id); switching from another course asks first; once
+    // focused the button flips to an "exit" affordance.
+    if (meta?.course) {
+      const wrap = /** @type {HTMLElement} */ (root.querySelector(".course-focus"));
+      const btn = /** @type {HTMLButtonElement} */ (root.querySelector(".focus-course"));
+      wrap.hidden = false;
+      const refreshBtn = () => {
+        const active = getCurrentCourse() === id;
+        btn.textContent = active ? t("course.focused") : t("course.focus");
+        btn.classList.toggle("is-active", active);
+      };
+      refreshBtn();
+      btn.addEventListener("click", async () => {
+        const cur = getCurrentCourse();
+        if (cur === id) { clearCourse(); return; } // already focused → leave the course
+        if (cur && cur !== id) {
+          const ok = await confirmDialog({ message: t("course.change"), confirm: t("course.switch"), cancel: t("course.keep") });
+          if (!ok) return;
+        }
+        setCurrentCourse(id);
+      });
+      this.#onCourse = refreshBtn;
+      document.addEventListener("course-change", this.#onCourse);
+    }
+
     // For an implicit level, fill the (initially hidden) badge from the emitted graph.
     if (declared === undefined) void this.#showImplicitLevel(root, id);
   }
 
   disconnectedCallback() {
     if (this.#onQuizGraded) document.removeEventListener("quiz-graded", this.#onQuizGraded);
-    this.#onQuizGraded = null;
+    if (this.#onCourse) document.removeEventListener("course-change", this.#onCourse);
+    this.#onQuizGraded = this.#onCourse = null;
   }
 
   /**

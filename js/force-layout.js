@@ -12,9 +12,11 @@
  * @module
  */
 
-/** @typedef {{ id: string, x: number, y: number, vx: number, vy: number, fixed?: boolean, depth?: number }} LayoutNode */
+/** @typedef {{ id: string, x: number, y: number, vx: number, vy: number, fixed?: boolean, depth?: number, charge?: number }} LayoutNode */
 // `depth` is a node's graph distance from the pinned root (root = 0); deeper nodes get more
 // outward push (see `outwardPerDepth`), so prerequisite→dependent edges point radially outward.
+// `charge` scales a node's repulsion (default 1; > 1 makes it shove harder — pairwise repulsion is
+// multiplied by both endpoints' charges, so two high-charge nodes fly apart strongly).
 /** @typedef {{ source: string, target: string, weight?: number }} LayoutEdge */
 // `weight` scales an edge's spring strength (default 1; > 1 pulls its endpoints harder).
 
@@ -97,7 +99,7 @@ export function tick(nodes, edges, params = {}) {
         d2 = dx * dx + dy * dy;
       }
       const inv = 1 / d2;
-      const mag = p.repulsion * inv;
+      const mag = p.repulsion * inv * (a.charge ?? 1) * (b.charge ?? 1);
       const dist = Math.sqrt(d2);
       const ux = dx / dist;
       const uy = dy / dist;

@@ -70,6 +70,23 @@ prerequisites or level may omit the block entirely.
 | `declaredLevel` | no | Real number. Levels start at 0 and propagate downstream via `max(declared, all prerequisite levels)`. Fractions allowed (e.g. `2.5`). |
 | `completedDate` | no | ISO date `YYYY-MM-DD` — when the lesson content was finished. Surfaced by the graph tool; omit on stubs. |
 | `needsReviewDate` | no | ISO date `YYYY-MM-DD` — when this concept was flagged as needing review (the date the flag was raised, not a deadline). |
+| `course` | no | Boolean. `true` marks this page as a **course** — see "Courses" below. |
+
+## Courses
+
+A **course** is a curated path through a set of concepts. Mark the course's hub page with
+`"course": true` in its `concept-meta`; the build then harvests every `<primer-ref>` on that page
+(**normal + soft**, deduped, in document order — `forward`/`todo` excluded) into the course's ordered
+member list (emitted as `courseMembers` on that node in `dist/graph.json`). So a course page is
+usually a prose index that `soft`-refs its concepts stage by stage (see
+`concepts/applied-mathematics/game-development-math/game-development-math.html`).
+
+A learner picks a **current course** (the "Focus on this course" button under the title, or the
+**Course** hamburger menu → Exit course). It's stored per-profile (`localStorage["primer:course"]`,
+via `js/course.js`) and travels with the progress export/import (a clash on import asks which to
+keep). While a course is active: the top/bottom mini-explorer tints the course predecessor/successor
+of the current concept; the big `/concepts.html` graph collapses to the course members + their
+recursive prerequisite ancestors, with members tinted in the course colour (`--primer-course`).
 
 ## Authoring elements (use inside `<primer-card>`)
 

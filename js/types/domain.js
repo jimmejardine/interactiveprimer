@@ -34,6 +34,8 @@
  * @property {Level} [declaredLevel]   Optional numeric level explicitly declared.
  * @property {string} [completedDate]    Optional ISO date "YYYY-MM-DD" — when the lesson content was finished.
  * @property {string} [needsReviewDate]  Optional ISO date "YYYY-MM-DD" — when this concept was flagged as needing review.
+ * @property {boolean} [course]          When true, this page is a *course*: a curated path whose
+ *   member concepts the build harvests from its inline `<primer-ref>`s (see `courseMembers`).
  * @property {string} [sourceHash]       Legacy: previously set on translation overlays; overlays now
  *   carry a trailing `<!-- sourceHash: … -->` comment instead (see scripts/i18n-check.js).
  */
@@ -44,7 +46,9 @@
  * `<primer-math>` math title) — consumers typeset it while `title` stays plain text for text uses.
  * `explicitPrerequisites` are just the concept-meta–declared prerequisites (a subset of the unioned
  * `prerequisites`); the rest are implicit, harvested from inline `<primer-ref>`s in the prose.
- * @typedef {ConceptMeta & { id: string, title: string, titleHtml?: string, explicitPrerequisites?: string[] }} Concept */
+ * `courseMembers` (present only on a `course: true` page) is its ordered, de-duped concept list,
+ * harvested from the page's normal + soft `<primer-ref>`s.
+ * @typedef {ConceptMeta & { id: string, title: string, titleHtml?: string, explicitPrerequisites?: string[], courseMembers?: string[] }} Concept */
 
 /**
  * A concept whose effective level has been resolved over the tree.

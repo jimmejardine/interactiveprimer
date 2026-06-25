@@ -69,6 +69,15 @@ export function parseConceptMeta(raw) {
     meta.needsReviewDate = validateDate(obj.needsReviewDate, "needsReviewDate");
   }
 
+  // `course: true` marks this page as a course — a curated path. The build harvests the page's
+  // <primer-ref>s (normal + soft) into the course's ordered concept list (see extractCourseMembers).
+  if (obj.course !== undefined) {
+    if (typeof obj.course !== "boolean") {
+      throw new Error("concept `course`, when present, must be a boolean");
+    }
+    meta.course = obj.course;
+  }
+
   // Legacy: previously set on translation overlays; overlays now carry a trailing
   // `<!-- sourceHash: … -->` comment instead. Still accepted if present.
   if (obj.sourceHash !== undefined) {

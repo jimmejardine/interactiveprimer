@@ -146,6 +146,28 @@ export function resolvePrerequisites(id, byId) {
 }
 
 /**
+ * The set of concept ids to show for a focused course: the course node itself, its
+ * `courseMembers`, and the FULL recursive prerequisite ancestry of all of them. Used by the big
+ * explorer to collapse the graph to just the course and the foundations it rests on. Tolerant of a
+ * missing course id or member (returns what it can).
+ * @param {string} courseId  The course page's concept id.
+ * @param {Map<string, Concept>} byId
+ * @returns {Set<string>}
+ */
+export function courseVisibleSet(courseId, byId) {
+  /** @type {Set<string>} */
+  const visible = new Set();
+  const course = byId.get(courseId);
+  if (!course) return visible;
+  for (const seed of [courseId, ...(course.courseMembers ?? [])]) {
+    if (!byId.has(seed)) continue;
+    visible.add(seed);
+    for (const anc of resolvePrerequisites(seed, byId)) visible.add(anc);
+  }
+  return visible;
+}
+
+/**
  * The local (one-hop) neighborhood of a concept, for the navigation pathway widget:
  *  - `predecessors` — the concept's direct prerequisites (immediate predecessors).
  *  - `successors`   — the concept's direct dependents (immediate successors).

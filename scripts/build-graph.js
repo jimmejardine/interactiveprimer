@@ -22,7 +22,7 @@ import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseConceptMeta } from "../js/concept-meta.js";
-import { extractConceptRefs, extractForwardRefs, extractSoftRefs, extractTodoRefs } from "../js/concept-refs.js";
+import { extractConceptRefs, extractForwardRefs, extractSoftRefs, extractTodoRefs, extractCourseMembers } from "../js/concept-refs.js";
 import { decodeEntities } from "../js/html-entities.js";
 import { validateGraph, indexConcepts, buildDependents, attachOrphans } from "../js/graph.js";
 import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
@@ -186,6 +186,12 @@ async function main() {
         prerequisites: [...new Set([...parsed.prerequisites, ...refs])],
       };
       if (rawTitle && /<[^>]+>/.test(rawTitle)) meta.titleHtml = rawTitle;
+      // A course page (`"course": true`) carries its ordered, de-duped member list — every normal
+      // or soft `<primer-ref>` on the page. Members are ordinary refs, so they're validated as
+      // prerequisites (normal) or by the soft-ref existence check below.
+      if (parsed.course) {
+        meta.courseMembers = extractCourseMembers(html).filter((r) => r !== id);
+      }
       concepts.push(meta);
       // Stash this page's forward refs; they're reversed onto their targets below.
       const fwd = extractForwardRefs(html).filter((r) => r !== id);
