@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Gradient Checkpointing</primer-title>
+
+    <primer-card>
+      <p>
+        The backward pass has a hidden appetite. To compute a layer's gradient,
+        <primer-ref to="computer-science/deep-learning/training-deep-networks/automatic-differentiation">automatic
+        differentiation</primer-ref> needs that layer's <strong>activations</strong> — the values it
+        produced on the forward pass. The naive recipe simply <em>stores every layer's activations</em>
+        so they are waiting when backprop reaches them. For a network of depth
+        <primer-math>n</primer-math>, that is memory growing linearly, <primer-math>O(n)</primer-math>
+        — and for a deep transformer on a long sequence, it is the single biggest consumer of GPU
+        memory.
+      </p>
+      <p>
+        <strong>Gradient checkpointing</strong> (also called <em>activation</em> checkpointing) makes
+        a different bargain: store only a few activations — the <strong>checkpoints</strong> — and
+        <strong>recompute</strong> the rest on the fly during the backward pass. It spends extra
+        compute (one extra forward pass) to slash activation memory from
+        <primer-math>O(n)</primer-math> toward <primer-math>O(\sqrt{n})</primer-math>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Deriving the √n trade-off</h2>
+      <p>
+        Take a network of <primer-math>n</primer-math> layers. We choose
+        <primer-math>m</primer-math> evenly spaced checkpoints and recompute everything between them
+        when needed. Count the memory and the extra compute as functions of
+        <primer-math>m</primer-math>.
+      </p>
+
+      <p>
+        <strong>Step 1 — the naive cost.</strong> Store all <primer-math>n</primer-math> activations:
+        memory <primer-math>\propto n</primer-math>. That is the baseline we want to beat.
+      </p>
+      <primer-math display>M_{\text{naive}} = O(n).</primer-math>
+
+      <p>
+        <strong>Step 2 — keep only m checkpoints.</strong> Save activations at
+        <primer-math>m</primer-math> layers and discard the rest. The stored checkpoints cost
+        <primer-math>O(m)</primer-math> memory:
+      </p>
+      <primer-math display>M_{\text{checkpoints}} = O(m).</primer-math>
+
+      <p>
+        <strong>Step 3 — recompute a segment at a time.</strong> The <primer-math>m</primer-math>
+        checkpoints cut the network into <primer-math>m</primer-math> segments of about
+        <primer-math>n/m</primer-math> layers each. To get the gradients inside one segment, replay
+        the forward pass from its checkpoint — holding only that segment's activations in memory at
+        once, an extra <primer-math>O(n/m)</primer-math>:
+      </p>
+      <primer-math display>M_{\text{total}}(m) = O\!\left(m + \frac{n}{m}\right).</primer-math>
+
+      <p>
+        <strong>Step 4 — minimize over m.</strong> Balance the two terms. Their sum is smallest when
+        they are equal, <primer-math>m = n/m</primer-math>, i.e.
+        <primer-math>m = \sqrt{n}</primer-math> (calculus agrees: set
+        <primer-math>\frac{d}{dm}\!\left(m + \tfrac{n}{m}\right) = 1 - \tfrac{n}{m^2} = 0</primer-math>).
+        At that choice each term is <primer-math>\sqrt{n}</primer-math>:
+      </p>
+      <primer-math display>M_{\text{total}}(\sqrt{n}) = O\!\left(\sqrt{n} + \frac{n}{\sqrt{n}}\right) = O(\sqrt{n}).</primer-math>
+
+      <p>
+        <strong>Step 5 — the compute it costs.</strong> Backprop already does one forward and one
+        backward. Recomputing each segment once during the backward pass adds, in total, exactly
+        <em>one more forward pass</em> over the network — a fixed
+        <primer-math>\approx 33\%</primer-math> overhead, independent of
+        <primer-math>n</primer-math>:
+      </p>
+      <primer-math display>\text{compute: } \ \underbrace{1\ \text{fwd}}_{\text{normal}} + \underbrace{1\ \text{fwd}}_{\text{recompute}} + \underbrace{1\ \text{bwd}}_{\text{normal}}.</primer-math>
+
+      <p>
+        So <primer-math>m = \sqrt{n}</primer-math> checkpoints turn
+        <primer-math>O(n)</primer-math> activation memory into
+        <primer-math>O(\sqrt{n})</primer-math> for the price of one extra forward pass — the classic
+        <strong>compute-for-memory</strong> trade.
+      </p>
+
+      <primer-theorem name="Gradient (activation) checkpointing">
+        For a depth-<primer-math>n</primer-math> network:
+        <ul>
+          <li>
+            <strong>Don't store all activations.</strong> Keep only
+            <primer-math>m</primer-math> checkpoints (memory <primer-math>O(m)</primer-math>) instead
+            of all <primer-math>n</primer-math> (<primer-math>O(n)</primer-math>).
+          </li>
+          <li>
+            <strong>Recompute in the backward pass.</strong> Replay the forward pass within each
+            segment from its checkpoint to regenerate the discarded activations on demand.
+          </li>
+          <li>
+            <strong>√n memory for ~1 extra forward.</strong> Choosing
+            <primer-math>m = \sqrt{n}</primer-math> minimizes total memory at
+            <primer-math>O(\sqrt{n})</primer-math>, costing one extra forward pass
+            (<primer-math>\approx 33\%</primer-math> more compute).
+          </li>
+        </ul>
+      </primer-theorem>
+
+      <primer-vignette title="The memory wall for long sequences and deep nets">
+        <p>
+          Transformer activation memory scales with <em>depth × sequence length × width</em>, and the
+          attention activations grow with the <em>square</em> of the sequence length. Double the
+          context window and the activations balloon; they, not the weights, are what pin a long-context
+          model to a too-small batch (or off the GPU entirely). This is the <strong>memory wall</strong>.
+        </p>
+        <p>
+          Checkpointing is the standard tool for climbing it: by recomputing instead of storing, it
+          lets you train deeper networks and longer sequences on the same hardware, or fit a larger
+          micro-batch (which then pairs with
+          <primer-ref to="computer-science/deep-learning/training-at-scale/gradient-accumulation">gradient
+          accumulation</primer-ref> for a still-bigger effective batch). The extra forward pass is
+          usually a price well worth paying when the alternative is not training the model at all.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "ckptChart": {
+          "title": "Activation memory vs number of checkpoints m — the √n valley",
+          "depth": "Network depth (n)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Find the valley</h2>
+      <p>
+        The curve is total activation memory <primer-math>M(m) = m + n/m</primer-math> against the
+        number of checkpoints <primer-math>m</primer-math>. Too few checkpoints (left) and you
+        recompute giant segments; too many (right) and the stored checkpoints themselves dominate. The
+        sweet spot is the bottom of the valley at <primer-math>m = \sqrt{n}</primer-math>, where memory
+        is <primer-math>2\sqrt{n}</primer-math>. Drag <strong>network depth</strong>
+        <primer-math>n</primer-math> and watch the valley deepen and its floor track
+        <primer-math>\sqrt{n}</primer-math>.
+      </p>
+      <primer-chart scene="ckptChart"></primer-chart>
+    </primer-card>
+
+    <primer-card>
+      <h2>Memory bought, one device at a time</h2>
+      <p>
+        Mixed precision, accumulation, and checkpointing are all single-device tricks: each squeezes a
+        bigger model or batch onto the GPU you already have. When even that is not enough — or you
+        simply want to go <em>faster</em> — the next move is to spread the work across many GPUs, which
+        is
+        <primer-ref forward to="computer-science/deep-learning/training-at-scale/data-parallelism">data
+        parallelism</primer-ref>.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "ckptQuiz@1": {
+          "intro": "Store a few checkpoints, recompute the rest — O(n) activation memory drops to O(√n). Test the trade.",
+          "whatQ": "Gradient checkpointing reduces memory by…",
+          "whatA": "storing only a few activations and recomputing the rest during the backward pass",
+          "whatB": "storing every activation twice for safety",
+          "whatC": "skipping the backward pass entirely",
+          "whatD": "using a smaller learning rate",
+          "costQ": "The extra compute cost of checkpointing is about…",
+          "costA": "one additional forward pass (~33% more compute)",
+          "costB": "ten additional forward passes",
+          "costC": "an extra full training run",
+          "costD": "zero — it is free",
+          "scaleQ": "With the optimal $m = \\sqrt{n}$ checkpoints, activation memory scales like…",
+          "scaleA": "$O(\\sqrt{n})$ instead of $O(n)$",
+          "scaleB": "$O(n^2)$",
+          "scaleC": "$O(1)$, independent of depth",
+          "scaleD": "$O(n\\log n)$",
+          "wallQ": "Activation memory is the bottleneck especially for…",
+          "wallA": "deep networks and long sequences (long context windows)",
+          "wallB": "shallow networks with tiny inputs",
+          "wallC": "models with no hidden layers",
+          "wallD": "inference on a single token",
+          "memQ": "A network has depth $n = {n}$. Using the optimal $m = \\sqrt{n}$ checkpoints, the memory floor is $2\\sqrt{n}$. Compute $2\\sqrt{n}$. (whole number)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="ckptQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/deep-learning/training-at-scale/gradient-accumulation"]
+  }
+</script>
+
+<!-- Interactive: total activation memory M(m) = m + n/m plotted against the number of checkpoints m —
+     a genuine y = f(m) curve with a minimum at m = √n, so registerCharts (with a depth slider) is the
+     right primitive (cf. learning-rate-schedules.html). The slider n reshapes the valley; values arrive
+     as the 2nd arg s of f(m, s). Colours from the theme via the `line` function form. The quiz carries a
+     computational free-text item (memory floor 2√n at a perfect-square depth). -->
+<script type="module">
+  import { registerCharts, registerQuiz, makeStrings } from "primer";
+
+  registerQuiz("ckptQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("whatQ"),
+      options: [
+        { text: () => sceneStrings("whatA"), correct: true },
+        { text: () => sceneStrings("whatB"), correct: false },
+        { text: () => sceneStrings("whatC"), correct: false },
+        { text: () => sceneStrings("whatD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("costQ"),
+      options: [
+        { text: () => sceneStrings("costA"), correct: true },
+        { text: () => sceneStrings("costB"), correct: false },
+        { text: () => sceneStrings("costC"), correct: false },
+        { text: () => sceneStrings("costD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("scaleQ"),
+      options: [
+        { text: () => sceneStrings("scaleA"), correct: true },
+        { text: () => sceneStrings("scaleB"), correct: false },
+        { text: () => sceneStrings("scaleC"), correct: false },
+        { text: () => sceneStrings("scaleD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("wallQ"),
+      options: [
+        { text: () => sceneStrings("wallA"), correct: true },
+        { text: () => sceneStrings("wallB"), correct: false },
+        { text: () => sceneStrings("wallC"), correct: false },
+        { text: () => sceneStrings("wallD"), correct: false },
+      ],
+    },
+    {
+      // Perfect-square depths so 2√n is a clean whole number.
+      prompt: (v) => sceneStrings("memQ", v),
+      variables: "n=[16,64,100,144,256,400]",
+      answer: (v) => 2 * Math.sqrt(v.n),
+    },
+  ]);
+
+  const s = makeStrings("ckptChart");
+
+  // Total activation memory M(m) = m + n/m, in units of "activations". Minimum at m = √n.
+  function mem(m, sl) {
+    const n = Math.max(4, sl.n ?? 144);
+    const mm = Math.max(1, m);
+    return mm + n / mm;
+  }
+
+  registerCharts(
+    [
+      {
+        name: "ckptChart",
+        f: (m, sl) => mem(m, sl),
+        line: (colors) => ({ strokeColor: colors.cat[0], strokeWidth: 3 }),
+      },
+    ],
+    {
+      xmin: 1, xmax: 40,
+      ymin: 0, ymax: 80, yticks: 20,
+      xticks: 5,
+      xaxisname: "checkpoints m", yaxisname: "memory M(m)",
+      title: () => s("title"),
+    },
+    [
+      { name: "n", label: () => s("depth"), min: 16, max: 400, step: 4, value: 144, anchors: [16, 64, 144, 256, 400] },
+    ],
+  );
+</script>

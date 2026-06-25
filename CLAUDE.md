@@ -413,6 +413,46 @@ and after a theme change. Drive it from a `<primer-chart>` carrying an inline `p
   then `{ …, title: () => s("title") }` and a slider `{ name: "A", label: () => s("amplitude"), … }`.
   See `concepts/mathematics/trigonometry/sine-properties.html` for the full showcase.
 
+### 3D charts: `register3dChart`
+
+For a **3D** figure (points, vectors, surfaces in space) use `register3dChart(name, builder, opts)`
++ a **`<primer-chart-3d scene="name">`** element. It renders a JSXGraph **View3D** projected to SVG
+(no WebGL, no context cap — themeable like every other figure) and is **drag-rotatable**. Sliders
+work exactly as for 2D charts: name a `registerChartSliders` group via `opts.sliders` and place a
+`<primer-chart-sliders>` below.
+
+Unlike the 2D builder, the 3D builder gets a single **toolkit** `{ view, JXG, board, colors,
+sliders }` and does NOT return an `update` — like a geometry scene it reads live slider values in
+**functional coordinates** and the component calls `board.update()` on every change. `view` is the
+themed View3D (author draws with `view.create('point3d' | 'line3d' | 'curve3d' | 'functiongraph3d' |
+'scatter3d', …)`); `board` is the underlying 2D board (handy for a 2D overlay readout, pinned in its
+`[-8,8]` coords); colours come from `themeColors()` (`colors.line`/`colors.cat[i]`/`colors.ink`),
+never hardcoded. The view's axes + x/y/z labels are drawn and themed for you.
+
+`opts`: `{ bounds = [[-5,5],[-5,5],[-5,5]], xName='x', yName='y', zName='z', title, sliders, az, el }`
+— `bounds` the 3D extent, `az`/`el` the initial azimuth/elevation, `title` a string or thunk.
+
+```html
+<primer-chart-3d scene="vec3d"></primer-chart-3d>
+<primer-chart-sliders name="vec3d"></primer-chart-sliders>
+
+<script type="module">
+  import { register3dChart, registerChartSliders } from "primer";
+  registerChartSliders("vec3d", [ { name: "vx", min: -4, max: 4, step: 1, value: 3 }, /* vy, vz … */ ]);
+  register3dChart("vec3d", ({ view, colors, sliders }) => {
+    const O = view.create("point3d", [0, 0, 0], { visible: false });
+    const tip = view.create("point3d", [() => sliders.vx, () => sliders.vy, () => sliders.vz],
+      { size: 4, strokeColor: colors.cat[1], fillColor: colors.cat[1], withLabel: false });
+    view.create("line3d", [O, tip], { strokeColor: colors.cat[1], strokeWidth: 4, straightFirst: false, straightLast: false });
+  }, { bounds: [[-4.5, 4.5], [-4.5, 4.5], [-4.5, 4.5]], sliders: "vec3d", title: "a 3D vector" });
+</script>
+```
+
+See `concepts/mathematics/linear-algebra/spaces/vectors-in-3d.html` and
+`concepts/computer-science/machine-learning/foundations/the-feature-vector.html` (a 3D scatter +
+vector). The 2D `<primer-chart>`/`<primer-geometry>` boards strip pointer handlers (static figures);
+`<primer-chart-3d>` keeps them so the view can rotate.
+
 ## Geometry diagrams (`registerGeometryScene`)
 
 For **figures** rather than function plots — lines, angles, polygons, Greek-letter labels — register a
@@ -500,7 +540,7 @@ sceneStrings, parallelMark, crossing, makeGraph }` — `colors` is the resolved 
 
 ## Helpers re-exported from `primer` (for inline scripts)
 
-`registerManimScene`, `getManimScene`, `registerChart`, `getChart`, `registerCharts`, `registerChartSliders`,
+`registerManimScene`, `getManimScene`, `registerChart`, `getChart`, `register3dChart`, `get3dChart`, `registerCharts`, `registerChartSliders`,
 `computeRange`, `registerGeometryScene`, `getGeometryScene`, `registerQuiz`, `getQuiz`, `speak`, `cancelSpeech`, `themeColors`, `makeStrings`, `getConceptMeta`,
 `parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`,
 `getTheme`, `applyTheme`, `initTheme`), and the graph helpers (`resolveLevels`,

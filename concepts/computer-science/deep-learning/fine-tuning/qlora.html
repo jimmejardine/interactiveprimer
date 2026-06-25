@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>QLoRA: Fine-Tuning on One GPU</primer-title>
+
+    <primer-card>
+      <p>
+        <primer-ref to="computer-science/deep-learning/fine-tuning/lora">LoRA</primer-ref> made the
+        <em>trainable</em> parameters tiny. But the <em>frozen</em> base still has to sit in GPU
+        memory while you fine-tune — and a 65-billion-parameter model in
+        <primer-ref to="computer-science/deep-learning/training-at-scale/mixed-precision-training">16-bit</primer-ref>
+        precision is about <primer-math>130</primer-math> GB before you have stored a single
+        gradient. That alone overflows any single GPU. <strong>QLoRA</strong> removes the last
+        barrier by shrinking the frozen base itself: quantize it to <strong>4-bit</strong>, then
+        train LoRA adapters on top. The result is the headline that made it famous — fine-tune a
+        65B model on a <em>single</em> 48 GB GPU.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Shrink the base, adapt on top, line by line</h2>
+      <p>
+        Let the base have <primer-math>N</primer-math> parameters. The memory to hold them is
+        <primer-math>N</primer-math> times the bytes-per-parameter, so precision is a direct lever
+        on memory.
+      </p>
+
+      <p>
+        <strong>Step 1 — quantize the frozen base to 4 bits.</strong> Store each base weight in a
+        4-bit format (NF4) instead of 16-bit. Bytes per parameter fall from
+        <primer-math>2</primer-math> to <primer-math>0.5</primer-math> — a factor of four:
+      </p>
+      <primer-math display>\text{mem}_{\text{base}} = N \times \tfrac{4}{8}\,\text{B} = \tfrac{N}{2}\,\text{B}, \qquad \frac{0.5}{2} = \frac{1}{4}.</primer-math>
+      <p>
+        The base is frozen, so its weights are read-only during fine-tuning — we never need their
+        gradients, which is exactly what makes such aggressive quantization safe here.
+      </p>
+
+      <p>
+        <strong>Step 2 — put LoRA adapters on top, in higher precision.</strong> Attach the
+        low-rank factors <primer-math>A, B</primer-math> from LoRA and keep <em>them</em> in 16-bit
+        (or bf16). They are the only trainable tensors:
+      </p>
+      <primer-math display>h = W_{\text{4bit}}\,x + B(A x), \qquad \text{train only } A, B.</primer-math>
+
+      <p>
+        <strong>Step 3 — gradients flow only into the adapters.</strong> Backprop dequantizes a
+        base weight on the fly to compute its contribution, but no gradient is stored for it; the
+        optimizer state (momentum, variance) exists only for the small
+        <primer-math>A, B</primer-math>. So the expensive 16-bit gradients and optimizer states
+        scale with <primer-math>2dr</primer-math>, not with <primer-math>N</primer-math>.
+      </p>
+
+      <p>
+        <strong>Step 4 — do the memory math.</strong> Compare the three regimes for a base of
+        <primer-math>N</primer-math> parameters (ignoring activations):
+      </p>
+      <primer-math display>
+        \begin{aligned}
+        \text{Full FT (fp16)} &\approx 2N \ \text{(weights)} + 2N\ \text{(grads)} + 8N\ \text{(optim)} \approx 12N\,\text{B},\\
+        \text{LoRA (fp16 base)} &\approx 2N \ \text{(frozen weights)} + \text{tiny adapters},\\
+        \text{QLoRA (4-bit base)} &\approx \tfrac{N}{2} \ \text{(frozen weights)} + \text{tiny adapters}.
+        \end{aligned}
+      </primer-math>
+      <p>
+        For <primer-math>N = 65\text{B}</primer-math>: full fine-tuning wants on the order of
+        <primer-math>\sim 780</primer-math> GB; LoRA still needs
+        <primer-math>\sim 130</primer-math> GB just to hold the fp16 base; QLoRA needs only
+        <primer-math>\sim 33</primer-math> GB for the 4-bit base plus a sliver for adapters — which
+        fits a single 48 GB card with room for activations.
+      </p>
+
+      <primer-theorem name="QLoRA">
+        QLoRA fine-tunes a large model on one GPU by quantizing the frozen base:
+        <ul>
+          <li>
+            <strong>4-bit frozen base.</strong> The pretrained weights are stored in 4-bit (NF4),
+            cutting base memory to <primer-math>\sim\!\tfrac14</primer-math> of fp16.
+          </li>
+          <li>
+            <strong>Higher-precision adapters.</strong> LoRA factors
+            <primer-math>A, B</primer-math> are kept in 16-bit and are the only trainable tensors;
+            gradients and optimizer state scale with <primer-math>2dr</primer-math>, not
+            <primer-math>N</primer-math>.
+          </li>
+          <li>
+            <strong>One GPU.</strong> The combination fits very large models — e.g. a 65B model on
+            a single 48 GB GPU — that full fine-tuning could never load.
+          </li>
+        </ul>
+      </primer-theorem>
+
+      <primer-vignette title="NF4 and double quantization">
+        <p>
+          Two refinements make the 4-bit base work without hurting accuracy.
+          <strong>NF4</strong> (4-bit NormalFloat) is a quantization grid whose 16 levels are placed
+          to be <em>information-theoretically optimal for normally distributed weights</em> — and
+          neural-network weights are close to Gaussian. Instead of evenly spaced bins, NF4 packs its
+          levels where the weights actually cluster, so the quantization error is far smaller than a
+          naive 4-bit integer grid.
+        </p>
+        <p>
+          <strong>Double quantization</strong> goes one step further: quantization itself needs a
+          small scale (a “quantization constant”) per block of weights, and those constants add up.
+          QLoRA quantizes the constants <em>too</em>, shaving roughly another half-bit per parameter
+          off the footprint. The savings are modest individually but meaningful at 65B scale. The
+          same precision-versus-memory trade-off reappears at deployment time as
+          <primer-ref todo to="computer-science/deep-learning/inference/quantization-for-inference">quantization
+          for inference</primer-ref>.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <!-- Strings for the interactive geometry bar chart, keyed by scene name. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "qloraMem": {
+          "title": "GPU memory to fine-tune a 65B model",
+          "full": "Full FT (fp16)",
+          "lora": "LoRA (fp16 base)",
+          "qlora": "QLoRA (4-bit base)",
+          "gpu": "single 48 GB GPU"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The memory, in bars</h2>
+      <p>
+        Three regimes for the same 65B model, in gigabytes. Full fine-tuning (weights, gradients,
+        and optimizer state in fp16) is off the top of any single card. LoRA trims the trainable
+        cost but must still hold the fp16 base. QLoRA's 4-bit base drops the bar under the dashed
+        48 GB line — the line a single GPU can hold.
+      </p>
+      <primer-geometry scene="qloraMem"></primer-geometry>
+    </primer-card>
+
+    <!-- Translatable quiz prose, keyed by the versioned quiz name. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "qloraQuiz@1": {
+          "intro": "QLoRA quantizes the frozen base to 4-bit and trains LoRA adapters on top. Test the memory story.",
+          "baseQ": "In QLoRA, the frozen base model is stored in…",
+          "baseRight": "4-bit (NF4) precision",
+          "base16": "16-bit precision",
+          "base32": "32-bit precision",
+          "base8": "8-bit integers, and is trainable",
+          "adaptQ": "Which tensors are actually trained in QLoRA?",
+          "adaptRight": "only the LoRA adapters $A, B$, kept in higher precision",
+          "adaptAll": "all of the base weights",
+          "adaptNone": "nothing — the model is used as-is",
+          "whyQ": "Why is it safe to quantize the base so aggressively?",
+          "whyRight": "the base is frozen and read-only, so no gradients are needed for it",
+          "whyData": "because the task data is small",
+          "whyRank": "because the rank is low",
+          "fitQ": "QLoRA's headline result is that you can fine-tune a 65B model on…",
+          "fitRight": "a single 48 GB GPU",
+          "fitCluster": "a 1000-GPU cluster",
+          "fitCpu": "a laptop CPU",
+          "memQ": "A 65B model in fp16 needs ${gb}$ GB for its weights. In 4-bit (1/4 the bytes), how many GB do the weights need?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="qloraQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/deep-learning/fine-tuning/lora"]
+  }
+</script>
+
+<!-- Interactive: a <primer-geometry> bar chart of GPU memory (GB) for three fine-tuning regimes of
+     a 65B model — Full FT (fp16, ~780 GB), LoRA (fp16 base, ~130 GB), QLoRA (4-bit base, ~33 GB).
+     A dashed line marks a single 48 GB GPU: only QLoRA's bar sits below it. Static (one step), so
+     the control bar auto-hides. All colours from themeColors(); the computational quiz item (gb/4)
+     lives in registerQuiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerQuiz("qloraQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("baseQ"),
+      options: [
+        { text: () => sceneStrings("baseRight"), correct: true },
+        { text: () => sceneStrings("base16"), correct: false },
+        { text: () => sceneStrings("base32"), correct: false },
+        { text: () => sceneStrings("base8"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("adaptQ"),
+      options: [
+        { text: () => sceneStrings("adaptRight"), correct: true },
+        { text: () => sceneStrings("adaptAll"), correct: false },
+        { text: () => sceneStrings("adaptNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("whyRight"), correct: true },
+        { text: () => sceneStrings("whyData"), correct: false },
+        { text: () => sceneStrings("whyRank"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fitQ"),
+      options: [
+        { text: () => sceneStrings("fitRight"), correct: true },
+        { text: () => sceneStrings("fitCluster"), correct: false },
+        { text: () => sceneStrings("fitCpu"), correct: false },
+      ],
+    },
+    {
+      // Computational: 4-bit = 1/4 of fp16 bytes, so gb/4.
+      prompt: (v) => sceneStrings("memQ", v),
+      variables: "gb=[100,120,130,140,160]",
+      answer: (v) => v.gb / 4,
+    },
+  ]);
+
+  registerGeometryScene(
+    "qloraMem",
+    ({ board, colors, sceneStrings }) => {
+      // Memory (GB) for a 65B model, rounded for illustration.
+      const bars = [
+        { label: () => sceneStrings("full"), mem: 780, color: colors.cat[0] },
+        { label: () => sceneStrings("lora"), mem: 130, color: colors.cat[1] },
+        { label: () => sceneStrings("qlora"), mem: 33, color: colors.cat[2] },
+      ];
+
+      const yMax = 800;
+      const scale = 6 / yMax; // map [0, yMax] GB onto board height ~6
+      const width = 1.0;
+      const gap = 1.6;
+
+      bars.forEach((b, i) => {
+        const x0 = 0.6 + i * gap;
+        const x1 = x0 + width;
+        const h = b.mem * scale;
+        board.create(
+          "polygon",
+          [
+            [x0, 0],
+            [x1, 0],
+            [x1, h],
+            [x0, h],
+          ],
+          { fillColor: b.color, fillOpacity: 0.6, borders: { strokeColor: b.color, strokeWidth: 2 }, highlight: false, fixed: true, vertices: { visible: false } },
+        );
+        // Value label above the bar.
+        board.create("text", [(x0 + x1) / 2, h + 0.25, `${b.mem} GB`], {
+          strokeColor: colors.ink, fontSize: 13, anchorX: "middle", anchorY: "bottom", highlight: false, fixed: true,
+        });
+        // Category label below the axis.
+        board.create("text", [(x0 + x1) / 2, -0.35, b.label()], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "top", highlight: false, fixed: true,
+        });
+      });
+
+      // Baseline axis.
+      board.create("segment", [[0, 0], [0.6 + bars.length * gap, 0]], {
+        strokeColor: colors.line, strokeWidth: 2, highlight: false,
+      });
+
+      // Dashed "single 48 GB GPU" capacity line.
+      const gpuY = 48 * scale;
+      const xRight = 0.6 + bars.length * gap;
+      board.create("segment", [[0, gpuY], [xRight, gpuY]], {
+        strokeColor: colors.line, strokeWidth: 2, dash: 2, highlight: false,
+      });
+      board.create("text", [xRight, gpuY + 0.05, sceneStrings("gpu")], {
+        strokeColor: colors.line, fontSize: 12, anchorX: "right", anchorY: "bottom", highlight: false, fixed: true,
+      });
+    },
+    {
+      boundingbox: [-0.6, 7, 5.6, -1.2],
+      keepAspect: false,
+      title: () => makeStrings("qloraMem")("title"),
+    },
+  );
+</script>

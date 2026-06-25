@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Pipeline Parallelism</primer-title>
+
+    <primer-card>
+      <p>
+        <primer-ref to="computer-science/deep-learning/training-at-scale/tensor-parallelism">Tensor
+        parallelism</primer-ref> splits a layer <em>across</em> GPUs, but it chatters constantly over the
+        interconnect, so it only works between GPUs wired together very fast. To span many machines we
+        need a coarser cut — one that talks far less often.
+      </p>
+      <p>
+        <strong>Pipeline parallelism</strong> (also called <em>inter-layer</em> parallelism) makes that
+        cut along the <em>depth</em> of the network. Instead of slicing each layer, it hands whole groups
+        of consecutive layers to different GPUs, and streams activations down the chain like parts moving
+        along a factory line.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Building the pipeline, line by line</h2>
+      <p>
+        Take a network of <primer-math>L</primer-math> layers and <primer-math>P</primer-math> GPUs
+        (<em>stages</em>), with <primer-math>k = L/P</primer-math> layers per stage.
+      </p>
+
+      <p>
+        <strong>Step 1 — assign a contiguous block of layers to each GPU.</strong> Layers
+        <primer-math>1\dots k</primer-math> live on GPU 1, layers
+        <primer-math>k+1\dots 2k</primer-math> on GPU 2, and so on:
+      </p>
+      <primer-math display>\text{GPU } p \;\text{holds layers}\; \{(p-1)k + 1,\, \dots,\, pk\}.</primer-math>
+      <p>
+        No single GPU stores the whole model, so a network far too deep for one card now fits across the
+        <primer-math>P</primer-math> of them.
+      </p>
+
+      <p>
+        <strong>Step 2 — flow the forward pass down the stages.</strong> An input enters GPU 1, which
+        runs its layers and ships the resulting activations to GPU 2, which runs its layers and ships to
+        GPU 3, and so on to the output:
+      </p>
+      <primer-math display>x \;\longrightarrow\; \text{GPU 1} \;\longrightarrow\; \text{GPU 2} \;\longrightarrow\; \cdots \;\longrightarrow\; \text{GPU } P \;\longrightarrow\; \hat{y}.</primer-math>
+
+      <p>
+        <strong>Step 3 — flow the backward pass back up.</strong> Gradients travel the same chain in
+        reverse, GPU <primer-math>P \to P-1 \to \dots \to 1</primer-math>, each stage doing backprop
+        through its own layers. The cross-GPU traffic is small: only the activations at the cut points
+        cross the wire, once each way — not every layer's weights.
+      </p>
+
+      <p>
+        <strong>Step 4 — see the problem: the bubble.</strong> Naively, GPU 2 cannot start until GPU 1
+        finishes; GPU 3 waits on GPU 2; and so on. While the input is being processed by stage 1, every
+        other stage sits idle. This idle time is the pipeline <strong>bubble</strong> — at any instant,
+        most of your expensive GPUs are doing nothing:
+      </p>
+      <primer-math display>\text{at start: only GPU 1 works} \;\Rightarrow\; P-1 \text{ GPUs idle.}</primer-math>
+
+      <p>
+        <strong>Step 5 — fill the bubble with micro-batches.</strong> The fix is to stop feeding one fat
+        batch and instead chop it into <primer-math>M</primer-math> small <strong>micro-batches</strong>
+        and stream them. As soon as micro-batch 1 leaves GPU 1 for GPU 2, micro-batch 2 enters GPU 1.
+        After a brief fill, <em>every</em> stage is working on a different micro-batch at once:
+      </p>
+      <primer-math display>\text{steady state: all } P \text{ GPUs busy, each on a different micro-batch.}</primer-math>
+      <p>
+        The bubble doesn't vanish — there is still a fill at the start and a drain at the end — but it
+        shrinks: more micro-batches means a longer busy middle and a relatively smaller bubble. Pipeline
+        parallelism lets one model span many machines, with the micro-batch knob trading a little extra
+        scheduling for far higher GPU utilization.
+      </p>
+
+      <primer-theorem name="Pipeline (inter-layer) parallelism">
+        A deep network can be split by depth across <primer-math>P</primer-math> GPUs:
+        <ul>
+          <li>
+            <strong>Layers split across GPUs.</strong> Each GPU (stage) holds a contiguous block of
+            <primer-math>L/P</primer-math> layers; activations flow stage-to-stage forward, gradients
+            stage-to-stage backward, with little cross-GPU traffic.
+          </li>
+          <li>
+            <strong>The bubble.</strong> Run naively and stages wait on one another, leaving
+            <primer-math>P-1</primer-math> GPUs idle while one works — wasted compute.
+          </li>
+          <li>
+            <strong>Micro-batching fills it.</strong> Split the batch into <primer-math>M</primer-math>
+            micro-batches and stream them, so all <primer-math>P</primer-math> stages stay busy. The
+            idle fraction shrinks toward <primer-math>\dfrac{P-1}{M + P - 1}</primer-math> as
+            <primer-math>M</primer-math> grows.
+          </li>
+        </ul>
+      </primer-theorem>
+
+      <primer-vignette title="How big is the bubble?">
+        <p>
+          Count the time slots. With <primer-math>P</primer-math> stages and
+          <primer-math>M</primer-math> micro-batches, the pipeline needs <primer-math>P-1</primer-math>
+          slots to fill (each new stage waits one slot longer) and the same to drain at the end. Of the
+          <primer-math>M + P - 1</primer-math> slots the whole job spans, exactly
+          <primer-math>P-1</primer-math> are bubble for any given stage, so the <strong>bubble
+          fraction</strong> is
+        </p>
+        <primer-math display>\text{bubble fraction} \;\approx\; \frac{P-1}{M + P - 1}.</primer-math>
+        <p>
+          With <primer-math>P = 4</primer-math> stages and only <primer-math>M = 1</primer-math> batch
+          the bubble is <primer-math>3/4</primer-math> — three quarters of your GPUs idle. Push to
+          <primer-math>M = 32</primer-math> micro-batches and it falls to
+          <primer-math>3/35 \approx 8.6\%</primer-math>. The lesson: keep
+          <primer-math>M \gg P</primer-math>, and the bubble all but disappears.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <!-- Localized strings for the pipeline-schedule diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "pipeSched": {
+          "title": "Pipeline schedule: GPU (stage) × time — micro-batches flow, idle = bubble",
+          "bubble": "shaded = bubble (idle GPU)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Watch the bubble shrink</h2>
+      <p>
+        A Gantt-style schedule: rows are the <primer-math>P=4</primer-math> GPU stages, columns are time
+        slots. Each coloured cell is a micro-batch's forward pass on that stage; the diagonal shows the
+        wavefront flowing down the pipeline. The faint shaded cells are the <strong>bubble</strong> —
+        idle GPUs. Slide the micro-batch count up and watch the busy diagonal lengthen and the bubble
+        fraction fall.
+      </p>
+      <primer-geometry scene="pipeSched"></primer-geometry>
+      <primer-chart-sliders name="pipeSched"></primer-chart-sliders>
+    </primer-card>
+
+    <!-- Quiz prose; the computational bubble-fraction item is language-neutral maths inline. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "pipeQuiz@1": {
+          "intro": "Pipeline parallelism splits the model by depth across GPUs; the idle 'bubble' is filled by streaming micro-batches.",
+          "whatQ": "Pipeline (inter-layer) parallelism splits…",
+          "whatA": "the model's layers across GPUs — a contiguous block per stage",
+          "whatB": "each weight matrix across GPUs",
+          "whatC": "the data batch across GPUs",
+          "whatD": "the optimizer states across GPUs",
+          "bubbleQ": "The pipeline 'bubble' is…",
+          "bubbleA": "idle GPU time while stages wait on one another",
+          "bubbleB": "a memory leak in the activations",
+          "bubbleC": "the all-reduce of the gradients",
+          "bubbleD": "the time spent loading data",
+          "fixQ": "The bubble is shrunk by…",
+          "fixA": "chopping the batch into micro-batches and streaming them so every stage stays busy",
+          "fixB": "using fewer GPUs",
+          "fixC": "making each layer larger",
+          "fixD": "removing the backward pass",
+          "trafficQ": "Compared with tensor parallelism, pipeline parallelism…",
+          "trafficA": "communicates far less often (only activations at the cut points), so it can span nodes",
+          "trafficB": "communicates after every layer, so it must stay within a node",
+          "trafficC": "never communicates at all",
+          "trafficD": "duplicates the whole model on each GPU"
+        }
+      }
+    </script>
+
+    <primer-quiz name="pipeQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/deep-learning/training-at-scale/tensor-parallelism"],
+    "completedDate": "2026-06-25"
+  }
+</script>
+
+<!-- Interactive: a <primer-geometry> Gantt grid (P=4 stage rows × time-slot columns). Each micro-batch
+     m occupies cell (stage p, time p-1+m) — the flowing diagonal; cells outside any micro-batch's
+     forward wave are the shaded bubble. A slider M (micro-batch count) lengthens the busy band and
+     prints the live bubble fraction (P-1)/(M+P-1). All colours from themeColors(); quiz incl. a
+     computational bubble-fraction free-text item in registerQuiz. -->
+<script type="module">
+  import { registerGeometryScene, registerChartSliders, registerQuiz, makeStrings } from "primer";
+
+  registerQuiz("pipeQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("whatQ"),
+      options: [
+        { text: () => sceneStrings("whatA"), correct: true },
+        { text: () => sceneStrings("whatB"), correct: false },
+        { text: () => sceneStrings("whatC"), correct: false },
+        { text: () => sceneStrings("whatD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bubbleQ"),
+      options: [
+        { text: () => sceneStrings("bubbleA"), correct: true },
+        { text: () => sceneStrings("bubbleB"), correct: false },
+        { text: () => sceneStrings("bubbleC"), correct: false },
+        { text: () => sceneStrings("bubbleD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fixQ"),
+      options: [
+        { text: () => sceneStrings("fixA"), correct: true },
+        { text: () => sceneStrings("fixB"), correct: false },
+        { text: () => sceneStrings("fixC"), correct: false },
+        { text: () => sceneStrings("fixD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("trafficQ"),
+      options: [
+        { text: () => sceneStrings("trafficA"), correct: true },
+        { text: () => sceneStrings("trafficB"), correct: false },
+        { text: () => sceneStrings("trafficC"), correct: false },
+        { text: () => sceneStrings("trafficD"), correct: false },
+      ],
+    },
+    {
+      // Computational: bubble fraction (P-1)/(M+P-1). Graded numerically (3 dp).
+      prompt: "A pipeline has ${P}$ stages and ${M}$ micro-batches. The bubble fraction is $(P-1)/(M+P-1)$. Compute it (3 dp).",
+      variables: "P=[2,4,8] M=[1,4,8,16]",
+      answer: (v) => (v.P - 1) / (v.M + v.P - 1),
+    },
+  ]);
+
+  const s = makeStrings("pipeSched");
+
+  registerChartSliders("pipeSched", [
+    { name: "M", label: "micro-batches (M)", min: 1, max: 8, step: 1, value: 1, anchors: [1, 2, 4, 8] },
+  ]);
+
+  // A Gantt grid: P stage rows, time columns. Micro-batch m's forward pass on stage p sits in column
+  // (p-1)+m (1-indexed) → the flowing diagonal wavefront. Cells in row p before its first arrival or
+  // after its last departure are bubble (shaded faint). The slider M sets how many micro-batches flow.
+  registerGeometryScene(
+    "pipeSched",
+    ({ board, colors, sliders }) => {
+      const P = 4;            // stages (rows)
+      const Mmax = 8;         // max micro-batches → columns sizing
+
+      // Each cell's fill/opacity is a function of the live slider M, so the whole grid is drawn once
+      // and re-fills on board.update() as the micro-batch count changes.
+      const M = () => Math.max(1, Math.round(sliders.M ?? 1));
+      const totalCols = Mmax + P - 1;
+
+      // Row labels (stages).
+      for (let p = 1; p <= P; p++) {
+        board.create("text", [-0.4, (P - p) + 0.5, `GPU ${p}`], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "right", anchorY: "middle", highlight: false,
+        });
+      }
+
+      // Draw every possible cell once; its fill depends functionally on M (so it updates with the slider).
+      for (let p = 1; p <= P; p++) {
+        const rowY = P - p; // top stage = GPU 1
+        for (let c = 0; c < totalCols; c++) {
+          const colX = c; // time slot index
+          // micro-batch occupying (stage p) at time slot c is m = c - (p-1) + 1, valid if 1..M
+          board.create("polygon",
+            [[colX, rowY], [colX + 1, rowY], [colX + 1, rowY + 1], [colX, rowY + 1]],
+            {
+              borders: { strokeColor: colors.line, strokeWidth: 1 },
+              vertices: { visible: false },
+              fillColor: () => {
+                const m = c - (p - 1) + 1;
+                return (m >= 1 && m <= M()) ? colors.cat[(m - 1) % 6] : colors.line;
+              },
+              fillOpacity: () => {
+                const m = c - (p - 1) + 1;
+                return (m >= 1 && m <= M()) ? 0.55 : 0.10; // busy vs bubble
+              },
+              highlight: false,
+            });
+        }
+      }
+
+      // Live bubble-fraction readout.
+      board.create("text", [totalCols / 2, P + 0.7, () => {
+        const m = M();
+        const frac = (P - 1) / (m + P - 1);
+        return `P = ${P}, M = ${m}  →  bubble ≈ ${(100 * frac).toFixed(1)}%`;
+      }, ], { strokeColor: colors.cat[0], fontSize: 14, anchorX: "middle", anchorY: "middle", highlight: false });
+
+      board.create("text", [totalCols / 2, -0.7, "time →", ], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", highlight: false,
+      });
+    },
+    {
+      // P=4 stages, Mmax=8 micro-batches → totalCols = 8+4-1 = 11; leave headroom for the readout.
+      boundingbox: [-1.6, 5.4, 11.4, -1.2],
+      keepAspect: false,
+      sliders: "pipeSched",
+      title: () => s("title"),
+    },
+  );
+</script>

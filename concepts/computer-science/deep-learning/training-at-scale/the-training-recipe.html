@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The Training Recipe</primer-title>
+
+    <primer-card>
+      <p>
+        You now own every ingredient separately:
+        <primer-ref to="computer-science/deep-learning/training-deep-networks/adam">Adam</primer-ref>
+        (in its decoupled-decay form, <strong>AdamW</strong>), a
+        <primer-ref to="computer-science/deep-learning/training-deep-networks/learning-rate-schedules">warmup-then-cosine
+        learning-rate schedule</primer-ref>, and the noisy gradient of
+        <primer-ref to="computer-science/deep-learning/training-deep-networks/mini-batch-sgd">mini-batch
+        SGD</primer-ref>. This page assembles them into the single loop that trains essentially every
+        modern large language model — the <strong>recipe</strong>.
+      </p>
+      <p>
+        Two pieces are still missing, and both guard against the same enemy: a single bad mini-batch
+        throwing a giant gradient and blowing up the run. <strong>Weight decay</strong> keeps the
+        parameters from drifting large, and <strong>gradient clipping</strong> rescales any
+        oversized gradient down to a fixed maximum norm before it can land a destabilizing step.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Deriving the training step</h2>
+      <p>
+        One step processes one mini-batch <primer-math>\mathcal{B}</primer-math> of examples and
+        nudges the parameters <primer-math>\theta</primer-math> once. We build it line by line; the
+        whole loop is just this step repeated for <primer-math>T</primer-math> steps.
+      </p>
+
+      <p>
+        <strong>Step 1 — forward pass.</strong> Run the network on the batch and average the
+        per-example loss over its <primer-math>B</primer-math> members:
+      </p>
+      <primer-math display>L(\theta) = \frac{1}{B} \sum_{i \in \mathcal{B}} L_i(\theta).</primer-math>
+
+      <p>
+        <strong>Step 2 — backward pass.</strong> Backpropagate to get the gradient of that loss with
+        respect to every parameter (this is what
+        <primer-ref to="computer-science/deep-learning/training-deep-networks/automatic-differentiation">automatic
+        differentiation</primer-ref> computes for you):
+      </p>
+      <primer-math display>g = \nabla_\theta L(\theta).</primer-math>
+
+      <p>
+        <strong>Step 3 — clip the gradient.</strong> Measure the gradient's global norm
+        <primer-math>\lVert g \rVert</primer-math> (stack every parameter's gradient into one vector
+        and take its length). If it exceeds a threshold <primer-math>c</primer-math>, rescale the
+        whole vector down so its norm is exactly <primer-math>c</primer-math>; otherwise leave it
+        alone:
+      </p>
+      <primer-math display>\hat{g} = g \cdot \min\!\left(1,\ \frac{c}{\lVert g \rVert}\right).</primer-math>
+
+      <p>
+        The direction is untouched — only the length is capped. A normal step passes through
+        unchanged; a freak spike of norm <primer-math>100c</primer-math> is shrunk back to
+        <primer-math>c</primer-math>, so it can no longer wreck the run. (This is the same
+        <primer-ref to="computer-science/deep-learning/training-deep-networks/vanishing-and-exploding-gradients">gradient
+        clipping</primer-ref> that tames exploding gradients.)
+      </p>
+
+      <p>
+        <strong>Step 4 — schedule the learning rate.</strong> Look up this step's rate from the
+        warmup-then-cosine schedule — a short linear ramp to a peak
+        <primer-math>\eta_{\max}</primer-math>, then a cosine glide to a floor
+        <primer-math>\eta_{\min}</primer-math>:
+      </p>
+      <primer-math display>\eta_t = \begin{cases} \eta_{\max}\, \dfrac{t}{T_{\text{warm}}}, & t < T_{\text{warm}}, \\[2ex] \eta_{\min} + \tfrac{1}{2}(\eta_{\max} - \eta_{\min})\big(1 + \cos(\pi p)\big), & t \ge T_{\text{warm}}, \end{cases}</primer-math>
+      <p>
+        with decay progress <primer-math>p = (t - T_{\text{warm}})/(T - T_{\text{warm}})</primer-math>.
+      </p>
+
+      <p>
+        <strong>Step 5 — the AdamW update.</strong> Feed the clipped gradient
+        <primer-math>\hat{g}</primer-math> into Adam's two moments, bias-correct them, take the
+        adaptive step, and — decoupled — shrink the weights by
+        <primer-math>\eta_t\,\lambda</primer-math> (the weight decay):
+      </p>
+      <primer-math display>\theta_t = \theta_{t-1} - \eta_t\, \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \varepsilon} - \eta_t\,\lambda\,\theta_{t-1}.</primer-math>
+
+      <p>
+        That is the entire recipe. Repeat steps 1–5 over mini-batches for
+        <primer-math>T</primer-math> steps and you have trained a deep network the way the field
+        actually does it: <strong>forward → loss → backward → clip → AdamW step → advance the
+        schedule</strong>.
+      </p>
+
+      <primer-theorem name="The LLM training recipe">
+        The standard loop repeats, per mini-batch, the step
+        <primer-math>\hat{g} \to \text{AdamW}</primer-math> under a scheduled rate
+        <primer-math>\eta_t</primer-math>. Its four signature choices:
+        <ul>
+          <li>
+            <strong>AdamW optimizer.</strong> Adam's per-parameter adaptive step with
+            <em>decoupled</em> weight decay — the default for transformers.
+          </li>
+          <li>
+            <strong>Warmup + cosine schedule.</strong> A linear ramp to
+            <primer-math>\eta_{\max}</primer-math>, then a cosine decay to
+            <primer-math>\eta_{\min}</primer-math>.
+          </li>
+          <li>
+            <strong>Weight decay.</strong> A coefficient <primer-math>\lambda</primer-math> shrinking
+            <primer-math>\theta</primer-math> each step, regularizing the model.
+          </li>
+          <li>
+            <strong>Gradient clipping.</strong> Rescale <primer-math>g</primer-math> to norm at most
+            <primer-math>c</primer-math> via <primer-math>\hat{g} = g\,\min(1, c/\lVert g\rVert)</primer-math>,
+            taming spikes.
+          </li>
+        </ul>
+      </primer-theorem>
+
+      <primer-vignette title="Loss spikes, and why clipping + schedule tame them">
+        <p>
+          Watch a large training run and the loss curve is not perfectly smooth — every so often it
+          jumps upward in a <strong>spike</strong>. The usual culprit is one pathological
+          mini-batch whose gradient is enormous. Without protection, AdamW takes a huge step along
+          it, the parameters lurch into a bad region, and the loss leaps — sometimes never to
+          recover (a <em>divergence</em>).
+        </p>
+        <p>
+          Clipping is the seatbelt. A spike of norm <primer-math>50c</primer-math> is rescaled to
+          <primer-math>c</primer-math>, so the step it causes is no larger than an ordinary one — the
+          model wobbles but does not blow up, and the next good batch pulls it back. The schedule
+          helps too: warmup keeps early steps small while Adam's second moment is still noisy, and
+          the cosine tail shrinks <primer-math>\eta_t</primer-math> late in training, so the same raw
+          spike does ever less damage as the run proceeds. Clipping caps the gradient; the schedule
+          caps the rate — together they keep a long run on the rails.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "recipeChart": {
+          "title": "Training loss falling, with the warmup + cosine learning rate overlaid",
+          "warm": "Warmup length (T_warm)",
+          "peak": "Peak rate (η_max × 100)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The loss and the schedule, together</h2>
+      <p>
+        The bold curve is a typical <strong>training loss</strong> falling over steps; the faint
+        curve is the <strong>learning rate</strong> <primer-math>\eta_t</primer-math> on the same
+        time axis — the warmup bump on the left, then the long cosine decay. Drag
+        <strong>warmup length</strong> to move the rate's peak and <strong>peak rate</strong> to
+        raise it; a longer, gentler schedule gives a smoother loss. Notice the loss falls fastest
+        while the rate is high and flattens as the rate glides to its floor.
+      </p>
+      <primer-chart scene="recipeChart"></primer-chart>
+    </primer-card>
+
+    <primer-card>
+      <h2>From recipe to model</h2>
+      <p>
+        This loop, run at scale over a vast text corpus, is what produces a pretrained
+        <primer-ref to="computer-science/deep-learning/language-models/prompting">language
+        model</primer-ref>. Everything that follows in this track —
+        <primer-ref forward to="computer-science/deep-learning/training-at-scale/mixed-precision-training">mixed
+        precision</primer-ref>,
+        <primer-ref forward to="computer-science/deep-learning/training-at-scale/gradient-accumulation">gradient
+        accumulation</primer-ref>,
+        <primer-ref forward to="computer-science/deep-learning/training-at-scale/gradient-checkpointing">checkpointing</primer-ref>,
+        and
+        <primer-ref forward to="computer-science/deep-learning/training-at-scale/data-parallelism">data
+        parallelism</primer-ref> — does not change this recipe. It changes how to <em>fit and
+        speed up</em> the very same step on real, finite hardware.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "recipeQuiz@1": {
+          "intro": "AdamW + warmup-cosine + weight decay + gradient clipping, over mini-batches. Test the recipe.",
+          "orderQ": "In one training step, the correct order is…",
+          "orderA": "forward → loss → backward → clip → AdamW step → advance schedule",
+          "orderB": "AdamW step → forward → backward → loss → clip",
+          "orderC": "backward → forward → clip → loss → AdamW step",
+          "orderD": "loss → clip → forward → backward → AdamW step",
+          "clipQ": "Gradient clipping by norm changes the gradient's…",
+          "clipA": "length only — it caps the norm at $c$ but keeps the direction",
+          "clipB": "direction only — it rotates the gradient",
+          "clipC": "both length and direction, arbitrarily",
+          "clipD": "nothing — it is a no-op",
+          "optQ": "The default optimizer in the modern recipe is…",
+          "optA": "AdamW (Adam with decoupled weight decay)",
+          "optB": "plain full-batch gradient descent",
+          "optC": "Newton's method",
+          "optD": "random search",
+          "spikeQ": "Clipping tames a loss spike because it…",
+          "spikeA": "stops one freak large-gradient batch from causing a giant destabilizing step",
+          "spikeB": "increases the learning rate during the spike",
+          "spikeC": "removes weight decay",
+          "spikeD": "deletes the bad batch from the dataset",
+          "clipValQ": "A gradient has norm $\\lVert g\\rVert = {g}$ and the clip threshold is $c = {c}$. After clipping, what is the norm of $\\hat g$? (1 dp)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="recipeQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/deep-learning/language-models/prompting"]
+  }
+</script>
+
+<!-- Interactive: a training LOSS curve and the warmup+cosine LEARNING-RATE schedule on one shared
+     step axis — both are genuine y = f(step) curves, so registerCharts (with sliders) is the right
+     primitive (cf. learning-rate-schedules.html). Sliders for warmup length and peak rate reshape the
+     η curve and, through it, the loss; values arrive as the 2nd arg s of f(step, s). Colours from the
+     theme via the `line` function form. The quiz carries a computational clipped-norm free-text item:
+     ‖ĝ‖ = min(‖g‖, c). -->
+<script type="module">
+  import { registerCharts, registerQuiz, makeStrings } from "primer";
+
+  registerQuiz("recipeQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("orderQ"),
+      options: [
+        { text: () => sceneStrings("orderA"), correct: true },
+        { text: () => sceneStrings("orderB"), correct: false },
+        { text: () => sceneStrings("orderC"), correct: false },
+        { text: () => sceneStrings("orderD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("clipQ"),
+      options: [
+        { text: () => sceneStrings("clipA"), correct: true },
+        { text: () => sceneStrings("clipB"), correct: false },
+        { text: () => sceneStrings("clipC"), correct: false },
+        { text: () => sceneStrings("clipD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("optQ"),
+      options: [
+        { text: () => sceneStrings("optA"), correct: true },
+        { text: () => sceneStrings("optB"), correct: false },
+        { text: () => sceneStrings("optC"), correct: false },
+        { text: () => sceneStrings("optD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("spikeQ"),
+      options: [
+        { text: () => sceneStrings("spikeA"), correct: true },
+        { text: () => sceneStrings("spikeB"), correct: false },
+        { text: () => sceneStrings("spikeC"), correct: false },
+        { text: () => sceneStrings("spikeD"), correct: false },
+      ],
+    },
+    {
+      // Clipped norm = min(‖g‖, c). Constrain g > c so clipping actually bites.
+      prompt: (v) => sceneStrings("clipValQ", v),
+      variables: "g=[5:20] c=[1:4]",
+      constraints: "g > c",
+      answer: (v) => Math.min(v.g, v.c),
+    },
+  ]);
+
+  const s = makeStrings("recipeChart");
+  const TOTAL = 10000; // step axis budget
+
+  // The warmup + cosine learning rate η_t (same shape as learning-rate-schedules.html).
+  function lr(t, sl) {
+    const Tw = Math.max(1, sl.Tw ?? 1000);
+    const etaMax = (sl.peak ?? 30) / 100;
+    const etaMin = 0.02 * etaMax;
+    if (t < Tw) return etaMax * (t / Tw);
+    const p = (t - Tw) / (TOTAL - Tw);
+    return etaMin + 0.5 * (etaMax - etaMin) * (1 + Math.cos(Math.PI * p));
+  }
+
+  // A plausible training loss: it falls fast while the cumulative learning rate is high and flattens
+  // as the schedule decays. We model loss ≈ floor + scale · exp(−∫η), approximated by a running sum of
+  // the (peak-scaled) rate so a bigger peak / longer warmup visibly reshapes the descent.
+  function loss(t, sl) {
+    const N = 60; // coarse Riemann sum of the rate up to t
+    const dt = t / N;
+    let area = 0;
+    for (let k = 1; k <= N; k++) area += lr(k * dt, sl) * dt;
+    const floor = 0.6;
+    return floor + 3.4 * Math.exp(-area / 250);
+  }
+
+  registerCharts(
+    [
+      {
+        name: "recipeChart",
+        // Curve 0: the loss (bold). Curve 1: the learning rate, scaled ×4 so it shares the loss axis.
+        f: [
+          (t, sl) => loss(t, sl),
+          (t, sl) => 4 * lr(t, sl),
+        ],
+        line: (colors, i) =>
+          i === 0
+            ? { strokeColor: colors.cat[0], strokeWidth: 3 }
+            : { strokeColor: colors.line, strokeWidth: 2, strokeOpacity: 0.4, dash: 2 },
+        legend: ["training loss", "learning rate η (×4)"],
+      },
+    ],
+    {
+      xmin: 0, xmax: TOTAL, xticks: 2000,
+      ymin: 0, ymax: 4.2, yticks: 1,
+      xaxisname: "step t", yaxisname: "loss / η",
+      title: () => s("title"),
+    },
+    [
+      { name: "Tw", label: () => s("warm"), min: 200, max: 4000, step: 100, value: 1000, anchors: [200, 1000, 2000, 4000] },
+      { name: "peak", label: () => s("peak"), min: 10, max: 80, step: 5, value: 30, anchors: [10, 30, 50, 80] },
+    ],
+  );
+</script>

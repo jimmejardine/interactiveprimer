@@ -18,7 +18,7 @@ import { snapToAnchor } from "../chart-snap.js";
 
 /** Styles for the controls markup. Each shadow root that renders a panel includes this. */
 export const SLIDER_PANEL_CSS = `
-  /* "Neon HUD" control panel: a recessed instrument surface framed with a hairline + corner brackets,
+  /* "Neon HUD" control panel: a recessed instrument surface framed with a hairline,
      a glowing accent slider thumb over a lit fill, and monospace numeric readouts. All colours come
      from --primer-* tokens, so it recolours per theme (the glow is the theme's accent/ring). */
   .controls {
@@ -29,13 +29,6 @@ export const SLIDER_PANEL_CSS = `
     box-shadow: inset 0 1px 0 var(--primer-ring, rgba(70,90,230,0.25));
   }
   .controls:empty { display: none; padding: 0; border: 0; box-shadow: none; }
-  /* Faint HUD corner brackets (top-left + bottom-right). */
-  .controls::before, .controls::after {
-    content: ""; position: absolute; width: 10px; height: 10px; pointer-events: none;
-    border: 1px solid var(--primer-accent, #46e); opacity: 0.5;
-  }
-  .controls::before { top: 4px; left: 4px; border-right: 0; border-bottom: 0; }
-  .controls::after { bottom: 4px; right: 4px; border-left: 0; border-top: 0; }
 
   .control { display: grid; grid-template-columns: minmax(6rem, auto) 1fr minmax(3.5rem, auto); gap: 0.6rem; align-items: center; }
   .control > label {

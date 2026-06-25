@@ -104,6 +104,64 @@ export function getChart(name) {
 }
 
 /**
+ * A 3D-chart builder, used by <primer-chart-3d>. It draws into a JSXGraph **View3D** (a 3D scene
+ * projected to SVG) that the component creates and themes from `themeColors()`. Unlike a 2D
+ * {@link ChartBuilder} it does NOT return an update — like a geometry scene it reads live slider
+ * values in *functional coordinates* (e.g. `() => sliders.x`) and the component calls
+ * `board.update()` whenever the sliders change. The toolkit is `{ view, JXG, board, colors,
+ * sliders }`: `view` the themed View3D (author calls `view.create('point3d' | 'line3d' | 'curve3d' |
+ * 'functiongraph3d' | 'scatter3d', …)`), `colors` the resolved palette, `board` the underlying 2D
+ * board, `sliders` the live values of the `opts.sliders` group. See js/components/primer-chart-3d.js.
+ * @callback Chart3dBuilder
+ * @param {{ view: any, JXG: Record<string, any>, board: any,
+ *   colors: { bg: string, ink: string, line: string, cat: string[] },
+ *   sliders: Record<string, number> }} toolkit
+ * @returns {void}
+ *
+ * @typedef {object} Chart3dOptions
+ * @property {[[number, number], [number, number], [number, number]]} [bounds]  Extent
+ *   `[[xmin,xmax],[ymin,ymax],[zmin,zmax]]` (default all `[-5,5]`).
+ * @property {string} [xName]  X-axis label.
+ * @property {string} [yName]  Y-axis label.
+ * @property {string} [zName]  Z-axis label.
+ * @property {string | (() => string)} [title]
+ * @property {string} [sliders]  Name of a registered slider group the view listens to.
+ * @property {number} [az]  Initial azimuth (degrees).
+ * @property {number} [el]  Initial elevation (degrees).
+ *
+ * @typedef {object} Chart3dEntry
+ * @property {Chart3dBuilder} builder
+ * @property {Chart3dOptions} opts
+ */
+
+/** @type {Map<string, Chart3dEntry>} */
+const charts3d = new Map();
+
+/**
+ * Register a named 3D chart. Re-registering a name overwrites it. Announces the registration (like
+ * {@link registerChart}) so a `<primer-chart-3d>` that connected before this deferred script ran can
+ * finish building.
+ * @param {string} name
+ * @param {Chart3dBuilder} builder
+ * @param {Chart3dOptions} [opts]
+ */
+export function register3dChart(name, builder, opts = {}) {
+  charts3d.set(name, { builder, opts });
+  if (typeof document !== "undefined") {
+    document.dispatchEvent(new CustomEvent("primer:chart3d-registered", { detail: { name } }));
+  }
+}
+
+/**
+ * Look up a 3D chart entry by name (or undefined if not registered).
+ * @param {string} name
+ * @returns {Chart3dEntry | undefined}
+ */
+export function get3dChart(name) {
+  return charts3d.get(name);
+}
+
+/**
  * A geometry-scene builder, used by <primer-geometry>. It draws a figure (lines, angles, polygons,
  * Greek-letter text) into a JSXGraph board, declaring ordered "waypoints" via `step(caption, fn)` so the
  * figure can be played forwards/backwards. Like a manim scene it receives a single TOOLKIT object — see

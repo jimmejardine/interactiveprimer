@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Autoregressive Decoding</primer-title>
+
+    <primer-card>
+      <p>
+        We have trained a
+        <primer-ref to="computer-science/deep-learning/language-models/language-modeling">language model</primer-ref>
+        to score the next token given the tokens so far. That gives a probability distribution
+        <primer-math>p(x_{t+1} \mid x_1, \dots, x_t)</primer-math> over the vocabulary. But a
+        distribution is not yet <em>text</em>. To make the model actually <strong>write</strong>, we
+        run it in a loop — predict a token, glue it on, predict again. That loop is
+        <strong>autoregressive decoding</strong>, and it is how every chatbot you have used produces
+        words one at a time.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The generation loop, line by line</h2>
+      <p>
+        Start with a prompt — a sequence of tokens <primer-math>x_1, \dots, x_t</primer-math> — and
+        generate a continuation.
+      </p>
+
+      <p>
+        <strong>Step 1 — run the model to get a next-token distribution.</strong> Feed the current
+        sequence through the network. Thanks to
+        <primer-ref to="computer-science/deep-learning/transformers/causal-masking">causal masking</primer-ref>,
+        the final position's output is a distribution over the whole vocabulary
+        <primer-math>V</primer-math> for the token that comes <em>next</em>:
+      </p>
+      <primer-math display>p(\cdot \mid x_1, \dots, x_t) = \operatorname{softmax}\big(\text{logits}(x_1, \dots, x_t)\big) \in \mathbb{R}^{|V|}.</primer-math>
+
+      <p>
+        <strong>Step 2 — pick a token.</strong> Turn that distribution into one concrete token
+        <primer-math>x_{t+1}</primer-math>. The simplest rule is to take the most likely token, but
+        there is a whole family of choices here — that is the subject of the next page,
+        <primer-ref forward to="computer-science/deep-learning/inference/sampling-strategies">sampling strategies</primer-ref>:
+      </p>
+      <primer-math display>x_{t+1} \sim p(\cdot \mid x_1, \dots, x_t).</primer-math>
+
+      <p>
+        <strong>Step 3 — append it.</strong> Stick the new token onto the end of the sequence. The
+        context is now one token longer:
+      </p>
+      <primer-math display>(x_1, \dots, x_t) \;\longrightarrow\; (x_1, \dots, x_t, x_{t+1}).</primer-math>
+
+      <p>
+        <strong>Step 4 — feed the longer sequence back in.</strong> This is the "auto-regressive"
+        part: the model's own output becomes part of its next input. Increment
+        <primer-math>t \leftarrow t + 1</primer-math> and return to Step 1.
+      </p>
+
+      <p>
+        <strong>Step 5 — stop.</strong> Repeat until the model emits a designated
+        end-of-sequence token <primer-math>\langle \text{eos} \rangle</primer-math>, or until a length
+        cap is hit:
+      </p>
+      <primer-math display>\text{halt when } x_{t+1} = \langle \text{eos} \rangle \ \text{ or } \ t = t_{\max}.</primer-math>
+
+      <h3>Why this is inherently sequential</h3>
+      <p>
+        Look at Step 4. To produce token <primer-math>x_{t+1}</primer-math> you must <em>already have</em>
+        token <primer-math>x_t</primer-math> — it is part of the input. So the tokens come out strictly
+        in order, one forward pass per token, and you <strong>cannot parallelise the output</strong>:
+        the <primer-math>(t+1)</primer-math>-th token genuinely depends on the <primer-math>t</primer-math>-th.
+        This is the sharp contrast with <em>training</em>, where the entire target sequence is known
+        ahead of time and causal masking lets all <primer-math>n</primer-math> next-token predictions
+        be computed in a single parallel forward pass. Training is parallel over positions; generation
+        is a serial chain.
+      </p>
+
+      <h3>Two phases: prefill, then decode</h3>
+      <p>
+        The loop has an asymmetry worth naming, because it dominates how fast generation feels.
+      </p>
+      <ul>
+        <li>
+          <strong>Prefill.</strong> The prompt <primer-math>x_1, \dots, x_t</primer-math> is already
+          known in full, so — exactly as in training — it goes through the model in <em>one</em> big
+          forward pass that processes all <primer-math>t</primer-math> prompt tokens in parallel.
+          One pass, the whole prompt.
+        </li>
+        <li>
+          <strong>Decode.</strong> After that, each new token needs its own forward pass, because each
+          depends on the one before. Generating <primer-math>m</primer-math> new tokens costs
+          <primer-math>m</primer-math> sequential forward passes — the slow part.
+        </li>
+      </ul>
+      <p>
+        So generating <primer-math>m</primer-math> tokens from a <primer-math>t</primer-math>-token
+        prompt is <strong>one prefill pass plus <primer-math>m</primer-math> decode passes</strong>
+        (the last decode pass is the one that emits the final token; counting whether prefill itself
+        emits a first token is a bookkeeping detail). The decode passes run back-to-back, which is why
+        a long answer takes longer to <em>start</em> finishing than a short one.
+      </p>
+
+      <primer-theorem name="Autoregressive decoding">
+        A trained language model generates text by iterating a fixed loop:
+        <ul>
+          <li>
+            <strong>Sample → append → repeat.</strong> Run the model on the current sequence to get
+            <primer-math>p(\cdot \mid x_{\le t})</primer-math>, pick a token
+            <primer-math>x_{t+1}</primer-math> from it, append it, and feed the longer sequence back
+            in — until <primer-math>\langle \text{eos} \rangle</primer-math> or a length cap.
+          </li>
+          <li>
+            <strong>Inherently sequential.</strong> Token <primer-math>x_{t+1}</primer-math> requires
+            token <primer-math>x_t</primer-math> as input, so the output cannot be parallelised — one
+            forward pass per generated token, in strict order. (Contrast training, which scores all
+            positions at once.)
+          </li>
+          <li>
+            <strong>Prefill vs decode.</strong> The known prompt is processed in a single parallel
+            <strong>prefill</strong> pass; each subsequent token needs its own serial
+            <strong>decode</strong> pass. Generating <primer-math>m</primer-math> tokens costs
+            <primer-math>1</primer-math> prefill <primer-math>+\,m</primer-math> decode forward passes.
+          </li>
+        </ul>
+      </primer-theorem>
+
+      <primer-vignette title="Why generation is latency-bound">
+        <p>
+          Training a model is a <em>throughput</em> problem: you have a mountain of text and want to
+          push as many tokens through the GPUs per second as possible, and parallelism over positions
+          and examples keeps the hardware saturated. Generation is the opposite — a <em>latency</em>
+          problem. Each decode step is one forward pass that must finish before the next can begin, so
+          the user waits out a chain of
+        </p>
+        <primer-math display>m \times (\text{time for one forward pass})</primer-math>
+        <p>
+          to read an <primer-math>m</primer-math>-token reply. Worse, a single decode pass moves the
+          entire weight matrix of the model from memory just to produce <em>one</em> token, so the GPU
+          spends most of its time waiting on memory rather than doing arithmetic — generation is
+          <strong>memory-bandwidth bound</strong>, not compute-bound. This is why so much inference
+          engineering — batching many users together, the
+          <primer-ref forward to="computer-science/deep-learning/inference/the-kv-cache">KV cache</primer-ref>,
+          speculative decoding — is aimed squarely at making each of those serial steps cheaper. The
+          arithmetic is cheap; the waiting is everything.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <!-- Localized strings for the token-by-token generation figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "genLoop": {
+          "title": "Generating token by token — Play to run the autoregressive loop",
+          "prompt": "prompt (prefill)",
+          "generated": "generated (decode)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Watch the loop run</h2>
+      <p>
+        The first cells are the <strong>prompt</strong>, processed in one prefill pass. Then each step
+        adds exactly one <strong>generated</strong> token: the model reads everything to its left
+        (the highlighted context) and emits the next cell — a single decode forward pass per token.
+        Step forward to watch the sequence grow one box at a time, right up to the
+        <primer-math>\langle \text{eos} \rangle</primer-math> stop. Refresh for a fresh random run with
+        a different prompt length and stopping point.
+      </p>
+      <primer-geometry scene="genLoop"></primer-geometry>
+    </primer-card>
+
+    <!-- Quiz prose; the computational forward-passes item stays inline as language-neutral maths. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "decodeQuiz@1": {
+          "intro": "Autoregressive decoding runs the model in a loop — sample a token, append it, feed it back — with a parallel prefill of the prompt and one serial decode pass per generated token.",
+          "loopQ": "How does an autoregressive model generate text?",
+          "loopA": "run the model, sample a token, append it, and feed the longer sequence back in — repeat",
+          "loopB": "output all tokens of the answer in a single forward pass",
+          "loopC": "sort the vocabulary alphabetically and read it out",
+          "loopD": "average every token in the prompt into one output token",
+          "seqQ": "Why can't the generated tokens be produced in parallel?",
+          "seqA": "token $x_{t+1}$ needs token $x_t$ as input, so they must come out in order",
+          "seqB": "the GPU only has one core",
+          "seqC": "softmax can only run once per second",
+          "seqD": "they actually can — generation is fully parallel",
+          "stopQ": "When does the decoding loop stop?",
+          "stopA": "when the model emits an end-of-sequence token, or a length cap is reached",
+          "stopB": "when the probabilities sum to 1",
+          "stopC": "after exactly one token, always",
+          "stopD": "when the prompt runs out",
+          "phaseQ": "The 'prefill' phase of decoding…",
+          "phaseA": "processes the whole known prompt in one parallel forward pass",
+          "phaseB": "generates one token per forward pass — the slow part",
+          "phaseC": "trains the model on the prompt",
+          "phaseD": "deletes the prompt before generating",
+          "vsTrainQ": "Compared with training, generation is…",
+          "vsTrainA": "sequential (serial decode steps), whereas training scores all positions at once",
+          "vsTrainB": "faster, because it skips the softmax",
+          "vsTrainC": "identical in cost",
+          "vsTrainD": "parallel over output tokens, unlike training",
+          "passesQ": "A prompt of ${t}$ tokens is processed in one prefill pass, then the model generates ${m}$ new tokens, one decode pass each. How many forward passes in total (prefill + decode)?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="decodeQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/deep-learning/fine-tuning/direct-preference-optimization"],
+    "completedDate": "2026-06-25"
+  }
+</script>
+
+<!-- Interactive: a RANDOM <primer-geometry> strip of token cells. The first `p` cells are the prompt
+     (prefill, one colour), then one generated token is revealed per step (decode, second colour), each
+     with its left-context highlighted, ending at a randomly placed <eos>. opts.random:true → Refresh
+     redraws a fresh prompt length + stop point with the toolkit rng. All colours from themeColors();
+     quiz incl. a computational "total forward passes = 1 + m" item in registerQuiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerQuiz("decodeQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("loopQ"),
+      options: [
+        { text: () => sceneStrings("loopA"), correct: true },
+        { text: () => sceneStrings("loopB"), correct: false },
+        { text: () => sceneStrings("loopC"), correct: false },
+        { text: () => sceneStrings("loopD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("seqQ"),
+      options: [
+        { text: () => sceneStrings("seqA"), correct: true },
+        { text: () => sceneStrings("seqB"), correct: false },
+        { text: () => sceneStrings("seqC"), correct: false },
+        { text: () => sceneStrings("seqD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("stopQ"),
+      options: [
+        { text: () => sceneStrings("stopA"), correct: true },
+        { text: () => sceneStrings("stopB"), correct: false },
+        { text: () => sceneStrings("stopC"), correct: false },
+        { text: () => sceneStrings("stopD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("phaseQ"),
+      options: [
+        { text: () => sceneStrings("phaseA"), correct: true },
+        { text: () => sceneStrings("phaseB"), correct: false },
+        { text: () => sceneStrings("phaseC"), correct: false },
+        { text: () => sceneStrings("phaseD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("vsTrainQ"),
+      options: [
+        { text: () => sceneStrings("vsTrainA"), correct: true },
+        { text: () => sceneStrings("vsTrainB"), correct: false },
+        { text: () => sceneStrings("vsTrainC"), correct: false },
+        { text: () => sceneStrings("vsTrainD"), correct: false },
+      ],
+    },
+    {
+      // Computational: 1 prefill pass + m decode passes = 1 + m forward passes total.
+      prompt: (v) => sceneStrings("passesQ", v),
+      variables: "t=[3:12] m=[2:10]",
+      answer: (v) => 1 + v.m,
+    },
+  ]);
+
+  const s = makeStrings("genLoop");
+
+  // A single horizontal strip of token cells. Steps:
+  //   step 0  → just the prompt (prefill), p cells in colour A.
+  //   step k  → reveal the k-th generated token (decode), colour B, with its left-context highlighted.
+  // Random: p (prompt length) and g (number of generated tokens, last one is <eos>) chosen by toolkit rng.
+  registerGeometryScene(
+    "genLoop",
+    ({ board, colors, step, sceneStrings, rng }) => {
+      const p = rng.int(2, 4);      // prompt tokens (prefill)
+      const g = rng.int(3, 5);      // generated tokens (decode), last is <eos>
+
+      const W = 1;                  // cell width
+      const y0 = 0;                 // strip baseline
+      const cell = (j, fill, op) =>
+        board.create("polygon",
+          [[j * W, y0], [(j + 1) * W, y0], [(j + 1) * W, y0 + 1], [j * W, y0 + 1]],
+          {
+            borders: { strokeColor: colors.line, strokeWidth: 1.4 },
+            vertices: { visible: false },
+            fillColor: fill, fillOpacity: op, highlight: false,
+          });
+
+      // Base layer (always visible): the prompt cells = prefill.
+      for (let j = 0; j < p; j++) {
+        cell(j, colors.cat[0], 0.45);
+        board.create("text", [j * W + 0.5, y0 + 0.5, `x${j + 1}`], {
+          strokeColor: colors.ink, fontSize: 13, anchorX: "middle", anchorY: "middle", highlight: false,
+        });
+      }
+      board.create("text", [p / 2, y0 + 1.45, () => sceneStrings("prompt")], {
+        strokeColor: colors.cat[0], fontSize: 13, anchorX: "middle", anchorY: "middle", highlight: false,
+      });
+
+      // One step per generated token (decode). Each reveals its cell + a left-context bracket.
+      for (let k = 0; k < g; k++) {
+        const j = p + k;                       // column of this generated token
+        const isEos = k === g - 1;
+        const label = isEos ? "eos" : `x${j + 1}`;
+        const cap = isEos
+          ? `Step ${k + 1}: emit ⟨eos⟩ → stop (decode pass ${k + 1})`
+          : `Step ${k + 1}: read x1..x${j} → emit ${label} (decode pass ${k + 1})`;
+        step(cap, () => {
+          cell(j, colors.cat[2], 0.6);
+          board.create("text", [j * W + 0.5, y0 + 0.5, label], {
+            strokeColor: colors.ink, fontSize: 13, anchorX: "middle", anchorY: "middle", highlight: false,
+          });
+          // Context underline: everything to the left of this token that the model attends to.
+          board.create("segment", [[0, y0 - 0.18], [j * W, y0 - 0.18]], {
+            strokeColor: colors.cat[2], strokeWidth: 4, highlight: false,
+          });
+        });
+      }
+
+      // A label for the generated region, placed under the generated cells.
+      board.create("text", [p + g / 2, y0 - 0.7, () => sceneStrings("generated")], {
+        strokeColor: colors.cat[2], fontSize: 13, anchorX: "middle", anchorY: "middle", highlight: false,
+      });
+    },
+    {
+      boundingbox: [-0.6, 2.1, 11, -1.2],
+      keepAspect: false,
+      random: true,
+      start: 0,
+      title: () => makeStrings("genLoop")("title"),
+    },
+  );
+</script>

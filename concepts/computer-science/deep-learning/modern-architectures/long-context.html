@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Long Context</primer-title>
+
+    <primer-card>
+      <p>
+        Early transformers read a few hundred tokens at a time; today's frontier models read whole books,
+        codebases, and hour-long transcripts — context windows of hundreds of thousands, even millions, of
+        tokens. Getting there meant beating two separate enemies at once. One is about <strong>cost</strong>:
+        attention scales badly with length. The other is about <strong>position</strong>: a model trained at
+        one length forgets how to count past it. We take them in turn.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Obstacle (a): the quadratic cost</h2>
+      <p>
+        <strong>Step 1 — name the scaling.</strong>
+        <primer-ref to="computer-science/deep-learning/transformers/scaled-dot-product-attention">Scaled
+        dot-product attention</primer-ref> forms the full <primer-math>n \times n</primer-math> score matrix
+        <primer-math>S = QK^{\top}</primer-math>, so its time and memory grow as
+      </p>
+      <primer-math display>\text{attention cost} = O(n^2), \qquad n = \text{context length}.</primer-math>
+      <p>
+        <strong>Step 2 — feel the doubling.</strong> Because the cost is quadratic, doubling the context does
+        not double the work — it <strong>quadruples</strong> it:
+      </p>
+      <primer-math display>\frac{(2n)^2}{n^2} = 4.</primer-math>
+      <p>
+        Go from <primer-math>2{,}000</primer-math> to <primer-math>1{,}000{,}000</primer-math> tokens — a
+        <primer-math>500\times</primer-math> longer context — and the naive attention matrix grows by
+        <primer-math>500^2 = 250{,}000\times</primer-math>. Left unchecked, this single
+        <primer-math>n^2</primer-math> makes long context impossible.
+      </p>
+
+      <p>
+        <strong>Step 3 — stop storing the matrix.</strong>
+        <primer-ref to="computer-science/deep-learning/training-at-scale/flash-attention">FlashAttention</primer-ref>
+        computes the <em>exact</em> same attention while never writing the
+        <primer-math>n \times n</primer-math> scores to memory — it tiles the work and keeps a running
+        softmax, dropping the memory from <primer-math>O(n^2)</primer-math> to <primer-math>O(n)</primer-math>.
+        The compute is still quadratic, but the crushing memory wall is gone.
+      </p>
+
+      <p>
+        <strong>Step 4 — stop comparing every pair.</strong> To attack the compute itself, restrict
+        <em>which</em> tokens each token may attend to. <strong>Sliding-window</strong> (local) attention lets
+        each token see only the nearest <primer-math>w</primer-math> neighbours; more general
+        <strong>sparse</strong> patterns add a few global or strided links. Either way each token attends to
+        <primer-math>O(w)</primer-math> others instead of all <primer-math>n</primer-math>, so the cost falls
+        from quadratic to linear:
+      </p>
+      <primer-math display>O(n^2) \;\longrightarrow\; O(n \cdot w), \qquad w \ll n.</primer-math>
+      <p>
+        <strong>Step 5 — mind the real limiter: the KV cache.</strong> At <em>inference</em> time a decoder
+        caches the keys and values of every past token so it need not recompute them — the
+        <primer-ref soft to="computer-science/deep-learning/inference/the-kv-cache">KV cache</primer-ref>.
+        Its size grows <em>linearly</em> with context,
+      </p>
+      <primer-math display>\text{KV-cache memory} = O(n \cdot d \cdot L) \quad(L \text{ layers}),</primer-math>
+      <p>
+        and at a million tokens this cache — not the attention compute — is what fills the GPU. Shrinking it
+        is exactly why
+        <primer-ref to="computer-science/deep-learning/modern-architectures/grouped-query-attention">grouped-query
+        attention</primer-ref> shares keys and values across heads. Long context is, in practice, a memory
+        problem.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Obstacle (b): running out of positions</h2>
+      <p>
+        <strong>Step 1 — the trained range.</strong> A model trained at length <primer-math>L</primer-math>
+        only ever sees positions <primer-math>0, 1, \dots, L-1</primer-math>. Its sense of "how far apart"
+        two tokens are is calibrated to that range and no further.
+      </p>
+      <p>
+        <strong>Step 2 — extrapolation fails.</strong> Ask it about position
+        <primer-math>3L</primer-math> at test time and the position signal lands somewhere it has never
+        encountered. With
+        <primer-ref to="computer-science/deep-learning/modern-architectures/rotary-position-embeddings">rotary
+        position embeddings</primer-ref> (RoPE) each dimension rotates a query/key by an angle proportional to
+        position,
+      </p>
+      <primer-math display>\theta_m(p) = p \cdot \omega_m,</primer-math>
+      <p>
+        and beyond <primer-math>L</primer-math> the fastest-rotating dimensions have wound through angles the
+        model never trained on — quality collapses.
+      </p>
+      <p>
+        <strong>Step 3 — interpolate the positions back in range.</strong> The fix is <strong>RoPE
+        scaling</strong>: squeeze the new, longer position axis back into the trained one. <em>Position
+        interpolation</em> simply rescales every position by <primer-math>L / L'</primer-math> when extending
+        to a new length <primer-math>L' > L</primer-math>,
+      </p>
+      <primer-math display>p \;\longmapsto\; p \cdot \frac{L}{L'}, \qquad\text{so } p \in [0, L') \text{ maps into } [0, L).</primer-math>
+      <p>
+        Now even position <primer-math>L'-1</primer-math> presents an angle inside the trained band, so the
+        model recognises it.
+      </p>
+      <p>
+        <strong>Step 4 — interpolate smartly.</strong> Plain interpolation crushes the high-frequency
+        dimensions that encode fine local order. <strong>NTK-aware</strong> scaling and <strong>YaRN</strong>
+        interpolate the <em>low</em>-frequency (long-range) dimensions while leaving the
+        <em>high</em>-frequency (short-range) ones nearly untouched — extending reach without blurring
+        adjacency. A short fine-tune at the new length locks it in. This is how a model trained at
+        <primer-math>4\text{k}</primer-math> is stretched to <primer-math>128\text{k}</primer-math> and beyond.
+      </p>
+
+      <primer-theorem name="Long context">
+        Two obstacles stand between a transformer and a very long context:
+        <ul>
+          <li>
+            <strong>Quadratic attention.</strong> Cost is <primer-math>O(n^2)</primer-math>, so doubling
+            context quadruples it. Tamed by FlashAttention (exact, <primer-math>O(n)</primer-math> memory) and
+            by sliding-window / sparse attention (each token sees <primer-math>O(w)</primer-math> others, so
+            <primer-math>O(n^2) \to O(nw)</primer-math>).
+          </li>
+          <li>
+            <strong>The KV cache is the memory limiter.</strong> At inference the cache grows
+            <primer-math>O(n d L)</primer-math> with context, so at long lengths it — not the attention
+            compute — fills the GPU.
+          </li>
+          <li>
+            <strong>Positions run out.</strong> A model trained to length <primer-math>L</primer-math>
+            degrades past it; <strong>RoPE scaling</strong> (position interpolation / NTK / YaRN) maps
+            positions beyond <primer-math>L</primer-math> back into the trained range,
+            <primer-math>p \mapsto p\, L/L'</primer-math>, extending reach.
+          </li>
+        </ul>
+      </primer-theorem>
+
+      <primer-vignette title="Needle in a haystack — advertised vs effective context">
+        <p>
+          A model can <em>accept</em> a million tokens and still not <em>use</em> them. The standard probe is
+          <strong>needle-in-a-haystack</strong>: hide a single fact (the needle) at a random depth in a long
+          filler document (the haystack), then ask for it. Sweep the needle's position and the haystack's
+          length and you get a grid of pass/fail — a map of where recall actually holds.
+        </p>
+        <p>
+          The results are humbling. Models routinely show a <em>U-shaped</em> profile — sharp at the very
+          start and very end, hazy in the middle (the "lost in the middle" effect) — and recall that decays
+          well before the advertised limit. Hence the distinction between <strong>advertised</strong> context
+          (the number on the box, how many tokens it will accept) and <strong>effective</strong> context (the
+          length over which it reliably retrieves and reasons). The second is the one that matters, and it is
+          usually the smaller.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <!-- Localized strings for the cost-vs-length chart family. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "ctxCost": {
+          "title": "Cost vs context length: attention compute ∝ n², KV-cache memory ∝ n",
+          "attn": "attention compute ∝ n²",
+          "kv": "KV-cache memory ∝ n",
+          "win": "sliding-window ∝ n·w"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Watch the curves separate</h2>
+      <p>
+        Two costs plotted against context length <primer-math>n</primer-math> (in thousands of tokens). The
+        steep curve is full attention compute, growing like <primer-math>n^2</primer-math> — it pulls away
+        from everything else as the context grows. The straight line is KV-cache memory, growing like
+        <primer-math>n</primer-math>; and the gentler line is sliding-window attention,
+        <primer-math>\propto n \cdot w</primer-math> for a fixed window — linear, like the cache. Past a
+        certain length the quadratic curve simply dominates, which is the whole story of why long context is
+        hard.
+      </p>
+      <primer-chart scene="ctxCost"></primer-chart>
+    </primer-card>
+
+    <primer-card>
+      <h2>Where this goes</h2>
+      <p>
+        We now have every modern upgrade in hand — sparse capacity, and the tricks that stretch context to the
+        horizon. Time to assemble them. The next page builds a 2020s frontier model from these parts and shows
+        how each one slots into the original 2017 design.
+      </p>
+    </primer-card>
+
+    <!-- Quiz prose; the computational n² items stay language-neutral maths inline. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "ctxQuiz@1": {
+          "intro": "Long context fights two enemies: attention's O(n²) cost (eased by FlashAttention, sliding-window/sparse, and the KV cache as the real limiter) and position extrapolation (fixed by RoPE scaling).",
+          "costQ": "How does attention's cost scale with context length $n$?",
+          "costA": "$O(n^2)$ — quadratic, so doubling $n$ quadruples it",
+          "costB": "$O(n)$ — linear in $n$",
+          "costC": "$O(\\log n)$",
+          "costD": "constant in $n$",
+          "winQ": "Sliding-window (local) attention reduces the cost by…",
+          "winA": "letting each token attend to only $w \\ll n$ neighbours, so $O(n^2) \\to O(nw)$",
+          "winB": "skipping the softmax",
+          "winC": "using fewer layers",
+          "winD": "lowering the precision of the weights",
+          "kvQ": "At inference, the practical memory limiter for long context is…",
+          "kvA": "the KV cache, which grows $O(n d L)$ with context length",
+          "kvB": "the embedding table",
+          "kvC": "the optimiser state",
+          "kvD": "the tokenizer",
+          "posQ": "A model trained to length $L$ degrades past it. RoPE scaling fixes this by…",
+          "posA": "interpolating positions beyond $L$ back into the trained range, $p \\mapsto p\\,L/L'$",
+          "posB": "deleting all tokens past position $L$",
+          "posC": "retraining from scratch at every new length",
+          "posD": "adding random noise to the positions",
+          "quadQ": "A context of length $n = {a}$ is grown to ${b}$× longer. Attention cost grows by a factor of (the square of the length ratio). What factor is that?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="ctxQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/deep-learning/modern-architectures/mixture-of-experts"],
+    "completedDate": "2026-06-25"
+  }
+</script>
+
+<!-- Interactive: registerCharts plotting cost vs context length n (in thousands). Three curves over one
+     shared domain/range: full attention compute ∝ n² (steep), KV-cache memory ∝ n (line), and
+     sliding-window attention ∝ n·w (gentler line). Static (no sliders) — the point is the shape contrast.
+     line is the theme-safe function form. All colours from themeColors(); quiz incl. a computational n²
+     scaling item in registerQuiz. -->
+<script type="module">
+  import { registerCharts, registerQuiz, makeStrings } from "primer";
+
+  registerQuiz("ctxQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("costQ"),
+      options: [
+        { text: () => sceneStrings("costA"), correct: true },
+        { text: () => sceneStrings("costB"), correct: false },
+        { text: () => sceneStrings("costC"), correct: false },
+        { text: () => sceneStrings("costD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("winQ"),
+      options: [
+        { text: () => sceneStrings("winA"), correct: true },
+        { text: () => sceneStrings("winB"), correct: false },
+        { text: () => sceneStrings("winC"), correct: false },
+        { text: () => sceneStrings("winD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("kvQ"),
+      options: [
+        { text: () => sceneStrings("kvA"), correct: true },
+        { text: () => sceneStrings("kvB"), correct: false },
+        { text: () => sceneStrings("kvC"), correct: false },
+        { text: () => sceneStrings("kvD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("posQ"),
+      options: [
+        { text: () => sceneStrings("posA"), correct: true },
+        { text: () => sceneStrings("posB"), correct: false },
+        { text: () => sceneStrings("posC"), correct: false },
+        { text: () => sceneStrings("posD"), correct: false },
+      ],
+    },
+    {
+      // Computational: doubling-style scaling. Cost grows by (length ratio)². Answer = b².
+      prompt: (v) => sceneStrings("quadQ", v),
+      variables: "a=[1000,2000,4000] b=[2:10]",
+      answer: (v) => v.b * v.b,
+    },
+  ]);
+
+  const s = makeStrings("ctxCost");
+
+  // n runs over context length in thousands of tokens, n ∈ [0, 32]. Scale each curve so the contrast in
+  // SHAPE (quadratic vs linear) is the message; constants are illustrative, not literal FLOP counts.
+  registerCharts(
+    [
+      {
+        name: "ctxCost",
+        f: [
+          (x) => (x * x) / 32,   // attention compute ∝ n²
+          (x) => x,              // KV-cache memory ∝ n
+          (x) => 0.45 * x,       // sliding-window ∝ n·w (fixed w) — gentler line
+        ],
+        line: (colors, i) =>
+          i === 0
+            ? { strokeColor: colors.cat[0], strokeWidth: 4 }
+            : i === 1
+              ? { strokeColor: colors.cat[1], strokeWidth: 3 }
+              : { strokeColor: colors.cat[2], strokeWidth: 3, dash: 2 },
+        legend: [() => s("attn"), () => s("kv"), () => s("win")],
+      },
+    ],
+    {
+      id: "ctxCost",
+      xmin: 0, xmax: 32, ymin: 0, ymax: 34,
+      xticks: 8, yticks: 8,
+      xaxisname: "context length n (×1000 tokens)",
+      yaxisname: "cost",
+      title: () => s("title"),
+    },
+  );
+</script>

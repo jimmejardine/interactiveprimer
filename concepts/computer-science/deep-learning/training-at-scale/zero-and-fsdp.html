@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>ZeRO and FSDP</primer-title>
+
+    <primer-card>
+      <p>
+        <primer-ref to="computer-science/deep-learning/training-at-scale/data-parallelism">Data
+        parallelism</primer-ref> is the simplest way to use many GPUs: give each a full copy of the model
+        and a different slice of the batch. Simple — but wasteful. Every GPU stores the <em>same</em>
+        parameters, the <em>same</em> gradients, and the <em>same</em> optimizer states. With
+        <primer-math>N</primer-math> GPUs you are paying for the model <primer-math>N</primer-math> times
+        over, even though it is one model.
+      </p>
+      <p>
+        <strong>ZeRO</strong> (Zero Redundancy Optimizer) — and its PyTorch-native form
+        <strong>FSDP</strong> (Fully Sharded Data Parallel) — removes that redundancy. Instead of
+        replicating the model state, it <em>shards</em> it across the data-parallel GPUs and gathers each
+        piece only when it is needed.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Where the memory goes, line by line</h2>
+      <p>
+        Let the model have <primer-math>\Psi</primer-math> parameters. Train it with mixed precision and
+        <primer-ref to="computer-science/deep-learning/training-deep-networks/adam">AdamW</primer-ref>,
+        and account for the bytes per parameter.
+      </p>
+
+      <p>
+        <strong>Step 1 — count the replicated state.</strong> Plain data parallelism keeps, on
+        <em>every</em> GPU, three things: the parameters, their gradients, and the optimizer's bookkeeping.
+        For AdamW the optimizer carries the first moment <primer-math>m</primer-math>, the second moment
+        <primer-math>v</primer-math>, and an fp32 master copy of the weights:
+      </p>
+      <primer-math display>\underbrace{2\Psi}_{\text{fp16 params}} + \underbrace{2\Psi}_{\text{fp16 grads}} + \underbrace{4\Psi + 4\Psi + 4\Psi}_{\text{Adam } m,\,v,\,\text{fp32 master}} = 16\Psi \text{ bytes.}</primer-math>
+      <p>
+        That is roughly <primer-math>16</primer-math> bytes per parameter, and the optimizer states alone
+        (<primer-math>12\Psi</primer-math>) dwarf the parameters themselves. With
+        <primer-math>N</primer-math> GPUs, this entire <primer-math>16\Psi</primer-math> is copied
+        <primer-math>N</primer-math> times — pure redundancy.
+      </p>
+
+      <p>
+        <strong>Step 2 — Stage 1: shard the optimizer states.</strong> The optimizer states are needed
+        only during the update, not during the forward/backward pass, so they are the easiest to split.
+        Give each of the <primer-math>N</primer-math> GPUs only <primer-math>1/N</primer-math> of
+        <primer-math>m, v</primer-math>, and the master weights:
+      </p>
+      <primer-math display>\text{per GPU} = 2\Psi + 2\Psi + \frac{12\Psi}{N}.</primer-math>
+
+      <p>
+        <strong>Step 3 — Stage 2: also shard the gradients.</strong> Each GPU only needs the gradient for
+        the parameters whose optimizer state it owns, so shard the gradients the same way:
+      </p>
+      <primer-math display>\text{per GPU} = 2\Psi + \frac{2\Psi}{N} + \frac{12\Psi}{N}.</primer-math>
+
+      <p>
+        <strong>Step 4 — Stage 3 (= FSDP): also shard the parameters.</strong> Finally split the
+        parameters themselves. Now <em>nothing</em> is fully replicated — every part of the model state is
+        divided <primer-math>N</primer-math> ways:
+      </p>
+      <primer-math display>\text{per GPU} = \frac{2\Psi}{N} + \frac{2\Psi}{N} + \frac{12\Psi}{N} = \frac{16\Psi}{N}.</primer-math>
+
+      <p>
+        <strong>Step 5 — gather on demand.</strong> But the forward pass <em>does</em> need a layer's full
+        parameters. So just before computing a layer, the GPUs do an <strong>all-gather</strong> to
+        momentarily reconstruct that layer's weights; right after, each GPU throws away the shards it does
+        not own. The full weights exist only for the instant they are used, one layer at a time — so peak
+        memory tracks the largest single layer, not the whole model:
+      </p>
+      <primer-math display>\text{Stage 3 memory per GPU} \;\approx\; \frac{16\Psi}{N} \;\xrightarrow[N \text{ large}]{}\; \text{model fits, however big.}</primer-math>
+      <p>
+        The bargain is the mirror image of pipeline parallelism's: ZeRO pays a little extra communication
+        (the on-demand gathers) to cut per-GPU memory by up to <primer-math>N\times</primer-math>, all
+        while keeping data parallelism's dead-simple programming model.
+      </p>
+
+      <primer-theorem name="ZeRO / FSDP">
+        For a model of <primer-math>\Psi</primer-math> parameters trained data-parallel on
+        <primer-math>N</primer-math> GPUs:
+        <ul>
+          <li>
+            <strong>Replication wastes memory.</strong> Plain data parallelism stores all
+            <primer-math>16\Psi</primer-math> bytes (params + grads + optimizer states) on
+            <em>every</em> GPU — the same model copied <primer-math>N</primer-math> times.
+          </li>
+          <li>
+            <strong>Shard in stages.</strong> Stage 1 shards the optimizer states; Stage 2 also the
+            gradients; Stage 3 (= FSDP) also the parameters — until per-GPU memory is
+            <primer-math>16\Psi / N</primer-math>.
+          </li>
+          <li>
+            <strong>Gather on demand.</strong> A layer's full parameters (and gradients) are
+            all-gathered just before they are used and dropped right after, so a model far too big for one
+            GPU still trains, at a cost of extra communication and a roughly
+            <primer-math>N\times</primer-math> memory saving.
+          </li>
+        </ul>
+      </primer-theorem>
+
+      <primer-vignette title="The 16-bytes-per-parameter breakdown">
+        <p>
+          Why <primer-math>16\Psi</primer-math>? Mixed-precision AdamW training keeps, per parameter:
+        </p>
+        <ul>
+          <li><strong>2 bytes</strong> — the fp16 (half-precision) parameter used in the forward pass.</li>
+          <li><strong>2 bytes</strong> — the fp16 gradient.</li>
+          <li><strong>4 bytes</strong> — Adam's first moment <primer-math>m</primer-math> (fp32).</li>
+          <li><strong>4 bytes</strong> — Adam's second moment <primer-math>v</primer-math> (fp32).</li>
+          <li><strong>4 bytes</strong> — the fp32 "master" copy of the weights, kept for numerical stability.</li>
+        </ul>
+        <p>
+          Total: <primer-math>2 + 2 + 4 + 4 + 4 = 16</primer-math> bytes. The striking part is that
+          <primer-math>12</primer-math> of those <primer-math>16</primer-math> — three quarters — are
+          optimizer overhead, not the model. That is exactly why ZeRO shards the optimizer states first
+          (Stage 1): it is the biggest, cheapest win, removing <primer-math>12\Psi(1 - 1/N)</primer-math>
+          bytes per GPU before touching anything on the hot forward/backward path.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <!-- Localized strings for the per-GPU memory-bar diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "zeroBar": {
+          "title": "Per-GPU memory as you move through ZeRO stages 0 → 3",
+          "params": "params (2 B/param)",
+          "grads": "gradients (2 B/param)",
+          "opt": "optimizer states (12 B/param)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Watch per-GPU memory shrink, stage by stage</h2>
+      <p>
+        Three stacked bands show one GPU's memory in bytes-per-parameter: parameters
+        (<primer-math>2</primer-math>), gradients (<primer-math>2</primer-math>), and optimizer states
+        (<primer-math>12</primer-math>) — <primer-math>16</primer-math> total. Move the stage selector
+        from 0 (plain data parallelism, nothing sharded) to 3 (FSDP, everything sharded across
+        <primer-math>N=8</primer-math> GPUs) and watch each band collapse as it gets sharded.
+      </p>
+      <primer-geometry scene="zeroBar"></primer-geometry>
+      <primer-chart-sliders name="zeroBar"></primer-chart-sliders>
+    </primer-card>
+
+    <!-- Quiz prose; the computational per-GPU memory item is language-neutral maths inline. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "zeroQuiz@1": {
+          "intro": "ZeRO/FSDP shards the model state (optimizer / gradients / parameters) across data-parallel GPUs instead of replicating it, gathering each piece on demand.",
+          "wasteQ": "What does plain data parallelism replicate on every GPU?",
+          "wasteA": "the full parameters, gradients, and optimizer states",
+          "wasteB": "only the data batch",
+          "wasteC": "only the parameters",
+          "wasteD": "nothing — it already shards everything",
+          "stageQ": "Which ZeRO stage shards the parameters themselves (and equals FSDP)?",
+          "stageA": "Stage 3",
+          "stageB": "Stage 1",
+          "stageC": "Stage 0",
+          "stageD": "Stage 2",
+          "gatherQ": "Stage 3 still works because, before a layer runs, the GPUs…",
+          "gatherA": "all-gather that layer's full parameters, then drop the shards they don't own",
+          "gatherB": "give up and use one GPU",
+          "gatherC": "keep every layer fully replicated after all",
+          "gatherD": "skip the forward pass",
+          "saveQ": "Sharding all three across $N$ GPUs cuts per-GPU model-state memory by about…",
+          "saveA": "a factor of $N$ (from $16\\Psi$ to $16\\Psi/N$)",
+          "saveB": "a factor of 2, always",
+          "saveC": "nothing — it only saves compute",
+          "saveD": "a factor of $N^2$"
+        }
+      }
+    </script>
+
+    <primer-quiz name="zeroQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/deep-learning/training-at-scale/pipeline-parallelism"],
+    "completedDate": "2026-06-25"
+  }
+</script>
+
+<!-- Interactive: a <primer-geometry> stacked memory bar (params / grads / optimizer) whose three bands'
+     heights shrink as a stage selector (choice 0/1/2/3) shards more of the state across N=8 GPUs. Heights
+     are functional in the slider so they re-draw on change; a live total readout (in units of Ψ) prints
+     above. All colours from themeColors(); quiz incl. a computational per-GPU memory free-text item. -->
+<script type="module">
+  import { registerGeometryScene, registerChartSliders, registerQuiz, makeStrings } from "primer";
+
+  registerQuiz("zeroQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("wasteQ"),
+      options: [
+        { text: () => sceneStrings("wasteA"), correct: true },
+        { text: () => sceneStrings("wasteB"), correct: false },
+        { text: () => sceneStrings("wasteC"), correct: false },
+        { text: () => sceneStrings("wasteD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("stageQ"),
+      options: [
+        { text: () => sceneStrings("stageA"), correct: true },
+        { text: () => sceneStrings("stageB"), correct: false },
+        { text: () => sceneStrings("stageC"), correct: false },
+        { text: () => sceneStrings("stageD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gatherQ"),
+      options: [
+        { text: () => sceneStrings("gatherA"), correct: true },
+        { text: () => sceneStrings("gatherB"), correct: false },
+        { text: () => sceneStrings("gatherC"), correct: false },
+        { text: () => sceneStrings("gatherD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("saveQ"),
+      options: [
+        { text: () => sceneStrings("saveA"), correct: true },
+        { text: () => sceneStrings("saveB"), correct: false },
+        { text: () => sceneStrings("saveC"), correct: false },
+        { text: () => sceneStrings("saveD"), correct: false },
+      ],
+    },
+    {
+      // Computational: Stage-3 per-GPU model-state memory = 16Ψ/N bytes (Ψ in billions of params,
+      // answer in GB = 16*Psi/N). Constrained so N divides nicely; graded numerically (3 dp).
+      prompt: "A model has ${P}$ billion parameters, trained on ${N}$ GPUs with full sharding (Stage 3). At $16$ bytes/param the per-GPU model-state memory is $16P/N$ GB. Compute it (3 dp).",
+      variables: "P=[1,7,13,70] N=[2,4,8,16]",
+      answer: (v) => (16 * v.P) / v.N,
+    },
+  ]);
+
+  const s = makeStrings("zeroBar");
+
+  // Stage selector: 0 (plain DP) → 1 (opt sharded) → 2 (+grads) → 3 (+params). N=8 GPUs.
+  registerChartSliders("zeroBar", [
+    { name: "stage", type: "choice", options: ["Stage 0", "Stage 1", "Stage 2", "Stage 3"], value: 0 },
+  ]);
+
+  // A single stacked memory bar for one GPU, in bytes-per-parameter. Bands (bottom→top): params 2,
+  // grads 2, optimizer 12 (= 16 total). A band is sharded (÷N) once the stage reaches the point that
+  // shards it: optimizer at stage ≥ 1, grads at ≥ 2, params at ≥ 3.
+  registerGeometryScene(
+    "zeroBar",
+    ({ board, colors, sliders, sceneStrings }) => {
+      const N = 8;
+      const stage = () => Math.round(sliders.stage ?? 0);
+
+      // full band sizes in bytes-per-parameter.
+      const FULL = { params: 2, grads: 2, opt: 12 };
+      const paramsH = () => (stage() >= 3 ? FULL.params / N : FULL.params);
+      const gradsH = () => (stage() >= 2 ? FULL.grads / N : FULL.grads);
+      const optH = () => (stage() >= 1 ? FULL.opt / N : FULL.opt);
+
+      const x0 = 0, x1 = 2.4; // bar width
+
+      // A band drawn from running-base yBase up by height h (both functions).
+      const band = (yBase, h, col, labelKey) => {
+        board.create("polygon",
+          [ [x0, () => yBase()], [x1, () => yBase()], [x1, () => yBase() + h()], [x0, () => yBase() + h()] ],
+          {
+            borders: { strokeColor: colors.line, strokeWidth: 1.5 },
+            vertices: { visible: false },
+            fillColor: col, fillOpacity: 0.5, highlight: false,
+          });
+        board.create("text", [x1 + 0.3, () => yBase() + h() / 2, () => sceneStrings(labelKey)], {
+          strokeColor: col, fontSize: 13, anchorX: "left", anchorY: "middle", highlight: false,
+        });
+      };
+
+      const base0 = () => 0;
+      const base1 = () => paramsH();
+      const base2 = () => paramsH() + gradsH();
+
+      band(base0, paramsH, colors.cat[0], "params");
+      band(base1, gradsH, colors.cat[1], "grads");
+      band(base2, optH, colors.cat[2], "opt");
+
+      // Total readout (bytes per parameter) above the bar.
+      board.create("text", [x1 / 2, 17.0, () => {
+        const tot = paramsH() + gradsH() + optH();
+        return `Stage ${stage()}  →  ${tot.toFixed(2)} bytes/param per GPU  (full DP = 16)`;
+      }], { strokeColor: colors.cat[0], fontSize: 13, anchorX: "middle", anchorY: "middle", highlight: false });
+    },
+    {
+      // Full bar height is 2+2+12 = 16 bytes/param at stage 0; leave headroom for the readout.
+      boundingbox: [-1.0, 18.4, 7.6, -1.0],
+      keepAspect: false,
+      sliders: "zeroBar",
+      title: () => s("title"),
+    },
+  );
+</script>
