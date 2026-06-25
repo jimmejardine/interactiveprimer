@@ -97,13 +97,28 @@ export class PrimerGeometry extends HTMLElement {
           box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
         .stage.jxgbox { background: var(--primer-viz-bg, #fff); }
         .stage svg { display: block; width: 100% !important; height: 100% !important; }
-        .bar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; justify-content: center; margin-bottom: 0.6rem;
+        /* "Neon HUD" step bar: a recessed instrument strip of glowing chip buttons + a monospace
+           step counter. Colours from --primer-* tokens (glow = the theme's accent/ring). */
+        .bar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; justify-content: center;
+          margin-bottom: 0.6rem; padding: 0.45rem 0.6rem; border-radius: 0.5rem;
+          background: var(--primer-control-bg, #f1ede4); border: 1px solid var(--primer-control-border, #ccc);
+          box-shadow: inset 0 1px 0 var(--primer-ring, rgba(70,90,230,0.2));
           font-family: var(--primer-font-ui, sans-serif); }
-        .bar button { padding: 0.2rem 0.6rem; }
-        /* "Next" is the primary step-through action — make it stand out. */
-        .bar .next { font-weight: 800; font-size: 1.15rem; line-height: 1; color: var(--primer-accent, #4d5bd1); }
-        .bar .next:disabled { color: inherit; font-weight: 600; }
-        .bar .count { font-size: 0.85rem; color: var(--primer-ink-soft, #667); min-width: 3.2rem; text-align: center; }
+        .bar button {
+          padding: 0.2rem 0.6rem; border-radius: 0.35rem;
+          border: 1px solid var(--primer-control-border, #ccc);
+          background: var(--primer-control-bg, #fff); color: var(--primer-ink, #111);
+          transition: border-color 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease; }
+        .bar button:hover:not(:disabled) { border-color: var(--primer-accent, #46e); }
+        .bar button:focus-visible { outline: none; border-color: var(--primer-accent, #46e);
+          box-shadow: 0 0 0 2px var(--primer-ring, rgba(70,90,230,0.5)), 0 0 8px var(--primer-ring, rgba(70,90,230,0.4)); }
+        .bar button:disabled { opacity: 0.4; box-shadow: none; }
+        /* "Next" is the primary step-through action — make it an accent-lit chip. */
+        .bar .next:not(:disabled) { font-weight: 800; font-size: 1.15rem; line-height: 1;
+          color: var(--primer-accent-ink, #fff); background: var(--primer-accent, #4d5bd1);
+          border-color: transparent; box-shadow: 0 0 8px var(--primer-ring, rgba(70,90,230,0.6)); }
+        .bar .count { font-family: var(--primer-font-mono, monospace); font-size: 0.85rem; letter-spacing: 0.04em;
+          color: var(--primer-ink-soft, #667); min-width: 3.6rem; text-align: center; }
         .bar .caption { flex: 1 1 100%; font-size: 0.92rem; font-weight: 700; color: var(--primer-ink, #111); margin-top: 0.1rem; text-align: center; }
         .expanded { margin-top: 0.6rem; display: grid; gap: 1rem; }
         .expanded .block h4 { font-family: var(--primer-font-ui, sans-serif); font-size: 0.95rem;

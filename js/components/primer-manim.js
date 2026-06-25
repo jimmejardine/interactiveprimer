@@ -74,15 +74,25 @@ export class PrimerManim extends HTMLElement {
            screens instead of clipping. object-fit:contain preserves aspect (no distortion).
            The drawing-buffer resolution still tracks the stage via manim's autoResize. */
         .stage canvas { display: block; width: 100% !important; height: 100% !important; object-fit: contain; }
-        .controls { margin-top: 0.4rem; display: flex; gap: 0.75rem; align-items: center; }
-        /* Control button: just the SVG icon, themed via currentColor (no font glyphs). */
-        .play { display: inline-flex; padding: 0; border: 0; background: none; color: var(--primer-ink, #111); cursor: pointer; line-height: 0; }
-        .play svg { width: 1.5rem; height: 1.5rem; display: block; }
+        /* "Neon HUD" control strip: a recessed instrument bar holding the icon chip + caption. */
+        .controls { margin-top: 0.4rem; display: flex; gap: 0.6rem; align-items: center;
+          padding: 0.35rem 0.55rem; border-radius: 0.5rem;
+          background: var(--primer-control-bg, #f1ede4); border: 1px solid var(--primer-control-border, #ccc);
+          box-shadow: inset 0 1px 0 var(--primer-ring, rgba(70,90,230,0.2)); }
+        /* Control button: the SVG icon in a small chip that lights up on hover/focus. */
+        .play { display: inline-flex; padding: 0.25rem; border: 1px solid var(--primer-control-border, #ccc);
+          border-radius: 0.35rem; background: var(--primer-control-bg, #fff); color: var(--primer-ink, #111);
+          cursor: pointer; line-height: 0; transition: border-color 0.12s ease, box-shadow 0.12s ease; }
+        .play:hover { border-color: var(--primer-accent, #46e); }
+        .play:focus-visible { outline: none; border-color: var(--primer-accent, #46e);
+          box-shadow: 0 0 0 2px var(--primer-ring, rgba(70,90,230,0.5)), 0 0 8px var(--primer-ring, rgba(70,90,230,0.4)); }
+        .play svg { width: 1.4rem; height: 1.4rem; display: block; }
         /* Big centred play button, shown on the idle stage so it's obvious the animation plays.
            Removed once it first starts (replay uses the small control). */
         .big-play { position: absolute; inset: 0; display: grid; place-items: center; padding: 0; border: 0; background: transparent; cursor: pointer; }
-        .big-play .disc { width: 4.5rem; height: 4.5rem; border-radius: 50%; background: var(--primer-accent, #5b6ee1); display: grid; place-items: center; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25); }
-        .big-play svg { width: 2.4rem; height: 2.4rem; fill: #fff; margin-left: 0.25rem; /* optical-centre the triangle */ }
+        .big-play .disc { width: 4.5rem; height: 4.5rem; border-radius: 50%; background: var(--primer-accent, #5b6ee1); display: grid; place-items: center;
+          box-shadow: 0 0 0 1px var(--primer-accent, #5b6ee1), 0 0 18px var(--primer-ring, rgba(70,90,230,0.7)), 0 2px 10px rgba(0, 0, 0, 0.25); }
+        .big-play svg { width: 2.4rem; height: 2.4rem; fill: var(--primer-accent-ink, #fff); margin-left: 0.25rem; /* optical-centre the triangle */ }
         .big-play:hover .disc, .big-play:focus-visible .disc { filter: brightness(1.1); }
         @keyframes primer-manim-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
         @media (prefers-reduced-motion: no-preference) { .big-play .disc { animation: primer-manim-pulse 1.8s ease-in-out infinite; } }

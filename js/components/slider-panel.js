@@ -18,17 +18,83 @@ import { snapToAnchor } from "../chart-snap.js";
 
 /** Styles for the controls markup. Each shadow root that renders a panel includes this. */
 export const SLIDER_PANEL_CSS = `
-  /* One row per param — label, slider, number box. Hidden when empty so it adds no margin. */
-  .controls { display: grid; gap: 0.5rem 0.75rem; margin-top: 0.6rem; }
-  .controls:empty { display: none; }
-  .control { display: grid; grid-template-columns: minmax(6rem, auto) 1fr minmax(3.5rem, auto); gap: 0.6rem; align-items: center; }
-  .control > label { font-family: var(--primer-font-ui, sans-serif); font-size: 0.9rem; color: var(--primer-ink, #111); }
-  .control input[type="range"] { width: 100%; accent-color: var(--primer-accent, #46e); display: block; }
-  .control input[type="number"] {
-    font: inherit; width: 100%; padding: 0.25rem 0.4rem; border-radius: 0.4rem;
-    border: 1px solid var(--primer-border, #ccc);
-    background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
+  /* "Neon HUD" control panel: a recessed instrument surface framed with a hairline + corner brackets,
+     a glowing accent slider thumb over a lit fill, and monospace numeric readouts. All colours come
+     from --primer-* tokens, so it recolours per theme (the glow is the theme's accent/ring). */
+  .controls {
+    display: grid; gap: 0.5rem 0.75rem; margin-top: 0.6rem;
+    padding: 0.75rem 0.95rem; border-radius: 0.55rem; position: relative;
+    background: var(--primer-control-bg, #f1ede4);
+    border: 1px solid var(--primer-control-border, #ccc);
+    box-shadow: inset 0 1px 0 var(--primer-ring, rgba(70,90,230,0.25));
   }
+  .controls:empty { display: none; padding: 0; border: 0; box-shadow: none; }
+  /* Faint HUD corner brackets (top-left + bottom-right). */
+  .controls::before, .controls::after {
+    content: ""; position: absolute; width: 10px; height: 10px; pointer-events: none;
+    border: 1px solid var(--primer-accent, #46e); opacity: 0.5;
+  }
+  .controls::before { top: 4px; left: 4px; border-right: 0; border-bottom: 0; }
+  .controls::after { bottom: 4px; right: 4px; border-left: 0; border-top: 0; }
+
+  .control { display: grid; grid-template-columns: minmax(6rem, auto) 1fr minmax(3.5rem, auto); gap: 0.6rem; align-items: center; }
+  .control > label {
+    font-family: var(--primer-font-ui, sans-serif); font-size: 0.72rem;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--primer-ink-soft, #667);
+  }
+
+  /* The range slider: a thin grooved track with a lit accent fill (--fill set by JS) and a small
+     glowing accent thumb. Styled per-engine (WebKit + Firefox). */
+  .control input[type="range"] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 1.4rem; display: block; background: transparent; cursor: pointer;
+    --fill: 50%;
+  }
+  .control input[type="range"]:focus { outline: none; }
+  .control input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px; border-radius: 2px;
+    background: linear-gradient(90deg, var(--primer-accent, #46e) 0 var(--fill),
+      var(--primer-control-border, #ccc) var(--fill) 100%);
+    box-shadow: inset 0 0 0 1px var(--primer-control-border, #ccc);
+  }
+  .control input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; margin-top: -4px;
+    width: 12px; height: 12px; border-radius: 2px;
+    background: var(--primer-accent, #46e); border: 1px solid var(--primer-accent-ink, #fff);
+    box-shadow: 0 0 6px var(--primer-ring, rgba(70,90,230,0.6));
+  }
+  .control input[type="range"]:focus::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px var(--primer-ring, rgba(70,90,230,0.5)), 0 0 10px var(--primer-accent, #46e);
+  }
+  .control input[type="range"]::-moz-range-track {
+    height: 4px; border-radius: 2px; background: var(--primer-control-border, #ccc);
+  }
+  .control input[type="range"]::-moz-range-progress {
+    height: 4px; border-radius: 2px; background: var(--primer-accent, #46e);
+  }
+  .control input[type="range"]::-moz-range-thumb {
+    width: 12px; height: 12px; border-radius: 2px;
+    background: var(--primer-accent, #46e); border: 1px solid var(--primer-accent-ink, #fff);
+    box-shadow: 0 0 6px var(--primer-ring, rgba(70,90,230,0.6));
+  }
+  .control input[type="range"]:focus::-moz-range-thumb {
+    box-shadow: 0 0 0 3px var(--primer-ring, rgba(70,90,230,0.5)), 0 0 10px var(--primer-accent, #46e);
+  }
+
+  /* Numeric readout: a monospace "instrument" box. */
+  .control input[type="number"] {
+    box-sizing: border-box; /* shadow DOM doesn't inherit the document's box-sizing reset, so set it
+       here — else width:100% + padding + border overflows the grid cell and eats the panel padding */
+    font-family: var(--primer-font-mono, monospace); font-size: 0.74rem; text-align: center;
+    width: 100%; padding: 0.25rem 0.35rem; border-radius: 0.35rem;
+    border: 1px solid var(--primer-control-border, #ccc);
+    background: var(--primer-control-bg, #fff); color: var(--primer-ink, #111);
+  }
+  .control input[type="number"]:focus {
+    outline: none; border-color: var(--primer-accent, #46e);
+    box-shadow: 0 0 0 2px var(--primer-ring, rgba(70,90,230,0.5));
+  }
+
   /* Anchor ticks: drawn under the slider, one per in-range anchor. The slider cell is a positioning
      context so each tick can sit over its value. */
   .slider { position: relative; --tick-inset: 8px; /* ≈ half a native range thumb */ }
@@ -39,29 +105,34 @@ export const SLIDER_PANEL_CSS = `
     transform: translateX(-50%);
     display: flex; flex-direction: column; align-items: center;
   }
-  .tick i { display: block; width: 1px; height: 5px; background: var(--primer-ink-soft, #667); }
+  .tick i { display: block; width: 1px; height: 5px; background: var(--primer-accent, #667); opacity: 0.55; }
   .tick b {
-    font-family: var(--primer-font-ui, sans-serif); font-size: 0.7rem; font-weight: 400;
+    font-family: var(--primer-font-mono, monospace); font-size: 0.65rem; font-weight: 400;
     line-height: 1; margin-top: 1px; color: var(--primer-ink-soft, #667); white-space: nowrap;
   }
   /* When labels would crowd, JS adds .sparse-labels — keep every tick MARK but show only every 2nd
      label (the first is kept; even-positioned labels are dropped). */
   .ticks.sparse-labels .tick:nth-child(even) b { display: none; }
 
-  /* A "choice" control: a label and a segmented row of buttons (the selected one is pressed). */
+  /* A "choice" control: a label and a segmented row of HUD chips (the selected one is lit). */
   .control.choice { grid-template-columns: minmax(6rem, auto) 1fr; }
   .segmented { display: flex; flex-wrap: wrap; gap: 0.3rem; }
   .segmented .seg {
-    font: inherit; font-family: var(--primer-font-ui, sans-serif); font-size: 0.85rem;
-    padding: 0.3rem 0.65rem; border-radius: 0.4rem; cursor: pointer;
-    border: 1px solid var(--primer-border, #ccc);
-    background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
+    font-family: var(--primer-font-ui, sans-serif); font-size: 0.85rem;
+    padding: 0.3rem 0.65rem; border-radius: 0.35rem; cursor: pointer;
+    border: 1px solid var(--primer-control-border, #ccc);
+    background: var(--primer-control-bg, #fff); color: var(--primer-ink, #111);
+    transition: border-color 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease;
   }
+  .segmented .seg:hover { border-color: var(--primer-accent, #46e); }
   .segmented .seg[aria-pressed="true"] {
     background: var(--primer-accent, #46e); color: var(--primer-accent-ink, #fff);
-    border-color: transparent;
+    border-color: transparent; box-shadow: 0 0 8px var(--primer-ring, rgba(70,90,230,0.6));
   }
-  .segmented .seg:focus-visible { outline: 2px solid var(--primer-accent, #46e); outline-offset: 1px; }
+  .segmented .seg:focus-visible {
+    outline: none; border-color: var(--primer-accent, #46e);
+    box-shadow: 0 0 0 2px var(--primer-ring, rgba(70,90,230,0.5)), 0 0 8px var(--primer-ring, rgba(70,90,230,0.4));
+  }
 `;
 
 /**
@@ -78,6 +149,17 @@ export function mountSliderPanel(host, defs, initialValues, onChange) {
   for (const d of defs) values[d.name] = initialValues?.[d.name] ?? d.value ?? d.min ?? 0;
 
   host.innerHTML = controlsHtml(defs, values);
+
+  // Paint each range's lit fill (--fill, a 0–100% the track gradient reads) from its current value.
+  /** @param {HTMLInputElement} input */
+  const setFill = (input) => {
+    const min = Number(input.min);
+    const max = Number(input.max);
+    const v = Number(input.value);
+    const pct = max > min ? ((v - min) / (max - min)) * 100 : 0;
+    input.style.setProperty("--fill", `${Math.max(0, Math.min(100, pct))}%`);
+  };
+  for (const r of host.querySelectorAll('input[type="range"]')) setFill(/** @type {HTMLInputElement} */ (r));
 
   let raf = 0;
   const flush = () => {
@@ -118,6 +200,10 @@ export function mountSliderPanel(host, defs, initialValues, onChange) {
     // If a slider drag snapped, pull the dragged thumb onto the anchor too.
     if (input.dataset.role === "range" && Number(input.value) !== value) {
       input.value = String(value);
+    }
+    // Keep the lit fill in sync with the new value (whether typed or dragged).
+    for (const r of host.querySelectorAll(`input[type="range"][data-name="${name}"]`)) {
+      setFill(/** @type {HTMLInputElement} */ (r));
     }
     schedule();
   };
