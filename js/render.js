@@ -30,7 +30,7 @@ import { getConceptMeta, conceptIdFromPath } from "./concept-meta.js";
 import { initTheme } from "./theme.js";
 import { initLocale, getLocale, DEFAULT_LOCALE, t } from "./i18n.js";
 import { loadGraph } from "./graph-data.js";
-import { mountSearchBox, SEARCH_BOX_CSS } from "./concept-search-box.js";
+import { mountConceptSearch as mountConceptSearchBox, SEARCH_BOX_CSS } from "./concept-search-box.js";
 import { runProgressMigration } from "./progress-migration.js";
 
 /** Build the page shell once the DOM is ready. */
@@ -162,11 +162,11 @@ async function mountConceptSearch(body, locale) {
   }
   const graph = await loadGraph().catch(() => null);
   if (!graph) return; // no graph → no search (the page is otherwise fine)
-  const items = [...graph.byId.values()].map((c) => ({ id: c.id, title: c.titles?.[locale] ?? c.title ?? c.id }));
-  mountSearchBox(body, {
-    items,
+  mountConceptSearchBox(body, {
+    byId: graph.byId,
+    locale,
     placement: "fixed",
-    onSelect: (id) => {
+    onSelect: (/** @type {string} */ id) => {
       window.location.href = `/concepts/${id}.html`;
     },
   });

@@ -6,7 +6,7 @@
  * @module
  */
 
-/** @typedef {{ id: string, title: string }} SearchItem */
+/** @typedef {{ id: string, title: string, course?: boolean }} SearchItem */
 
 /**
  * The best `limit` concepts whose title matches `query`, ranked exact → prefix → substring, then

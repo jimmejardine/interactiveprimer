@@ -39,12 +39,21 @@ export const SEARCH_BOX_CSS = `
     box-shadow: var(--primer-shadow-lg, 0 12px 36px rgba(0, 0, 0, 0.18));
   }
   .cg-results[hidden] { display: none; }
-  .cg-result { display: flex; flex-direction: column; gap: 0.05rem; padding: 0.35rem 0.5rem; border-radius: 0.4rem; cursor: pointer; }
+  .cg-result { display: flex; flex-direction: row; align-items: center; gap: 0.5rem; padding: 0.35rem 0.5rem; border-radius: 0.4rem; cursor: pointer; }
   .cg-result:hover, .cg-result.is-active { background: var(--primer-accent, #46e); color: var(--primer-accent-ink, #fff); }
+  /* The title + id stack in a column; min-width:0 lets them ellipsize beside the icon. */
+  .cg-result-text { display: flex; flex-direction: column; gap: 0.05rem; min-width: 0; }
+  /* A gold shield marks a course result (only present on .cg-result--course rows); it sits at the
+     RIGHT edge (margin-left:auto) so every row's title stays left-aligned. */
+  .cg-result-icon { flex: 0 0 auto; margin-left: auto; display: inline-flex; width: 1.6rem; height: 1.6rem; color: var(--primer-course, #b8860b); }
+  .cg-result-icon svg, .cg-result-icon img { width: 100%; height: 100%; display: block; object-fit: contain; }
   .cg-result-title { font-size: 0.92rem; }
   .cg-result-id { font-size: 0.72rem; opacity: 0.7; }
   .cg-result:hover .cg-result-id, .cg-result.is-active .cg-result-id { opacity: 0.85; }
 `;
+
+/** The shield image marking a course in the result list. */
+const SHIELD = '<img src="/images/course_shield.png" alt="" aria-hidden="true">';
 
 /** Distinguishes element ids across multiple boxes on one page (explorer + two pathways). */
 let seq = 0;
@@ -54,7 +63,7 @@ let seq = 0;
  * a row, or Enter on the active/first row, calls `onSelect(id)`. ArrowUp/Down move the active row,
  * Escape and an outside click close it.
  * @param {HTMLElement} host
- * @param {{ items: { id: string, title: string }[], onSelect: (id: string) => void, placement?: "inline" | "overlay" | "fixed", placeholder?: string }} opts
+ * @param {{ items: { id: string, title: string, course?: boolean }[], onSelect: (id: string) => void, placement?: "inline" | "overlay" | "fixed", placeholder?: string }} opts
  * @returns {{ destroy: () => void }}
  */
 export function mountSearchBox(host, { items, onSelect, placement = "inline", placeholder = "Search concepts…" }) {
@@ -71,7 +80,7 @@ export function mountSearchBox(host, { items, onSelect, placement = "inline", pl
   const input = /** @type {HTMLInputElement} */ (search.querySelector(".cg-search-input"));
   const list = /** @type {HTMLElement} */ (search.querySelector(".cg-results"));
 
-  /** @type {{ id: string, title: string }[]} */
+  /** @type {{ id: string, title: string, course?: boolean }[]} */
   let results = [];
   let activeIdx = -1;
 
@@ -108,7 +117,7 @@ export function mountSearchBox(host, { items, onSelect, placement = "inline", pl
     if (!results.length) return closeList();
     results.forEach((r, i) => {
       const li = document.createElement("li");
-      li.className = "cg-result";
+      li.className = "cg-result" + (r.course ? " cg-result--course" : "");
       li.id = `${uid}-opt-${i}`;
       li.setAttribute("role", "option");
       li.dataset.id = r.id;
@@ -118,7 +127,19 @@ export function mountSearchBox(host, { items, onSelect, placement = "inline", pl
       const sub = document.createElement("span");
       sub.className = "cg-result-id";
       sub.textContent = r.id;
-      li.append(title, sub);
+      const text = document.createElement("div");
+      text.className = "cg-result-text";
+      text.append(title, sub);
+      li.append(text);
+      // A course gets a gold shield to the RIGHT of its title, so every row's title stays
+      // left-aligned (a left-side icon would indent only the course rows).
+      if (r.course) {
+        const icon = document.createElement("span");
+        icon.className = "cg-result-icon";
+        icon.setAttribute("aria-label", "course");
+        icon.innerHTML = SHIELD;
+        li.append(icon);
+      }
       list.appendChild(li);
     });
     list.hidden = false;
@@ -167,4 +188,47 @@ export function mountSearchBox(host, { items, onSelect, placement = "inline", pl
       search.remove();
     },
   };
+}
+
+/**
+ * The shared search items for a graph: every concept as `{ id, title, course }`, the title localized
+ * to `locale`. This is the single source of truth so EVERY box (explorer, lesson pages, landing)
+ * ranks and renders identically — and a course is flagged everywhere, so the shield is consistent.
+ * @param {Map<string, { id: string, title?: string, titles?: Record<string, string>, course?: boolean }>} byId
+ * @param {string} locale
+ * @returns {{ id: string, title: string, course: boolean }[]}
+ */
+export function conceptSearchItems(byId, locale) {
+  return [...byId.values()].map((c) => ({
+    id: c.id,
+    title: c.titles?.[locale] ?? c.title ?? c.id,
+    course: !!c.course,
+  }));
+}
+
+/**
+ * Mount the standard CONCEPT search box (all concepts; a course shows a shield). Identical to the
+ * course box in every way except the `onSelect` callback — here it opens / reveals the chosen concept.
+ * @param {HTMLElement} host
+ * @param {{ byId: Map<string, any>, locale: string, onSelect: (id: string) => void, placement?: "inline" | "overlay" | "fixed", placeholder?: string }} opts
+ * @returns {{ destroy: () => void }}
+ */
+export function mountConceptSearch(host, { byId, locale, onSelect, placement, placeholder }) {
+  return mountSearchBox(host, { items: conceptSearchItems(byId, locale), onSelect, placement, placeholder });
+}
+
+/**
+ * Mount the standard COURSE search box (courses only — every row shielded). Identical to the concept
+ * box except `onSelect` — here it enrols in / opens the chosen course.
+ * @param {HTMLElement} host
+ * @param {{ byId: Map<string, any>, locale: string, onSelect: (id: string) => void, placement?: "inline" | "overlay" | "fixed" }} opts
+ * @returns {{ destroy: () => void }}
+ */
+export function mountCourseSearch(host, { byId, locale, onSelect, placement }) {
+  return mountSearchBox(host, {
+    items: conceptSearchItems(byId, locale).filter((i) => i.course),
+    onSelect,
+    placement,
+    placeholder: "Search courses…",
+  });
 }

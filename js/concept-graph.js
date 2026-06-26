@@ -11,7 +11,7 @@
 import { seedPositions, tick, bounds } from "./force-layout.js";
 import { themeColors } from "./theme.js";
 import { confidenceColor } from "./confidence-color.js";
-import { mountSearchBox, SEARCH_BOX_CSS } from "./concept-search-box.js";
+import { mountConceptSearch, mountCourseSearch, SEARCH_BOX_CSS } from "./concept-search-box.js";
 import { createContextMenu } from "./context-menu.js";
 import { t } from "./i18n.js";
 import { getCurrentCourse, setCurrentCourse } from "./course.js";
@@ -930,15 +930,12 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
   const searchStack = document.createElement("div");
   searchStack.className = "cg-search-stack";
   host.appendChild(searchStack);
-  const courseSearch = mountSearchBox(searchStack, {
-    items: [...byId.values()].filter((c) => c.course).map((c) => ({ id: c.id, title: titleOf(c.id) })),
-    placement: "inline",
-    placeholder: "Search courses…",
+  const courseSearch = mountCourseSearch(searchStack, {
+    byId, locale, placement: "inline",
     onSelect: (id) => setCurrentCourse(id), // → course-change → concepts.html rebuilds to the course's spine
   });
-  const searchBox = mountSearchBox(searchStack, {
-    items: [...byId.keys()].map((id) => ({ id, title: titleOf(id) })),
-    placement: "inline",
+  const searchBox = mountConceptSearch(searchStack, {
+    byId, locale, placement: "inline",
     onSelect: (id) => reveal(id),
   });
 
