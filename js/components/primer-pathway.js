@@ -102,6 +102,7 @@ const STYLE = `
   }
   .wires line { stroke: var(--primer-border, #ccc); stroke-width: 1.2; stroke-opacity: 0.65; transition: stroke .1s, stroke-width .1s, opacity .12s; }
   .wires line.is-explicit { stroke-width: 2.8; stroke-opacity: 1; } /* explicit (concept-meta) prerequisite — clearly thicker */
+  .wires line.is-course { stroke: var(--primer-course, #b8860b); stroke-width: 3; stroke-opacity: 1; } /* the active course's path — gold */
   .wires line.is-hot { stroke: var(--primer-accent, #46e); stroke-width: 3.4; stroke-opacity: 1; }
   .wires line.is-dim { opacity: 0.2; }
 `;
@@ -206,9 +207,6 @@ export class PrimerPathway extends HTMLElement {
 
     let col1 = byLevel(hood.predecessors);
     let col3 = byLevel(hood.successors);
-    const peers = byLevel(hood.peers);
-    const above = peers.slice(0, Math.ceil(peers.length / 2));
-    const below = peers.slice(above.length);
 
     // Course overlay: when a course is active and the current concept is on its path, find the
     // course-order predecessor/successor and surface them at the FRONT of col1/col3 (so they're not
@@ -218,15 +216,24 @@ export class PrimerPathway extends HTMLElement {
     const members = courseId ? byId.get(courseId)?.courseMembers : undefined;
     /** @type {Set<string>} */
     const courseHL = new Set();
+    /** @type {{ a: string, b: string }[]} The course's path through the current concept (drawn gold). */
+    const courseEdges = [];
     if (members && members.length) {
       // The course's first member IS the course page itself, so a plain index walk gives the right
       // predecessor/successor everywhere — including the hub (i = 0 → no predecessor, first concept next).
       const i = members.indexOf(hood.id);
       const pred = i > 0 ? members[i - 1] : undefined;
       const succ = i >= 0 && i < members.length - 1 ? members[i + 1] : undefined;
-      if (pred && byId.has(pred)) { courseHL.add(pred); col1 = [pred, ...col1.filter((x) => x !== pred)]; }
-      if (succ && byId.has(succ)) { courseHL.add(succ); col3 = [succ, ...col3.filter((x) => x !== succ)]; }
+      if (pred && byId.has(pred)) { courseHL.add(pred); col1 = [pred, ...col1.filter((x) => x !== pred)]; courseEdges.push({ a: pred, b: hood.id }); }
+      if (succ && byId.has(succ)) { courseHL.add(succ); col3 = [succ, ...col3.filter((x) => x !== succ)]; courseEdges.push({ a: hood.id, b: succ }); }
     }
+
+    // Peers fill the centre column — but drop any concept already surfaced as a course predecessor or
+    // successor above, so a course neighbour that's also a peer doesn't appear twice (and the gold
+    // course wire then connects the right copy).
+    const peers = byLevel(hood.peers).filter((x) => !courseHL.has(x));
+    const above = peers.slice(0, Math.ceil(peers.length / 2));
+    const below = peers.slice(above.length);
 
     /** @param {string} id */
     const link = (id) =>
@@ -279,7 +286,15 @@ export class PrimerPathway extends HTMLElement {
     // explorer. The edge is undirected, so check the explicit list of whichever end is the dependent.
     const isExplicit = (/** @type {string} */ a, /** @type {string} */ b) =>
       !!(byId.get(a)?.explicitPrerequisites?.includes(b) || byId.get(b)?.explicitPrerequisites?.includes(a));
-    const drawEdges = hood.edges.map((e) => ({ ...e, explicit: isExplicit(e.a, e.b) }));
+    // Gold-tag the active course's path. A course step may not be a prerequisite edge (course order ≠
+    // prerequisite order), so flag matching prerequisite edges AND append any that aren't drawn yet.
+    const pairKey = (/** @type {string} */ a, /** @type {string} */ b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+    const coursePairs = new Set(courseEdges.map((e) => pairKey(e.a, e.b)));
+    const havePairs = new Set(hood.edges.map((e) => pairKey(e.a, e.b)));
+    const drawEdges = hood.edges.map((e) => ({ ...e, explicit: isExplicit(e.a, e.b), course: coursePairs.has(pairKey(e.a, e.b)) }));
+    for (const e of courseEdges) {
+      if (!havePairs.has(pairKey(e.a, e.b))) drawEdges.push({ a: e.a, b: e.b, explicit: false, course: true });
+    }
     const draw = () => this.#drawWires(pathway, svg, drawEdges);
 
     // Scroll the strip so the current concept starts centred (only meaningful when the map
@@ -328,7 +343,7 @@ export class PrimerPathway extends HTMLElement {
       if (!s) adj.set(x, (s = new Set()));
       s.add(y);
     };
-    for (const { a, b } of hood.edges) {
+    for (const { a, b } of [...hood.edges, ...courseEdges]) {
       linkAdj(a, b);
       linkAdj(b, a);
     }
@@ -459,7 +474,7 @@ export class PrimerPathway extends HTMLElement {
    * Measure each node's centre and draw a line per edge into the SVG layer.
    * @param {HTMLElement} pathway
    * @param {SVGSVGElement} svg
-   * @param {{ a: string, b: string, explicit?: boolean }[]} edges
+   * @param {{ a: string, b: string, explicit?: boolean, course?: boolean }[]} edges
    */
   #drawWires(pathway, svg, edges) {
     const box = pathway.getBoundingClientRect();
@@ -475,7 +490,7 @@ export class PrimerPathway extends HTMLElement {
     };
 
     while (svg.firstChild) svg.removeChild(svg.firstChild);
-    for (const { a, b, explicit } of edges) {
+    for (const { a, b, explicit, course } of edges) {
       const p = centre(a);
       const q = centre(b);
       if (!p || !q) continue;
@@ -487,6 +502,7 @@ export class PrimerPathway extends HTMLElement {
       line.setAttribute("data-a", a);
       line.setAttribute("data-b", b);
       if (explicit) line.classList.add("is-explicit");
+      if (course) line.classList.add("is-course"); // the active course's path — gold
       svg.appendChild(line);
     }
   }
