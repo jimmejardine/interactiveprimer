@@ -130,8 +130,62 @@ export function triangle(rng) {
   return { name: "triangle", points, edges, parallels: [], angles, relations, boundingbox: [-4.5, cy + 1.2, 4.5, -1.5] };
 }
 
+/**
+ * A triangle with a line through the apex PARALLEL to the base — the classic angle-sum proof figure.
+ * The two base angles reappear at the apex as alternate interior angles, and the three angles along the
+ * line through the apex sum to 180°, which is the triangle's angle sum. So a chase here mixes
+ * alternate-interior angles, angles-on-a-line, AND the triangle sum.
+ * @param {import("../rng.js").Rng} rng
+ * @returns {Figure}
+ */
+export function triangleParallelApex(rng) {
+  let alpha, beta, gamma;
+  do {
+    alpha = rng.int(40, 75);
+    beta = rng.int(40, 75);
+    gamma = 180 - alpha - beta;
+  } while (gamma < 35 || gamma > 100);
+  const Lbase = 6;
+  const ta = Math.tan(alpha * DEG);
+  const tb = Math.tan(beta * DEG);
+  const cx = (Lbase * tb) / (ta + tb);
+  const cy = ta * cx;
+  /** @type {Vec} */
+  const A = [-Lbase / 2, -1];
+  /** @type {Vec} */
+  const B = [Lbase / 2, -1];
+  /** @type {Vec} */
+  const C = [-Lbase / 2 + cx, -1 + cy];
+  /** @type {Record<string, Vec>} */
+  const points = {
+    A, B, C,
+    L: [C[0] - 2.6, C[1]], // the parallel line through the apex, drawn as a stub L—C—R
+    R: [C[0] + 2.6, C[1]],
+  };
+  /** @type {Array<[string, string]>} */
+  const edges = [["A", "B"], ["A", "C"], ["B", "C"], ["L", "R"]];
+  /** @type {AngleSlot[]} */
+  const angles = [
+    { key: "A", vertex: "A", from: "B", to: "C", value: alpha }, // base angle at A
+    { key: "B", vertex: "B", from: "C", to: "A", value: beta }, // base angle at B
+    { key: "C", vertex: "C", from: "A", to: "B", value: gamma }, // apex angle
+    { key: "LCA", vertex: "C", from: "L", to: "A", value: alpha }, // alternate interior to A
+    { key: "RCB", vertex: "C", from: "B", to: "R", value: beta }, // alternate interior to B
+  ];
+  const relations = [
+    equal("LCA", "A", "alternateInterior"),
+    equal("RCB", "B", "alternateInterior"),
+    sumTo(["LCA", "C", "RCB"], 180, "linearPair"), // the three angles on the line through C
+    sumTo(["A", "B", "C"], 180, "triangleSum"),
+  ];
+  return {
+    name: "triangleParallelApex", points, edges, parallels: [[0, 3]], angles, relations,
+    boundingbox: [-5.4, C[1] + 0.9, 5.4, -1.9],
+  };
+}
+
 /** All scaffolds by name, for the generator to pick from. */
-export const SCAFFOLDS = { parallelTransversal, triangle };
+export const SCAFFOLDS = { parallelTransversal, triangle, triangleParallelApex };
 
 /**
  * The point on an angle's bisector at distance `r` from its vertex — where a label/blank for that

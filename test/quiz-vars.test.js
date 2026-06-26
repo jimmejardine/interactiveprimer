@@ -163,8 +163,11 @@ test("checkAnswer: numeric tolerance, string normalization, empty", () => {
 test("checkAnswer: a numeric angle answer tolerates a degree marker", () => {
   assert.equal(checkAnswer(70, "70°"), true);
   assert.equal(checkAnswer(70, "70 °"), true);
+  assert.equal(checkAnswer(70, "  70°  "), true);
   assert.equal(checkAnswer(70, "70 degrees"), true);
-  assert.equal(checkAnswer(70, "70^\\circ"), true); // MathLive LaTeX
+  assert.equal(checkAnswer(70, "70^\\circ"), true); // MathLive LaTeX (unbraced)
+  assert.equal(checkAnswer(70, "70^{\\circ}"), true); // MathLive LaTeX (braced)
   assert.equal(checkAnswer(70, "70"), true);
   assert.equal(checkAnswer(70, "71°"), false);
+  assert.equal(checkAnswer(70, "71^{\\circ}"), false);
 });

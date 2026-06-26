@@ -576,7 +576,13 @@ export class PrimerGeometryProblem extends HTMLElement {
    * (e.g. `\mathsf{70}` → `70`) so the sans-serif rendering doesn't reach the grader. @param {any} el */
   #fieldValue(el) {
     const v = typeof el?.value === "string" ? el.value : "";
-    return v.replace(/\\math(?:sf|rm|it|bf|tt|cal|bb|frak)\{([^{}]*)\}/g, "$1");
+    // Drop MathLive's font-variant wrappers (the sans-serif rendering) robustly, even when nested
+    // around a degree marker: e.g. "\mathsf{70^{\circ}}" / "\mathsf{70}^{\circ}" → "70^\circ", which
+    // checkAnswer then reduces to 70. (Numeric/short answers, so removing braces is safe.)
+    return v
+      .replace(/\\math(?:sf|rm|it|bf|tt|cal|bb|frak)\b/g, "")
+      .replace(/[{}]/g, "")
+      .trim();
   }
 
   /** The explanation for a quantity: an authored per-blank hint, else its theorem (chain step on the

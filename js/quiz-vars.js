@@ -402,9 +402,15 @@ export function checkAnswer(expected, raw) {
   const input = raw.trim();
   if (input === "") return false;
   if (typeof expected === "number") {
-    // Tolerate a degree marker on an angle answer: "70", "70°", "70 degrees" and MathLive's
-    // "70^\circ" all read as 70. Strip a trailing °/^\circ/deg(rees) before the numeric parse.
-    const stripped = input.replace(/\s*(\^?\\?circ|°|deg(?:rees|ree)?)\s*$/i, "").trim();
+    // Tolerate a degree marker on an angle answer in any form: "70", "70°", "70 degrees", and
+    // MathLive's LaTeX "70^\circ" / "70^{\circ}" all read as 70. Remove every degree token (the
+    // `circ` macro with optional `^`/braces, the Unicode °, and the words deg/degree/degrees) before
+    // the numeric parse — targeted to those tokens so a real exponent like "x^2" is left alone.
+    const stripped = input
+      .replace(/\^?\s*\{?\s*\\?circ\s*\}?/gi, "")
+      .replace(/°/g, "")
+      .replace(/\bdeg(?:rees|ree)?\b/gi, "")
+      .trim();
     const got = Number(stripped);
     if (!Number.isFinite(got)) return false;
     return Math.abs(got - expected) <= Math.max(1e-3, 1e-9 * Math.abs(expected));

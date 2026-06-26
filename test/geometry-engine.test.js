@@ -167,3 +167,19 @@ test("the real graph gives angle-chasing's parallel-line theorems as learned", (
   assert.ok(allowed.has("mathematics/geometry/alternate-interior-angles"));
   assert.ok(!allowed.has("mathematics/geometry/angle-sum-of-a-triangle")); // not a prerequisite
 });
+
+test("a page may practise its OWN theorem (its id is allowed too), plus its prerequisites", () => {
+  // The angle-sum page teaches triangleSum and builds on alternate-interior → parallel-lines, so a
+  // problem on it may chain all three (alternate angles, angles-on-a-line, AND the triangle sum).
+  const graph = {
+    concepts: [
+      { id: "mathematics/geometry/angle-sum-of-a-triangle", prerequisites: ["mathematics/geometry/alternate-interior-angles"] },
+      { id: "mathematics/geometry/alternate-interior-angles", prerequisites: ["mathematics/geometry/parallel-lines"] },
+      { id: "mathematics/geometry/parallel-lines", prerequisites: [] },
+    ],
+  };
+  const allowed = allowedTheorems(buildAdjacency(graph), "mathematics/geometry/angle-sum-of-a-triangle", allRuleConcepts());
+  assert.ok(allowed.has("mathematics/geometry/angle-sum-of-a-triangle"), "its own theorem is practisable");
+  assert.ok(allowed.has("mathematics/geometry/alternate-interior-angles"));
+  assert.ok(allowed.has("mathematics/geometry/parallel-lines"));
+});

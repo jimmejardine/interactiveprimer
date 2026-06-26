@@ -56,5 +56,6 @@ export function prereqClosure(adjacency, id) {
 export function allowedTheorems(adjacency, id, ruleConceptIds, override) {
   if (override) return new Set(override);
   const closure = prereqClosure(adjacency, id);
+  closure.add(id); // a page also teaches — and so may practise — its OWN theorem
   return new Set([...ruleConceptIds].filter((c) => closure.has(c)));
 }
