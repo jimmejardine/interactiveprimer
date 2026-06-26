@@ -6,10 +6,11 @@ Primer way: one small idea per page, each with an interactive picture and a quiz
 ## Vision
 
 Statistics is the umbrella; **probability** lives under it. The classical course runs
-descriptive → distributions → sampling → estimation → testing → relationships, and the existing
-`mathematics/probability/*` mini-course folds in as **Stage 7 — Bayesian inference** (the other way
-to reason under uncertainty). The probability pages are referenced in place for now and will be
-**migrated into `mathematics/statistics/`** in a later pass, updating their ids/refs then.
+descriptive → distributions → sampling → estimation → testing → relationships, and the Bayesian
+inference pages live in `bayesian/` as **Stage 7 — Bayesian inference** (the other way to reason
+under uncertainty). These pages were migrated here from the former `mathematics/probability/`
+folder, which has been removed; everything that referenced them (the inverse-problems course,
+primality testing) now points at `mathematics/statistics/...`.
 
 ## Principles
 
@@ -39,5 +40,5 @@ to reason under uncertainty). The probability pages are referenced in place for 
    significance-and-the-t-test, type-i-and-type-ii-errors.
 6. **Relationships** (`regression/`) — scatter-plots, correlation, the-regression-line,
    interpreting-slope-and-intercept.
-7. **Bayesian inference** — `mathematics/probability/bayes-theorem`,
-   `mathematics/probability/likelihood-and-mle` (folded in; to be migrated here later).
+7. **Bayesian inference** (`bayesian/`) — bayes-theorem, likelihood-and-mle, the-covariance-matrix,
+   the-multivariate-gaussian, map-estimation (migrated here from the former `mathematics/probability/`).

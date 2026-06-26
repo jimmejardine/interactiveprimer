@@ -12,7 +12,7 @@ This file is **documentation only** — the graph build scans `*.html`, not `.md
 - **No `declaredLevel` yet** — chain by `prerequisites` only, levelless for a later pass.
 - **Applied-math rooting** (matches `game-development-math/`): the **hub** roots into the linear-algebra
   prerequisites + `applied-mathematics/applied-mathematics`; content pages chain to each other and to
-  specific math pages. The Bayesian stage depends on the new `mathematics/probability/` mini-course.
+  specific math pages. The Bayesian stage depends on the new `mathematics/statistics/bayesian/` mini-course.
 - **Two LA gaps are authored here** (central to the subject): the Moore–Penrose **pseudoinverse**
   (`the-generalized-inverse`, `svd-and-the-pseudoinverse`) and the **condition number**
   (`conditioning-and-the-condition-number`), with soft refs to the existing LA pages.
