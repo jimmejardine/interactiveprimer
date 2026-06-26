@@ -148,11 +148,11 @@ export class PrimerMenu extends HTMLElement {
         <div class="menu-view view-root">
           <button type="button" class="nav" data-href="/">${t("menu.home")}</button>
           <button type="button" class="nav" data-href="/concepts.html">${t("menu.explore")}</button>
-          <button type="button" class="nav" data-extern="https://github.com/jimmejardine/interactiveprimer/discussions">${t("menu.feedback")}<span class="chev" aria-hidden="true">↗</span></button>
+          <button type="button" class="nav nav-course" data-target="course" hidden>${t("menu.course")}<span class="chev" aria-hidden="true">›</span></button>
+          <button type="button" class="nav" data-target="progress">${t("menu.progress")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="theme">${t("menu.theme")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="lang">${t("menu.language")}<span class="chev" aria-hidden="true">›</span></button>
-          <button type="button" class="nav" data-target="progress">${t("menu.progress")}<span class="chev" aria-hidden="true">›</span></button>
-          <button type="button" class="nav nav-course" data-target="course" hidden>${t("menu.course")}<span class="chev" aria-hidden="true">›</span></button>
+          <button type="button" class="nav" data-extern="https://github.com/jimmejardine/interactiveprimer/discussions">${t("menu.feedback")}<span class="chev" aria-hidden="true">↗</span></button>
         </div>
         <div class="menu-view view-theme" hidden>
           <button type="button" class="back"><span aria-hidden="true">‹ </span>${t("menu.theme")}</button>

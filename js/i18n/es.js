@@ -101,4 +101,10 @@ export default {
   "course.keep": "Mantener actual",
   "course.importClash": "El progreso importado es del curso «{course}». ¿Cambiar a él?",
   "course.filtered": "Curso:",
+
+  "welcome.title": "Bienvenido de nuevo",
+  "welcome.progress": "Llevas {done} / {total} conceptos del curso {course}.",
+  "welcome.resume": "Haz clic aquí para continuar con {concept}.",
+  "welcome.no": "No, gracias",
+  "welcome.yes": "Sí, por favor",
 };

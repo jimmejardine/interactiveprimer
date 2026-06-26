@@ -102,4 +102,10 @@ export default {
   "course.keep": "Keep current",
   "course.importClash": "The imported progress is from the course “{course}”. Switch to it?",
   "course.filtered": "Course:",
+
+  "welcome.title": "Welcome back",
+  "welcome.progress": "You're {done} / {total} concepts through {course}.",
+  "welcome.resume": "Click here to continue with {concept}.",
+  "welcome.no": "No thanks",
+  "welcome.yes": "Yes please",
 };

@@ -219,10 +219,11 @@ export class PrimerPathway extends HTMLElement {
     /** @type {Set<string>} */
     const courseHL = new Set();
     if (members && members.length) {
+      // The course's first member IS the course page itself, so a plain index walk gives the right
+      // predecessor/successor everywhere — including the hub (i = 0 → no predecessor, first concept next).
       const i = members.indexOf(hood.id);
-      const isHub = hood.id === courseId;
       const pred = i > 0 ? members[i - 1] : undefined;
-      const succ = isHub ? members[0] : i >= 0 && i < members.length - 1 ? members[i + 1] : undefined;
+      const succ = i >= 0 && i < members.length - 1 ? members[i + 1] : undefined;
       if (pred && byId.has(pred)) { courseHL.add(pred); col1 = [pred, ...col1.filter((x) => x !== pred)]; }
       if (succ && byId.has(succ)) { courseHL.add(succ); col3 = [succ, ...col3.filter((x) => x !== succ)]; }
     }

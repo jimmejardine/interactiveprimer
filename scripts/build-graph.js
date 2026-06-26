@@ -186,11 +186,12 @@ async function main() {
         prerequisites: [...new Set([...parsed.prerequisites, ...refs])],
       };
       if (rawTitle && /<[^>]+>/.test(rawTitle)) meta.titleHtml = rawTitle;
-      // A course page (`"course": true`) carries its ordered, de-duped member list — every normal
-      // or soft `<primer-ref>` on the page. Members are ordinary refs, so they're validated as
+      // A course page (`"course": true`) carries its ordered member list. The FIRST member is the
+      // course page itself (the course starts at its own overview), followed by every normal or soft
+      // `<primer-ref>` on the page (de-duped). Members are ordinary refs, so they're validated as
       // prerequisites (normal) or by the soft-ref existence check below.
       if (parsed.course) {
-        meta.courseMembers = extractCourseMembers(html).filter((r) => r !== id);
+        meta.courseMembers = [id, ...extractCourseMembers(html).filter((r) => r !== id)];
       }
       concepts.push(meta);
       // Stash this page's forward refs; they're reversed onto their targets below.

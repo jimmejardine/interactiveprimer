@@ -14,7 +14,7 @@ import { confidenceColor } from "./confidence-color.js";
 import { mountSearchBox, SEARCH_BOX_CSS } from "./concept-search-box.js";
 import { createContextMenu } from "./context-menu.js";
 import { t } from "./i18n.js";
-import { getCurrentCourse } from "./course.js";
+import { getCurrentCourse, setCurrentCourse } from "./course.js";
 import { buildDependents, directNeighbors, kHopNeighborhood } from "./graph.js";
 // Defines <primer-math> on this page (concepts.html doesn't load boot.js) so a node with a math
 // title can typeset inside a <foreignObject>. concepts.html supplies the KaTeX CSS + import map.
@@ -124,11 +124,14 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
   // SEED_HOPS of it. `visible` is the live set of shown ids; `byId` is the full graph behind it.
   const activeCourse = getCurrentCourse();
   const courseNode = activeCourse ? byId.get(activeCourse) : undefined;
-  const courseMembers = new Set(courseNode?.courseMembers ?? []);
-  // The course as an ORDERED list (course/document order). The gold "course edges" are the
-  // consecutive links of this sequence (member[i]→member[i+1]) — a linear, non-cyclic spine — and
-  // the members are pinned into a vertical column in this order (see pinCourseColumn below).
-  const orderedMembers = (courseNode?.courseMembers ?? []).filter((id) => id !== activeCourse);
+  // The course as an ORDERED list, STARTING WITH THE COURSE PAGE ITSELF, then the concepts it links —
+  // a linear, non-cyclic spine. The gold "course edges" are the consecutive links of this sequence
+  // (member[i]→member[i+1]); the members are pinned into a vertical column in this order, top→bottom.
+  // (Built defensively so it's hub-first whether or not dist/graph.json already prepends the hub.)
+  const orderedMembers = courseNode
+    ? [activeCourse, ...(courseNode.courseMembers ?? []).filter((id) => id !== activeCourse)]
+    : [];
+  const courseMembers = new Set(orderedMembers); // tinted gold + pinned into the spine (incl. the hub, first)
 
   // Whole-graph adjacency (for seeding + expand/collapse), computed once.
   const dependents = buildDependents(byId);
@@ -535,15 +538,19 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
   //      settles, expands or collapses. ALWAYS running — no debounce, no pausing. The ease is so tiny
   //      it doesn't perceptibly fight a manual zoom/pan; the view just slowly drifts back to the fit. ----
   const FIT_EASE = 0.0001; // fraction of the remaining gap closed per frame — minuscule = glacial, near-invisible drift
+  const FIT_EASE_IN = 0.01; // zooming IN (content too small → must grow) corrects 10× faster than zooming out
   /** Step the view toward the fit. @returns {boolean} true while still easing (keeps the loop alive). */
   const autoFitStep = () => {
     const f = computeFit();
     const ds = f.scale - view.scale, dx = f.tx - view.tx, dy = f.ty - view.ty;
     if (Math.abs(dx) < 0.4 && Math.abs(dy) < 0.4 && Math.abs(ds) < 1e-4) return false; // already fitted
     if (prefersReduced) { view.scale = f.scale; view.tx = f.tx; view.ty = f.ty; applyView(); return false; }
-    view.scale += ds * FIT_EASE;
-    view.tx += dx * FIT_EASE;
-    view.ty += dy * FIT_EASE;
+    // Zoom-in (ds > 0: too far out, scale must grow) snaps back 10× faster than zoom-out; tx/ty follow
+    // the same pace so the motion stays coherent.
+    const ease = ds > 0 ? FIT_EASE_IN : FIT_EASE;
+    view.scale += ds * ease;
+    view.tx += dx * ease;
+    view.ty += dy * ease;
     applyView();
     return true;
   };
@@ -917,17 +924,29 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
   document.addEventListener("theme-change", onTheme);
   document.addEventListener("confidence-change", onConfidence);
 
-  // ---- top-left search: filter ALL concept names (not just the shown ones); selecting one reveals
-  //      it (+ its neighbourhood) on the map and pans to it. "fixed" pins it to the viewport top-left. ----
-  const searchBox = mountSearchBox(host, {
+  // ---- top-left search: two stacked boxes pinned to the viewport top-left. The COURSES box (on top)
+  //      lists only course pages; picking one focuses that course (the explorer then rebuilds to its
+  //      spine). The CONCEPTS box (below) lists every concept; picking one reveals it on the map. ----
+  const searchStack = document.createElement("div");
+  searchStack.className = "cg-search-stack";
+  host.appendChild(searchStack);
+  const courseSearch = mountSearchBox(searchStack, {
+    items: [...byId.values()].filter((c) => c.course).map((c) => ({ id: c.id, title: titleOf(c.id) })),
+    placement: "inline",
+    placeholder: "Search courses…",
+    onSelect: (id) => setCurrentCourse(id), // → course-change → concepts.html rebuilds to the course's spine
+  });
+  const searchBox = mountSearchBox(searchStack, {
     items: [...byId.keys()].map((id) => ({ id, title: titleOf(id) })),
-    placement: "fixed",
+    placement: "inline",
     onSelect: (id) => reveal(id),
   });
 
   return {
     destroy() {
+      courseSearch.destroy();
       searchBox.destroy();
+      searchStack.remove();
       ro?.disconnect();
       if (raf) cancelAnimationFrame(raf);
       svg.removeEventListener("pointerdown", onDown);
@@ -994,6 +1013,12 @@ function injectStyleOnce() {
       color: var(--primer-course, #e3b15c); font-family: var(--primer-font-ui, sans-serif);
       font-weight: 600; font-size: 0.95rem; pointer-events: none; white-space: nowrap;
     }
+    /* Two stacked search boxes (courses over concepts), pinned to the viewport top-left. */
+    .cg-search-stack {
+      position: fixed; top: 0.75rem; left: 0.75rem; z-index: 1000;
+      display: flex; flex-direction: column; gap: 0.5rem; width: min(17rem, 58vw);
+    }
+    .cg-search-stack .cg-search { width: 100%; } /* override the inline default width to fill the stack */
     ${SEARCH_BOX_CSS}
   `;
   document.head.appendChild(style);
