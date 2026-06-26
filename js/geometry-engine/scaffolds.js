@@ -12,7 +12,7 @@
  * @module
  */
 
-import { equal, sumTo } from "./rules.js";
+import { equal, sumTo, rel } from "./rules.js";
 
 /**
  * @typedef {[number, number]} Vec
@@ -184,8 +184,54 @@ export function triangleParallelApex(rng) {
   };
 }
 
+/**
+ * A triangle with one side EXTENDED, forming an exterior angle. The exterior angle equals the sum of
+ * the two remote interior angles — and also makes a straight line with the adjacent interior angle —
+ * so a chase here mixes the exterior-angle theorem, angles-on-a-line, and the triangle sum.
+ * @param {import("../rng.js").Rng} rng
+ * @returns {Figure}
+ */
+export function triangleExterior(rng) {
+  let a, b, c;
+  do {
+    a = rng.int(40, 75);
+    b = rng.int(40, 75);
+    c = 180 - a - b;
+  } while (c < 30 || c > 95);
+  const Lbase = 4;
+  const ta = Math.tan(a * DEG);
+  const tb = Math.tan(b * DEG);
+  const cx = (Lbase * tb) / (ta + tb);
+  const cy = ta * cx;
+  /** @type {Vec} */
+  const A = [-2.4, -1];
+  /** @type {Vec} */
+  const B = [-2.4 + Lbase, -1];
+  /** @type {Vec} */
+  const C = [A[0] + cx, A[1] + cy];
+  /** @type {Vec} */
+  const D = [B[0] + 2, -1]; // base AB extended beyond B
+  /** @type {Record<string, Vec>} */
+  const points = { A, B, C, D };
+  /** @type {Array<[string, string]>} */
+  const edges = [["A", "B"], ["A", "C"], ["B", "C"], ["B", "D"]];
+  /** @type {AngleSlot[]} */
+  const angles = [
+    { key: "A", vertex: "A", from: "B", to: "C", value: a },
+    { key: "B", vertex: "B", from: "C", to: "A", value: b }, // interior angle at B
+    { key: "C", vertex: "C", from: "A", to: "B", value: c },
+    { key: "ext", vertex: "B", from: "D", to: "C", value: a + c }, // exterior angle at B
+  ];
+  const relations = [
+    rel("exteriorAngle", [{ key: "ext", coef: 1 }, { key: "A", coef: -1 }, { key: "C", coef: -1 }], 0),
+    sumTo(["B", "ext"], 180, "linearPair"), // exterior + adjacent interior on the straight line
+    sumTo(["A", "B", "C"], 180, "triangleSum"),
+  ];
+  return { name: "triangleExterior", points, edges, parallels: [], angles, relations, boundingbox: [-3.3, C[1] + 0.9, 4.4, -1.8] };
+}
+
 /** All scaffolds by name, for the generator to pick from. */
-export const SCAFFOLDS = { parallelTransversal, triangle, triangleParallelApex };
+export const SCAFFOLDS = { parallelTransversal, triangle, triangleParallelApex, triangleExterior };
 
 /**
  * The point on an angle's bisector at distance `r` from its vertex — where a label/blank for that
