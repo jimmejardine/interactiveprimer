@@ -63,6 +63,7 @@ export default {
   "geometryProblem.toolEqual": "Mark =",
   "geometryProblem.toolRight": "Right ∟",
   "geometryProblem.toolUndo": "Undo",
+  "geometryProblem.restart": "Restart",
   "geometryProblem.goal": "Chase the angles: fill in any you can work out, ending with the highlighted one.",
   "geometryProblem.blankLabel": "unknown {noun}",
   "geometryProblem.solved": "Solved! Every step checks out.",

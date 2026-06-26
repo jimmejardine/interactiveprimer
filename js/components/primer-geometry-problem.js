@@ -130,22 +130,29 @@ export class PrimerGeometryProblem extends HTMLElement {
         .prob { display: block; }
         .goal { font-family: var(--primer-font-display, sans-serif); font-weight: 700;
           color: var(--primer-ink, #111); margin: 0 0 0.5rem; text-align: center; }
-        .toolbar { display: flex; flex-wrap: wrap; gap: 0.35rem; justify-content: center;
+        /* The toolbar is a single control bar above the diagram: construction tools (when any) plus the
+           always-present Check / Refresh / Restart actions. */
+        .toolbar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; justify-content: center;
           margin-bottom: 0; padding: 0.4rem; border-radius: 0.5rem 0.5rem 0 0;
           background: var(--primer-control-bg, #f1ede4); border: 1px solid var(--primer-control-border, #ccc);
           border-bottom: none; font-family: var(--primer-font-ui, sans-serif); }
-        .toolbar[hidden] { display: none; } /* display:flex above would otherwise beat the hidden attribute */
-        .toolbar button { padding: 0.2rem 0.55rem; border-radius: 0.35rem; font-size: 0.85rem;
+        .tools { display: contents; } /* tool buttons flow inline beside the action buttons */
+        .toolbar button { padding: 0.25rem 0.6rem; border-radius: 0.35rem; font-size: 0.85rem;
           border: 1px solid var(--primer-control-border, #ccc);
           background: var(--primer-control-bg, #fff); color: var(--primer-ink, #111); }
         .toolbar button[aria-pressed="true"] { background: var(--primer-accent, #4d5bd1);
           color: var(--primer-accent-ink, #fff); border-color: transparent; }
+        /* Check is the primary action; a touch of space sets the actions off from the tools. */
+        .toolbar .check { margin-left: 0.4rem; font-weight: 700; color: var(--primer-accent-ink, #fff);
+          background: var(--primer-accent, #4d5bd1); border-color: transparent; }
+        /* Embedded in a quiz, the quiz's "Check answers" grades it and the question is fixed — hide our
+           own Check + Refresh (Restart stays, to clear an attempt). */
+        :host([embedded]) .check, :host([embedded]) .refresh { display: none; }
         .stage { position: relative; width: 100%; aspect-ratio: 7 / 4; overflow: hidden;
           background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem);
           box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); touch-action: none; }
-        /* When a (visible) toolbar sits directly above, square the stage's top corners so the two
-           meet flush; with no toolbar the stage keeps all four corners rounded. */
-        .toolbar:not([hidden]) + .stage { border-top-left-radius: 0; border-top-right-radius: 0; }
+        /* The toolbar sits directly above; square the stage's top corners so they meet flush. */
+        .toolbar + .stage { border-top-left-radius: 0; border-top-right-radius: 0; }
         /* The JSXGraph board gets its OWN container (sharing the stage with the overlay breaks
            JSXGraph's resize measurement). */
         .board { position: absolute; inset: 0; }
@@ -187,13 +194,6 @@ export class PrimerGeometryProblem extends HTMLElement {
           display: grid; place-items: center; min-width: 1rem; height: 1rem; padding: 0 0.18rem;
           border-radius: 1rem; font-size: 0.6rem; font-weight: 700; line-height: 1; color: #fff;
           box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25); pointer-events: none; }
-        .actions { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.55rem; flex-wrap: wrap; }
-        .actions button { padding: 0.3rem 0.8rem; border-radius: 0.4rem;
-          border: 1px solid var(--primer-control-border, #ccc); background: var(--primer-control-bg, #fff); color: var(--primer-ink, #111); }
-        .actions .check { font-weight: 700; color: var(--primer-accent-ink, #fff);
-          background: var(--primer-accent, #4d5bd1); border-color: transparent; }
-        /* Embedded in a quiz, the quiz's "Check answers" drives grading — hide our own Check. */
-        :host([embedded]) .actions .check { display: none; }
         .feedback { margin: 0.55rem 0 0; min-height: 1.2rem; font-size: 0.95rem; }
         .feedback .ok { color: var(--primer-ok, #1a8f3c); font-weight: 700; }
         .feedback .bad { color: var(--primer-bad, #c0392b); font-weight: 700; }
@@ -207,13 +207,13 @@ export class PrimerGeometryProblem extends HTMLElement {
       </style>
       <div class="prob">
         <p class="goal"></p>
-        <div class="toolbar" part="toolbar"></div>
-        <div class="stage" part="stage"><div class="board"></div><div class="overlay"></div></div>
-        <div class="actions">
+        <div class="toolbar" part="toolbar">
+          <span class="tools"></span>
           <button class="check" type="button">${t("quiz.check")}</button>
           <button class="refresh" type="button">${t("geometry.refresh")}</button>
-          <button class="reset" type="button">${t("geometry.rewind")}</button>
+          <button class="reset" type="button">${this.#str("restart", "Restart")}</button>
         </div>
+        <div class="stage" part="stage"><div class="board"></div><div class="overlay"></div></div>
         <p class="feedback" role="status" aria-live="polite"></p>
       </div>`;
   }
@@ -424,11 +424,12 @@ export class PrimerGeometryProblem extends HTMLElement {
     this.#wireBoardTools(board);
   }
 
-  /** Render the construction toolbar (hidden when the problem offers no construction tools). */
+  /** Render the construction tool buttons into the toolbar's `.tools` slot (beside the static Check /
+   * Refresh / Restart actions). Empty when the problem offers no construction tools. */
   #renderToolbar() {
-    const bar = /** @type {HTMLElement} */ (this.#root.querySelector(".toolbar"));
-    if (!this.#toolset.length) { bar.hidden = true; bar.replaceChildren(); return; }
-    bar.hidden = false;
+    const toolsEl = /** @type {HTMLElement} */ (this.#root.querySelector(".tools"));
+    toolsEl.replaceChildren();
+    if (!this.#toolset.length) return; // no construction tools → just the action buttons
     const labels = /** @type {Record<string, string>} */ ({
       answer: this.#str("toolAnswer", "Fill in"),
       line: this.#str("toolLine", "Draw line"),
@@ -437,25 +438,22 @@ export class PrimerGeometryProblem extends HTMLElement {
       right: this.#str("toolRight", "Right ∟"),
       undo: this.#str("toolUndo", "Undo"),
     });
-    // "Fill in" is always first and "Undo" always last; in between, only the configured tools (so a
-    // figure never offers a tool that has nothing to attach to).
+    // "Fill in" is always first and "Undo" always last; in between, only the configured tools.
     const keys = ["answer", ...this.#toolset.filter((k) => k in labels && k !== "answer" && k !== "undo"), "undo"];
-    const tools = keys.map((k) => [k, labels[k]]);
-    bar.replaceChildren();
-    for (const [key, label] of tools) {
+    for (const key of keys) {
       const b = document.createElement("button");
       b.type = "button";
-      b.textContent = label;
+      b.textContent = labels[key];
       b.dataset.tool = key;
       if (key === this.#tool) b.setAttribute("aria-pressed", "true");
       b.addEventListener("click", () => {
         if (key === "undo") return this.#undo();
         this.#tool = key;
         this.#pendingPoint = null;
-        for (const el of bar.querySelectorAll("button")) el.removeAttribute("aria-pressed");
+        for (const el of toolsEl.querySelectorAll("button")) el.removeAttribute("aria-pressed");
         b.setAttribute("aria-pressed", "true");
       });
-      bar.append(b);
+      toolsEl.append(b);
     }
   }
 
