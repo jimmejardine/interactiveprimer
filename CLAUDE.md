@@ -223,12 +223,24 @@ recursive prerequisite ancestors, with members tinted in the course colour (`--p
   and keep its `correct` flag. Use `constraints` to stop distractors colliding — e.g. with
   `a,b∈[1:20]`, set `"a != b"` so `{a+b}`, `{2*a}`, `{2*b}` don't render identically.
 
-  **Chart options** (the choices are graphs, not text): give an option a `chart` (a registered
-  chart-scene name) instead of `text`, and it renders as a small `<primer-chart>` graph; `correct`
+  **Chart / geometry options** (the choices are figures, not text): give an option a `chart` (a
+  registered chart-scene name) **or** a `geometry` (a registered geometry-scene name) instead of `text`,
+  and it renders as a small `<primer-chart>` / `<primer-geometry>` figure in a 2-column grid; `correct`
   works the same. Example:
-  `{ prompt: () => sceneStrings("whichSin"),
-     options: [ { chart: "optSinX", correct: false }, { chart: "opt2SinX", correct: true } ] }`.
-  Chart options carry no `text`, so they need no translation.
+  `{ prompt: () => sceneStrings("whichParallel"),
+     options: [ { geometry: "optParallel", correct: true }, { geometry: "optCrossing", correct: false } ] }`.
+  Figure options carry no `text`, so they need no translation.
+
+  **A figure above the prompt**: add `figure: "sceneName"` to any question (MC or free-text) to render a
+  `<primer-geometry>` (read-only) **above** the prompt — a "given this diagram, find ∠x" question. Pair a
+  free-text geometry answer with `keyboard: "geometry"` (the geometry virtual keyboard — digits, `°`,
+  Greek `α β θ`); a numeric angle answer accepts `70`, `70°` or `70 degrees` (the `°` is stripped before
+  grading). See `js/math-keyboards.js`.
+
+  **An interactive geometry PROBLEM as a question**: add `{ problem: "name" }` (a registered
+  `registerGeometryProblem`, see its section below) as a bank item — it embeds the engine-generated
+  "apply-the-theorem" sandbox and folds its solved/unsolved state into the score. It carries no
+  options/answer (recognised by its `problem` field), so it's never mistaken for the leading config.
 
   Inline JSON blocks (the `concept-meta`, `scene-strings`) are parsed with **JSON5**, so `//` and
   `/* … */` comments and trailing commas are allowed.
@@ -526,6 +538,16 @@ sceneStrings, parallelMark, crossing, makeGraph }` — `colors` is the resolved 
 - **Tools** (board-bound, on the toolkit):
   - `parallelMark(x, y, { dir = "h"|"v", along, count = 1, color })` — the "these are parallel" arrowheads
     (use `count: 2` for a second, distinct parallel pair; `color` defaults to `colors.line`).
+  - `tickMark(p, q, { count = 1, color })` — equal-length **hatch ticks** across the middle of the side
+    `p`→`q` (each a `[x,y]`); `count: 2`/`3` for a second/third congruent-side group.
+  - `angleMark(vertex, p1, p2, { count = 1, label, color, radius })` — equal-**angle** arc(s) at `vertex`
+    between the rays to `p1`/`p2`, with an optional `label` on the bisector (`count` draws concentric arcs).
+  - `rightAngle(vertex, p1, p2, { color })` — the right-angle **square** marker.
+  - `extend(p, q, { both, dash, color })` — an **auxiliary/extension** line through `p`→`q` past `q` (and
+    past `p` if `both`), themed dashed by default.
+  - `label(at, text, { color, style })` — themed text at `[x,y]`; `style: "unknown"` renders the muted
+    "fill me in" accent (vs `"given"`, the ink colour). Greek/`°` stay literal Unicode.
+    See `concepts/mathematics/geometry/angle-chasing.html` for all of these in one figure.
   - `crossing(vertex, dirA, dirB)` — the four angles where two lines cross. Returns
     `{ number(corner, text, opts?), wedge(corner, opts?) }`, addressing an angle by screen corner
     (`"ul"|"ur"|"ll"|"lr"`): `number` writes a label inside the wedge (along its bisector); `wedge`
@@ -568,10 +590,45 @@ sceneStrings, parallelMark, crossing, makeGraph }` — `colors` is the resolved 
   scene (or any script) can `document.querySelector('primer-geometry[scene="x"]').goTo(k)` to drive a proof
   in lockstep. See `concepts/mathematics/geometry/parallel-lines.html` for the showcase.
 
+## Interactive theorem practice (`registerGeometryProblem` + `<primer-geometry-problem>`)
+
+For a figure the learner **works**, not just watches — an "apply-the-theorem" angle chase — use
+`<primer-geometry-problem name="…">` + `registerGeometryProblem(name, config)`. Problems are **generated
+by a forward-chaining theorem engine** (`js/geometry-engine/*`, pure + unit-tested): it picks a scaffold
+(a parametric figure), synthesises a fresh figure with some angles **given** and others **blank** plus an
+ordered solution chain, and is **different every Refresh**. The usable theorem pool is **gated by the
+page's prerequisite-DAG closure** — a problem only ever chains theorems taught in the lessons leading to
+this page (each engine rule names the lesson `conceptId` that teaches it).
+
+```html
+<primer-geometry-problem name="angleChase"></primer-geometry-problem>
+<script type="module">
+  import { registerGeometryProblem } from "primer";
+  registerGeometryProblem("angleChase", {
+    generate: { scaffolds: ["parallelTransversal"], minSteps: 2, maxSteps: 4 },
+  });
+</script>
+```
+
+- **`config.generate`**: `{ scaffolds: string[], minSteps?, maxSteps?, theorems?, pageId? }`. `scaffolds`
+  are engine scaffold names (v1: `"parallelTransversal"`, `"triangle"`). `minSteps`/`maxSteps` bound the
+  chain length. `theorems` (optional) pins the rule pool explicitly (else it's DAG-gated); `pageId`
+  overrides the page id (else inferred from the URL). v1 generates **angle** chases (clean integer
+  answers by construction).
+- **The learner** types each unknown angle into the on-figure blanks (the highlighted box is the final
+  target), and may use the **construction toolbar** (draw line · mark ∥ · mark = · right ∟ · undo) as a
+  sandbox to reason. **Check** walks the engine's solution chain — ticking each blank and, at the first
+  wrong one, revealing that step's theorem hint; **Refresh** rolls a new problem; **Reset** clears.
+- **Embed in a quiz** as a `{ problem: "name" }` question (see below): it renders inline, hides its own
+  Check (the quiz's "Check answers" drives it), and folds `solved`/not into the scorecard.
+- Colours from `themeColors()`; re-themes on theme change. The board is **interactive** (the one place a
+  Primer figure keeps JSXGraph's pointer handlers — via `wrapBoard(…, { interactive: true })`).
+  Showcase: `concepts/mathematics/geometry/angle-chasing.html`.
+
 ## Helpers re-exported from `primer` (for inline scripts)
 
 `registerManimScene`, `getManimScene`, `registerChart`, `getChart`, `register3dChart`, `get3dChart`, `registerCharts`, `registerChartSliders`,
-`computeRange`, `registerGeometryScene`, `getGeometryScene`, `registerQuiz`, `getQuiz`, `speak`, `cancelSpeech`, `themeColors`, `makeStrings`, `getConceptMeta`,
+`computeRange`, `registerGeometryScene`, `getGeometryScene`, `registerGeometryProblem`, `getGeometryProblem`, `registerQuiz`, `getQuiz`, `speak`, `cancelSpeech`, `themeColors`, `makeStrings`, `getConceptMeta`,
 `parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`,
 `getTheme`, `applyTheme`, `initTheme`), and the graph helpers (`resolveLevels`,
 `validateGraph`, …). Pinned KaTeX/manim-web/JSXGraph versions live in `js/boot.js`.

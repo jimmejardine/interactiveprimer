@@ -68,6 +68,10 @@ function isChoice(q) {
 function isText(q) {
   return /** @type {any} */ (q).answer !== undefined;
 }
+/** @param {AuthoredQuestion} q @returns {boolean} Whether it's an interactive geometry-problem question. */
+function isProblem(q) {
+  return typeof /** @type {any} */ (q).problem === "string";
+}
 
 /**
  * Split a builder's returned array into an optional config object + the question bank. The
@@ -80,7 +84,7 @@ function isText(q) {
  */
 export function extractConfig(bank) {
   const first = /** @type {AuthoredQuestion} */ (bank[0]);
-  if (first && !isChoice(first) && !isText(first)) {
+  if (first && !isChoice(first) && !isText(first) && !isProblem(first)) {
     return { config: /** @type {QuizConfig} */ (bank[0]), questions: /** @type {AuthoredQuestion[]} */ (bank.slice(1)) };
   }
   return { config: {}, questions: /** @type {AuthoredQuestion[]} */ (bank) };
@@ -102,13 +106,18 @@ function isTemplate(q) {
  * @returns {GeneratedQuestion}
  */
 export function generateQuestion(question, rng) {
+  // An interactive geometry-problem question carries no options/answer — pass its scene straight
+  // through (the <primer-geometry-problem> generates and grades itself; the quiz folds in its result).
+  if (isProblem(question)) {
+    return { kind: "problem", scene: /** @type {any} */ (question).problem };
+  }
   const choice = isChoice(question);
   const text = isText(question);
   if (choice && text) {
-    throw new Error(`Question has both options and answer: "${describe(question.prompt)}"`);
+    throw new Error(`Question has both options and answer: "${describe(/** @type {any} */ (question).prompt)}"`);
   }
   if (!choice && !text) {
-    throw new Error(`Question needs either options or answer: "${describe(question.prompt)}"`);
+    throw new Error(`Question needs either options or answer: "${describe(/** @type {any} */ (question).prompt)}"`);
   }
 
   if (choice) {
@@ -140,7 +149,7 @@ export function generateQuestion(question, rng) {
     if (correctIndex === -1) {
       throw new Error(`Question has no correct option: "${describe(prompt)}"`);
     }
-    return { kind: "choice", prompt, options, correctIndex };
+    return { kind: "choice", prompt, options, correctIndex, figure: /** @type {any} */ (q).figure };
   }
 
   const q = /** @type {TextQuestion} */ (question);
@@ -151,7 +160,7 @@ export function generateQuestion(question, rng) {
   // a string `prompt` fills its `{name}` placeholders and a string/number `answer` is evaluated.
   const prompt = typeof q.prompt === "function" ? q.prompt(bindings) : substitute(q.prompt, bindings);
   const expected = typeof q.answer === "function" ? q.answer(bindings) : computeAnswer(q.answer, bindings);
-  return { kind: "text", prompt, expected, compare: q.compare, keyboard: q.keyboard };
+  return { kind: "text", prompt, expected, compare: q.compare, keyboard: q.keyboard, figure: /** @type {any} */ (q).figure };
 }
 
 /**

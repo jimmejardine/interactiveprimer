@@ -159,3 +159,12 @@ test("checkAnswer: numeric tolerance, string normalization, empty", () => {
   assert.equal(checkAnswer(10, ""), false);
   assert.equal(checkAnswer(10, "abc"), false);
 });
+
+test("checkAnswer: a numeric angle answer tolerates a degree marker", () => {
+  assert.equal(checkAnswer(70, "70°"), true);
+  assert.equal(checkAnswer(70, "70 °"), true);
+  assert.equal(checkAnswer(70, "70 degrees"), true);
+  assert.equal(checkAnswer(70, "70^\\circ"), true); // MathLive LaTeX
+  assert.equal(checkAnswer(70, "70"), true);
+  assert.equal(checkAnswer(70, "71°"), false);
+});

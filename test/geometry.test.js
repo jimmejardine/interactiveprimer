@@ -8,6 +8,8 @@ import {
   chevronSegments,
   quadrantOf,
   quadrantWedges,
+  tickSegments,
+  angleArcSpec,
 } from "../js/geometry.js";
 
 const D = Math.PI / 180;
@@ -149,4 +151,40 @@ test("quadrantWedges: perpendicular axes bisect at the 45° diagonals", () => {
   const ur = w.find((x) => x.corner === "ur");
   if (!ur) throw new Error("no ur wedge");
   near(Math.atan2(ur.bisector[1], ur.bisector[0]) / D, 45);
+});
+
+/* --------------------------- tickSegments ---------------------------- */
+
+test("tickSegments: a single tick is a stroke PERPENDICULAR to the side at its midpoint", () => {
+  // Side along +x at midpoint (2,1): the hatch runs along ±y.
+  const segs = tickSegments(2, 1, [1, 0], 1, { d: 0.16 });
+  assert.equal(segs.length, 1);
+  near(segs[0][0][0], 2);
+  near(segs[0][1][0], 2);
+  near(segs[0][0][1], 0.84);
+  near(segs[0][1][1], 1.16);
+});
+
+test("tickSegments: a double tick is two parallel hatches offset ALONG the side", () => {
+  const segs = tickSegments(0, 0, [1, 0], 2, { d: 0.1, gap: 0.2 });
+  assert.equal(segs.length, 2);
+  near(segs[0][0][0], -0.1); // centres at x = ∓0.1 along the side
+  near(segs[1][0][0], 0.1);
+});
+
+/* --------------------------- angleArcSpec ---------------------------- */
+
+test("angleArcSpec: bisector of a right angle at the origin points along the 45° diagonal", () => {
+  const s = angleArcSpec([0, 0], [1, 0], [0, 1], 1, { r: 0.5, labelR: 1 });
+  near(Math.atan2(s.bisector[1], s.bisector[0]) / D, 45);
+  near(s.labelAt[0], Math.SQRT1_2);
+  near(s.labelAt[1], Math.SQRT1_2);
+});
+
+test("angleArcSpec: count gives that many concentric radii, gap apart", () => {
+  const s = angleArcSpec([0, 0], [1, 0], [0, 1], 3, { r: 0.5, gap: 0.1 });
+  assert.deepEqual(
+    s.radii.map((r) => Math.round(r * 100) / 100),
+    [0.5, 0.6, 0.7],
+  );
 });

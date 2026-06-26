@@ -105,6 +105,78 @@ export function chevronSegments(x, y, along, count = 1, { d = 0.16, gap = 0.18 }
 }
 
 /**
+ * The `[start, end]` segments for `count` equal-length "tick" hatches centred on `(mx, my)` — the
+ * midpoint of a side — drawn PERPENDICULAR to the side's unit direction `along`. Each hatch is `2*d`
+ * long; multiple hatches are spaced `gap` apart along the side (so a double tick reads as ‖). This is
+ * the congruent-sides mark (one/two/three ticks for distinct equal groups).
+ * @param {number} mx @param {number} my @param {Vec} along  Unit vector ALONG the side.
+ * @param {number} [count]
+ * @param {{ d?: number, gap?: number }} [opts]
+ * @returns {[Vec, Vec][]}
+ */
+export function tickSegments(mx, my, along, count = 1, { d = 0.16, gap = 0.12 } = {}) {
+  const [ax, ay] = along;
+  const m = Math.hypot(ax, ay) || 1;
+  const ux = ax / m;
+  const uy = ay / m;
+  const px = -uy; // perpendicular (the hatch direction)
+  const py = ux;
+  /** @type {[Vec, Vec][]} */
+  const out = [];
+  for (let k = 0; k < count; k++) {
+    const off = (k - (count - 1) / 2) * gap;
+    const cx = mx + ux * off;
+    const cy = my + uy * off;
+    out.push([
+      [cx - px * d, cy - py * d],
+      [cx + px * d, cy + py * d],
+    ]);
+  }
+  return out;
+}
+
+/**
+ * Geometry for an equal-angle arc mark at a vertex `V` between rays toward `P1` and `P2`. Returns the
+ * `count` concentric arc radii (a single/double/triple arc marks distinct equal-angle groups) and the
+ * point on the bisector at `labelR` where an angle label sits. The angles are returned as the
+ * JSXGraph-friendly bounding directions so the caller can draw `arc`/`sector` elements.
+ * @param {Vec} V @param {Vec} P1 @param {Vec} P2
+ * @param {number} [count]
+ * @param {{ r?: number, gap?: number, labelR?: number }} [opts]
+ * @returns {{ radii: number[], bisector: Vec, labelAt: Vec }}
+ */
+export function angleArcSpec(V, P1, P2, count = 1, { r = 0.5, gap = 0.12, labelR = 0.8 } = {}) {
+  /** @param {Vec} P @returns {Vec} */
+  const dir = (P) => {
+    const dx = P[0] - V[0];
+    const dy = P[1] - V[1];
+    const m = Math.hypot(dx, dy) || 1;
+    return [dx / m, dy / m];
+  };
+  const a = dir(P1);
+  const b = dir(P2);
+  // Bisector of the (smaller) angle between the two rays.
+  let bx = a[0] + b[0];
+  let by = a[1] + b[1];
+  const bm = Math.hypot(bx, by);
+  if (bm < 1e-9) {
+    // Rays are opposite — bisector is perpendicular to a.
+    bx = -a[1];
+    by = a[0];
+  } else {
+    bx /= bm;
+    by /= bm;
+  }
+  const radii = [];
+  for (let k = 0; k < count; k++) radii.push(r + k * gap);
+  return {
+    radii,
+    bisector: [bx, by],
+    labelAt: [V[0] + bx * labelR, V[1] + by * labelR],
+  };
+}
+
+/**
  * Screen quadrant a direction points into: "ur" (x+,y+), "ul" (x−,y+), "ll" (x−,y−), "lr" (x+,y−).
  * JSXGraph user coords have y pointing UP, so this matches what the eye sees. Boundary angles round
  * up into the next CCW quadrant.

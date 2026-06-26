@@ -163,30 +163,47 @@ export class PrimerQuiz extends HTMLElement {
   #render(root, quiz) {
     /** @param {GeneratedQuestion} q @param {number} qi */
     const item = (q, qi) => {
+      // An interactive geometry-problem question: drop in the self-contained sandbox element. It
+      // generates + grades itself; the quiz triggers its Check and folds `solved` into the score.
+      if (q.kind === "problem") {
+        return `
+          <li class="q problem-q">
+            <primer-geometry-problem scene="${escapeHtml(q.scene)}" embedded></primer-geometry-problem>
+          </li>`;
+      }
+      // An optional figure (a registered geometry scene) drawn ABOVE the prompt — "given this diagram…".
+      const figure = q.figure
+        ? `<primer-geometry class="q-figure" scene="${escapeHtml(q.figure)}" no-controls></primer-geometry>`
+        : "";
       if (q.kind === "text") {
         const poly = q.compare === "polynomial";
+        const kb = poly ? (q.keyboard ?? "algebra-basic") : q.keyboard; // a geometry/etc. keyboard also upgrades to MathLive
         return `
           <li class="q">
+            ${figure}
             <p class="prompt">${tex(q.prompt)}</p>
             <div class="answer-row">
               <input type="text" class="answer${poly ? " poly" : ""}" name="q${qi}" autocomplete="off" inputmode="text"
-                ${poly ? `spellcheck="false" autocapitalize="off" data-keyboard="${escapeHtml(q.keyboard ?? "algebra-basic")}"` : ""}
+                ${kb ? `spellcheck="false" autocapitalize="off" data-keyboard="${escapeHtml(kb)}"` : ""}
                 aria-label="${t("quiz.answerPlaceholder")}" placeholder="${t("quiz.answerPlaceholder")}">
             </div>
           </li>`;
       }
-      // An option is EITHER a chart (a registered <primer-chart> scene, so the choice itself
-      // is a graph) or text. Chart options get a 2-column grid; text options the inline list.
-      const hasCharts = q.options.some((opt) => opt.chart);
+      // An option is a chart, a geometry figure, or text. Figure options (chart/geometry) get a
+      // 2-column grid; text options the inline list.
+      const hasFigures = q.options.some((opt) => opt.chart || opt.geometry);
       return `
         <li class="q">
+          ${figure}
           <p class="prompt">${tex(q.prompt)}</p>
-          <div class="options${hasCharts ? " chart-options" : ""}">
+          <div class="options${hasFigures ? " figure-options" : ""}">
             ${q.options
               .map((opt, oi) => {
                 const body = opt.chart
                   ? `<primer-chart scene="${escapeHtml(opt.chart)}" aria-label="${t("quiz.chartOption", { n: oi + 1 })}"></primer-chart>`
-                  : `<span>${tex(opt.text ?? "")}</span>`;
+                  : opt.geometry
+                    ? `<primer-geometry scene="${escapeHtml(opt.geometry)}" no-controls aria-label="${t("quiz.chartOption", { n: oi + 1 })}"></primer-geometry>`
+                    : `<span>${tex(opt.text ?? "")}</span>`;
                 return `
                   <label class="option">
                     <input type="radio" name="q${qi}" value="${oi}">
@@ -275,13 +292,17 @@ export class PrimerQuiz extends HTMLElement {
         .option.correct { background: var(--primer-ok-bg, #e6f6ec); color: var(--primer-ok, #1a8f3c); box-shadow: inset 0 0 0 1px var(--primer-ok, #1a8f3c); }
         .option.chosen-wrong { background: var(--primer-bad-bg, #fdecea); color: var(--primer-bad, #c0392b); box-shadow: inset 0 0 0 1px var(--primer-bad, #c0392b); }
 
-        /* Chart options: each choice is a small graph. Lay them in a responsive 2-col grid,
-           the radio above its chart, the whole tile a clickable card. */
-        .options.chart-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
-        .options.chart-options .option { flex-direction: column; align-items: stretch; gap: 0.3rem; padding: 0.4rem; border: 1px solid var(--primer-border, #ddd); }
-        .options.chart-options .option > input[type="radio"] { align-self: start; }
-        .options.chart-options primer-chart { width: 100%; }
-        @media (max-width: 30rem) { .options.chart-options { grid-template-columns: 1fr; } }
+        /* Figure options: each choice is a small graph or geometry diagram. Lay them in a responsive
+           2-col grid, the radio above its figure, the whole tile a clickable card. */
+        .options.figure-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
+        .options.figure-options .option { flex-direction: column; align-items: stretch; gap: 0.3rem; padding: 0.4rem; border: 1px solid var(--primer-border, #ddd); }
+        .options.figure-options .option > input[type="radio"] { align-self: start; }
+        .options.figure-options primer-chart, .options.figure-options primer-geometry { width: 100%; }
+        @media (max-width: 30rem) { .options.figure-options { grid-template-columns: 1fr; } }
+
+        /* A figure rendered above a question prompt ("given this diagram, …"). */
+        .q-figure { display: block; max-width: 26rem; margin: 0 auto 0.6rem; }
+        .problem-q { padding-top: 0.9rem; }
 
         /* Results scorecard — replaces the Check-answers button once graded. */
         .scorecard { display: flex; align-items: center; gap: 0.9rem; flex-wrap: wrap; animation: scorecard-pop 0.35s ease both; }
@@ -315,6 +336,7 @@ export class PrimerQuiz extends HTMLElement {
     // counts; clearing them all disables it again.
     const anyAnswered = () =>
       root.querySelector('input[type="radio"]:checked') !== null ||
+      root.querySelector("primer-geometry-problem") !== null ||
       [...root.querySelectorAll("input.answer")].some(
         (el) => /** @type {HTMLInputElement} */ (el).value.trim() !== "",
       );
@@ -351,7 +373,9 @@ export class PrimerQuiz extends HTMLElement {
     // failure leaves the usable text box (the comparator parses plain `x^2`/`x²`). Its virtual
     // keyboard uses the "sandboxed" policy so it renders + dismisses correctly inside this
     // shadow root (the default policy leaves the keyboard stuck open on mobile).
-    const polyInputs = /** @type {HTMLInputElement[]} */ ([...root.querySelectorAll("input.answer.poly")]);
+    const polyInputs = /** @type {HTMLInputElement[]} */ ([
+      ...root.querySelectorAll("input.answer.poly, input.answer[data-keyboard]"),
+    ]);
     if (polyInputs.length) {
       // Preload the Compute Engine so equivalence grading is ready by the time the learner
       // checks (cached across renders; null on failure → comparePolynomial fallback).
@@ -462,7 +486,14 @@ export class PrimerQuiz extends HTMLElement {
     const questionEls = root.querySelectorAll(".q");
     quiz.questions.forEach((q, qi) => {
       let correct = false;
-      if (q.kind === "text") {
+      if (q.kind === "problem") {
+        // An embedded geometry problem grades itself: trigger its Check and read `solved`.
+        const probEl = /** @type {any} */ (questionEls[qi]?.querySelector("primer-geometry-problem"));
+        if (probEl) {
+          correct = Boolean(probEl.check?.());
+          answered++; // an interactive problem always counts as attempted on submit
+        }
+      } else if (q.kind === "text") {
         const input = /** @type {HTMLInputElement | null} */ (
           root.querySelector(`input[name="q${qi}"]`)
         );

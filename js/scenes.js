@@ -168,7 +168,11 @@ export function get3dChart(name) {
  * js/components/primer-geometry.js for assembly.
  * @callback GeometryBuilder
  * @param {Record<string, any>} toolkit  `{ board, JXG, step, sliders, colors, sceneStrings, parallelMark,
- *   crossing, makeGraph, rng }` — `board` the JSXGraph board, `colors` the resolved `themeColors()`
+ *   crossing, makeGraph, tickMark, angleMark, rightAngle, extend, label, rng }` — the drawing tools
+ *   (js/geometry-tools.js): `parallelMark`/`crossing` (parallel + crossing-angle marks), `tickMark`
+ *   (equal-length side hatches), `angleMark` (equal-angle arcs + label), `rightAngle` (the square),
+ *   `extend` (an auxiliary/extension line), `label` (themed given/unknown text). `board` the JSXGraph
+ *   board, `colors` the resolved `themeColors()`
  *   palette, `step` the waypoint collector, `sliders` live values of the `opts.sliders` group,
  *   `sceneStrings(key, vars?)` the scene-scoped localized strings (js/scene-strings.js), `parallelMark` /
  *   `crossing` the drawing tools, `makeGraph(opts?)` which draws standardized Cartesian axes
@@ -218,6 +222,47 @@ export function registerGeometryScene(name, builder, opts = {}) {
  */
 export function getGeometryScene(name) {
   return geometries.get(name);
+}
+
+/**
+ * A geometry-PROBLEM config, used by `<primer-geometry-problem name="…">` — the interactive
+ * "apply-the-theorem" construction sandbox. In v1 a problem is **generated**: the engine
+ * (js/geometry-engine/*) picks a scaffold, gates the theorem pool by the page's prerequisite DAG, and
+ * synthesises a fresh figure + ordered solution chain each time (Refresh re-rolls). The element draws
+ * it, overlays fill-in blanks, offers construction tools, and walks the chain on Check.
+ * @typedef {object} GeometryProblemConfig
+ * @property {{ scaffolds: string[], minSteps?: number, maxSteps?: number, theorems?: string[],
+ *   pageId?: string }} generate  Engine config: which scaffolds to draw from, the desired chain-length
+ *   band, an optional explicit theorem-pool `theorems` override (else gated by the DAG), and an
+ *   optional `pageId` override (else inferred from the URL).
+ *
+ * @typedef {{ config: GeometryProblemConfig }} GeometryProblemEntry
+ */
+
+/** @type {Map<string, GeometryProblemConfig>} */
+const geometryProblems = new Map();
+
+/**
+ * Register a named geometry problem. Re-registering overwrites. Announces the registration (like
+ * {@link registerChart}) so a `<primer-geometry-problem>` that connected before this deferred script
+ * ran can finish building.
+ * @param {string} name
+ * @param {GeometryProblemConfig} config
+ */
+export function registerGeometryProblem(name, config) {
+  geometryProblems.set(name, config);
+  if (typeof document !== "undefined") {
+    document.dispatchEvent(new CustomEvent("primer:geometry-problem-registered", { detail: { name } }));
+  }
+}
+
+/**
+ * Look up a geometry problem config by name (or undefined if not registered).
+ * @param {string} name
+ * @returns {GeometryProblemConfig | undefined}
+ */
+export function getGeometryProblem(name) {
+  return geometryProblems.get(name);
 }
 
 /**

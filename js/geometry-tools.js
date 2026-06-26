@@ -12,7 +12,7 @@
  * @module
  */
 
-import { chevronSegments, quadrantWedges } from "./geometry.js";
+import { chevronSegments, quadrantWedges, tickSegments, angleArcSpec } from "./geometry.js";
 import { drawAxes } from "./graph-axes.js";
 
 /**
@@ -121,5 +121,114 @@ export function makeGeometryTools(board, colors) {
    */
   const makeGraph = (opts = {}) => drawAxes(board, colors, opts);
 
-  return { parallelMark, crossing, makeGraph };
+  /**
+   * Equal-length "tick" hatches across the middle of the side `p`→`q` (each a coordinate pair). Use
+   * `count: 2`/`3` for a second/third distinct congruent-side group. Returns the hatch elements.
+   * @param {Vec} p @param {Vec} q
+   * @param {{ count?: number, color?: string }} [opts]
+   * @returns {any[]}
+   */
+  const tickMark = (p, q, { count = 1, color } = {}) => {
+    const mx = (p[0] + q[0]) / 2;
+    const my = (p[1] + q[1]) / 2;
+    const along = /** @type {Vec} */ ([q[0] - p[0], q[1] - p[1]]);
+    const stroke = color ?? colors.line;
+    return tickSegments(mx, my, along, count).map(([a, b]) =>
+      board.create("segment", [a, b], { strokeColor: stroke, strokeWidth: 2, fixed: true, highlight: false }),
+    );
+  };
+
+  /**
+   * Equal-angle arc mark(s) at `vertex` between the rays to `p1` and `p2` (each a coordinate pair),
+   * with an optional `label` sitting on the bisector. `count` draws concentric arcs (distinct equal
+   * groups). Returns `{ arcs, label }`.
+   * @param {Vec} vertex @param {Vec} p1 @param {Vec} p2
+   * @param {{ count?: number, label?: string, color?: string, radius?: number }} [opts]
+   */
+  const angleMark = (vertex, p1, p2, { count = 1, label: text, color, radius = 0.5 } = {}) => {
+    const stroke = color ?? colors.line;
+    const spec = angleArcSpec(vertex, p1, p2, count, { r: radius });
+    const V = ipt(vertex);
+    const A = ipt(p1);
+    const B = ipt(p2);
+    const arcs = spec.radii.map((r) =>
+      board.create("angle", [A, V, B], {
+        radius: r,
+        fillColor: stroke,
+        fillOpacity: 0,
+        strokeColor: stroke,
+        strokeWidth: 1.5,
+        name: "",
+        withLabel: false,
+        fixed: true,
+        highlight: false,
+      }),
+    );
+    const lbl = text
+      ? board.create("text", [spec.labelAt[0], spec.labelAt[1], String(text)], {
+          strokeColor: color ?? colors.ink,
+          fontSize: 15,
+          anchorX: "middle",
+          anchorY: "middle",
+          fixed: true,
+          highlight: false,
+        })
+      : null;
+    return { arcs, label: lbl };
+  };
+
+  /**
+   * The right-angle square at `vertex` between the rays to `p1` and `p2` (coordinate pairs).
+   * @param {Vec} vertex @param {Vec} p1 @param {Vec} p2 @param {{ color?: string }} [opts]
+   */
+  const rightAngle = (vertex, p1, p2, { color } = {}) => {
+    const stroke = color ?? colors.line;
+    return board.create("angle", [ipt(p1), ipt(vertex), ipt(p2)], {
+      orthoType: "square",
+      radius: 0.4,
+      fillColor: stroke,
+      fillOpacity: 0.001,
+      strokeColor: stroke,
+      strokeWidth: 1.5,
+      name: "",
+      withLabel: false,
+      fixed: true,
+      highlight: false,
+    });
+  };
+
+  /**
+   * An auxiliary line through `p`→`q` extended past `q` (and past `p` if `both`), themed dashed by
+   * default — the "extend this side / draw this line" construction mark.
+   * @param {Vec} p @param {Vec} q
+   * @param {{ both?: boolean, dash?: boolean, color?: string }} [opts]
+   */
+  const extend = (p, q, { both = false, dash = true, color } = {}) =>
+    board.create("line", [ipt(p), ipt(q)], {
+      straightFirst: both,
+      straightLast: true,
+      strokeColor: color ?? colors.line,
+      strokeWidth: 1.5,
+      dash: dash ? 2 : 0,
+      fixed: true,
+      highlight: false,
+    });
+
+  /**
+   * A themed text label at `at` (a coordinate pair). `style:"unknown"` renders it in the accent
+   * colour (the "fill this in" look); otherwise the ink colour (a given). Greek/° are plain Unicode.
+   * @param {Vec} at @param {string|number} text
+   * @param {{ color?: string, style?: "given"|"unknown", fontSize?: number }} [opts]
+   */
+  const label = (at, text, { color, style = "given", fontSize = 16 } = {}) =>
+    board.create("text", [at[0], at[1], String(text)], {
+      strokeColor: color ?? (style === "unknown" ? colors.cat[0] : colors.ink),
+      fontSize,
+      anchorX: "middle",
+      anchorY: "middle",
+      fixed: true,
+      highlight: false,
+    });
+
+  return { parallelMark, crossing, makeGraph, tickMark, angleMark, rightAngle, extend, label };
 }

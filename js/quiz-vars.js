@@ -402,7 +402,10 @@ export function checkAnswer(expected, raw) {
   const input = raw.trim();
   if (input === "") return false;
   if (typeof expected === "number") {
-    const got = Number(input);
+    // Tolerate a degree marker on an angle answer: "70", "70°", "70 degrees" and MathLive's
+    // "70^\circ" all read as 70. Strip a trailing °/^\circ/deg(rees) before the numeric parse.
+    const stripped = input.replace(/\s*(\^?\\?circ|°|deg(?:rees|ree)?)\s*$/i, "").trim();
+    const got = Number(stripped);
     if (!Number.isFinite(got)) return false;
     return Math.abs(got - expected) <= Math.max(1e-3, 1e-9 * Math.abs(expected));
   }

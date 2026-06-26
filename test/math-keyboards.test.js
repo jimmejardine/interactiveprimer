@@ -16,3 +16,15 @@ test("getMathKeyboard returns null for unknown / missing names", () => {
   assert.equal(getMathKeyboard(null), null);
   assert.equal(getMathKeyboard(""), null);
 });
+
+test("the geometry keyboard exists and carries a degree key and Greek unknowns", () => {
+  const kb = /** @type {any} */ (getMathKeyboard("geometry"));
+  assert.ok(kb, "geometry keyboard should exist");
+  const caps = kb.rows.flat();
+  const inserts = caps.map((/** @type {any} */ c) => c.insert).filter(Boolean);
+  assert.ok(
+    inserts.includes("^\\circ"),
+    "should have a degree-sign key",
+  );
+  assert.ok(inserts.includes("\\alpha") && inserts.includes("\\theta"), "should have Greek unknowns");
+});

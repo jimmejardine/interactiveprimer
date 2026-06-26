@@ -24,13 +24,14 @@ import "./components/primer-chart.js";
 import "./components/primer-chart-3d.js";
 import "./components/primer-chart-sliders.js";
 import "./components/primer-geometry.js";
+import "./components/primer-geometry-problem.js";
 import "./components/primer-video.js";
 import "./components/primer-quiz.js";
 import "./components/primer-pathway.js";
 import "./components/primer-menu.js";
 
 // Re-exports for page scripts.
-export { registerManimScene, getManimScene, registerChart, getChart, register3dChart, get3dChart, registerGeometryScene, getGeometryScene, registerQuiz, getQuiz } from "./scenes.js";
+export { registerManimScene, getManimScene, registerChart, getChart, register3dChart, get3dChart, registerGeometryScene, getGeometryScene, registerGeometryProblem, getGeometryProblem, registerQuiz, getQuiz } from "./scenes.js";
 export { registerCharts, registerChartSliders, computeRange, subscribeSliders, getSliderGroup } from "./charts.js";
 export { THEMES, getTheme, applyTheme, initTheme, themeColors } from "./theme.js";
 export { LOCALES, getLocale, applyLocale, t } from "./i18n.js";

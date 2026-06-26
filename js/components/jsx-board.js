@@ -63,12 +63,17 @@ export function adoptJsxCss(root, stillConnected) {
  * the created board via `onBoard(board, JSXGraph)`. A builder's own initBoard options override the
  * defaults (e.g. `grid: false`, `keepaspectratio: true`). Read `colors` fresh per call (a theme
  * rebuild re-wraps) so the grid re-tints.
+ * Pass `opts.interactive: true` for a board the learner manipulates (e.g. `<primer-geometry-problem>`):
+ * the pointer/touch handlers are KEPT (so points drag and tools click) — pan/zoom stay disabled — and
+ * the board claims the gesture with `touch-action: none`. The default (read-only figures) strips those
+ * handlers so the page keeps scrolling on touch.
  * @param {Record<string, any>} JXG
  * @param {ThemeColors} colors
  * @param {(board: any, JSXGraph: any) => void} onBoard
+ * @param {{ interactive?: boolean }} [opts]
  * @returns {Record<string, any>}
  */
-export function wrapBoard(JXG, colors, onBoard) {
+export function wrapBoard(JXG, colors, onBoard, opts = {}) {
   const JSXGraph = JXG.JSXGraph;
   const defaults = {
     showCopyright: false,
@@ -88,18 +93,25 @@ export function wrapBoard(JXG, colors, onBoard) {
   /** @param {any} box @param {any} [attributes] */
   wrappedJSXGraph.initBoard = (box, attributes) => {
     const board = JSXGraph.initBoard(box, { ...defaults, ...(attributes || {}) });
-    // These are read-only teaching figures (no panning/dragging, sliders live in external DOM),
-    // but JSXGraph still binds pointer/touch listeners that `preventDefault()` on every touch —
-    // swallowing the page's vertical scroll on phones. Drop just those two handler sets (NOT the
-    // broad removeEventHandlers(), which would also stop the resize ResizeObserver we rely on to
-    // re-fit), and un-claim the gesture for the browser via `touch-action: pan-y`.
-    try {
-      board.removePointerEventHandlers?.();
-      board.removeTouchEventHandlers?.();
-    } catch {
-      /* best-effort: a board without input handlers is fine, these figures are static */
+    if (opts.interactive) {
+      // A manipulable construction surface: KEEP the pointer/touch handlers so points drag and tools
+      // click (pan/zoom are still disabled above). The board claims the gesture so a drag isn't read
+      // as a page scroll.
+      if (board.containerObj) board.containerObj.style.touchAction = "none";
+    } else {
+      // Read-only teaching figures (no panning/dragging, sliders live in external DOM), but JSXGraph
+      // still binds pointer/touch listeners that `preventDefault()` on every touch — swallowing the
+      // page's vertical scroll on phones. Drop just those two handler sets (NOT the broad
+      // removeEventHandlers(), which would also stop the resize ResizeObserver we rely on to re-fit),
+      // and un-claim the gesture for the browser via `touch-action: pan-y`.
+      try {
+        board.removePointerEventHandlers?.();
+        board.removeTouchEventHandlers?.();
+      } catch {
+        /* best-effort: a board without input handlers is fine, these figures are static */
+      }
+      if (board.containerObj) board.containerObj.style.touchAction = "pan-y";
     }
-    if (board.containerObj) board.containerObj.style.touchAction = "pan-y";
     onBoard(board, JSXGraph);
     return board;
   };

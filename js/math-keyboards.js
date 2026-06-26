@@ -52,9 +52,56 @@ const BASIC_ALGEBRA = {
   ],
 };
 
+/**
+ * Geometry: digits + the degree sign and the Greek unknowns an angle/length chase needs. Aimed at
+ * "type the missing angle" answers — a value like `70` or `70°` (the ° is cosmetic; numeric grading
+ * strips it), or a short expression like `180 - x`. The unknowns row carries the usual angle names.
+ */
+const GEOMETRY = {
+  label: "Geometry",
+  rows: [
+    [
+      { label: "7", key: "7" },
+      { label: "8", key: "8" },
+      { label: "9", key: "9" },
+      { label: "°", insert: "^\\circ" },
+      { class: "action", label: "⇦", command: "deleteBackward" },
+    ],
+    [
+      { label: "4", key: "4" },
+      { label: "5", key: "5" },
+      { label: "6", key: "6" },
+      { label: "+", key: "+" },
+      { label: "−", key: "-" },
+    ],
+    [
+      { label: "1", key: "1" },
+      { label: "2", key: "2" },
+      { label: "3", key: "3" },
+      { label: "×", insert: "\\times" },
+      { label: "÷", insert: "\\frac{#?}{#?}" },
+    ],
+    [
+      { label: "0", key: "0" },
+      { label: ".", key: "." },
+      { label: "(", key: "(" },
+      { label: ")", key: ")" },
+      { class: "action", label: "⇨", command: "moveToNextChar" },
+    ],
+    [
+      { label: "x", key: "x" },
+      { label: "α", insert: "\\alpha" },
+      { label: "β", insert: "\\beta" },
+      { label: "θ", insert: "\\theta" },
+      { class: "action", label: "Next", command: "moveToNextPlaceholder" },
+    ],
+  ],
+};
+
 /** Module keyboards by name. */
 const KEYBOARDS = /** @type {Record<string, object>} */ ({
   "algebra-basic": BASIC_ALGEBRA,
+  geometry: GEOMETRY,
 });
 
 /**

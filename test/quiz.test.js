@@ -116,7 +116,7 @@ test("generateQuiz falls back past an unsatisfiable-constraint question", () => 
   ];
   const quiz = generateQuiz(bank, 2, seededRng(7));
   assert.equal(quiz.questions.length, 2);
-  assert.ok(quiz.questions.every((q) => q.prompt !== "bad")); // the bad one is dropped
+  assert.ok(quiz.questions.every((q) => /** @type {any} */ (q).prompt !== "bad")); // the bad one is dropped
 
   // A bank whose ONLY question is unsatisfiable can't build anything → throws.
   assert.throws(() => generateQuiz([bank[0]], 1, seededRng(7)));
@@ -152,7 +152,7 @@ test("generateQuiz picks distinct questions, capped at bank size", () => {
 
   const all = generateQuiz(bank, 10, seededRng(99));
   assert.equal(all.questions.length, 3); // capped at bank size
-  const prompts = all.questions.map((q) => q.prompt);
+  const prompts = all.questions.map((q) => /** @type {any} */ (q).prompt);
   assert.equal(new Set(prompts).size, 3); // distinct
 });
 
@@ -177,7 +177,7 @@ test("generateQuiz: a static is drawn at most once; a template fills the rest", 
   for (let seed = 1; seed <= 30; seed++) {
     const quiz = generateQuiz(bank, 4, seededRng(seed));
     assert.equal(quiz.questions.length, 4);
-    const statics = quiz.questions.filter((q) => q.prompt === "static");
+    const statics = quiz.questions.filter((q) => /** @type {any} */ (q).prompt === "static");
     assert.ok(statics.length <= 1, `static appeared ${statics.length} times (seed ${seed})`);
   }
 });
@@ -190,7 +190,7 @@ test("generateQuiz returns as many as possible when statics run out and there's 
   ];
   const quiz = generateQuiz(bank, 5, seededRng(7)); // ask for 5, only 2 statics exist
   assert.equal(quiz.questions.length, 2);
-  assert.equal(new Set(quiz.questions.map((q) => q.prompt)).size, 2); // distinct
+  assert.equal(new Set(quiz.questions.map((q) => /** @type {any} */ (q).prompt)).size, 2); // distinct
 });
 
 test("free-text template re-instantiates to fill count past bank size", () => {
@@ -252,7 +252,7 @@ test("registerQuiz/getQuiz round-trips a builder, and its bank generates", () =>
   // after extractConfig splits off any leading config item (none here).
   const { questions } = extractConfig(builder({ sceneStrings: (k) => k }));
   const quiz = generateQuiz(questions, 1, seededRng(5));
-  assert.equal(quiz.questions[0].prompt, "q");
+  assert.equal(/** @type {any} */ (quiz.questions[0]).prompt, "q");
 });
 
 test("string and function forms of `text`/`answer` are identical", () => {
@@ -306,7 +306,7 @@ test("free-text: a function answer is computed from the drawn bindings", () => {
 
 test("free-text: a function prompt with no variables receives empty bindings", () => {
   const quiz = generateQuiz([{ prompt: () => "Capital of France?", answer: "Paris" }], 1, seededRng(1));
-  assert.equal(quiz.questions[0].prompt, "Capital of France?");
+  assert.equal(/** @type {any} */ (quiz.questions[0]).prompt, "Capital of France?");
 });
 
 test("multiple-choice: function prompt and option text resolve from bindings", () => {
@@ -344,7 +344,42 @@ test("extractConfig: a leading config item (no options/answer) is split from the
   assert.equal(config.num_questions, 4);
   assert.equal(config.preamble, "Solve each.");
   assert.equal(questions.length, 2);
-  assert.equal(questions[0].prompt, "Q1");
+  assert.equal(/** @type {any} */ (questions[0]).prompt, "Q1");
+});
+
+test("a geometry-problem question is generated as a problem kind, not mistaken for config", () => {
+  // A leading {problem} item must NOT be eaten as config (it has no options/answer).
+  /** @type {Array<any>} */
+  const bank = [{ problem: "angleChase" }, { prompt: "Q1", answer: "Paris" }];
+  const { config, questions } = extractConfig(bank);
+  assert.deepEqual(config, {});
+  assert.equal(questions.length, 2);
+  const gen = generateQuestion({ problem: "angleChase" }, seededRng(1));
+  assert.equal(gen.kind, "problem");
+  assert.equal(/** @type {any} */ (gen).scene, "angleChase");
+});
+
+test("geometry option + figure carry through generation", () => {
+  const choice = /** @type {any} */ (generateQuestion(
+    {
+      prompt: "Which shows alternate angles?",
+      figure: "altFig",
+      options: [{ geometry: "optA", correct: true }, { geometry: "optB", correct: false }],
+    },
+    seededRng(2),
+  ));
+  assert.equal(choice.kind, "choice");
+  assert.equal(choice.figure, "altFig");
+  assert.ok(choice.options.every((/** @type {any} */ o) => typeof o.geometry === "string"));
+
+  const txt = /** @type {any} */ (generateQuestion(
+    { prompt: "Find ∠x", figure: "chase", answer: 70, keyboard: "geometry" },
+    seededRng(3),
+  ));
+  assert.equal(txt.kind, "text");
+  assert.equal(txt.figure, "chase");
+  assert.equal(txt.keyboard, "geometry");
+  assert.equal(txt.expected, 70);
 });
 
 test("extractConfig: no config item → empty config and the whole bank is questions", () => {

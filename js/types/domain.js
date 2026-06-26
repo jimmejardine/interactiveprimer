@@ -92,8 +92,10 @@
  * graph via <primer-chart> — so the choices themselves can be plots). Exactly one is given.
  * `text` may be a function of the drawn {@link Bindings} (e.g. `(b) => \`$${b.a + b.b}$\``).
  * @typedef {object} QuizOption
- * @property {string | ((b: Bindings) => string)} [text]  The text shown to the learner (when not a chart option).
+ * @property {string | ((b: Bindings) => string)} [text]  The text shown to the learner (when not a chart/geometry option).
  * @property {string} [chart]    Name of a registered chart scene to render as this option.
+ * @property {string} [geometry] Name of a registered geometry scene to render as this option (a small
+ *   figure, e.g. "which diagram shows alternate angles?"). Like `chart`, carries no text.
  * @property {boolean} correct   Whether this option is the correct answer.
  */
 
@@ -102,6 +104,8 @@
  * @typedef {object} QuizQuestion
  * @property {string | ((b: Bindings) => string)} prompt   The question text (may contain LaTeX), or a
  *   function of the drawn variable bindings.
+ * @property {string} [figure]   Optional name of a registered geometry scene rendered ABOVE the prompt
+ *   (a "given this diagram, …" question). Carries no answer logic of its own.
  * @property {QuizOption[]} options    Two or more options; at least one correct.
  * @property {string} [variables]     Optional spec (see js/quiz-vars.js). When present the
  *   prompt and each option's `text` are evaluated against the drawn values: `{expr}` →
@@ -119,6 +123,8 @@
  * the generated values.
  * @typedef {object} TextQuestion
  * @property {string | ((b: Bindings) => string)} prompt   The question text, or a function of the bindings.
+ * @property {string} [figure]   Optional name of a registered geometry scene rendered ABOVE the prompt
+ *   (e.g. "given this diagram, find ∠x"). Pair with `keyboard: "geometry"` for angle answers.
  * @property {string | number | ((b: Bindings) => string | number)} answer   The expected answer: an
  *   expression/literal over the variables, or a function of the bindings (e.g. `(b) => b.a + b.b`).
  * @property {string} [variables]
@@ -132,8 +138,16 @@
  *   to "algebra-basic".
  */
 
-/** A question as authored: multiple-choice (has `options`) or free-text (has `answer`).
- * @typedef {QuizQuestion | TextQuestion} AuthoredQuestion */
+/**
+ * An interactive geometry-PROBLEM question: embeds a `<primer-geometry-problem>` (the engine-generated
+ * "apply-the-theorem" construction sandbox). Recognised by its `problem` field (it has neither
+ * `options` nor `answer`). Its solved/unsolved state folds into the quiz scorecard.
+ * @typedef {object} ProblemQuestion
+ * @property {string} problem   Name of a registered geometry problem (see `registerGeometryProblem`).
+ */
+
+/** A question as authored: multiple-choice (`options`), free-text (`answer`), or a geometry problem (`problem`).
+ * @typedef {QuizQuestion | TextQuestion | ProblemQuestion} AuthoredQuestion */
 
 /**
  * Quiz-level settings, supplied as the OPTIONAL FIRST item returned by a `registerQuiz` builder.
@@ -162,8 +176,9 @@
 /**
  * One option after generation: any function/template `text` has been resolved to a final string.
  * @typedef {object} GeneratedOption
- * @property {string} [text]     The resolved text shown (when not a chart option).
+ * @property {string} [text]     The resolved text shown (when not a chart/geometry option).
  * @property {string} [chart]    Name of a registered chart scene to render as this option.
+ * @property {string} [geometry] Name of a registered geometry scene to render as this option.
  * @property {boolean} correct   Whether this option is the correct answer.
  */
 
@@ -172,6 +187,7 @@
  * @typedef {object} GeneratedChoiceQuestion
  * @property {"choice"} kind
  * @property {string} prompt
+ * @property {string} [figure]   Optional geometry scene rendered above the prompt.
  * @property {GeneratedOption[]} options    Shuffled options (text resolved to strings).
  * @property {number} correctIndex     Index into `options` of (a) correct answer.
  */
@@ -182,13 +198,22 @@
  * @typedef {object} GeneratedTextQuestion
  * @property {"text"} kind
  * @property {string} prompt
+ * @property {string} [figure]   Optional geometry scene rendered above the prompt.
  * @property {number | string} expected
  * @property {"polynomial"} [compare]   Grading mode, carried through from the authored question.
  * @property {string} [keyboard]   Custom math-keyboard name, carried through from the question.
  */
 
+/**
+ * A geometry-problem question, ready to render: the quiz drops in a `<primer-geometry-problem>` and
+ * folds its solved state into the score.
+ * @typedef {object} GeneratedProblemQuestion
+ * @property {"problem"} kind
+ * @property {string} scene   The registered geometry-problem name.
+ */
+
 /** A generated question, ready to render and grade.
- * @typedef {GeneratedChoiceQuestion | GeneratedTextQuestion} GeneratedQuestion */
+ * @typedef {GeneratedChoiceQuestion | GeneratedTextQuestion | GeneratedProblemQuestion} GeneratedQuestion */
 
 /**
  * The learner's self-attested confidence for a concept, as a number of stars from

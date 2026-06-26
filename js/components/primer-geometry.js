@@ -275,12 +275,12 @@ export class PrimerGeometry extends HTMLElement {
     // The toolkit, manim-style: the board + palette, the step collector, live slider values, the
     // scene-scoped localized strings, and the drawing tools.
     const sceneStrings = makeStrings(name);
-    const { parallelMark, crossing, makeGraph } = makeGeometryTools(board, colors);
+    const tools = makeGeometryTools(board, colors);
     // A seeded RNG for random scenes: built from the same per-run #seed for the main board AND every
     // mini-board of the "All steps" view, so a single run is internally coherent; Refresh bumps the
     // seed for a fresh example. Builders use rng()/rng.int/rng.pick instead of Math.random().
     const rng = makeRng(/** @type {number} */ (this.#seed ?? 0));
-    entry.builder({ board, JXG, step, sliders, colors, sceneStrings, parallelMark, crossing, makeGraph, rng });
+    entry.builder({ board, JXG, step, sliders, colors, sceneStrings, rng, ...tools });
     // Read-only: a teaching figure isn't a manipulable construction. Free points (created from
     // coordinates) are draggable by default — fix EVERY element and drop hover highlighting so the
     // mouse can't move anything. (Slider-driven points use functional coords, so they still update

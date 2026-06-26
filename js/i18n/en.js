@@ -57,6 +57,18 @@ export default {
   "geometry.collapse": "Collapse",
   "geometry.refresh": "Refresh",
 
+  "geometryProblem.toolAnswer": "Fill in",
+  "geometryProblem.toolLine": "Draw line",
+  "geometryProblem.toolParallel": "Mark ∥",
+  "geometryProblem.toolEqual": "Mark =",
+  "geometryProblem.toolRight": "Right ∟",
+  "geometryProblem.toolUndo": "Undo",
+  "geometryProblem.goal": "Find every unknown angle, ending with the highlighted one.",
+  "geometryProblem.blankLabel": "unknown angle",
+  "geometryProblem.solved": "Solved! Every step checks out.",
+  "geometryProblem.notYet": "Not yet —",
+  "geometryProblem.noTheorems": "No relevant theorems learned yet — come back after the lessons above.",
+
   "video.play": "Play video",
   "video.unavailable": "Couldn't load this video.",
 
