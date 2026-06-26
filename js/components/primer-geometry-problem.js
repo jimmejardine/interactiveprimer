@@ -29,7 +29,7 @@ import { adoptJsxCss, wrapBoard } from "./jsx-board.js";
 import { makeGeometryTools } from "../geometry-tools.js";
 import { makeRng } from "../rng.js";
 import { checkAnswer } from "../quiz-vars.js";
-import { SCAFFOLDS } from "../geometry-engine/scaffolds.js";
+import { SCAFFOLDS, anglePos } from "../geometry-engine/scaffolds.js";
 import { generateProblem } from "../geometry-engine/generate.js";
 import { RULES } from "../geometry-engine/rules.js";
 import { buildAdjacency, allowedTheorems } from "../geometry-engine/learned.js";
@@ -70,13 +70,17 @@ export class PrimerGeometryProblem extends HTMLElement {
   /** @type {any} */ #board = null;
   /** @type {any} Raw JSXGraph namespace (for Coords + freeBoard). */ #jsx = null;
   /** @type {import("../geometry-engine/generate.js").Problem | null} */ #problem = null;
-  /** @type {Map<string, HTMLInputElement>} blank key → input. */ #inputs = new Map();
+  /** @type {Map<string, HTMLInputElement>} fillable angle key → input. */ #inputs = new Map();
+  /** @type {Array<{ key: string, value: number, pos: [number, number], isTarget: boolean }>} Every non-given angle the learner can fill. */ #fillable = [];
+  /** @type {Map<string, import("../geometry-engine/chain.js").DerivStep>} chain step keyed by produced angle, for hints. */ #hintByKey = new Map();
+  /** @type {{ parallel: { pending: any, count: number }, equal: { pending: any, count: number } }} Marking-tool group state. */ #marks = { parallel: { pending: null, count: 0 }, equal: { pending: null, count: 0 } };
   /** @type {(() => void) | null} */ #onTheme = null;
   /** @type {(() => void) | null} */ #stopWaiting = null;
   /** @type {number} */ #buildGen = 0;
   /** @type {number | null} */ #seed = null;
   /** @type {boolean} */ #solved = false;
   /** @type {string} Current construction tool. */ #tool = "answer";
+  /** @type {string[]} Construction tools the toolbar offers (besides the always-present Fill in / Undo). */ #toolset = ["line", "parallel", "equal", "right"];
   /** @type {any[]} Learner-created elements (for undo/reset). */ #added = [];
   /** @type {{ x: number, y: number, el: any }[]} Pickable points for the tools. */ #picks = [];
   /** @type {any} First point chosen by the line tool. */ #pendingPoint = null;
@@ -136,11 +140,11 @@ export class PrimerGeometryProblem extends HTMLElement {
         .board { position: absolute; inset: 0; }
         .stage svg { display: block; width: 100% !important; height: 100% !important; }
         .overlay { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
-        .overlay input { position: absolute; transform: translate(-50%, -50%); width: 3.1rem;
-          text-align: center; font: inherit; font-size: 0.85rem; padding: 0.1rem 0.15rem;
-          border-radius: 0.35rem; border: 1px solid var(--primer-accent, #4d5bd1);
+        .overlay input { position: absolute; transform: translate(-50%, -50%); width: 2.1rem;
+          text-align: center; font: inherit; font-size: 0.72rem; line-height: 1; padding: 0.08rem 0.1rem;
+          border-radius: 0.3rem; border: 1px solid var(--primer-border, #ccc);
           background: var(--primer-surface, #fff); color: var(--primer-ink, #111); pointer-events: auto; }
-        .overlay input.target { box-shadow: 0 0 0 2px var(--primer-ring, rgba(70,90,230,0.55)); }
+        .overlay input.target { border-color: var(--primer-accent, #4d5bd1); box-shadow: 0 0 0 2px var(--primer-ring, rgba(70,90,230,0.55)); }
         .overlay input.right { border-color: var(--primer-ok, #1a8f3c); color: var(--primer-ok, #1a8f3c); background: var(--primer-ok-bg, #e6f6ec); }
         .overlay input.wrong { border-color: var(--primer-bad, #c0392b); color: var(--primer-bad, #c0392b); background: var(--primer-bad-bg, #fdecea); }
         .actions { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.55rem; flex-wrap: wrap; }
@@ -182,12 +186,17 @@ export class PrimerGeometryProblem extends HTMLElement {
       return;
     }
     this.#stopWaiting?.();
+    this.#toolset = config.generate.tools ?? ["line", "parallel", "equal", "right"];
+    this.#tool = "answer";
     if (this.#seed === null) this.#seed = (Math.random() * 0x100000000) >>> 0;
     const gen = ++this.#buildGen;
     this.#dispose();
     const overlay = /** @type {HTMLElement} */ (stage.querySelector(".overlay"));
     overlay.replaceChildren();
     this.#inputs.clear();
+    this.#fillable = [];
+    this.#hintByKey = new Map();
+    this.#marks = { parallel: { pending: null, count: 0 }, equal: { pending: null, count: 0 } };
     this.#added = [];
     this.#picks = [];
     this.#pendingPoint = null;
@@ -220,10 +229,19 @@ export class PrimerGeometryProblem extends HTMLElement {
         return;
       }
 
+      // EVERY non-given angle is fillable — that's how you chase the solution. Each carries its true
+      // value (the figure is exact) and a screen position; the engine's chain only supplies the
+      // ordered HINTS and which one is the final target.
+      const givenKeys = new Set(problem.givens.map((/** @type {any} */ g) => g.key));
+      this.#fillable = figure.angles
+        .filter((/** @type {any} */ a) => !givenKeys.has(a.key))
+        .map((/** @type {any} */ a) => ({ key: a.key, value: a.value, pos: anglePos(figure, a), isTarget: a.key === problem.target }));
+      this.#hintByKey = new Map(problem.blanks.map((/** @type {any} */ b) => [b.key, b]));
+
       this.#drawBoard(stage, JXG, figure, problem);
       this.#renderToolbar();
       this.#renderGoal(problem);
-      this.#placeBlanks(overlay, problem);
+      this.#placeInputs(overlay);
       this.#syncOverlay();
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -266,24 +284,37 @@ export class PrimerGeometryProblem extends HTMLElement {
         strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false,
       });
     }
+    // GIVEN parallel marks: the "these lines are parallel" chevrons the chase relies on. Each parallel
+    // group gets its own number of chevrons (1, 2, …) so distinct groups are distinguishable.
+    (figure.parallels ?? []).forEach((/** @type {number[]} */ group, /** @type {number} */ gi) => {
+      for (const ei of group) {
+        const [p, q] = figure.edges[ei];
+        const a = figure.points[p];
+        const b = figure.points[q];
+        tools.parallelMark((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, {
+          along: [b[0] - a[0], b[1] - a[1]], count: gi + 1, color: colors.line,
+        });
+      }
+    });
     // Pickable vertex points (small, faint) for the construction tools.
     this.#picks = [];
-    for (const [pname, coord] of Object.entries(figure.points)) {
+    for (const [, coord] of Object.entries(figure.points)) {
       const c = /** @type {[number, number]} */ (coord);
       const pt = board.create("point", c, { name: "", size: 1, strokeColor: colors.line, fillColor: colors.line, fixed: true, withLabel: false, highlight: false });
       this.#picks.push({ x: c[0], y: c[1], el: pt });
     }
 
     const givenKeys = new Set(problem.givens.map((/** @type {any} */ g) => g.key));
-    const blankKeys = new Set(problem.blanks.map((/** @type {any} */ b) => b.key));
     for (const ang of figure.angles) {
       const V = figure.points[ang.vertex];
       const P1 = figure.points[ang.from];
       const P2 = figure.points[ang.to];
       if (givenKeys.has(ang.key)) {
-        tools.angleMark(V, P1, P2, { label: `${ang.value}°`, color: colors.ink, radius: 0.55 });
-      } else if (blankKeys.has(ang.key)) {
-        tools.angleMark(V, P1, P2, { color: colors.cat[0], radius: 0.55 }); // accent arc, value via overlay input
+        // A given: a clear arc + its value, in small ink text.
+        tools.angleMark(V, P1, P2, { label: `${ang.value}°`, color: colors.ink, radius: 0.5, fontSize: 12 });
+      } else {
+        // A fillable angle: a faint arc to anchor its input box (the target a touch stronger).
+        tools.angleMark(V, P1, P2, { color: ang.key === problem.target ? colors.cat[0] : colors.line, radius: 0.5 });
       }
     }
     board.update();
@@ -300,14 +331,18 @@ export class PrimerGeometryProblem extends HTMLElement {
   /** Render the construction toolbar. */
   #renderToolbar() {
     const bar = /** @type {HTMLElement} */ (this.#root.querySelector(".toolbar"));
-    const tools = [
-      ["answer", this.#str("toolAnswer", "Fill in")],
-      ["line", this.#str("toolLine", "Draw line")],
-      ["parallel", this.#str("toolParallel", "Mark ∥")],
-      ["equal", this.#str("toolEqual", "Mark =")],
-      ["right", this.#str("toolRight", "Right ∟")],
-      ["undo", this.#str("toolUndo", "Undo")],
-    ];
+    const labels = /** @type {Record<string, string>} */ ({
+      answer: this.#str("toolAnswer", "Fill in"),
+      line: this.#str("toolLine", "Draw line"),
+      parallel: this.#str("toolParallel", "Mark ∥"),
+      equal: this.#str("toolEqual", "Mark ="),
+      right: this.#str("toolRight", "Right ∟"),
+      undo: this.#str("toolUndo", "Undo"),
+    });
+    // "Fill in" is always first and "Undo" always last; in between, only the configured tools (so a
+    // figure never offers a tool that has nothing to attach to).
+    const keys = ["answer", ...this.#toolset.filter((k) => k in labels && k !== "answer" && k !== "undo"), "undo"];
+    const tools = keys.map((k) => [k, labels[k]]);
     bar.replaceChildren();
     for (const [key, label] of tools) {
       const b = document.createElement("button");
@@ -327,26 +362,26 @@ export class PrimerGeometryProblem extends HTMLElement {
   }
 
   /** Show the goal sentence. */
-  #renderGoal(/** @type {any} */ problem) {
+  #renderGoal(/** @type {any} */ _problem) {
     const goal = /** @type {HTMLElement} */ (this.#root.querySelector(".goal"));
-    goal.textContent = this.#str("goal", `Find every unknown angle, ending with the highlighted one (${problem.blanks.length} to fill).`);
+    goal.textContent = this.#str("goal", "Chase the angles: fill in any you can work out, ending with the highlighted one.");
   }
 
-  /** Overlay an input box at each blank's bisector position. */
-  #placeBlanks(/** @type {HTMLElement} */ overlay, /** @type {any} */ problem) {
+  /** Overlay a small input box at EVERY fillable angle's bisector position. */
+  #placeInputs(/** @type {HTMLElement} */ overlay) {
     overlay.replaceChildren();
     this.#inputs.clear();
-    for (const b of problem.blanks) {
+    for (const f of this.#fillable) {
       const input = document.createElement("input");
       input.type = "text";
       input.inputMode = "numeric";
       input.autocomplete = "off";
-      input.className = b.key === problem.target ? "target" : "";
+      input.className = f.isTarget ? "target" : "";
       input.setAttribute("aria-label", this.#str("blankLabel", "unknown angle"));
-      input.dataset.key = b.key;
+      input.dataset.key = f.key;
       input.addEventListener("input", () => { input.classList.remove("right", "wrong"); });
       overlay.append(input);
-      this.#inputs.set(b.key, input);
+      this.#inputs.set(f.key, input);
     }
   }
 
@@ -358,32 +393,43 @@ export class PrimerGeometryProblem extends HTMLElement {
 
   /* ----------------------------- grading ----------------------------- */
 
-  /** Grade the blanks against the engine's solution chain; reveal ticks + the first wrong step's hint. */
+  /**
+   * Grade every angle the learner filled against its true value. The problem is solved when the
+   * highlighted TARGET is filled and correct and nothing filled is wrong. On a wrong entry, the first
+   * one's theorem hint is shown (from the engine's chain where it applies, else a generic nudge); if the
+   * target is still blank, the learner is pointed at it.
+   */
   check() {
     const prob = this.#problem;
     if (!prob) return false;
     let firstWrong = null;
-    for (const b of prob.blanks) {
-      const input = this.#inputs.get(b.key);
+    let targetOk = false;
+    let targetFilled = false;
+    for (const f of this.#fillable) {
+      const input = this.#inputs.get(f.key);
       if (!input) continue;
-      const ok = checkAnswer(b.value, input.value);
-      input.classList.toggle("right", ok);
-      input.classList.toggle("wrong", !ok);
-      if (!ok && firstWrong === null) firstWrong = b;
+      const filled = input.value.trim() !== "";
+      const ok = filled && checkAnswer(f.value, input.value);
+      input.classList.toggle("right", filled && ok);
+      input.classList.toggle("wrong", filled && !ok);
+      if (filled && !ok && firstWrong === null) firstWrong = f;
+      if (f.isTarget) { targetFilled = filled; targetOk = ok; }
     }
-    if (firstWrong === null) {
-      this.#solved = true;
+    this.#solved = targetOk && firstWrong === null;
+    if (this.#solved) {
       this.#feedback(`<span class="ok">✓ ${this.#str("solved", "Solved! Every step checks out.")}</span>` + this.#chainHtml(prob));
-    } else {
-      this.#solved = false;
-      const hint = (JUSTIFY[firstWrong.rule] ?? ((/** @type {number} */ v) => `This angle is ${v}°.`))(firstWrong.value);
+    } else if (firstWrong) {
+      const step = this.#hintByKey.get(firstWrong.key);
+      const hint = step ? JUSTIFY[step.rule](step.value) : this.#str("genericHint", "That angle isn't right yet — look at angles on a line, vertical angles, or the parallel-line rules.");
       this.#feedback(`<span class="bad">✗ ${this.#str("notYet", "Not yet —")}</span> ${hint}`);
+    } else if (!targetFilled) {
+      this.#feedback(`<span class="bad">${this.#str("fillTarget", "Fill in the highlighted angle to finish.")}</span>`);
     }
     this.dispatchEvent(new CustomEvent("primer:problem-graded", { bubbles: true, detail: { solved: this.#solved } }));
     return this.#solved;
   }
 
-  /** The full justified chain, shown once solved. @param {any} prob */
+  /** The full justified solution chain, shown once solved. @param {any} prob */
   #chainHtml(prob) {
     const items = prob.blanks
       .map((/** @type {any} */ b) => `<li>${(JUSTIFY[b.rule] ?? ((/** @type {number} */ v) => `${v}°`))(b.value)}</li>`)
@@ -391,10 +437,11 @@ export class PrimerGeometryProblem extends HTMLElement {
     return `<ol>${items}</ol>`;
   }
 
-  /** Reset: clear inputs, marks, and feedback (same problem). */
+  /** Reset: clear inputs, learner-drawn marks, and feedback (same problem). */
   reset() {
     for (const input of this.#inputs.values()) { input.value = ""; input.classList.remove("right", "wrong"); }
     this.#undo(true);
+    this.#marks = { parallel: { pending: null, count: 0 }, equal: { pending: null, count: 0 } };
     this.#solved = false;
     this.#feedback("");
   }
@@ -450,26 +497,43 @@ export class PrimerGeometryProblem extends HTMLElement {
     board.update();
   }
 
-  /** Parallel / equal-length mark on the nearest edge to the click. @param {any} board */
-  #toolEdgeMark(board, /** @type {number} */ x, /** @type {number} */ y, /** @type {"parallel"|"equal"} */ kind) {
+  /**
+   * Parallel / equal-length marking, in PAIRS: click one edge (it's remembered), then a second edge —
+   * both get the SAME mark. Each successive pair uses one more tick/chevron (1, 2, 3…) so distinct
+   * groups read apart. Clicking the same edge twice cancels the pending selection.
+   * @param {any} board @param {number} x @param {number} y @param {"parallel"|"equal"} kind
+   */
+  #toolEdgeMark(board, x, y, kind) {
     const fig = this.#problem?.figure;
     if (!fig) return;
+    let bestIdx = -1;
+    let bd = 0.4;
+    fig.edges.forEach((/** @type {[string,string]} */ e, /** @type {number} */ i) => {
+      const d = distToSeg(x, y, fig.points[e[0]], fig.points[e[1]]);
+      if (d < bd) { bd = d; bestIdx = i; }
+    });
+    if (bestIdx < 0) return;
+    const grp = this.#marks[kind];
+    if (grp.pending === null) { grp.pending = bestIdx; return; } // first of the pair — wait for the second
+    if (grp.pending === bestIdx) { grp.pending = null; return; } // same edge → cancel
+    const n = grp.count + 1; // this pair's tick count
+    grp.count = n;
+    for (const idx of [grp.pending, bestIdx]) this.#markEdge(board, fig, idx, kind, n);
+    grp.pending = null;
+    board.update();
+  }
+
+  /** Draw `n` parallel chevrons / equal-length ticks on edge `idx`. @param {any} board @param {any} fig @param {number} idx @param {"parallel"|"equal"} kind @param {number} n */
+  #markEdge(board, fig, idx, kind, n) {
     const colors = themeColors();
     const tools = makeGeometryTools(board, colors);
-    let best = null;
-    let bd = 0.4;
-    for (const [p, q] of fig.edges) {
-      const a = fig.points[p];
-      const b = fig.points[q];
-      const d = distToSeg(x, y, a, b);
-      if (d < bd) { bd = d; best = [a, b]; }
-    }
-    if (!best) return;
-    const els = /** @type {any} */ (kind === "parallel"
-      ? tools.parallelMark((best[0][0] + best[1][0]) / 2, (best[0][1] + best[1][1]) / 2, { along: [best[1][0] - best[0][0], best[1][1] - best[0][1]], color: colors.cat[2] })
-      : tools.tickMark(best[0], best[1], { color: colors.cat[2] }));
-    for (const e of /** @type {any[]} */ (Array.isArray(els) ? els : (els.arcs ?? [els]))) this.#added.push(e);
-    board.update();
+    const [p, q] = fig.edges[idx];
+    const a = fig.points[p];
+    const b = fig.points[q];
+    const els = kind === "parallel"
+      ? tools.parallelMark((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, { along: [b[0] - a[0], b[1] - a[1]], count: n, color: colors.cat[2] })
+      : tools.tickMark(a, b, { count: n, color: colors.cat[2] });
+    for (const e of els) this.#added.push(e);
   }
 
   /** Right-angle mark at the nearest vertex with two incident edges. @param {any} board */
@@ -500,6 +564,8 @@ export class PrimerGeometryProblem extends HTMLElement {
     const drop = all ? this.#added.splice(0) : this.#added.splice(-1);
     for (const el of drop) { try { this.#board.removeObject(el); } catch { /* already gone */ } }
     this.#pendingPoint = null;
+    this.#marks.parallel.pending = null;
+    this.#marks.equal.pending = null;
     this.#board.update();
   }
 
@@ -513,18 +579,17 @@ export class PrimerGeometryProblem extends HTMLElement {
   #syncOverlay() {
     try {
       const board = this.#board;
-      const prob = this.#problem;
-      if (!board || !prob || !board.origin) return;
+      if (!board || !board.origin) return;
       const ox = board.origin.scrCoords[1];
       const oy = board.origin.scrCoords[2];
       const ux = board.unitX;
       const uy = board.unitY;
-      const byKey = new Map(prob.blanks.map((/** @type {any} */ b) => [b.key, b]));
+      const byKey = new Map(this.#fillable.map((f) => [f.key, f]));
       for (const [key, input] of this.#inputs) {
-        const b = byKey.get(key);
-        if (!b) continue;
-        input.style.left = `${ox + b.pos[0] * ux}px`;
-        input.style.top = `${oy - b.pos[1] * uy}px`;
+        const f = byKey.get(key);
+        if (!f) continue;
+        input.style.left = `${ox + f.pos[0] * ux}px`;
+        input.style.top = `${oy - f.pos[1] * uy}px`;
       }
     } catch {
       /* board mid-rebuild / freed — skip this frame */

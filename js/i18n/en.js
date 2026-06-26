@@ -63,10 +63,12 @@ export default {
   "geometryProblem.toolEqual": "Mark =",
   "geometryProblem.toolRight": "Right ∟",
   "geometryProblem.toolUndo": "Undo",
-  "geometryProblem.goal": "Find every unknown angle, ending with the highlighted one.",
+  "geometryProblem.goal": "Chase the angles: fill in any you can work out, ending with the highlighted one.",
   "geometryProblem.blankLabel": "unknown angle",
   "geometryProblem.solved": "Solved! Every step checks out.",
   "geometryProblem.notYet": "Not yet —",
+  "geometryProblem.genericHint": "That angle isn't right yet — look at angles on a line, vertical angles, or the parallel-line rules.",
+  "geometryProblem.fillTarget": "Fill in the highlighted angle to finish.",
   "geometryProblem.noTheorems": "No relevant theorems learned yet — come back after the lessons above.",
 
   "video.play": "Play video",

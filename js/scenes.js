@@ -232,9 +232,13 @@ export function getGeometryScene(name) {
  * it, overlays fill-in blanks, offers construction tools, and walks the chain on Check.
  * @typedef {object} GeometryProblemConfig
  * @property {{ scaffolds: string[], minSteps?: number, maxSteps?: number, theorems?: string[],
- *   pageId?: string }} generate  Engine config: which scaffolds to draw from, the desired chain-length
- *   band, an optional explicit theorem-pool `theorems` override (else gated by the DAG), and an
- *   optional `pageId` override (else inferred from the URL).
+ *   pageId?: string, tools?: string[] }} generate  Engine config: which scaffolds to draw from, the
+ *   desired chain-length band, an optional explicit theorem-pool `theorems` override (else gated by the
+ *   DAG), an optional `pageId` override (else inferred from the URL), and `tools` — which construction
+ *   tools the toolbar offers (subset of `"line"`/`"parallel"`/`"equal"`/`"right"`; "Fill in" + "Undo"
+ *   are always present). Default: `["line","parallel","equal","right"]`. Pick the ones that suit the
+ *   scaffold — e.g. a parallel-lines angle chase wants `["line","parallel"]` (no vertex has two edges
+ *   meeting, so a right-angle mark has nothing to attach to).
  *
  * @typedef {{ config: GeometryProblemConfig }} GeometryProblemEntry
  */

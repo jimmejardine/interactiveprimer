@@ -12,7 +12,7 @@
  * @module
  */
 
-import { chevronSegments, quadrantWedges, tickSegments, angleArcSpec } from "./geometry.js";
+import { chevronArrowheads, quadrantWedges, tickSegments, angleArcSpec } from "./geometry.js";
 import { drawAxes } from "./graph-axes.js";
 
 /**
@@ -40,8 +40,9 @@ export function makeGeometryTools(board, colors) {
   const parallelMark = (x, y, { dir = "h", along, count = 1, color } = {}) => {
     const a = along ?? (dir === "v" ? [0, 1] : [1, 0]);
     const stroke = color ?? colors.line;
-    return chevronSegments(x, y, /** @type {Vec} */ (a), count).map(([p, q]) =>
-      board.create("arrow", [p, q], { strokeColor: stroke, strokeWidth: 2, lastArrow: { type: 2, size: 7 } }),
+    // Arrowhead chevrons only (no shaft): two short strokes per chevron meeting at a tip.
+    return chevronArrowheads(x, y, /** @type {Vec} */ (a), count).map(([p, q]) =>
+      board.create("segment", [p, q], { strokeColor: stroke, strokeWidth: 2, fixed: true, highlight: false }),
     );
   };
 
@@ -143,9 +144,9 @@ export function makeGeometryTools(board, colors) {
    * with an optional `label` sitting on the bisector. `count` draws concentric arcs (distinct equal
    * groups). Returns `{ arcs, label }`.
    * @param {Vec} vertex @param {Vec} p1 @param {Vec} p2
-   * @param {{ count?: number, label?: string, color?: string, radius?: number }} [opts]
+   * @param {{ count?: number, label?: string, color?: string, radius?: number, fontSize?: number }} [opts]
    */
-  const angleMark = (vertex, p1, p2, { count = 1, label: text, color, radius = 0.5 } = {}) => {
+  const angleMark = (vertex, p1, p2, { count = 1, label: text, color, radius = 0.5, fontSize = 13 } = {}) => {
     const stroke = color ?? colors.line;
     const spec = angleArcSpec(vertex, p1, p2, count, { r: radius });
     const V = ipt(vertex);
@@ -167,7 +168,7 @@ export function makeGeometryTools(board, colors) {
     const lbl = text
       ? board.create("text", [spec.labelAt[0], spec.labelAt[1], String(text)], {
           strokeColor: color ?? colors.ink,
-          fontSize: 15,
+          fontSize,
           anchorX: "middle",
           anchorY: "middle",
           fixed: true,

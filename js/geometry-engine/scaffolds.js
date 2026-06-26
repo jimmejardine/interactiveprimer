@@ -22,10 +22,12 @@ import { equal, sumTo } from "./rules.js";
  *   name: string,
  *   points: Record<string, Vec>,
  *   edges: Array<[string, string]>,
+ *   parallels: number[][],
  *   angles: AngleSlot[],
  *   relations: import("./rules.js").Relation[],
  *   boundingbox: [number, number, number, number],
- * }} Figure
+ * }} Figure  `parallels` lists groups of mutually-parallel edges (by index into `edges`), so the
+ *   renderer can draw the "these are parallel" marks the chase relies on.
  */
 
 const DEG = Math.PI / 180;
@@ -92,7 +94,8 @@ export function parallelTransversal(rng) {
     sumTo(["b_ul", "t_ll"], 180, "coInterior"),
   ];
 
-  return { name: "parallelTransversal", points, edges, angles, relations, boundingbox: [-5, 4.2, 5, -2] };
+  // The two horizontal lines (edges 0 and 1) are the parallel pair; the transversal (edge 2) is not.
+  return { name: "parallelTransversal", points, edges, parallels: [[0, 1]], angles, relations, boundingbox: [-5, 4.2, 5, -2] };
 }
 
 /**
@@ -124,7 +127,7 @@ export function triangle(rng) {
     { key: "C", vertex: "C", from: "A", to: "B", value: c },
   ];
   const relations = [sumTo(["A", "B", "C"], 180, "triangleSum")];
-  return { name: "triangle", points, edges, angles, relations, boundingbox: [-4.5, cy + 1.2, 4.5, -1.5] };
+  return { name: "triangle", points, edges, parallels: [], angles, relations, boundingbox: [-4.5, cy + 1.2, 4.5, -1.5] };
 }
 
 /** All scaffolds by name, for the generator to pick from. */

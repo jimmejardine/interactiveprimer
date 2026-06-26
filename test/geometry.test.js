@@ -5,7 +5,7 @@ import {
   clampStep,
   createStepCollector,
   applyStepVisibility,
-  chevronSegments,
+  chevronArrowheads,
   quadrantOf,
   quadrantWedges,
   tickSegments,
@@ -107,23 +107,23 @@ test("applyStepVisibility reveals step i iff i < current, honouring intended vis
 
 /* ------------------------- geometry-tool math ------------------------- */
 
-test("chevronSegments: one mark is a short stroke centred on the point along `along`", () => {
-  const segs = chevronSegments(2, 1, [1, 0], 1, { d: 0.16 });
-  assert.equal(segs.length, 1);
-  assert.deepEqual(segs[0], [
-    [1.84, 1],
-    [2.16, 1],
-  ]);
+test("chevronArrowheads: one chevron is two strokes meeting at a tip ahead along `along`", () => {
+  const segs = chevronArrowheads(0, 0, [1, 0], 1, { len: 0.2, spread: 0.6 });
+  assert.equal(segs.length, 2); // two arms
+  // both arms start at the tip (ahead, +x); they fan back-and-out symmetrically in ±y
+  near(segs[0][0][0], 0.1); // tip x
+  near(segs[1][0][0], 0.1);
+  near(segs[0][0][1], 0); // tip y
+  near(segs[0][1][0], -0.1); // back x
+  near(segs[0][1][1], 0.12); // +y arm
+  near(segs[1][1][1], -0.12); // −y arm
 });
 
-test("chevronSegments: a double tick is two strokes offset by ±gap/2 along the line", () => {
-  const segs = chevronSegments(0, 0, [0, 1], 2, { d: 0.16, gap: 0.2 });
-  assert.equal(segs.length, 2);
-  // centres at y = -0.1 and +0.1, each ±0.16 in y
-  near(segs[0][0][1], -0.26);
-  near(segs[0][1][1], 0.06);
-  near(segs[1][0][1], -0.06);
-  near(segs[1][1][1], 0.26);
+test("chevronArrowheads: a double mark is two stacked chevrons (4 strokes), the 2nd behind the 1st", () => {
+  const segs = chevronArrowheads(0, 0, [1, 0], 2, { len: 0.2, gap: 0.16 });
+  assert.equal(segs.length, 4);
+  // second chevron's tip is one `gap` behind the first along −x
+  near(segs[2][0][0], 0.1 - 0.16);
 });
 
 test("quadrantOf classifies a direction into its screen corner", () => {

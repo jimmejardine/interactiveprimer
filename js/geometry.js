@@ -81,25 +81,33 @@ export function applyStepVisibility(steps, current) {
 /** @typedef {[number, number]} Vec */
 
 /**
- * The `[start, end]` segments for `count` "parallel-mark" chevrons centred on `(x, y)`, each `2*d`
- * long along the unit vector `along`, spaced `gap` apart (so a double tick reads as a tight »»).
+ * The stroke segments for `count` "parallel-mark" arrowhead chevrons (`›`, `››`, …) centred on
+ * `(x, y)` and pointing ALONG the unit vector `along` — a chevron is the arrowHEAD only (two short
+ * strokes meeting at a tip), with no shaft. Multiple chevrons stack behind the tip (`»`). Returns two
+ * segments per chevron.
  * @param {number} x @param {number} y @param {Vec} along
  * @param {number} [count]
- * @param {{ d?: number, gap?: number }} [opts]
+ * @param {{ len?: number, gap?: number, spread?: number }} [opts]
  * @returns {[Vec, Vec][]}
  */
-export function chevronSegments(x, y, along, count = 1, { d = 0.16, gap = 0.18 } = {}) {
-  const [ux, uy] = along;
+export function chevronArrowheads(x, y, along, count = 1, { len = 0.2, gap = 0.16, spread = 0.6 } = {}) {
+  const [ax, ay] = along;
+  const m = Math.hypot(ax, ay) || 1;
+  const ux = ax / m;
+  const uy = ay / m;
+  const px = -uy; // perpendicular
+  const py = ux;
   /** @type {[Vec, Vec][]} */
   const out = [];
   for (let k = 0; k < count; k++) {
-    const off = (k - (count - 1) / 2) * gap;
-    const cx = x + ux * off;
-    const cy = y + uy * off;
-    out.push([
-      [cx - ux * d, cy - uy * d],
-      [cx + ux * d, cy + uy * d],
-    ]);
+    const cx = x - ux * (k * gap); // stack successive chevrons behind the tip
+    const cy = y - uy * (k * gap);
+    /** @type {Vec} */
+    const tip = [cx + ux * (len / 2), cy + uy * (len / 2)];
+    const bx = cx - ux * (len / 2);
+    const by = cy - uy * (len / 2);
+    out.push([tip, [bx + px * len * spread, by + py * len * spread]]);
+    out.push([tip, [bx - px * len * spread, by - py * len * spread]]);
   }
   return out;
 }
