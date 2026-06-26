@@ -814,7 +814,8 @@ export class PrimerGeometryProblem extends HTMLElement {
   /** A localized chrome string for the problem element — global i18n (`geometryProblem.*`), which
    * falls back to English then the key, so it never logs a "missing scene string" error. (The second
    * argument is the inline English default kept at the call sites for readability; `t` supplies it.) */
-  #str(/** @type {string} */ key, /** @type {string} */ _fallback, /** @type {Record<string, string|number>} */ vars) {
+  /** @param {string} key @param {string} [_fallback] @param {Record<string, string|number>} [vars] */
+  #str(key, _fallback, vars) {
     return t(`geometryProblem.${key}`, vars);
   }
 
