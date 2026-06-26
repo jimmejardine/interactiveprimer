@@ -236,6 +236,61 @@ export function neighborhood(id, byId) {
 }
 
 /**
+ * The direct, one-hop neighbours of a concept in BOTH directions: its immediate prerequisites
+ * (predecessors) and its immediate dependents (successors), deduped and filtered to known ids.
+ * Excludes the concept itself. Used by the progressive explorer to expand a clicked node.
+ * Pass a precomputed `dependents` (from {@link buildDependents}) to avoid rebuilding it per call.
+ * @param {string} id
+ * @param {Map<string, Concept>} byId
+ * @param {Map<string, string[]>} [dependents]
+ * @returns {string[]}
+ */
+export function directNeighbors(id, byId, dependents) {
+  if (!byId.has(id)) return [];
+  const deps = dependents ?? buildDependents(byId);
+  /** @type {Set<string>} */
+  const out = new Set();
+  for (const p of byId.get(id)?.prerequisites ?? []) if (byId.has(p)) out.add(p);
+  for (const s of deps.get(id) ?? []) if (byId.has(s)) out.add(s);
+  out.delete(id);
+  return [...out];
+}
+
+/**
+ * The undirected neighbourhood within `hops` steps of any seed: every concept reachable from a seed
+ * by following prerequisite edges in EITHER direction at most `hops` times, including the seeds
+ * themselves. Used to compute the explorer's starting set (a concept / the root / a course's members,
+ * plus two layers around them). `hops = 0` returns just the (known) seeds.
+ * @param {Iterable<string>} seedIds
+ * @param {Map<string, Concept>} byId
+ * @param {number} hops
+ * @param {Map<string, string[]>} [dependents]
+ * @returns {Set<string>}
+ */
+export function kHopNeighborhood(seedIds, byId, hops, dependents) {
+  const deps = dependents ?? buildDependents(byId);
+  /** @type {Set<string>} */
+  const seen = new Set();
+  let frontier = [...seedIds].filter((id) => byId.has(id));
+  for (const id of frontier) seen.add(id);
+  for (let h = 0; h < hops; h++) {
+    /** @type {string[]} */
+    const next = [];
+    for (const id of frontier) {
+      for (const n of directNeighbors(id, byId, deps)) {
+        if (!seen.has(n)) {
+          seen.add(n);
+          next.push(n);
+        }
+      }
+    }
+    if (!next.length) break;
+    frontier = next;
+  }
+  return seen;
+}
+
+/**
  * Detect prerequisite cycles without throwing. Returns one representative path per
  * cycle found (e.g. ["a", "b", "a"]).
  * @param {Map<string, Concept>} byId

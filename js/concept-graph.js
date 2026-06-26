@@ -15,7 +15,7 @@ import { mountSearchBox, SEARCH_BOX_CSS } from "./concept-search-box.js";
 import { createContextMenu } from "./context-menu.js";
 import { t } from "./i18n.js";
 import { getCurrentCourse } from "./course.js";
-import { courseVisibleSet } from "./graph.js";
+import { buildDependents, directNeighbors, kHopNeighborhood } from "./graph.js";
 // Defines <primer-math> on this page (concepts.html doesn't load boot.js) so a node with a math
 // title can typeset inside a <foreignObject>. concepts.html supplies the KaTeX CSS + import map.
 import "./components/primer-math.js";
@@ -118,65 +118,51 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     return c?.titleHtml && !c?.titles?.[locale] ? c.titleHtml : null;
   };
 
-  // Course focus: when a course is active, restrict the graph to the course's members + their
-  // recursive prerequisite ancestors (`courseVisibleSet`), and tint the member nodes with the
-  // course colour. No course → show everything (`visibleIds` null = no filter).
+  // Progressive disclosure: instead of rendering the whole DAG, we start from a small SEED set and
+  // let clicks expand outward. The seed depends on context (the same three cases that pick the
+  // centre): an active course's member line, a focused concept, or the root — plus everything within
+  // SEED_HOPS of it. `visible` is the live set of shown ids; `byId` is the full graph behind it.
   const activeCourse = getCurrentCourse();
   const courseNode = activeCourse ? byId.get(activeCourse) : undefined;
-  const visibleIds = courseNode ? courseVisibleSet(activeCourse, byId) : null;
   const courseMembers = new Set(courseNode?.courseMembers ?? []);
   // The course as an ORDERED list (course/document order). The gold "course edges" are the
   // consecutive links of this sequence (member[i]→member[i+1]) — a linear, non-cyclic spine — and
   // the members are pinned into a vertical column in this order (see pinCourseColumn below).
   const orderedMembers = (courseNode?.courseMembers ?? []).filter((id) => id !== activeCourse);
 
-  // ---- model: layout nodes (+ render refs) and directed prerequisite→dependent edges ----
-  /** @typedef {{ id: string, x: number, y: number, vx: number, vy: number, fixed?: boolean, pinned?: boolean, depth?: number, charge?: number, hw: number, hh: number, g: SVGGElement, rect: SVGElement, text?: SVGElement, fo?: SVGElement, div?: HTMLElement }} GNode */
+  // Whole-graph adjacency (for seeding + expand/collapse), computed once.
+  const dependents = buildDependents(byId);
+  /** @param {string} id @returns {string[]} predecessors ∪ successors (both directions), known only */
+  const directNbrs = (id) => directNeighbors(id, byId, dependents);
+
+  const SEED_HOPS = 2; // the starting view shows the seed + everything within this many hops
+  const seedIds = activeCourse
+    ? [activeCourse, ...orderedMembers] // the whole course line
+    : focusId && byId.has(focusId)
+      ? [focusId] // a focused concept
+      : ["root"]; // default: the tree's root
+  const seedSet = new Set(seedIds.filter((id) => byId.has(id))); // never collapsed away
+  /** @type {Set<string>} the live set of shown concept ids */
+  const visible = kHopNeighborhood(seedIds, byId, SEED_HOPS, dependents);
+
+  // The concept pinned at the centre (bold, larger). Prefer the focus, else root, else the course hub.
+  const centerId = focusId && visible.has(focusId) ? focusId : visible.has("root") ? "root" : activeCourse || [...visible][0] || "root";
+
+  // ---- model: layout nodes (built incrementally) + directed prerequisite→dependent edges ----
+  /** @typedef {{ id: string, x: number, y: number, vx: number, vy: number, fixed?: boolean, pinned?: boolean, depth?: number, charge?: number, hw: number, hh: number, g: SVGGElement, rect: SVGElement, text?: SVGElement, fo?: SVGElement, div?: HTMLElement, badge?: SVGGElement, badgeText?: SVGElement }} GNode */
   /** @type {GNode[]} */
   const nodes = [];
   /** @type {Map<string, GNode>} */
   const nodeById = new Map();
-  for (const c of byId.values()) {
-    if (visibleIds && !visibleIds.has(c.id)) continue; // hidden outside the active course's scope
-    const n = /** @type {GNode} */ ({ id: c.id, x: 0, y: 0, vx: 0, vy: 0, hw: 0, hh: 0, charge: courseMembers.has(c.id) ? COURSE_CHARGE : 1 });
-    nodes.push(n);
-    nodeById.set(c.id, n);
-  }
-  // The concept pinned at the centre (bold, larger, immovable). Normally `root`; a valid `focusId`
-  // (e.g. from a pathway's "Explore" link) re-centres the whole map on that concept instead. In
-  // course mode root is always present (it's an ancestor of everything), but fall back to the
-  // course node just in case. (Edges below auto-filter: they only link nodes present in nodeById.)
-  const centerId = focusId && nodeById.has(focusId) ? focusId : nodeById.has("root") ? "root" : activeCourse || "root";
-  // Edges are prerequisite→dependent. An edge is "explicit" when the prerequisite was declared in
-  // the concept-meta (vs. only harvested from an inline <primer-ref>): explicit edges pull harder
-  // and draw thicker. Fall back to "explicit" when the graph predates explicitPrerequisites.
   /** @type {{ source: string, target: string, explicit: boolean, course: boolean, weight: number, line: SVGElement }[]} */
   const edges = [];
-  // The gold course spine: consecutive links of the ordered member list (member[i]→member[i+1]).
-  // We dedupe these against prerequisite edges by unordered pair, so a consecutive pair that also
-  // happens to be a prerequisite is drawn ONCE, in gold — the course tier supersedes explicit/implicit.
-  const chainMembers = orderedMembers.filter((id) => nodeById.has(id));
+  /** @type {Set<string>} edge DOM deduped by unordered pair */
+  const edgeKeys = new Set();
   /** @param {string} a @param {string} b */
   const pairKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+  // The gold course spine: consecutive member→member links draw gold and supersede a prereq edge there.
+  const chainMembers = orderedMembers.filter((id) => visible.has(id));
   const coursePairs = new Set(chainMembers.slice(1).map((id, i) => pairKey(chainMembers[i], id)));
-  for (const c of byId.values()) {
-    const expl = c.explicitPrerequisites;
-    for (const pre of c.prerequisites ?? []) {
-      if (nodeById.has(pre) && pre !== c.id) {
-        if (coursePairs.has(pairKey(pre, c.id))) continue; // a course-chain link draws this pair in gold below
-        const explicit = expl ? expl.includes(pre) : true;
-        const weight = explicit ? EXPLICIT_WEIGHT : IMPLICIT_WEIGHT;
-        edges.push(/** @type {any} */ ({ source: pre, target: c.id, explicit, course: false, weight }));
-      }
-    }
-  }
-  // Append the gold chain after the prerequisite edges. Direction is course order (earlier→later),
-  // so with the members pinned top→bottom the arrowheads point down the sequence.
-  for (let i = 1; i < chainMembers.length; i++) {
-    edges.push(/** @type {any} */ ({
-      source: chainMembers[i - 1], target: chainMembers[i], explicit: false, course: true, weight: COURSE_EDGE_WEIGHT,
-    }));
-  }
 
   // ---- SVG scaffold ----
   host.replaceChildren();
@@ -215,16 +201,28 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     host.appendChild(banner);
   }
 
-  // ---- build edge + node DOM ----
-  for (const e of edges) {
-    e.line = mk("line", { "marker-end": e.course ? "url(#cg-arrow-course)" : "url(#cg-arrow)" });
-    e.line.setAttribute("data-source", e.source);
-    e.line.setAttribute("data-target", e.target);
-    if (e.explicit) e.line.classList.add("cg-explicit");
-    if (e.course) e.line.classList.add("cg-course");
-    edgesG.appendChild(e.line);
-  }
-  for (const n of nodes) {
+  // ---- per-element paint (theme + confidence + course outline); the whole-graph paint() loops these ----
+  /** @param {GNode} n @param {ReturnType<typeof palette>} c */
+  const paintNode = (n, c) => {
+    // A course member keeps its CONFIDENCE fill (so the learner's star progress still shows) and is
+    // marked instead by a gold OUTLINE (stroke); non-members keep the normal border.
+    n.rect.setAttribute("fill", confidenceColor(n.id) ?? c.surface);
+    n.rect.setAttribute("stroke", courseMembers.has(n.id) ? c.course : c.border);
+    // SVG text colours via `fill`; a foreignObject HTML label (incl. KaTeX) via CSS `color`.
+    if (n.div) n.div.style.color = c.ink;
+    else n.text?.setAttribute("fill", c.ink);
+  };
+  /** @param {(typeof edges)[number]} e @param {ReturnType<typeof palette>} c */
+  const paintEdge = (e, c) => {
+    // An edge linking two course members is drawn in the course colour (gold), so the course's
+    // internal spine stands out from the prerequisite foundations beneath it.
+    e.line.setAttribute("stroke", e.course ? c.course : c.line);
+    e.line.setAttribute("stroke-opacity", e.course ? "0.95" : e.explicit ? "0.5" : "0.28");
+  };
+
+  // ---- build one node's DOM (label + pill, measured) and its hidden "+N" expand badge ----
+  /** @param {GNode} n */
+  const buildNodeDom = (n) => {
     const g = /** @type {SVGGElement} */ (mk("g", { class: "cg-node" }));
     g.setAttribute("data-id", n.id);
     if (n.id === centerId) g.classList.add("cg-node--root"); // bigger, bold central node
@@ -236,10 +234,10 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     if (html) {
       // Math title → foreignObject HTML so its <primer-math> can typeset (SVG <text> can't show
       // KaTeX). Give the fo a generous sandbox first so the inline-block label lays out at its
-      // natural width; the measure pass below shrinks it to fit.
+      // natural width; the measure below shrinks it to fit.
       const fo = mk("foreignObject", { x: -1000, y: -100, width: 2000, height: 200 });
       const wrap = document.createElement("div");
-      wrap.className = "cg-fo-wrap"; // fills the pill and flex-centres the label (see measure pass)
+      wrap.className = "cg-fo-wrap"; // fills the pill and flex-centres the label
       const span = document.createElement("span");
       span.className = "cg-fo-label";
       span.innerHTML = html; // trusted authored markup; <primer-math> upgrades + typesets on insert
@@ -247,26 +245,21 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
       fo.appendChild(wrap);
       g.appendChild(fo);
       n.fo = fo;
-      n.div = span; // the measured + coloured label; the wrap centres it within the pill
+      n.div = span;
     } else {
       const text = mk("text", { "text-anchor": "middle", "dominant-baseline": "central" });
       g.appendChild(text);
-      // The centre node's label is larger/bold (21px), so it needs a wider wrap + roomier spacing.
-      const isRoot = n.id === centerId;
+      const isRoot = n.id === centerId; // the centre node's label is larger/bold (21px)
       wrapLabel(text, titleOf(n.id), isRoot ? 170 : LABEL_MAXW, isRoot ? 26 : LINE_H);
       n.text = text;
     }
     n.g = g;
     n.rect = rect;
-  }
 
-  // ---- measure each label and size its pill (titles are static until a locale reload) ----
-  for (const n of nodes) {
+    // Measure the label and size the pill.
     let cw, ch;
     if (n.div) {
-      // The HTML label's natural size (rendered KaTeX included). At build time the view transform
-      // is identity, so a client rect ≈ user units.
-      const r = n.div.getBoundingClientRect();
+      const r = n.div.getBoundingClientRect(); // KaTeX included; build-time transform ≈ identity
       cw = r.width;
       ch = r.height;
     } else {
@@ -278,45 +271,127 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     const h = Math.max(24, ch + PAD_Y * 2);
     n.hw = w / 2;
     n.hh = h / 2;
-    n.rect.setAttribute("x", String(-n.hw));
-    n.rect.setAttribute("y", String(-n.hh));
-    n.rect.setAttribute("width", String(w));
-    n.rect.setAttribute("height", String(h));
-    // A foreignObject label fills the WHOLE pill (not just the content box) and flex-centres its
-    // wrap, so the typeset math sits dead-centre with PAD margin — no baseline drift, no clipping.
+    rect.setAttribute("x", String(-n.hw));
+    rect.setAttribute("y", String(-n.hh));
+    rect.setAttribute("width", String(w));
+    rect.setAttribute("height", String(h));
     if (n.fo) {
       n.fo.setAttribute("x", String(-n.hw));
       n.fo.setAttribute("y", String(-n.hh));
       n.fo.setAttribute("width", String(w));
       n.fo.setAttribute("height", String(h));
     }
-  }
 
-  // ---- colours (re-applied on theme / confidence change) ----
+    // The "+N hidden neighbours" badge, pinned to the pill's top-right corner. Hidden until
+    // refreshBadges() finds un-revealed neighbours. Colours come from CSS (themed).
+    const badge = /** @type {SVGGElement} */ (mk("g", { class: "cg-badge", transform: `translate(${n.hw},${-n.hh})` }));
+    badge.style.display = "none";
+    badge.appendChild(mk("circle", { r: "8" }));
+    const bt = mk("text", { "text-anchor": "middle", "dominant-baseline": "central", class: "cg-badge-text" });
+    badge.appendChild(bt);
+    g.appendChild(badge);
+    n.badge = badge;
+    n.badgeText = bt;
+  };
+
+  // ---- incremental node/edge add + remove (drive expand / collapse / reveal) ----
+  /** Create + show a node at (x,y) if not already visible. @param {string} id @returns {GNode | undefined} */
+  const addNode = (id, x = 0, y = 0) => {
+    const existing = nodeById.get(id);
+    if (existing) return existing;
+    if (!byId.has(id)) return undefined;
+    const n = /** @type {GNode} */ ({ id, x, y, vx: 0, vy: 0, hw: 0, hh: 0, charge: courseMembers.has(id) ? COURSE_CHARGE : 1 });
+    nodes.push(n);
+    nodeById.set(id, n);
+    visible.add(id);
+    buildNodeDom(n);
+    paintNode(n, palette());
+    return n;
+  };
+  /** @param {(typeof edges)[number]} e */
+  const addEdgeDom = (e) => {
+    e.line = mk("line", { "marker-end": e.course ? "url(#cg-arrow-course)" : "url(#cg-arrow)" });
+    e.line.setAttribute("data-source", e.source);
+    e.line.setAttribute("data-target", e.target);
+    if (e.explicit) e.line.classList.add("cg-explicit");
+    if (e.course) e.line.classList.add("cg-course");
+    edgesG.appendChild(e.line);
+    edges.push(e);
+    edgeKeys.add(pairKey(e.source, e.target));
+    paintEdge(e, palette());
+  };
+  // (Re)create any prerequisite/course edge whose endpoints are now both visible.
+  const syncEdges = () => {
+    for (const tgt of visible) {
+      const c = byId.get(tgt);
+      if (!c) continue;
+      const expl = c.explicitPrerequisites;
+      for (const pre of c.prerequisites ?? []) {
+        if (pre === tgt || !visible.has(pre)) continue;
+        const key = pairKey(pre, tgt);
+        if (edgeKeys.has(key) || coursePairs.has(key)) continue; // already drawn, or a gold course link
+        const explicit = expl ? expl.includes(pre) : true;
+        addEdgeDom(/** @type {any} */ ({ source: pre, target: tgt, explicit, course: false, weight: explicit ? EXPLICIT_WEIGHT : IMPLICIT_WEIGHT }));
+      }
+    }
+    // The gold course chain: consecutive visible members, drawn over any prereq edge there.
+    for (let i = 1; i < chainMembers.length; i++) {
+      const a = chainMembers[i - 1], b = chainMembers[i];
+      if (!visible.has(a) || !visible.has(b) || edgeKeys.has(pairKey(a, b))) continue;
+      addEdgeDom(/** @type {any} */ ({ source: a, target: b, explicit: false, course: true, weight: COURSE_EDGE_WEIGHT }));
+    }
+  };
+  /** Remove a node, its DOM, and every incident edge. @param {string} id */
+  const removeNode = (id) => {
+    const n = nodeById.get(id);
+    if (!n) return;
+    n.g.remove();
+    for (let i = edges.length - 1; i >= 0; i--) {
+      const e = edges[i];
+      if (e.source === id || e.target === id) {
+        e.line.remove();
+        edgeKeys.delete(pairKey(e.source, e.target));
+        edges.splice(i, 1);
+      }
+    }
+    nodeById.delete(id);
+    visible.delete(id);
+    const idx = nodes.indexOf(n);
+    if (idx >= 0) nodes.splice(idx, 1);
+  };
+  // Show / hide each node's "+N" badge from its count of still-hidden neighbours.
+  const refreshBadges = () => {
+    for (const n of nodes) {
+      if (!n.badge || !n.badgeText) continue;
+      const hidden = directNbrs(n.id).reduce((acc, x) => acc + (visible.has(x) ? 0 : 1), 0);
+      if (hidden > 0) {
+        n.badgeText.textContent = `${hidden}`;
+        n.badge.style.display = "";
+        n.g.classList.add("cg-node--expandable");
+      } else {
+        n.badge.style.display = "none";
+        n.g.classList.remove("cg-node--expandable");
+      }
+    }
+  };
+
+  // ---- colours (re-applied on theme / confidence change): loop the per-element painters ----
   const paint = () => {
     const c = palette();
     svg.style.background = "var(--primer-bg, #fff)";
-    for (const n of nodes) {
-      // A course member keeps its CONFIDENCE fill (so the learner's star progress still shows) and
-      // is marked instead by a gold OUTLINE (stroke); non-members keep the normal border.
-      n.rect.setAttribute("fill", confidenceColor(n.id) ?? c.surface);
-      n.rect.setAttribute("stroke", courseMembers.has(n.id) ? c.course : c.border);
-      // SVG text colours via `fill`; a foreignObject HTML label (incl. KaTeX) via CSS `color`.
-      if (n.div) n.div.style.color = c.ink;
-      else n.text?.setAttribute("fill", c.ink);
-    }
-    for (const e of edges) {
-      // An edge linking two course members is drawn in the course colour (gold), so the course's
-      // internal spine stands out from the prerequisite foundations beneath it.
-      e.line.setAttribute("stroke", e.course ? c.course : c.line);
-      e.line.setAttribute("stroke-opacity", e.course ? "0.95" : e.explicit ? "0.5" : "0.28");
-    }
+    for (const n of nodes) paintNode(n, c);
+    for (const e of edges) paintEdge(e, c);
     arrowPath.setAttribute("fill", c.line);
     arrowPath.setAttribute("fill-opacity", "0.5");
     arrowPathCourse.setAttribute("fill", c.course); // gold arrowheads on course edges
     arrowPathCourse.setAttribute("fill-opacity", "0.95");
   };
+
+  // ---- seed the starting view (positions are set by seedPositions below) ----
+  for (const id of visible) addNode(id);
+  syncEdges();
   paint();
+  refreshBadges();
 
   // ---- pan / zoom view transform ----
   const view = { tx: 0, ty: 0, scale: 1 };
@@ -481,21 +556,98 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     reheat(); // …then animate it settling
   }
 
-  // ---- context menu: right-click / long-press a node → Open (the lesson) or Explore (re-centre) ----
+  // ---- progressive disclosure: expand / collapse / reveal ----
+  /** Does this concept have neighbours not yet shown? (drives click = expand vs. open.) @param {string} id */
+  const hasHidden = (id) => directNbrs(id).some((x) => !visible.has(x));
+
+  /** Reveal a clicked node's direct predecessors + successors (and the edges among everything). @param {string} id */
+  const expand = (id) => {
+    const clicked = nodeById.get(id);
+    if (!clicked) return;
+    const fresh = directNbrs(id).filter((x) => !visible.has(x));
+    if (!fresh.length) return;
+    fresh.forEach((nid, i) => {
+      const a = (i / fresh.length) * Math.PI * 2; // fan the new nodes around the clicked one
+      const n = addNode(nid, clicked.x + 90 * Math.cos(a), clicked.y + 90 * Math.sin(a));
+      if (n) n.depth = (clicked.depth ?? 1) + 1;
+    });
+    syncEdges();
+    refreshBadges();
+    render();
+    reheat();
+  };
+
+  /** Re-hide the subtree a node introduced: visible non-seed nodes that only reach the seed THROUGH `id`. @param {string} id */
+  const collapse = (id) => {
+    if (!nodeById.has(id)) return;
+    // Reachability over the visible graph with `id` removed; whatever still reaches a seed stays.
+    const keep = new Set();
+    /** @type {string[]} */
+    const stack = [];
+    for (const s of seedSet) if (visible.has(s) && s !== id) { keep.add(s); stack.push(s); }
+    while (stack.length) {
+      const x = /** @type {string} */ (stack.pop());
+      for (const e of edges) {
+        const y = e.source === x ? e.target : e.target === x ? e.source : null;
+        if (y && y !== id && !keep.has(y)) { keep.add(y); stack.push(y); }
+      }
+    }
+    keep.add(id); // the collapsed node itself stays
+    const doomed = [...visible].filter((v) => !keep.has(v) && !seedSet.has(v));
+    if (!doomed.length) return;
+    doomed.forEach(removeNode);
+    refreshBadges();
+    render();
+    reheat();
+  };
+
+  /** Surface a concept (from search): add it + its neighbourhood if hidden, then pan to centre it. @param {string} id */
+  const reveal = (id) => {
+    if (!byId.has(id)) return;
+    if (!visible.has(id)) {
+      const w = host.clientWidth || svg.clientWidth || 900;
+      const h = host.clientHeight || svg.clientHeight || 600;
+      const cx = (w / 2 - view.tx) / view.scale, cy = (h / 2 - view.ty) / view.scale; // current view centre, in layout coords
+      let i = 0;
+      for (const nid of kHopNeighborhood([id], byId, SEED_HOPS, dependents)) {
+        if (nid === id) addNode(nid, cx, cy);
+        else { const a = i++ * 2.39996; addNode(nid, cx + 70 * Math.cos(a), cy + 70 * Math.sin(a)); }
+      }
+      syncEdges();
+      refreshBadges();
+    }
+    const n = nodeById.get(id);
+    if (n) {
+      const w = host.clientWidth || svg.clientWidth || 900;
+      const h = host.clientHeight || svg.clientHeight || 600;
+      view.tx = w / 2 - n.x * view.scale;
+      view.ty = h / 2 - n.y * view.scale;
+      applyView();
+    }
+    render();
+    reheat();
+  };
+
+  // ---- context menu: right-click / long-press a node → Open · Explore · Collapse ----
   const ctxMenu = createContextMenu(document.body, [
-    // "Open" — same as clicking the node: open the concept's lesson (in a new tab, as a click does).
+    // "Open" — open the concept's lesson in a new tab.
     {
       label: t("contextmenu.open"),
       run: (id) => {
         window.open(`/concepts/${id}.html`, "_blank", "noopener");
       },
     },
-    // "Explore" — re-centre the whole map on this concept.
+    // "Explore" — re-seed the whole map around this concept (a fresh focus view).
     {
       label: t("menu.explore"),
       run: (id) => {
         window.location.href = `/concepts.html?id=${encodeURIComponent(id)}`;
       },
+    },
+    // "Collapse" — re-hide the neighbours this concept revealed (touch-friendly shift-click).
+    {
+      label: t("menu.collapse"),
+      run: (id) => collapse(id),
     },
   ]);
 
@@ -513,6 +665,7 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
   const pointers = new Map();
   let pinchDist = 0; // last two-finger distance (client px); 0 = not pinching
   let gesturePinched = false; // a pinch occurred this touch sequence → suppress tap-to-open
+  let tapShift = false; // shift held at pointerdown → a tap collapses instead of expands
   /** The first two active pointers (only called when ≥2 are down). @returns {Array<{ x: number, y: number }>} */
   const twoPointers = () => {
     const it = pointers.values();
@@ -562,6 +715,7 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     lastY = ev.clientY;
     travel = 0;
     longPressed = false;
+    tapShift = ev.shiftKey;
     if (g) {
       dragNode = nodeById.get(g.getAttribute("data-id") ?? "") ?? null;
       if (dragNode) dragNode.fixed = true;
@@ -657,8 +811,13 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
       const n = dragNode;
       dragNode = null;
       if (!n.pinned) n.fixed = false; // keep the pinned root fixed
-      // Neither a pinch nor a long-press counts as a click-to-open.
-      if (!gesturePinched && !longPressed && travel < CLICK_PX) window.open(`/concepts/${n.id}.html`, "_blank", "noopener");
+      // Neither a pinch nor a long-press counts as a tap. A tap shift-collapses, else expands the
+      // node's hidden neighbours, else (fully expanded) opens its lesson.
+      if (!gesturePinched && !longPressed && travel < CLICK_PX) {
+        if (tapShift) collapse(n.id);
+        else if (hasHidden(n.id)) expand(n.id);
+        else window.open(`/concepts/${n.id}.html`, "_blank", "noopener");
+      }
       reheat();
     }
     panning = false;
@@ -728,12 +887,12 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
   document.addEventListener("theme-change", onTheme);
   document.addEventListener("confidence-change", onConfidence);
 
-  // ---- top-left search: filter concept names, select to open the concept in a new tab.
-  //      "fixed" pins it to the viewport top-left at the same inset as the top-right hamburger. ----
+  // ---- top-left search: filter ALL concept names (not just the shown ones); selecting one reveals
+  //      it (+ its neighbourhood) on the map and pans to it. "fixed" pins it to the viewport top-left. ----
   const searchBox = mountSearchBox(host, {
-    items: nodes.map((n) => ({ id: n.id, title: titleOf(n.id) })),
+    items: [...byId.keys()].map((id) => ({ id, title: titleOf(id) })),
     placement: "fixed",
-    onSelect: (id) => window.open(`/concepts/${id}.html`, "_blank", "noopener"), // matches a node click
+    onSelect: (id) => reveal(id),
   });
 
   return {
@@ -791,6 +950,11 @@ function injectStyleOnce() {
     .cg-node--root text, .cg-node--root .cg-fo-label { font-size: 21px; font-weight: 700; }
     .cg-node--root rect { stroke-width: 2.5; }
     .cg-node--course rect { stroke-width: 3; } /* gold outline marks a course member (stroke colour in paint) */
+    /* "+N hidden neighbours" badge — a small accent disc at the pill's top-right; a faint accent ring
+       on the pill signals the node is expandable (click to reveal its predecessors + successors). */
+    .cg-node--expandable rect { stroke: var(--primer-accent, #46e); stroke-dasharray: 4 2.5; }
+    .cg-badge circle { fill: var(--primer-accent, #46e); }
+    .cg-badge-text { fill: var(--primer-accent-ink, #fff); font-family: var(--primer-font-ui, sans-serif); font-size: 8.5px; font-weight: 700; pointer-events: none; user-select: none; }
     .cg-edges line { stroke-width: 1.2; transition: stroke-width .1s, stroke-opacity .1s; }
     .cg-edges line.cg-explicit { stroke-width: 2.6; }
     .cg-edges line.cg-hot { stroke: var(--primer-accent, #46e) !important; stroke-opacity: 0.9 !important; stroke-width: 3; }

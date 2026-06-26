@@ -13,6 +13,8 @@ import {
   resolveLevels,
   validateGraph,
   courseVisibleSet,
+  directNeighbors,
+  kHopNeighborhood,
 } from "../js/graph.js";
 
 /** @typedef {import("../js/types/domain.js").Concept} Concept */
@@ -209,4 +211,39 @@ test("courseVisibleSet = the course node + members + their recursive prerequisit
 test("courseVisibleSet returns an empty set for an unknown course id", () => {
   const byId = indexConcepts(sample());
   assert.equal(courseVisibleSet("does/not/exist", byId).size, 0);
+});
+
+test("directNeighbors = direct prerequisites (predecessors) ∪ direct dependents (successors)", () => {
+  const byId = indexConcepts(sample());
+  // addition: prereq counting; dependents multiplication.
+  assert.deepEqual(new Set(directNeighbors("math/addition", byId)), new Set(["math/counting", "math/multiplication"]));
+  // multiplication: prereqs addition+sets; no dependents.
+  assert.deepEqual(new Set(directNeighbors("math/multiplication", byId)), new Set(["math/addition", "math/sets"]));
+  assert.deepEqual(directNeighbors("does/not/exist", byId), []);
+});
+
+test("kHopNeighborhood: 0 hops = the seeds, growing undirected each hop", () => {
+  const byId = indexConcepts(sample());
+  assert.deepEqual([...kHopNeighborhood(["math/addition"], byId, 0)], ["math/addition"]);
+  // 1 hop from addition → + counting + multiplication.
+  assert.deepEqual(
+    new Set(kHopNeighborhood(["math/addition"], byId, 1)),
+    new Set(["math/addition", "math/counting", "math/multiplication"]),
+  );
+  // 2 hops also pulls in sets (via multiplication) and root (via counting).
+  assert.deepEqual(
+    new Set(kHopNeighborhood(["math/addition"], byId, 2)),
+    new Set(["math/addition", "math/counting", "math/multiplication", "math/sets", "root"]),
+  );
+});
+
+test("kHopNeighborhood from the root fans out downstream and accepts multiple seeds", () => {
+  const byId = indexConcepts(sample());
+  // root's only dependents are counting and sets (1 hop).
+  assert.deepEqual(new Set(kHopNeighborhood(["root"], byId, 1)), new Set(["root", "math/counting", "math/sets"]));
+  // Seeding with two members unions their neighbourhoods; unknown seeds are ignored.
+  assert.deepEqual(
+    new Set(kHopNeighborhood(["math/sets", "nope"], byId, 1)),
+    new Set(["math/sets", "root", "math/multiplication"]),
+  );
 });

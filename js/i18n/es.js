@@ -70,6 +70,7 @@ export default {
   "menu.label": "Menú",
   "menu.home": "Inicio",
   "menu.explore": "Explorar",
+  "menu.collapse": "Contraer",
   "menu.feedback": "Comentarios",
   "menu.theme": "Tema",
   "menu.language": "Idioma",
@@ -99,5 +100,5 @@ export default {
   "course.switch": "Cambiar",
   "course.keep": "Mantener actual",
   "course.importClash": "El progreso importado es del curso «{course}». ¿Cambiar a él?",
-  "course.filtered": "Filtrado al curso:",
+  "course.filtered": "Curso:",
 };

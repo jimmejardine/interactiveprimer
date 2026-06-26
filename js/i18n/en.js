@@ -71,6 +71,7 @@ export default {
   "menu.label": "Menu",
   "menu.home": "Home",
   "menu.explore": "Explore",
+  "menu.collapse": "Collapse",
   "menu.feedback": "Feedback",
   "menu.theme": "Theme",
   "menu.language": "Language",
@@ -100,5 +101,5 @@ export default {
   "course.switch": "Switch",
   "course.keep": "Keep current",
   "course.importClash": "The imported progress is from the course “{course}”. Switch to it?",
-  "course.filtered": "Filtered to course:",
+  "course.filtered": "Course:",
 };
