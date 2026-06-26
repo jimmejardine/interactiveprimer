@@ -484,15 +484,21 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
   // The on-open animation below re-seeds and re-settles deterministically to this same state, so
   // the view it's fitted to stays correct once the motion ends.
   for (let i = 0; i < PREWARM; i++) if (tick(nodes, edges, LAYOUT) <= ENERGY_MIN) break;
-  const fit = () => {
+  // The view transform that perfectly frames + centres the currently-shown nodes.
+  const computeFit = () => {
     const b = bounds(nodes);
     const w = host.clientWidth || svg.clientWidth || 900;
     const h = host.clientHeight || svg.clientHeight || 600;
     const gw = b.maxX - b.minX || 1;
     const gh = b.maxY - b.minY || 1;
-    view.scale = clamp(Math.min((w - 120) / gw, (h - 120) / gh), 0.08, 1.3);
-    view.tx = w / 2 - ((b.minX + b.maxX) / 2) * view.scale;
-    view.ty = h / 2 - ((b.minY + b.maxY) / 2) * view.scale;
+    const scale = clamp(Math.min((w - 120) / gw, (h - 120) / gh), 0.08, 1.3);
+    return { scale, tx: w / 2 - ((b.minX + b.maxX) / 2) * scale, ty: h / 2 - ((b.minY + b.maxY) / 2) * scale };
+  };
+  const fit = () => {
+    const f = computeFit();
+    view.scale = f.scale;
+    view.tx = f.tx;
+    view.ty = f.ty;
     applyView();
   };
   fit();
@@ -516,6 +522,7 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
         view.tx = w / 2 - cx * view.scale; // …kept centred after it
         view.ty = h / 2 - cy * view.scale;
         applyView();
+        reheat(); // let ambient auto-fit re-frame to the new viewport size
       }
       lastW = w;
       lastH = h;
@@ -523,13 +530,32 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     ro.observe(host);
   }
 
-  // ---- animation loop: run while hot, pause when settled, reheat on demand ----
+  // ---- ambient auto-fit: every frame, ease the view a minuscule amount toward a perfect fit + centre
+  //      of the shown nodes, so the graph perpetually, almost-imperceptibly keeps itself framed as it
+  //      settles, expands or collapses. ALWAYS running — no debounce, no pausing. The ease is so tiny
+  //      it doesn't perceptibly fight a manual zoom/pan; the view just slowly drifts back to the fit. ----
+  const FIT_EASE = 0.0001; // fraction of the remaining gap closed per frame — minuscule = glacial, near-invisible drift
+  /** Step the view toward the fit. @returns {boolean} true while still easing (keeps the loop alive). */
+  const autoFitStep = () => {
+    const f = computeFit();
+    const ds = f.scale - view.scale, dx = f.tx - view.tx, dy = f.ty - view.ty;
+    if (Math.abs(dx) < 0.4 && Math.abs(dy) < 0.4 && Math.abs(ds) < 1e-4) return false; // already fitted
+    if (prefersReduced) { view.scale = f.scale; view.tx = f.tx; view.ty = f.ty; applyView(); return false; }
+    view.scale += ds * FIT_EASE;
+    view.tx += dx * FIT_EASE;
+    view.ty += dy * FIT_EASE;
+    applyView();
+    return true;
+  };
+
+  // ---- animation loop: run while hot OR while still auto-fitting; pause when settled + framed ----
   let raf = 0;
   let running = false;
   const frame = () => {
     const e = tick(nodes, edges, LAYOUT);
+    const fitting = autoFitStep();
     render();
-    if (e > ENERGY_MIN || dragNode) raf = requestAnimationFrame(frame);
+    if (e > ENERGY_MIN || dragNode || fitting) raf = requestAnimationFrame(frame);
     else { running = false; raf = 0; }
   };
   const reheat = () => {
@@ -756,6 +782,7 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
         view.tx = mx - lx * view.scale;
         view.ty = my - ly * view.scale;
         applyView();
+        reheat(); // keep the loop alive so ambient auto-fit keeps running during the pinch
       }
       pinchDist = dist;
       return;
@@ -780,6 +807,7 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
       lastX = ev.clientX;
       lastY = ev.clientY;
       applyView();
+      reheat(); // keep the loop alive so ambient auto-fit keeps running during the pan
     }
   };
   /** @param {PointerEvent} ev */
@@ -823,6 +851,7 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     panning = false;
     gesturePinched = false;
     longPressed = false;
+    reheat();
   };
   svg.addEventListener("pointerdown", onDown);
   svg.addEventListener("pointermove", onMove);
@@ -850,6 +879,7 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     view.tx = sx - lx * view.scale;
     view.ty = sy - ly * view.scale;
     applyView();
+    reheat();
   };
   svg.addEventListener("wheel", onWheel, { passive: false });
 
