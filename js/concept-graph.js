@@ -193,7 +193,7 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
   // A second, gold arrowhead for course edges (its fill is set to --primer-course in paint()).
   const markerCourse = mk("marker", {
     id: "cg-arrow-course", viewBox: "0 0 10 10", refX: "9", refY: "5",
-    markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse",
+    markerWidth: "3.5", markerHeight: "3.5", orient: "auto-start-reverse", // half the standard arrowhead
   });
   const arrowPathCourse = mk("path", { d: "M0,0 L10,5 L0,10 z" });
   markerCourse.appendChild(arrowPathCourse);
@@ -702,7 +702,11 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
     const id = g.getAttribute("data-id");
     g.classList.toggle("cg-hot", on);
     for (const e of edges) {
-      if (e.source === id || e.target === id) e.line.classList.toggle("cg-hot", on);
+      if (e.source !== id && e.target !== id) continue;
+      e.line.classList.toggle("cg-hot", on);
+      // Emphasise the node at the OTHER end of each incident edge too.
+      const otherId = e.source === id ? e.target : e.source;
+      nodeById.get(otherId)?.g.classList.toggle("cg-hot", on);
     }
   };
   const onOver = (/** @type {Event} */ e) => hover(e, true);
