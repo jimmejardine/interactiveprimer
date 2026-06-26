@@ -225,20 +225,28 @@ export function getGeometryScene(name) {
 }
 
 /**
- * A geometry-PROBLEM config, used by `<primer-geometry-problem name="…">` — the interactive
- * "apply-the-theorem" construction sandbox. In v1 a problem is **generated**: the engine
- * (js/geometry-engine/*) picks a scaffold, gates the theorem pool by the page's prerequisite DAG, and
- * synthesises a fresh figure + ordered solution chain each time (Refresh re-rolls). The element draws
- * it, overlays fill-in blanks, offers construction tools, and walks the chain on Check.
+ * A geometry-PROBLEM config, used by `<primer-geometry-problem name="…">` — the interactive figure
+ * where the learner fills quantities in **on the diagram** (boxes sit on the angles/sides). Two sources:
+ *
+ *  - **`generate`** (the theorem engine, js/geometry-engine/*): picks a scaffold, gates the theorem pool
+ *    by the page's prerequisite DAG, and synthesises a fresh angle chase + ordered solution chain each
+ *    Refresh; the toolbar offers construction tools and Check walks the chain.
+ *  - **`authored`**: YOU draw the figure and declare the fill-in blanks. The `build(toolkit)` runs each
+ *    Refresh (with a fresh seeded `rng`, so it can randomise) and returns `{ blanks, goal }`. Each blank
+ *    `{ pos:[x,y], answer:number, kind?:"angle"|"length", target?:boolean, hint?:string }` becomes an
+ *    on-figure box (angles → the `geometry-angles` keyboard, lengths → `geometry-lengths`). The figure is
+ *    static (no construction tools by default). The toolkit is `{ board, JXG, colors, rng, …drawing
+ *    tools }` — the same `parallelMark`/`tickMark`/`angleMark`/`rightAngle`/`extend`/`label` a geometry
+ *    scene gets.
+ *
  * @typedef {object} GeometryProblemConfig
  * @property {{ scaffolds: string[], minSteps?: number, maxSteps?: number, theorems?: string[],
- *   pageId?: string, tools?: string[] }} generate  Engine config: which scaffolds to draw from, the
- *   desired chain-length band, an optional explicit theorem-pool `theorems` override (else gated by the
- *   DAG), an optional `pageId` override (else inferred from the URL), and `tools` — which construction
- *   tools the toolbar offers (subset of `"line"`/`"parallel"`/`"equal"`/`"right"`; "Fill in" + "Undo"
- *   are always present). Default: `["line","parallel","equal","right"]`. Pick the ones that suit the
- *   scaffold — e.g. a parallel-lines angle chase wants `["line","parallel"]` (no vertex has two edges
- *   meeting, so a right-angle mark has nothing to attach to).
+ *   pageId?: string, tools?: string[] }} [generate]  Engine config (see above). `tools` is the toolbar
+ *   subset of `"line"`/`"parallel"`/`"equal"`/`"right"` (default all).
+ * @property {{ boundingbox: [number,number,number,number], tools?: string[],
+ *   build: (toolkit: Record<string, any>) => { blanks: Array<{ pos: [number,number], answer: number,
+ *     kind?: "angle"|"length", target?: boolean, hint?: string }>, goal?: string } }} [authored]
+ *   Authored config (see above).
  *
  * @typedef {{ config: GeometryProblemConfig }} GeometryProblemEntry
  */

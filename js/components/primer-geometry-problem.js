@@ -29,6 +29,8 @@ import { adoptJsxCss, wrapBoard } from "./jsx-board.js";
 import { makeGeometryTools } from "../geometry-tools.js";
 import { makeRng } from "../rng.js";
 import { checkAnswer } from "../quiz-vars.js";
+import { loadMathLive } from "../mathfield.js";
+import { getMathKeyboard } from "../math-keyboards.js";
 import { SCAFFOLDS, anglePos } from "../geometry-engine/scaffolds.js";
 import { generateProblem } from "../geometry-engine/generate.js";
 import { RULES } from "../geometry-engine/rules.js";
@@ -70,9 +72,14 @@ export class PrimerGeometryProblem extends HTMLElement {
   /** @type {any} */ #board = null;
   /** @type {any} Raw JSXGraph namespace (for Coords + freeBoard). */ #jsx = null;
   /** @type {import("../geometry-engine/generate.js").Problem | null} */ #problem = null;
-  /** @type {Map<string, HTMLInputElement>} fillable angle key → input. */ #inputs = new Map();
-  /** @type {Array<{ key: string, value: number, pos: [number, number], isTarget: boolean }>} Every non-given angle the learner can fill. */ #fillable = [];
+  /** @type {Map<string, any>} fillable angle key → its `<math-field>` (or fallback `<input>`). */ #inputs = new Map();
+  /** @type {Array<{ key: string, value: number, pos: [number, number], isTarget: boolean, kind: "angle"|"length" }>} Every non-given quantity the learner can fill. */ #fillable = [];
+  /** @type {boolean} Whether MathLive loaded (else fall back to plain text boxes). */ #mathlive = false;
   /** @type {Map<string, import("../geometry-engine/chain.js").DerivStep>} chain step keyed by produced angle, for hints. */ #hintByKey = new Map();
+  /** @type {Map<string, { rule: string | null, value: number }>} A theorem explanation for EVERY fillable angle (chain step if on the path, else any determining relation). */ #explainByKey = new Map();
+  /** @type {Map<string, string>} Per-blank explanation text for AUTHORED problems. */ #hintText = new Map();
+  /** @type {string} The goal sentence (authored problems set their own). */ #goal = "";
+  /** @type {Array<{ el: HTMLElement, pos: [number, number] }>} Numbered step badges shown on solve. */ #badges = [];
   /** @type {{ parallel: { pending: any, count: number }, equal: { pending: any, count: number } }} Marking-tool group state. */ #marks = { parallel: { pending: null, count: 0 }, equal: { pending: null, count: 0 } };
   /** @type {(() => void) | null} */ #onTheme = null;
   /** @type {(() => void) | null} */ #stopWaiting = null;
@@ -124,9 +131,10 @@ export class PrimerGeometryProblem extends HTMLElement {
         .goal { font-family: var(--primer-font-display, sans-serif); font-weight: 700;
           color: var(--primer-ink, #111); margin: 0 0 0.5rem; text-align: center; }
         .toolbar { display: flex; flex-wrap: wrap; gap: 0.35rem; justify-content: center;
-          margin-bottom: 0.5rem; padding: 0.4rem; border-radius: 0.5rem;
+          margin-bottom: 0; padding: 0.4rem; border-radius: 0.5rem 0.5rem 0 0;
           background: var(--primer-control-bg, #f1ede4); border: 1px solid var(--primer-control-border, #ccc);
-          font-family: var(--primer-font-ui, sans-serif); }
+          border-bottom: none; font-family: var(--primer-font-ui, sans-serif); }
+        .toolbar[hidden] { display: none; } /* display:flex above would otherwise beat the hidden attribute */
         .toolbar button { padding: 0.2rem 0.55rem; border-radius: 0.35rem; font-size: 0.85rem;
           border: 1px solid var(--primer-control-border, #ccc);
           background: var(--primer-control-bg, #fff); color: var(--primer-ink, #111); }
@@ -135,18 +143,50 @@ export class PrimerGeometryProblem extends HTMLElement {
         .stage { position: relative; width: 100%; aspect-ratio: 7 / 4; overflow: hidden;
           background: var(--primer-viz-bg, #fff); border-radius: var(--primer-radius, 0.6rem);
           box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); touch-action: none; }
+        /* When a (visible) toolbar sits directly above, square the stage's top corners so the two
+           meet flush; with no toolbar the stage keeps all four corners rounded. */
+        .toolbar:not([hidden]) + .stage { border-top-left-radius: 0; border-top-right-radius: 0; }
         /* The JSXGraph board gets its OWN container (sharing the stage with the overlay breaks
            JSXGraph's resize measurement). */
         .board { position: absolute; inset: 0; }
         .stage svg { display: block; width: 100% !important; height: 100% !important; }
         .overlay { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
-        .overlay input { position: absolute; transform: translate(-50%, -50%); width: 2.1rem;
-          text-align: center; font: inherit; font-size: 0.72rem; line-height: 1; padding: 0.08rem 0.1rem;
-          border-radius: 0.3rem; border: 1px solid var(--primer-border, #ccc);
-          background: var(--primer-surface, #fff); color: var(--primer-ink, #111); pointer-events: auto; }
-        .overlay input.target { border-color: var(--primer-accent, #4d5bd1); box-shadow: 0 0 0 2px var(--primer-ring, rgba(70,90,230,0.55)); }
-        .overlay input.right { border-color: var(--primer-ok, #1a8f3c); color: var(--primer-ok, #1a8f3c); background: var(--primer-ok-bg, #e6f6ec); }
-        .overlay input.wrong { border-color: var(--primer-bad, #c0392b); color: var(--primer-bad, #c0392b); background: var(--primer-bad-bg, #fdecea); }
+        /* Fillable boxes: the diagram backdrop (--primer-viz-bg) equals --primer-surface in every
+           theme, so a "surface" fill would vanish. Use the recessed control surface (distinct from the
+           backdrop) plus a soft lift so each box reads clearly against the figure — but stays quieter
+           than a full answer box. */
+        .overlay input, .overlay math-field.mf {
+          position: absolute; transform: translate(-50%, -50%); width: 1.85rem;
+          text-align: center; font-size: 0.72rem; line-height: 1;
+          font-family: var(--primer-font-ui, ui-sans-serif, system-ui, sans-serif);
+          border-radius: 0.25rem; border: 1px solid var(--primer-border, #ccc);
+          /* 30%-opaque fill so the figure shows through; opaque fallback for engines without color-mix. */
+          background: var(--primer-control-bg, #f1ede4);
+          background: color-mix(in srgb, var(--primer-control-bg, #f1ede4) 30%, transparent);
+          color: var(--primer-ink, #111); pointer-events: auto; }
+        .overlay input { padding: 0 0.1rem; }
+        /* MathLive box: keep it compact, sans-serif glyphs, and hide the in-field menu / keyboard
+           toggles (the module keyboard pops up on focus instead). */
+        .overlay math-field.mf { padding: 0; min-height: 0.95rem; --smart-fence-opacity: 0;
+          font-family: var(--primer-font-ui, ui-sans-serif, system-ui, sans-serif); }
+        .overlay math-field.mf::part(menu-toggle),
+        .overlay math-field.mf::part(virtual-keyboard-toggle) { display: none; }
+        /* The target (the chase's answer) is the prominent one: the brighter surface + accent ring. */
+        .overlay input.target, .overlay math-field.mf.target {
+          background: var(--primer-surface, #fff);
+          background: color-mix(in srgb, var(--primer-surface, #fff) 30%, transparent);
+          border-color: var(--primer-accent, #4d5bd1); box-shadow: 0 0 0 2px var(--primer-ring, rgba(70,90,230,0.55)); }
+        .overlay input.right, .overlay math-field.mf.right { border-color: var(--primer-ok, #1a8f3c); color: var(--primer-ok, #1a8f3c);
+          background: var(--primer-ok-bg, #e6f6ec);
+          background: color-mix(in srgb, var(--primer-ok-bg, #e6f6ec) 30%, transparent); }
+        .overlay input.wrong, .overlay math-field.mf.wrong { border-color: var(--primer-bad, #c0392b); color: var(--primer-bad, #c0392b);
+          background: var(--primer-bad-bg, #fdecea);
+          background: color-mix(in srgb, var(--primer-bad-bg, #fdecea) 30%, transparent); }
+        /* A small numbered badge marking which solution step an angle belongs to (shown on solve). */
+        .overlay .step-badge { position: absolute; transform: translate(-50%, -50%);
+          display: grid; place-items: center; min-width: 1rem; height: 1rem; padding: 0 0.18rem;
+          border-radius: 1rem; font-size: 0.6rem; font-weight: 700; line-height: 1; color: #fff;
+          box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25); pointer-events: none; }
         .actions { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.55rem; flex-wrap: wrap; }
         .actions button { padding: 0.3rem 0.8rem; border-radius: 0.4rem;
           border: 1px solid var(--primer-control-border, #ccc); background: var(--primer-control-bg, #fff); color: var(--primer-ink, #111); }
@@ -158,6 +198,11 @@ export class PrimerGeometryProblem extends HTMLElement {
         .feedback .ok { color: var(--primer-ok, #1a8f3c); font-weight: 700; }
         .feedback .bad { color: var(--primer-bad, #c0392b); font-weight: 700; }
         .feedback ol { margin: 0.4rem 0 0; padding-left: 1.2rem; }
+        /* The solution chain, each step colour-matched to its angle on the figure. */
+        .feedback ol.chain { list-style: none; padding-left: 0; }
+        .feedback ol.chain li { display: flex; align-items: flex-start; gap: 0.45rem; margin: 0.25rem 0; }
+        .feedback ol.chain .step-n { flex: none; display: grid; place-items: center; min-width: 1.2rem;
+          height: 1.2rem; border-radius: 1rem; color: #fff; font-size: 0.72rem; font-weight: 700; }
         .meta { color: var(--primer-ink-soft, #667); }
       </style>
       <div class="prob">
@@ -186,7 +231,6 @@ export class PrimerGeometryProblem extends HTMLElement {
       return;
     }
     this.#stopWaiting?.();
-    this.#toolset = config.generate.tools ?? ["line", "parallel", "equal", "right"];
     this.#tool = "answer";
     if (this.#seed === null) this.#seed = (Math.random() * 0x100000000) >>> 0;
     const gen = ++this.#buildGen;
@@ -196,11 +240,16 @@ export class PrimerGeometryProblem extends HTMLElement {
     this.#inputs.clear();
     this.#fillable = [];
     this.#hintByKey = new Map();
+    this.#explainByKey = new Map();
+    this.#hintText = new Map();
+    this.#badges = [];
     this.#marks = { parallel: { pending: null, count: 0 }, equal: { pending: null, count: 0 } };
     this.#added = [];
     this.#picks = [];
     this.#pendingPoint = null;
     this.#solved = false;
+    this.#problem = null;
+    this.#goal = "";
     this.#feedback("");
 
     try {
@@ -208,40 +257,22 @@ export class PrimerGeometryProblem extends HTMLElement {
       if (!this.isConnected || gen !== this.#buildGen) return;
       const JXG = mod.default ?? /** @type {any} */ (mod).JXG ?? mod;
       this.#jsx = JXG;
-
-      const allowed = await this.#allowedPool(config, JXG);
-      if (gen !== this.#buildGen) return;
-
-      // Generate from a randomly chosen scaffold (seeded so a page load is reproducible-per-run).
       const rng = makeRng(/** @type {number} */ (this.#seed));
-      const scaffoldNames = config.generate.scaffolds.filter((n) => SCAFFOLDS[/** @type {keyof typeof SCAFFOLDS} */ (n)]);
-      const scaffoldName = rng.pick(scaffoldNames.length ? scaffoldNames : ["parallelTransversal"]);
-      const figure = SCAFFOLDS[/** @type {keyof typeof SCAFFOLDS} */ (scaffoldName)](rng);
-      const problem = generateProblem(figure, allowed, rng, {
-        minSteps: config.generate.minSteps ?? 2,
-        maxSteps: config.generate.maxSteps ?? 4,
-      });
-      this.#problem = problem;
 
-      if (!problem) {
-        stage.querySelector(".overlay")?.replaceChildren();
-        this.#feedback(`<span class="meta">${this.#str("noTheorems", "No relevant theorems learned yet — come back after the lessons above.")}</span>`);
-        return;
-      }
+      // Two sources: an AUTHORED figure (the author draws it + declares the fill-in blanks), or an
+      // engine-GENERATED angle chase. Both end up with the same #fillable boxes + grading.
+      const ok = /** @type {any} */ (config).authored
+        ? this.#buildAuthored(stage, JXG, /** @type {any} */ (config).authored, rng)
+        : await this.#buildGenerated(stage, JXG, config, rng, gen);
+      if (!ok || gen !== this.#buildGen) return;
 
-      // EVERY non-given angle is fillable — that's how you chase the solution. Each carries its true
-      // value (the figure is exact) and a screen position; the engine's chain only supplies the
-      // ordered HINTS and which one is the final target.
-      const givenKeys = new Set(problem.givens.map((/** @type {any} */ g) => g.key));
-      this.#fillable = figure.angles
-        .filter((/** @type {any} */ a) => !givenKeys.has(a.key))
-        .map((/** @type {any} */ a) => ({ key: a.key, value: a.value, pos: anglePos(figure, a), isTarget: a.key === problem.target }));
-      this.#hintByKey = new Map(problem.blanks.map((/** @type {any} */ b) => [b.key, b]));
-
-      this.#drawBoard(stage, JXG, figure, problem);
       this.#renderToolbar();
-      this.#renderGoal(problem);
-      this.#placeInputs(overlay);
+      this.#renderGoal();
+      // Load MathLive now (cached) so the figure + toolbar are already on screen; the editable boxes
+      // appear a moment later on first load, instantly thereafter.
+      this.#mathlive = await loadMathLive();
+      if (gen !== this.#buildGen) return;
+      this.#placeFields(overlay);
       this.#syncOverlay();
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -249,19 +280,79 @@ export class PrimerGeometryProblem extends HTMLElement {
     }
   }
 
+  /** Engine path: gate the theorem pool, generate an angle chase, set up the fillable angles + hints,
+   * draw the figure. Returns false (with a message) if nothing is derivable. */
+  async #buildGenerated(/** @type {HTMLElement} */ stage, /** @type {any} */ JXG, /** @type {any} */ config, /** @type {any} */ rng, /** @type {number} */ gen) {
+    this.#toolset = config.generate.tools ?? ["line", "parallel", "equal", "right"];
+    const allowed = await this.#allowedPool(config, JXG);
+    if (gen !== this.#buildGen) return false;
+    const scaffoldNames = config.generate.scaffolds.filter((/** @type {string} */ n) => SCAFFOLDS[/** @type {keyof typeof SCAFFOLDS} */ (n)]);
+    const scaffoldName = rng.pick(scaffoldNames.length ? scaffoldNames : ["parallelTransversal"]);
+    const figure = SCAFFOLDS[/** @type {keyof typeof SCAFFOLDS} */ (scaffoldName)](rng);
+    const problem = generateProblem(figure, allowed, rng, {
+      minSteps: config.generate.minSteps ?? 2,
+      maxSteps: config.generate.maxSteps ?? 4,
+    });
+    this.#problem = problem;
+    if (!problem) {
+      stage.querySelector(".overlay")?.replaceChildren();
+      this.#feedback(`<span class="meta">${this.#str("noTheorems", "No relevant theorems learned yet — come back after the lessons above.")}</span>`);
+      return false;
+    }
+    // EVERY non-given angle is fillable — that's how you chase the solution. The engine's chain only
+    // supplies the ordered HINTS and which one is the final target.
+    const givenKeys = new Set(problem.givens.map((/** @type {any} */ g) => g.key));
+    this.#fillable = figure.angles
+      .filter((/** @type {any} */ a) => !givenKeys.has(a.key))
+      .map((/** @type {any} */ a) => ({ key: a.key, value: a.value, pos: anglePos(figure, a), isTarget: a.key === problem.target, kind: /** @type {"angle"} */ ("angle") }));
+    this.#hintByKey = new Map(problem.blanks.map((/** @type {any} */ b) => [b.key, b]));
+    this.#explainByKey = new Map();
+    for (const f of this.#fillable) {
+      const step = this.#hintByKey.get(f.key);
+      if (step) { this.#explainByKey.set(f.key, { rule: step.rule, value: step.value }); continue; }
+      const reln = figure.relations.find(
+        (/** @type {any} */ r) => allowed.has(r.conceptId) && r.terms.some((/** @type {any} */ t) => t.key === f.key),
+      );
+      this.#explainByKey.set(f.key, { rule: reln ? reln.rule : null, value: f.value });
+    }
+    this.#drawBoardFigure(stage, JXG, figure, problem);
+    return true;
+  }
+
+  /** Authored path: the author's `build(toolkit)` draws the figure and returns `{ blanks, goal }`; the
+   * blanks become the on-figure fill-in boxes (angles → geometry-angles keyboard, lengths →
+   * geometry-lengths). The figure is static — the overlay boxes are the only interaction. */
+  #buildAuthored(/** @type {HTMLElement} */ stage, /** @type {any} */ JXG, /** @type {any} */ authored, /** @type {any} */ rng) {
+    this.#toolset = authored.tools ?? [];
+    const { board, tools, colors } = this.#initBoard(stage, JXG, authored.boundingbox ?? [-5, 5, 5, -5]);
+    const spec = authored.build({ board, JXG, colors, rng, ...tools }) ?? {};
+    for (const el of board.objectsList) el.setAttribute?.({ fixed: true, highlight: false }); // static figure
+    board.update();
+    const blanks = spec.blanks ?? [];
+    this.#fillable = blanks.map((/** @type {any} */ b, /** @type {number} */ i) => ({
+      key: `b${i}`, value: b.answer, pos: b.pos, isTarget: b.target ?? i === 0, kind: b.kind ?? "angle",
+    }));
+    this.#hintText = new Map(blanks.map((/** @type {any} */ b, /** @type {number} */ i) => [`b${i}`, b.hint ?? ""]));
+    this.#goal = spec.goal ?? "";
+    return true;
+  }
+
   /** Resolve the allowed theorem pool: explicit override, else DAG-gated, else (offline) all rules. */
   async #allowedPool(/** @type {import("../scenes.js").GeometryProblemConfig} */ config, /** @type {any} */ _JXG) {
+    const gen = config.generate ?? { scaffolds: [] };
     const allRuleConcepts = new Set(Object.values(RULES).map((r) => r.conceptId));
-    if (config.generate.theorems) return new Set(config.generate.theorems);
+    if (gen.theorems) return new Set(gen.theorems);
     const adj = await loadGraph();
     if (!adj) return allRuleConcepts; // offline / no graph → don't block, allow everything
-    const id = config.generate.pageId ?? pageConceptId();
+    const id = gen.pageId ?? pageConceptId();
     if (!id || !adj.has(id)) return allRuleConcepts;
     return allowedTheorems(adj, id, allRuleConcepts);
   }
 
-  /** Draw the figure (edges + given/blank angle marks) on an interactive board. */
-  #drawBoard(/** @type {HTMLElement} */ stage, /** @type {any} */ JXG, /** @type {any} */ figure, /** @type {any} */ problem) {
+  /** Create a fresh interactive JSXGraph board for the figure, and keep the overlay boxes glued to it
+   * as it updates/resizes. Returns the board + the drawing tools + the resolved palette.
+   * @param {HTMLElement} stage @param {any} JXG @param {[number,number,number,number]} boundingbox */
+  #initBoard(stage, JXG, boundingbox) {
     const colors = themeColors();
     // Recreate a FRESH board container each build. Re-initialising JSXGraph on the same element across
     // a Refresh is fragile (the element keeps its old JSXGraph container id / leftover state); a brand
@@ -272,11 +363,23 @@ export class PrimerGeometryProblem extends HTMLElement {
     stage.insertBefore(boardEl, stage.querySelector(".overlay"));
     let board = null;
     const wrapped = wrapBoard(JXG, colors, (b) => { board = b; }, { interactive: true });
-    board = wrapped.JSXGraph.initBoard(boardEl, { boundingbox: figure.boundingbox, keepaspectratio: true, axis: false, grid: false });
+    board = wrapped.JSXGraph.initBoard(boardEl, { boundingbox, keepaspectratio: true, axis: false, grid: false });
     board.options.line.point1 = { ...board.options.line.point1, visible: false, withLabel: false };
     board.options.line.point2 = { ...board.options.line.point2, visible: false, withLabel: false };
     this.#board = board;
-    const tools = makeGeometryTools(board, colors);
+    // Keep the overlay boxes glued to their anchors as the board updates (drags) or the stage resizes.
+    if (typeof board.on === "function") board.on("update", () => this.#syncOverlay());
+    if (typeof ResizeObserver !== "undefined") {
+      this.#resizeObs?.disconnect();
+      this.#resizeObs = new ResizeObserver(() => this.#syncOverlay());
+      this.#resizeObs.observe(stage);
+    }
+    return { board, tools: makeGeometryTools(board, colors), colors };
+  }
+
+  /** Draw an engine FIGURE (edges, parallel marks, given/blank angle marks) and wire construction tools. */
+  #drawBoardFigure(/** @type {HTMLElement} */ stage, /** @type {any} */ JXG, /** @type {any} */ figure, /** @type {any} */ problem) {
+    const { board, tools, colors } = this.#initBoard(stage, JXG, figure.boundingbox);
 
     // Edges.
     for (const [p, q] of figure.edges) {
@@ -319,18 +422,13 @@ export class PrimerGeometryProblem extends HTMLElement {
     }
     board.update();
     this.#wireBoardTools(board);
-    // Keep the overlay inputs glued to their angles as the board updates (drags) or the stage resizes.
-    if (typeof board.on === "function") board.on("update", () => this.#syncOverlay());
-    if (typeof ResizeObserver !== "undefined") {
-      this.#resizeObs?.disconnect();
-      this.#resizeObs = new ResizeObserver(() => this.#syncOverlay());
-      this.#resizeObs.observe(stage);
-    }
   }
 
-  /** Render the construction toolbar. */
+  /** Render the construction toolbar (hidden when the problem offers no construction tools). */
   #renderToolbar() {
     const bar = /** @type {HTMLElement} */ (this.#root.querySelector(".toolbar"));
+    if (!this.#toolset.length) { bar.hidden = true; bar.replaceChildren(); return; }
+    bar.hidden = false;
     const labels = /** @type {Record<string, string>} */ ({
       answer: this.#str("toolAnswer", "Fill in"),
       line: this.#str("toolLine", "Draw line"),
@@ -361,28 +459,61 @@ export class PrimerGeometryProblem extends HTMLElement {
     }
   }
 
-  /** Show the goal sentence. */
-  #renderGoal(/** @type {any} */ _problem) {
+  /** Show the goal sentence — an authored problem's own goal, else the default angle-chase prompt. */
+  #renderGoal() {
     const goal = /** @type {HTMLElement} */ (this.#root.querySelector(".goal"));
-    goal.textContent = this.#str("goal", "Chase the angles: fill in any you can work out, ending with the highlighted one.");
+    goal.textContent = this.#goal || this.#str("goal", "Chase the angles: fill in any you can work out, ending with the highlighted one.");
   }
 
-  /** Overlay a small input box at EVERY fillable angle's bisector position. */
-  #placeInputs(/** @type {HTMLElement} */ overlay) {
+  /** Overlay a small editor at EVERY fillable quantity's position — a MathLive `<math-field>` (its
+   * module keyboard is `geometry-angles` for angles, `geometry-lengths` for lengths), or a plain text
+   * box if MathLive isn't available. */
+  #placeFields(/** @type {HTMLElement} */ overlay) {
     overlay.replaceChildren();
     this.#inputs.clear();
+    const haveMf = this.#mathlive && typeof customElements !== "undefined" && !!customElements.get("math-field");
     for (const f of this.#fillable) {
-      const input = document.createElement("input");
-      input.type = "text";
-      input.inputMode = "numeric";
-      input.autocomplete = "off";
-      input.className = f.isTarget ? "target" : "";
-      input.setAttribute("aria-label", this.#str("blankLabel", "unknown angle"));
-      input.dataset.key = f.key;
-      input.addEventListener("input", () => { input.classList.remove("right", "wrong"); });
-      overlay.append(input);
-      this.#inputs.set(f.key, input);
+      const kb = f.kind === "length" ? "geometry-lengths" : "geometry-angles";
+      const el = haveMf ? this.#makeField(f, kb) : this.#makeInput(f);
+      overlay.append(el);
+      this.#inputs.set(f.key, el);
     }
+  }
+
+  /** A MathLive editor for one fillable quantity, wired to pop its module keyboard on focus. */
+  #makeField(/** @type {any} */ f, /** @type {string} */ kb) {
+    const mf = /** @type {any} */ (document.createElement("math-field"));
+    mf.mathVirtualKeyboardPolicy = "manual"; // we show on focus / hide on blur
+    mf.className = `mf${f.isTarget ? " target" : ""}`;
+    mf.setAttribute("aria-label", this.#str("blankLabel", "unknown angle", { noun: this.#noun() }));
+    mf.dataset.key = f.key;
+    const layout = getMathKeyboard(kb);
+    mf.addEventListener("input", () => mf.classList.remove("right", "wrong"));
+    mf.addEventListener("focusin", () => {
+      // Render typed content in the sans-serif MATH variant (CSS can't reach MathLive's glyph font).
+      // Applied while the cursor is collapsed so the next inserted digits inherit it.
+      try { mf.applyStyle?.({ variant: "sans-serif" }); } catch { /* not mounted yet */ }
+      const vk = /** @type {any} */ (globalThis).mathVirtualKeyboard;
+      if (!vk) return;
+      if (layout) vk.layouts = [layout];
+      vk.editToolbar = "none";
+      vk.show();
+    });
+    mf.addEventListener("focusout", () => { /** @type {any} */ (globalThis).mathVirtualKeyboard?.hide(); });
+    return mf;
+  }
+
+  /** A plain text box fallback (MathLive failed to load). */
+  #makeInput(/** @type {any} */ f) {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.inputMode = "numeric";
+    input.autocomplete = "off";
+    input.className = f.isTarget ? "target" : "";
+    input.setAttribute("aria-label", this.#str("blankLabel", "unknown angle", { noun: this.#noun() }));
+    input.dataset.key = f.key;
+    input.addEventListener("input", () => { input.classList.remove("right", "wrong"); });
+    return input;
   }
 
   /** Roll a brand-new problem (a fresh seed) and rebuild. */
@@ -400,45 +531,114 @@ export class PrimerGeometryProblem extends HTMLElement {
    * target is still blank, the learner is pointed at it.
    */
   check() {
-    const prob = this.#problem;
-    if (!prob) return false;
-    let firstWrong = null;
+    if (!this.#fillable.length) return false;
+    this.#clearSolutionMarks();
+    /** @type {Array<{ key: string, label: string }>} every wrong angle the learner filled */
+    const wrong = [];
     let targetOk = false;
     let targetFilled = false;
     for (const f of this.#fillable) {
       const input = this.#inputs.get(f.key);
       if (!input) continue;
-      const filled = input.value.trim() !== "";
-      const ok = filled && checkAnswer(f.value, input.value);
+      const raw = this.#fieldValue(input);
+      const filled = raw.trim() !== "";
+      const ok = filled && checkAnswer(f.value, raw);
       input.classList.toggle("right", filled && ok);
       input.classList.toggle("wrong", filled && !ok);
-      if (filled && !ok && firstWrong === null) firstWrong = f;
+      if (filled && !ok) wrong.push({ key: f.key, label: this.#explainText(f.key) });
       if (f.isTarget) { targetFilled = filled; targetOk = ok; }
     }
-    this.#solved = targetOk && firstWrong === null;
+    this.#solved = targetOk && wrong.length === 0;
     if (this.#solved) {
-      this.#feedback(`<span class="ok">✓ ${this.#str("solved", "Solved! Every step checks out.")}</span>` + this.#chainHtml(prob));
-    } else if (firstWrong) {
-      const step = this.#hintByKey.get(firstWrong.key);
-      const hint = step ? JUSTIFY[step.rule](step.value) : this.#str("genericHint", "That angle isn't right yet — look at angles on a line, vertical angles, or the parallel-line rules.");
-      this.#feedback(`<span class="bad">✗ ${this.#str("notYet", "Not yet —")}</span> ${hint}`);
+      // Colour each solution step and ring its quantity; the numbered list maps onto the figure.
+      const items = this.#solutionItems();
+      this.#markAngles(items, true);
+      this.#feedback(`<span class="ok">✓ ${this.#str("solved", "Solved! Every step checks out.")}</span>` + this.#explainHtml(items));
+    } else if (wrong.length) {
+      // Explain EVERY wrong angle, badge each one, and colour-match the explanations.
+      this.#markAngles(wrong, false);
+      this.#feedback(`<span class="bad">✗ ${this.#str("notYet", "Not yet —")}</span> ${this.#str("review", "these angles need another look:", { noun: this.#noun() })}` + this.#explainHtml(wrong));
     } else if (!targetFilled) {
-      this.#feedback(`<span class="bad">${this.#str("fillTarget", "Fill in the highlighted angle to finish.")}</span>`);
+      this.#feedback(`<span class="bad">${this.#str("fillTarget", "Fill in the highlighted angle to finish.", { noun: this.#noun() })}</span>`);
     }
     this.dispatchEvent(new CustomEvent("primer:problem-graded", { bubbles: true, detail: { solved: this.#solved } }));
     return this.#solved;
   }
 
-  /** The full justified solution chain, shown once solved. @param {any} prob */
-  #chainHtml(prob) {
-    const items = prob.blanks
-      .map((/** @type {any} */ b) => `<li>${(JUSTIFY[b.rule] ?? ((/** @type {number} */ v) => `${v}°`))(b.value)}</li>`)
+  /** The ordered, labelled solution steps to colour-code on solve: the engine's chain for a generated
+   * problem, else each authored blank with its hint. @returns {Array<{ key: string, label: string }>} */
+  #solutionItems() {
+    if (this.#problem) {
+      return this.#problem.blanks.map((/** @type {any} */ b) => ({ key: b.key, label: JUSTIFY[b.rule](b.value) }));
+    }
+    return this.#fillable.map((f) => ({ key: f.key, label: this.#explainText(f.key) || `${f.value}` }));
+  }
+
+  /** Read a box's value as a plain string for grading — unwrapping MathLive's font-variant macros
+   * (e.g. `\mathsf{70}` → `70`) so the sans-serif rendering doesn't reach the grader. @param {any} el */
+  #fieldValue(el) {
+    const v = typeof el?.value === "string" ? el.value : "";
+    return v.replace(/\\math(?:sf|rm|it|bf|tt|cal|bb|frak)\{([^{}]*)\}/g, "$1");
+  }
+
+  /** The explanation for a quantity: an authored per-blank hint, else its theorem (chain step on the
+   * path, else any determining relation), else a generic nudge. @param {string} key */
+  #explainText(key) {
+    const authored = this.#hintText.get(key);
+    if (authored) return authored;
+    const e = this.#explainByKey.get(key);
+    if (e && e.rule && JUSTIFY[e.rule]) return JUSTIFY[e.rule](e.value);
+    return this.#str("genericHint", "That angle isn't right yet — look at angles on a line, vertical angles, or the parallel-line rules.");
+  }
+
+  /** The colour from the sequence palette for solution step `i`. @param {number} i */
+  #stepColor(i) {
+    const cat = themeColors().cat;
+    return cat[i % cat.length];
+  }
+
+  /** A colour-coded numbered list (used for the solution chain AND the wrong-angle explanations).
+   * @param {Array<{ key: string, label: string }>} items */
+  #explainHtml(items) {
+    const lis = items
+      .map((it, i) => `<li><span class="step-n" style="background:${this.#stepColor(i)}">${i + 1}</span><span>${it.label}</span></li>`)
       .join("");
-    return `<ol>${items}</ol>`;
+    return `<ol class="chain">${lis}</ol>`;
+  }
+
+  /** Badge each listed angle with its sequence-coloured number (matching {@link #explainHtml}); when
+   * `ring`, also outline the box in that colour (used for the all-correct solution path).
+   * @param {Array<{ key: string, label: string }>} items @param {boolean} ring */
+  #markAngles(items, ring) {
+    const overlay = /** @type {HTMLElement} */ (this.#root.querySelector(".overlay"));
+    items.forEach((it, i) => {
+      const c = this.#stepColor(i);
+      if (ring) {
+        const input = this.#inputs.get(it.key);
+        if (input) { input.style.borderColor = c; input.style.boxShadow = `0 0 0 2px ${c}`; }
+      }
+      const f = this.#fillable.find((x) => x.key === it.key);
+      if (!f) return;
+      const badge = document.createElement("span");
+      badge.className = "step-badge";
+      badge.textContent = String(i + 1);
+      badge.style.background = c;
+      overlay.append(badge);
+      this.#badges.push({ el: badge, pos: f.pos });
+    });
+    this.#syncOverlay();
+  }
+
+  /** Remove the solution badges and clear the per-step inline ring on the boxes. */
+  #clearSolutionMarks() {
+    for (const { el } of this.#badges) el.remove();
+    this.#badges = [];
+    for (const input of this.#inputs.values()) { input.style.borderColor = ""; input.style.boxShadow = ""; }
   }
 
   /** Reset: clear inputs, learner-drawn marks, and feedback (same problem). */
   reset() {
+    this.#clearSolutionMarks();
     for (const input of this.#inputs.values()) { input.value = ""; input.classList.remove("right", "wrong"); }
     this.#undo(true);
     this.#marks = { parallel: { pending: null, count: 0 }, equal: { pending: null, count: 0 } };
@@ -591,6 +791,11 @@ export class PrimerGeometryProblem extends HTMLElement {
         input.style.left = `${ox + f.pos[0] * ux}px`;
         input.style.top = `${oy - f.pos[1] * uy}px`;
       }
+      // Step badges sit just up-and-left of their box.
+      for (const { el, pos } of this.#badges) {
+        el.style.left = `${ox + pos[0] * ux - 15}px`;
+        el.style.top = `${oy - pos[1] * uy - 12}px`;
+      }
     } catch {
       /* board mid-rebuild / freed — skip this frame */
     }
@@ -609,8 +814,16 @@ export class PrimerGeometryProblem extends HTMLElement {
   /** A localized chrome string for the problem element — global i18n (`geometryProblem.*`), which
    * falls back to English then the key, so it never logs a "missing scene string" error. (The second
    * argument is the inline English default kept at the call sites for readability; `t` supplies it.) */
-  #str(/** @type {string} */ key, /** @type {string} */ _fallback) {
-    return t(`geometryProblem.${key}`);
+  #str(/** @type {string} */ key, /** @type {string} */ _fallback, /** @type {Record<string, string|number>} */ vars) {
+    return t(`geometryProblem.${key}`, vars);
+  }
+
+  /** The noun for the quantity being filled, for feedback wording: "side" (lengths), "angle", or a
+   * neutral "value" for a mix. @returns {string} */
+  #noun() {
+    const kinds = new Set(this.#fillable.map((f) => f.kind));
+    if (kinds.size === 1) return kinds.has("length") ? "side" : "angle";
+    return "value";
   }
 
   /** @param {string} html */

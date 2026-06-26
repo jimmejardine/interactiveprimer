@@ -233,9 +233,10 @@ recursive prerequisite ancestors, with members tinted in the course colour (`--p
 
   **A figure above the prompt**: add `figure: "sceneName"` to any question (MC or free-text) to render a
   `<primer-geometry>` (read-only) **above** the prompt — a "given this diagram, find ∠x" question. Pair a
-  free-text geometry answer with `keyboard: "geometry"` (the geometry virtual keyboard — digits, `°`,
-  Greek `α β θ`); a numeric angle answer accepts `70`, `70°` or `70 degrees` (the `°` is stripped before
-  grading). See `js/math-keyboards.js`.
+  free-text geometry answer with `keyboard: "geometry-angles"` (digits, `°`, `+ − × ÷`, parens, the angle
+  unknowns `x α β θ`) or `keyboard: "geometry-lengths"` (digits, `√`, the four operations, `x`, no degree
+  sign); a numeric angle answer accepts `70`, `70°` or `70 degrees` (the `°` is stripped before grading).
+  See `js/math-keyboards.js`.
 
   **An interactive geometry PROBLEM as a question**: add `{ problem: "name" }` (a registered
   `registerGeometryProblem`, see its section below) as a bank item — it embeds the engine-generated
@@ -615,10 +616,13 @@ this page (each engine rule names the lesson `conceptId` that teaches it).
   chain length. `theorems` (optional) pins the rule pool explicitly (else it's DAG-gated); `pageId`
   overrides the page id (else inferred from the URL). v1 generates **angle** chases (clean integer
   answers by construction).
-- **The learner** types each unknown angle into the on-figure blanks (the highlighted box is the final
-  target), and may use the **construction toolbar** (draw line · mark ∥ · mark = · right ∟ · undo) as a
-  sandbox to reason. **Check** walks the engine's solution chain — ticking each blank and, at the first
-  wrong one, revealing that step's theorem hint; **Refresh** rolls a new problem; **Reset** clears.
+- **The learner** fills in EVERY unknown angle (that's how a chase works) via small on-figure
+  **MathLive `<math-field>`** boxes — angle boxes pop the `geometry-angles` keyboard, length boxes the
+  `geometry-lengths` one — with the highlighted box the final target; they may also use the
+  **construction toolbar** (draw line · mark ∥ · mark = · right ∟ · undo) to reason. **Check** grades
+  every filled box, requires the target correct, and colour-codes the solution/mistakes by step (a
+  numbered badge on each angle matching its numbered explanation); **Refresh** rolls a new problem;
+  **Reset** clears.
 - **Embed in a quiz** as a `{ problem: "name" }` question (see below): it renders inline, hides its own
   Check (the quiz's "Check answers" drives it), and folds `solved`/not into the scorecard.
 - Colours from `themeColors()`; re-themes on theme change. The board is **interactive** (the one place a

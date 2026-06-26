@@ -52,48 +52,85 @@ const BASIC_ALGEBRA = {
   ],
 };
 
-/**
- * Geometry: digits + the degree sign and the Greek unknowns an angle/length chase needs. Aimed at
- * "type the missing angle" answers — a value like `70` or `70°` (the ° is cosmetic; numeric grading
- * strips it), or a short expression like `180 - x`. The unknowns row carries the usual angle names.
- */
-const GEOMETRY = {
-  label: "Geometry",
+/** Geometry ANGLES: digits, the degree sign, +/−/×/÷, parentheses, and the angle unknowns (x, α, β,
+ * θ) — for "type the missing angle" answers like `70`, `70°`, or `180 - x` (the ° is cosmetic; numeric
+ * grading strips it). */
+const GEOMETRY_ANGLES = {
+  label: "Geometry Angles",
   rows: [
     [
-      { label: "7", key: "7" },
-      { label: "8", key: "8" },
-      { label: "9", key: "9" },
-      { label: "°", insert: "^\\circ" },
-      { class: "action", label: "⇦", command: "deleteBackward" },
-    ],
-    [
-      { label: "4", key: "4" },
-      { label: "5", key: "5" },
-      { label: "6", key: "6" },
-      { label: "+", key: "+" },
-      { label: "−", key: "-" },
-    ],
-    [
+      { label: "0", key: "0" },
       { label: "1", key: "1" },
       { label: "2", key: "2" },
       { label: "3", key: "3" },
-      { label: "×", insert: "\\times" },
-      { label: "÷", insert: "\\frac{#?}{#?}" },
+      { label: "4", key: "4" },
+      { class: "action", label: "⇦", command: "deleteBackward" },
     ],
     [
-      { label: "0", key: "0" },
-      { label: ".", key: "." },
-      { label: "(", key: "(" },
-      { label: ")", key: ")" },
+
+      { label: "5", key: "5" },
+      { label: "6", key: "6" },
+      { label: "7", key: "7" },
+      { label: "8", key: "8" },
+      { label: "9", key: "9" },
       { class: "action", label: "⇨", command: "moveToNextChar" },
     ],
     [
+      { label: "+", key: "+" },
+      { label: "−", key: "-" },
       { label: "x", key: "x" },
+      { label: "°", insert: "^\\circ" },
+      { label: ".", key: "." },
+      { class: "action", label: "Prev", command: "moveToPreviousPlaceholder" }
+    ],
+    [
       { label: "α", insert: "\\alpha" },
       { label: "β", insert: "\\beta" },
       { label: "θ", insert: "\\theta" },
-      { class: "action", label: "Next", command: "moveToNextPlaceholder" },
+      { label: "(", key: "(" },
+      { label: ")", key: ")" },
+      { class: "action", label: "Next", command: "moveToNextPlaceholder" }
+    ],
+  ],
+};
+
+/** Geometry LENGTHS: digits, decimal point, the four operations, a square root and parentheses, plus
+ * `x` — for length answers like `5`, `2.5`, `√(3)` or `x + 1` (no degree sign, no angle Greek). */
+const GEOMETRY_LENGTHS = {
+  label: "Geometry Lengths",
+  rows: [
+    [
+      { label: "0", key: "0" },
+      { label: "1", key: "1" },
+      { label: "2", key: "2" },
+      { label: "3", key: "3" },
+      { label: "4", key: "4" },
+      { class: "action", label: "⇦", command: "deleteBackward" },
+    ],
+    [
+
+      { label: "5", key: "5" },
+      { label: "6", key: "6" },
+      { label: "7", key: "7" },
+      { label: "8", key: "8" },
+      { label: "9", key: "9" },
+      { class: "action", label: "⇨", command: "moveToNextChar" },
+    ],
+    [
+      { label: "+", key: "+" },
+      { label: "−", key: "-" },
+      { label: "x²", insert: "^2" },
+      { label: "√", insert: "\\sqrt{#?}" },
+      { label: ".", key: "." },
+      { class: "action", label: "Prev", command: "moveToPreviousPlaceholder" }
+    ],
+    [
+      { label: "x", insert: "x" },
+      { label: "y", insert: "y" },
+      { label: "z", insert: "z" },
+      { label: "(", key: "(" },
+      { label: ")", key: ")" },
+      { class: "action", label: "Next", command: "moveToNextPlaceholder" }
     ],
   ],
 };
@@ -101,7 +138,8 @@ const GEOMETRY = {
 /** Module keyboards by name. */
 const KEYBOARDS = /** @type {Record<string, object>} */ ({
   "algebra-basic": BASIC_ALGEBRA,
-  geometry: GEOMETRY,
+  "geometry-angles": GEOMETRY_ANGLES,
+  "geometry-lengths": GEOMETRY_LENGTHS,
 });
 
 /**
