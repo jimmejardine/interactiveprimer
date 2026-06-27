@@ -230,8 +230,48 @@ export function triangleExterior(rng) {
   return { name: "triangleExterior", points, edges, parallels: [], angles, relations, boundingbox: [-3.3, C[1] + 0.9, 4.4, -1.8] };
 }
 
+/**
+ * Two straight lines crossing at a point — the canonical figure for vertically-opposite angles and
+ * angles on a straight line. Four angles around the crossing: opposite pairs are equal (vertical
+ * angles) and adjacent pairs sum to 180° (a straight line). θ is a nice non-right integer, so a chase
+ * here mixes vertical angles and angles-on-a-line.
+ * @param {import("../rng.js").Rng} rng
+ * @returns {Figure}
+ */
+export function crossingLines(rng) {
+  const theta = rng.pick([35, 40, 50, 55, 65, 70, 75, 80]);
+  const co = 180 - theta;
+  const r = 4;
+  const c = Math.cos(theta * DEG), s = Math.sin(theta * DEG);
+  /** @type {Record<string, Vec>} */
+  const points = {
+    O: [0, 0],
+    Rp: [r, 0], Lp: [-r, 0], // the horizontal line
+    Up: [r * c, r * s], Dn: [-r * c, -r * s], // the slanted line
+  };
+  /** @type {Array<[string, string]>} */
+  const edges = [["Lp", "Rp"], ["Dn", "Up"]];
+  // Angles around O, going anticlockwise from the +x ray. ur/ll = θ; ul/lr = 180−θ.
+  /** @type {AngleSlot[]} */
+  const angles = [
+    { key: "ur", vertex: "O", from: "Rp", to: "Up", value: theta },
+    { key: "ul", vertex: "O", from: "Up", to: "Lp", value: co },
+    { key: "ll", vertex: "O", from: "Lp", to: "Dn", value: theta },
+    { key: "lr", vertex: "O", from: "Dn", to: "Rp", value: co },
+  ];
+  const relations = [
+    equal("ur", "ll", "vertical"),
+    equal("ul", "lr", "vertical"),
+    sumTo(["ur", "ul"], 180, "linearPair"),
+    sumTo(["ul", "ll"], 180, "linearPair"),
+    sumTo(["ll", "lr"], 180, "linearPair"),
+    sumTo(["lr", "ur"], 180, "linearPair"),
+  ];
+  return { name: "crossingLines", points, edges, parallels: [], angles, relations, boundingbox: [-5, 3.6, 5, -3.6] };
+}
+
 /** All scaffolds by name, for the generator to pick from. */
-export const SCAFFOLDS = { parallelTransversal, triangle, triangleParallelApex, triangleExterior };
+export const SCAFFOLDS = { parallelTransversal, triangle, triangleParallelApex, triangleExterior, crossingLines };
 
 /**
  * The point on an angle's bisector at distance `r` from its vertex — where a label/blank for that

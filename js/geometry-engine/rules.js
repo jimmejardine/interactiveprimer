@@ -29,19 +29,19 @@
  */
 export const RULES = {
   vertical: {
-    conceptId: "mathematics/geometry/parallel-lines",
+    conceptId: "mathematics/geometry/vertically-opposite-angles",
     justifyKey: "ruleVertical",
   },
   linearPair: {
-    conceptId: "mathematics/geometry/parallel-lines",
+    conceptId: "mathematics/geometry/angles-on-a-line-and-at-a-point",
     justifyKey: "ruleLinearPair",
   },
   corresponding: {
-    conceptId: "mathematics/geometry/parallel-lines",
+    conceptId: "mathematics/geometry/corresponding-angles",
     justifyKey: "ruleCorresponding",
   },
   coInterior: {
-    conceptId: "mathematics/geometry/parallel-lines",
+    conceptId: "mathematics/geometry/co-interior-angles",
     justifyKey: "ruleCoInterior",
   },
   alternateInterior: {
@@ -49,7 +49,7 @@ export const RULES = {
     justifyKey: "ruleAlternate",
   },
   anglesAtPoint: {
-    conceptId: "mathematics/geometry/angles-at-a-point",
+    conceptId: "mathematics/geometry/angles-on-a-line-and-at-a-point",
     justifyKey: "ruleAnglesAtPoint",
   },
   triangleSum: {
@@ -57,7 +57,7 @@ export const RULES = {
     justifyKey: "ruleTriangleSum",
   },
   isoscelesBase: {
-    conceptId: "mathematics/geometry/isosceles-triangle",
+    conceptId: "mathematics/geometry/isosceles-triangles",
     justifyKey: "ruleIsosceles",
   },
   exteriorAngle: {

@@ -79,7 +79,7 @@ test("forwardChain respects the allowed pool — a disallowed theorem never fire
   const relations = [equal("a", "b", "vertical"), sumTo(["a", "c"], 180, "linearPair")];
   // Allow only the linearPair conceptId, not vertical.
   const allowed = new Set([RULES.linearPair.conceptId]);
-  // vertical and linearPair share a conceptId in the catalog, so to test gating use triangleSum.
+  // Use triangleSum vs alternateInterior (distinct conceptIds) to test gating cleanly.
   const rels2 = [sumTo(["a", "b", "c"], 180, "triangleSum"), equal("c", "d", "alternateInterior")];
   const onlyTri = new Set([RULES.triangleSum.conceptId]);
   const { known } = forwardChain(rels2, [["a", 60], ["b", 70]], onlyTri);
@@ -152,34 +152,40 @@ test("prereqClosure / allowedTheorems gate by the prerequisite DAG", () => {
   assert.deepEqual([...pinned].sort(), ["par", "triangle-sum"]);
 });
 
-test("the real graph gives angle-chasing's parallel-line theorems as learned", () => {
-  // alternate-interior-angles → parallel-lines is a real edge; a page built on alternate-interior
-  // therefore has both parallel-line and alternate-interior theorems in its closure.
+test("the real graph gives angle-chasing the whole transversal-theorem chain as learned", () => {
+  // Each transversal theorem is owned by its dedicated lesson; the Stage-1 chain threads them in
+  // order, so a practice page at the end (angle-chasing) has every earlier theorem in its closure.
   const graph = {
     concepts: [
-      { id: "mathematics/geometry/angle-chasing", prerequisites: ["mathematics/geometry/alternate-interior-angles"] },
-      { id: "mathematics/geometry/alternate-interior-angles", prerequisites: ["mathematics/geometry/parallel-lines"] },
-      { id: "mathematics/geometry/parallel-lines", prerequisites: [] },
+      { id: "mathematics/geometry/angle-chasing", prerequisites: ["mathematics/geometry/co-interior-angles"] },
+      { id: "mathematics/geometry/co-interior-angles", prerequisites: ["mathematics/geometry/alternate-interior-angles"] },
+      { id: "mathematics/geometry/alternate-interior-angles", prerequisites: ["mathematics/geometry/corresponding-angles"] },
+      { id: "mathematics/geometry/corresponding-angles", prerequisites: ["mathematics/geometry/vertically-opposite-angles"] },
+      { id: "mathematics/geometry/vertically-opposite-angles", prerequisites: [] },
     ],
   };
   const allowed = allowedTheorems(buildAdjacency(graph), "mathematics/geometry/angle-chasing", allRuleConcepts());
-  assert.ok(allowed.has("mathematics/geometry/parallel-lines"));
-  assert.ok(allowed.has("mathematics/geometry/alternate-interior-angles"));
+  for (const c of [
+    "mathematics/geometry/co-interior-angles",
+    "mathematics/geometry/alternate-interior-angles",
+    "mathematics/geometry/corresponding-angles",
+    "mathematics/geometry/vertically-opposite-angles",
+  ]) assert.ok(allowed.has(c), `${c} should be learned`);
   assert.ok(!allowed.has("mathematics/geometry/angle-sum-of-a-triangle")); // not a prerequisite
 });
 
 test("a page may practise its OWN theorem (its id is allowed too), plus its prerequisites", () => {
-  // The angle-sum page teaches triangleSum and builds on alternate-interior → parallel-lines, so a
-  // problem on it may chain all three (alternate angles, angles-on-a-line, AND the triangle sum).
+  // The angle-sum page teaches triangleSum and builds on alternate-interior → corresponding, so a
+  // problem on it may chain all three (alternate angles, corresponding angles, AND the triangle sum).
   const graph = {
     concepts: [
       { id: "mathematics/geometry/angle-sum-of-a-triangle", prerequisites: ["mathematics/geometry/alternate-interior-angles"] },
-      { id: "mathematics/geometry/alternate-interior-angles", prerequisites: ["mathematics/geometry/parallel-lines"] },
-      { id: "mathematics/geometry/parallel-lines", prerequisites: [] },
+      { id: "mathematics/geometry/alternate-interior-angles", prerequisites: ["mathematics/geometry/corresponding-angles"] },
+      { id: "mathematics/geometry/corresponding-angles", prerequisites: [] },
     ],
   };
   const allowed = allowedTheorems(buildAdjacency(graph), "mathematics/geometry/angle-sum-of-a-triangle", allRuleConcepts());
   assert.ok(allowed.has("mathematics/geometry/angle-sum-of-a-triangle"), "its own theorem is practisable");
   assert.ok(allowed.has("mathematics/geometry/alternate-interior-angles"));
-  assert.ok(allowed.has("mathematics/geometry/parallel-lines"));
+  assert.ok(allowed.has("mathematics/geometry/corresponding-angles"));
 });
