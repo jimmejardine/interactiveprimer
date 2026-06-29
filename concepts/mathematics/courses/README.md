@@ -22,9 +22,12 @@ Documentation only (the graph build scans `*.html`, not `.md`).
 
 ```
 courses/courses                              (hub)
+courses/primary-school/primary-school        (hub)
+courses/primary-school/za/za                 (hub) → grade-r, grade-1..7   [CAPS: Foundation R–3, Intermediate 4–6, Senior 7]
 courses/secondary-school/secondary-school    (hub)
 courses/secondary-school/uk/uk               (hub) → year-7..9, gcse-year-10..11, a-level-year-12..13
 courses/secondary-school/ib/ib               (hub) → myp-year-1..5, dp-year-1..2
+courses/secondary-school/za/za               (hub) → grade-8..9, grade-10..12   [CAPS: Senior 8–9, FET 10–12]
 ```
 
 Country codes are internet suffixes (`uk`); `ib` = International Baccalaureate. MYP years mirror UK

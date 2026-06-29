@@ -680,6 +680,12 @@ npm run check:graph  # validate only (CI gate; non-zero exit on error)
 npm run check        # typecheck + tests + graph validation (run before done)
 ```
 
+**Dev server: reuse it, never kill it.** A dev server is normally already running on
+`http://localhost:8080/` — just use it (curl/open URLs against it). Do **not** spawn a second
+`npm run serve`, and do **not** kill the server (no `taskkill`/`Stop-Process` on it) when you're done.
+There is no build step, so the running server already serves your edits. Only start one if nothing is
+listening on `:8080`, and if you do, leave it running.
+
 `npm run graph` reports **errors** (duplicate id, id≠path, dangling/cyclic
 prerequisites, an orphan unreachable from the root, a missing root) and **warnings** (a declared
 level below a prerequisite, or no declared level in a concept's ancestry). Orphans are
