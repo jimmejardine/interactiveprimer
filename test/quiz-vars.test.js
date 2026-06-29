@@ -171,3 +171,13 @@ test("checkAnswer: a numeric angle answer tolerates a degree marker", () => {
   assert.equal(checkAnswer(70, "71°"), false);
   assert.equal(checkAnswer(70, "71^{\\circ}"), false);
 });
+
+test("checkAnswer: a numeric percentage answer tolerates a percent marker", () => {
+  assert.equal(checkAnswer(25, "25%"), true);
+  assert.equal(checkAnswer(25, "25 %"), true);
+  assert.equal(checkAnswer(25, "25 percent"), true);
+  assert.equal(checkAnswer(25, "25 per cent"), true);
+  assert.equal(checkAnswer(25, "25"), true);
+  assert.equal(checkAnswer(10, "10%"), true);
+  assert.equal(checkAnswer(25, "26%"), false);
+});

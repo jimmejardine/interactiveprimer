@@ -181,6 +181,20 @@ export class PrimerPathway extends HTMLElement {
    * @param {NonNullable<ReturnType<typeof neighborhood>>} hood
    */
   #render(root, byId, hood) {
+    // Hide course nodes (course: true) from the mini map — they clutter concepts that are a course's
+    // "Begin →" target (a forward ref makes the course a prerequisite edge) — EXCEPT the learner's
+    // currently-focused course. The centre node (hood.id, the page itself) is never filtered.
+    const courseId = getCurrentCourse();
+    /** @param {string} nid */
+    const visible = (nid) => nid === courseId || byId.get(nid)?.course !== true;
+    hood = {
+      ...hood,
+      predecessors: hood.predecessors.filter(visible),
+      successors: hood.successors.filter(visible),
+      peers: hood.peers.filter(visible),
+      edges: hood.edges.filter((e) => visible(e.a) && visible(e.b)),
+    };
+
     // Label nodes in the active language: a node's translated title when the overlays
     // provided one (harvested into graph.json by build-graph), else the English title.
     const locale = getLocale();
@@ -212,7 +226,6 @@ export class PrimerPathway extends HTMLElement {
     // course-order predecessor/successor and surface them at the FRONT of col1/col3 (so they're not
     // truncated), tinted with the course colour. Course order ≠ prerequisite order, so a course
     // neighbour may not otherwise appear in these columns — hence we ensure it's present.
-    const courseId = getCurrentCourse();
     const members = courseId ? byId.get(courseId)?.courseMembers : undefined;
     /** @type {Set<string>} */
     const courseHL = new Set();
