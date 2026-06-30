@@ -187,10 +187,16 @@ export function get3dChart(name) {
  * @property {boolean} [keepAspect]
  * @property {string | (() => string)} [title]
  * @property {string} [sliders]  Name of a registered slider group the diagram listens to.
- * @property {number} [start]    Initial revealed-step count (default: all steps revealed).
+ * @property {number} [start]    Initial revealed-step count. A multi-step scene is "finished-frame-first"
+ *   by DEFAULT (opens fully revealed with a big Play button to replay), so the default opening is
+ *   `steps.length`; pass an explicit POSITIVE `start` to pin a specific frame, or use `stepThrough` to
+ *   open collapsed at the first step.
  * @property {number} [stepMs]   Fade duration for a step reveal in ms (default 450).
  * @property {boolean} [random]  This scene draws random initial conditions (via the toolkit `rng`):
  *   shows a "Refresh" button that re-draws a fresh example.
+ * @property {boolean} [stepThrough]  Opt OUT of the finished-frame-first default: open collapsed at the
+ *   first step and play through forward (no big-play overlay). For a genuine discover-it-yourself
+ *   exercise where revealing the final frame on load would spoil it.
  *
  * @typedef {object} GeometryEntry
  * @property {GeometryBuilder} builder

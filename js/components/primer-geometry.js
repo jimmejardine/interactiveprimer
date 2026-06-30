@@ -41,6 +41,9 @@ import { clampStep, createStepCollector, applyStepVisibility } from "../geometry
 import { makeGeometryTools } from "../geometry-tools.js";
 import { makeRng } from "../rng.js";
 
+/** The play triangle as inline SVG (matches `<primer-manim>`'s big-play icon; recolours with the theme). */
+const ICON_PLAY = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+
 export class PrimerGeometry extends HTMLElement {
   /** @type {any} The active JSXGraph board. */
   #board = null;
@@ -72,6 +75,13 @@ export class PrimerGeometry extends HTMLElement {
   #seed = null;
   /** @type {boolean} Whether this scene opted into random (shows the Refresh button). */
   #random = false;
+  /** @type {boolean} "Finished-frame-first" mode (the default for any multi-step scene): the figure
+   * opens fully revealed with a big Play button over it that rewinds and replays the build-up. False
+   * for static (0-step) scenes, `no-controls` scenes, and scenes that opt out with `stepThrough`. */
+  #showOverlay = false;
+  /** @type {HTMLElement | null} The big-play overlay button (cached: `#build` clears the stage, so the
+   * same node — with its listener — is re-appended over the freshly-rendered board each build). */
+  #bigPlay = null;
 
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
@@ -84,7 +94,7 @@ export class PrimerGeometry extends HTMLElement {
           font-size: 1.05rem; font-weight: 600; margin: 0 0 0.5rem; color: var(--primer-ink, #111);
           text-align: center;
         }
-        .geo-title[hidden], .bar[hidden], .expanded[hidden] { display: none; }
+        .geo-title[hidden], .bar[hidden], .expanded[hidden], .big-play[hidden] { display: none; }
         /* In the expanded "all steps" view, only the Collapse button (and Refresh, so a random
            figure can be re-rolled while expanded) stay in the bar — the step-nav buttons, counter and
            caption are meaningless when every step is shown at once. */
@@ -97,6 +107,16 @@ export class PrimerGeometry extends HTMLElement {
           box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
         .stage.jxgbox { background: var(--primer-viz-bg, #fff); }
         .stage svg { display: block; width: 100% !important; height: 100% !important; }
+        /* Big centred Play button overlaid on a "play overlay" figure: the figure opens fully
+           revealed, and this button rewinds + replays the build-up. Hidden while playing and on
+           non-overlay scenes. (Mirrors <primer-manim>'s big-play facade.) */
+        .big-play { position: absolute; inset: 0; display: grid; place-items: center; padding: 0; border: 0; background: transparent; cursor: pointer; }
+        .big-play .disc { width: 4.5rem; height: 4.5rem; border-radius: 50%; background: var(--primer-accent, #5b6ee1); display: grid; place-items: center;
+          box-shadow: 0 0 0 1px var(--primer-accent, #5b6ee1), 0 0 18px var(--primer-ring, rgba(70,90,230,0.7)), 0 2px 10px rgba(0, 0, 0, 0.25); }
+        .big-play svg { width: 2.4rem; height: 2.4rem; fill: var(--primer-accent-ink, #fff); margin-left: 0.25rem; /* optical-centre the triangle */ }
+        .big-play:hover .disc, .big-play:focus-visible .disc { filter: brightness(1.1); }
+        @keyframes primer-geo-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
+        @media (prefers-reduced-motion: no-preference) { .big-play .disc { animation: primer-geo-pulse 1.8s ease-in-out infinite; } }
         /* "Neon HUD" step bar: a recessed instrument strip of glowing chip buttons + a monospace
            step counter. Colours from --primer-* tokens (glow = the theme's accent/ring). */
         .bar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; justify-content: center;
@@ -141,7 +161,11 @@ export class PrimerGeometry extends HTMLElement {
           <button class="refresh" type="button" hidden>${t("geometry.refresh")}</button>
           <span class="caption"></span>
         </div>
-        <div class="stage" part="stage"></div>
+        <div class="stage" part="stage">
+          <button class="big-play" type="button" hidden aria-label="${t("geometry.play")}" title="${t("geometry.play")}">
+            <span class="disc">${ICON_PLAY}</span>
+          </button>
+        </div>
         <div class="expanded" part="expanded" hidden></div>
       </div>`;
 
@@ -153,6 +177,11 @@ export class PrimerGeometry extends HTMLElement {
     bar.querySelector(".play")?.addEventListener("click", () => this.#togglePlay());
     bar.querySelector(".refresh")?.addEventListener("click", () => void this.#refresh());
     bar.querySelector(".expand")?.addEventListener("click", () => this.#toggleExpand());
+
+    // The big-play overlay (cached so it survives the stage being cleared on each build). Pressing it
+    // rewinds + replays — play() already does `if (current >= steps.length) goTo(0)` first.
+    this.#bigPlay = /** @type {HTMLElement} */ (root.querySelector(".big-play"));
+    this.#bigPlay?.addEventListener("click", () => this.play());
 
     this.#onTheme = () => void this.#build(root);
     document.addEventListener("theme-change", this.#onTheme);
@@ -204,6 +233,9 @@ export class PrimerGeometry extends HTMLElement {
       this.#board = board;
       this.#jsx = JXG.JSXGraph;
       this.#steps = steps;
+      // Re-append the cached big-play overlay over the freshly-rendered board (initBoard injects the
+      // SVG; appending after it puts the absolutely-positioned button on top). #renderBar toggles it.
+      if (this.#bigPlay) stage.append(this.#bigPlay);
 
       // Title (may be a thunk so a localized title reflects the active locale).
       const rawTitle = entry.opts.title;
@@ -212,13 +244,22 @@ export class PrimerGeometry extends HTMLElement {
       heading.textContent = title;
       heading.hidden = !title;
 
-      // Initial step. By default a figure opens at the FIRST step (collapsed) so the student plays
-      // it through forward; an author can override with opts.start (e.g. start: <steps.length> to
-      // open fully revealed). A rebuild (e.g. theme change) keeps the student's current position
-      // (including 0), so the #started flag distinguishes "first build" from "rewound to 0". Apply
-      // instantly, THEN enable fades so the first hide doesn't flash a fade-out.
+      // "Finished-frame-first" is the DEFAULT for any multi-step scene: it opens fully revealed (the
+      // completed figure on load) with the big-play button to rewind + replay. Exceptions: a static
+      // (0-step) figure, a `no-controls` scene (externally driven), or a scene that opts out with
+      // `stepThrough: true` — those open at the first step. An explicit POSITIVE `opts.start` is always
+      // honored (an author pinning a specific frame); a redundant `start: 0` does NOT block the reveal.
+      // A rebuild (e.g. theme change) keeps the student's current position (the #started flag
+      // distinguishes "first build" from "rewound to 0"). Apply instantly, THEN enable fades so the
+      // first hide doesn't flash a fade-out.
+      this.#showOverlay =
+        this.#steps.length > 0 && !this.hasAttribute("no-controls") && !entry.opts.stepThrough;
       if (!this.#started) {
-        this.#current = clampStep(entry.opts.start ?? 0, this.#steps.length);
+        const start = entry.opts.start;
+        const opening = Number.isFinite(start) && /** @type {number} */ (start) > 0
+          ? /** @type {number} */ (start)
+          : this.#showOverlay ? this.#steps.length : 0;
+        this.#current = clampStep(opening, this.#steps.length);
         this.#started = true;
       } else {
         this.#current = clampStep(this.#current, this.#steps.length);
@@ -347,6 +388,8 @@ export class PrimerGeometry extends HTMLElement {
       this.#playTimer = 0;
     }
     this.#setPlayLabel(false);
+    // Re-show the big-play overlay now that playback has stopped (the play loop ends at current===n).
+    this.#renderBar();
   }
   /** @param {boolean} playing */
   #setPlayLabel(playing) {
@@ -373,6 +416,9 @@ export class PrimerGeometry extends HTMLElement {
     /** @type {HTMLButtonElement} */ (root.querySelector(".prev")).disabled = this.#current <= 0;
     /** @type {HTMLButtonElement} */ (root.querySelector(".next")).disabled = this.#current >= n;
     /** @type {HTMLButtonElement} */ (root.querySelector(".forward")).disabled = this.#current >= n;
+    // The big-play overlay: only in finished-frame-first mode, only at the final frame, and not while
+    // playing (it auto-hides the instant play advances, since every goTo re-runs #renderBar).
+    if (this.#bigPlay) this.#bigPlay.hidden = !(this.#showOverlay && n > 0 && this.#current >= n && !this.#playTimer);
   }
 
   #emit() {
