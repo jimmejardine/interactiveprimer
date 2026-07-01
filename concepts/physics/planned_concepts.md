@@ -19,9 +19,6 @@ topics and the whole **A-level** tier. Everything already built has been removed
 
 ## Still to build — GCSE (14–16)
 
-**Strand hubs (missing):** `waves/waves`, `electromagnetism/electromagnetism`, `atomic/atomic` — the
-only three strands without a folder-intro hub page.
-
 - **Working scientifically (secondary)** *(folder `working-scientifically/`)* — SI base & derived
   units; prefixes & standard form; scalars vs vectors; precision, accuracy & resolution; uncertainty &
   significant figures; interpreting graphs (gradient & area-under-graph meanings); systematic vs random
