@@ -160,7 +160,7 @@
   }
 
   // Pinned dependency URLs — the single source of truth for versions.
-  const KATEX_VERSION = "0.16.11";
+  const KATEX_VERSION = "0.16.47";
   const MANIM_VERSION = "0.3.22";
   const JSON5_VERSION = "2.2.3";
   const JSXGRAPH_VERSION = "1.12.2";

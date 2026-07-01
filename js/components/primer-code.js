@@ -91,20 +91,44 @@ export class PrimerCode extends HTMLElement {
         .output { white-space: pre-wrap; }
         .output .err { color: #e0564f; font-weight: 600; }
         .output .muted { color: var(--code-c); font-style: italic; }
+        .reset { font: inherit; font-size: 0.82rem; cursor: pointer; padding: 0.2rem 0.7rem;
+          border-radius: 0.35rem; border: 1px solid var(--primer-control-border, #ccc);
+          background: transparent; color: var(--primer-ink-soft, #667); }
+        .reset:hover { color: var(--primer-ink, #111); }
+        /* editable code: a transparent textarea over the highlighted layer (both identical box model) */
+        .editor { position: relative; overflow: hidden;
+          background: var(--code-bg, var(--primer-viz-bg, #fff));
+          border: 1px solid var(--primer-border, #e6e0d4);
+          border-radius: 0 0 var(--primer-radius, 0.6rem) var(--primer-radius, 0.6rem);
+          box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
+        .editor > pre, .editor > textarea { margin: 0; box-sizing: border-box; padding: 0.7rem 0.95rem;
+          font-family: var(--primer-font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
+          font-size: 0.9rem; line-height: 1.55; tab-size: 4; white-space: pre; }
+        /* no wrap: long lines scroll horizontally; the textarea is the scroller, the pre mirrors it */
+        .editor > pre { position: relative; pointer-events: none; overflow: hidden; color: var(--code-ink, #111); }
+        .editor > pre code { font: inherit; padding: 0; white-space: inherit; }
+        .editor > textarea { position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
+          resize: none; overflow: auto; scrollbar-width: none; outline: none;
+          color: transparent; background: transparent; caret-color: var(--code-ink, #111); }
+        .editor > textarea::-webkit-scrollbar { display: none; }
+        .editor > textarea:focus-visible { outline: 2px solid var(--primer-ring, #88f); outline-offset: -2px; }
       </style>
       <div class="wrap${runnable ? " runnable" : ""}">
         ${runnable
           ? `<div class="bar">
                <button class="tab code-tab active" type="button">Code</button>
                <button class="tab out-tab" type="button">Output</button>
+               <button class="reset" type="button" title="Reset the code to the original">Reset code</button>
                <span class="spacer"></span>
                <button class="run" type="button">▶ Run</button>
-             </div>`
-          : ""}
-        <pre class="panel code-pane"><code></code></pre>
-        ${runnable
-          ? `<pre class="panel output out-pane" hidden><span class="muted">▶ Press Run to see the output</span></pre>`
-          : ""}
+             </div>
+             <div class="editor code-pane">
+               <pre aria-hidden="true"><code></code></pre>
+               <textarea class="input" spellcheck="false" autocapitalize="off" autocomplete="off"
+                 aria-label="Editable code — edit it, then press Run"></textarea>
+             </div>
+             <pre class="panel output out-pane" hidden><span class="muted">▶ Press Run to see the output</span></pre>`
+          : `<pre class="panel code-pane"><code></code></pre>`}
       </div>`;
     /** @type {HTMLElement} */ (root.querySelector("code")).innerHTML = highlight(code, lang);
     this.#applyColors();
@@ -112,10 +136,59 @@ export class PrimerCode extends HTMLElement {
     document.addEventListener("theme-change", this.#onTheme);
 
     if (runnable) {
+      const ta = /** @type {HTMLTextAreaElement} */ (root.querySelector(".input"));
+      ta.value = code;
+      ta.addEventListener("input", () => this.#renderHighlight());
+      ta.addEventListener("scroll", () => this.#syncScroll());
+      ta.addEventListener("keydown", (e) => this.#onKey(e));
       root.querySelector(".code-tab")?.addEventListener("click", () => this.#showTab("code"));
       root.querySelector(".out-tab")?.addEventListener("click", () => this.#showTab("out"));
+      root.querySelector(".reset")?.addEventListener("click", () => this.#reset());
       root.querySelector(".run")?.addEventListener("click", () => void this.#run());
     }
+  }
+
+  /** Re-highlight the visible layer from the current textarea contents (called on every edit). */
+  #renderHighlight() {
+    const root = this.shadowRoot;
+    if (!root) return;
+    const ta = /** @type {HTMLTextAreaElement} */ (root.querySelector(".input"));
+    /** @type {HTMLElement} */ (root.querySelector(".editor pre code")).innerHTML = highlight(ta.value, this.#lang);
+    this.#syncScroll();
+  }
+
+  /** Keep the highlight layer scrolled in lockstep with the (scrollable) textarea. */
+  #syncScroll() {
+    const root = this.shadowRoot;
+    if (!root) return;
+    const ta = /** @type {HTMLTextAreaElement} */ (root.querySelector(".input"));
+    const pre = /** @type {HTMLElement} */ (root.querySelector(".editor > pre"));
+    if (ta && pre) {
+      pre.scrollLeft = ta.scrollLeft;
+      pre.scrollTop = ta.scrollTop;
+    }
+  }
+
+  /** Tab inserts two spaces (so indenting code doesn't jump focus out of the editor). @param {KeyboardEvent} e */
+  #onKey(e) {
+    if (e.key !== "Tab") return;
+    e.preventDefault();
+    const ta = /** @type {HTMLTextAreaElement} */ (e.target);
+    const s = ta.selectionStart;
+    ta.value = ta.value.slice(0, s) + "  " + ta.value.slice(ta.selectionEnd);
+    ta.selectionStart = ta.selectionEnd = s + 2;
+    this.#renderHighlight();
+  }
+
+  /** Restore the original source and return to the Code tab. */
+  #reset() {
+    const root = this.shadowRoot;
+    if (!root) return;
+    const ta = /** @type {HTMLTextAreaElement} */ (root.querySelector(".input"));
+    ta.value = this.#code;
+    this.#renderHighlight();
+    this.#showTab("code");
+    ta.focus();
   }
 
   disconnectedCallback() {
@@ -146,7 +219,8 @@ export class PrimerCode extends HTMLElement {
     out.innerHTML = `<span class="muted">Running…</span>`;
     this.#showTab("out");
     try {
-      const js = this.#lang.startsWith("t") ? await transpileTs(this.#code) : this.#code;
+      const src = /** @type {HTMLTextAreaElement} */ (root.querySelector(".input")).value;
+      const js = this.#lang.startsWith("t") ? await transpileTs(src) : src;
       const mod = await getQuickJs();
       if (!mod) {
         out.innerHTML = `<span class="err">Couldn't load the code runner (are you offline?).</span>`;
