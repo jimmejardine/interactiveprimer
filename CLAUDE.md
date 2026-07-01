@@ -147,8 +147,10 @@ recursive prerequisite ancestors, with members tinted in the course colour (`--p
     gains **Code** / **Output** tabs and a **Run ▶** button that transpiles the TS (sucrase) and runs the
     JS in a sandboxed **QuickJS-WASM** engine (lazy-loaded on first Run; no DOM/network — **`console.log`
     is what appears in Output**), then switches to the Output tab. An infinite loop is stopped by a ~1 s
-    timeout. Add `run` only to **complete, output-producing** examples (a `console.log`-driven demo); leave
-    fragments / snippets-mid-explanation non-run.
+    timeout. The Code pane is **editable** (line-number gutter, horizontal scroll, and a **Reset code**
+    button that restores your original), so learners can tweak the snippet and re-run it. Add `run` only to
+    **complete, output-producing** examples (a `console.log`-driven demo); leave fragments /
+    snippets-mid-explanation non-run.
 - `<primer-manim scene="name" caption="…">` — plays a registered animation on a Play
   button (lazy-loads manim-web; supports replay). See scenes below.
 - `<primer-chart scene="name">` — a **JSXGraph chart** (a function plotted on axes, SVG). Two

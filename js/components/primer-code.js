@@ -57,14 +57,12 @@ export class PrimerCode extends HTMLElement {
     root.innerHTML = `
       <style>
         :host { display: block; margin: 0.9rem 0; }
-        [hidden] { display: none; }
         .panel { margin: 0; padding: 0.7rem 0.95rem; overflow-x: auto;
           background: var(--code-bg, var(--primer-viz-bg, #fff));
           color: var(--code-ink, var(--primer-ink, #111));
           border: 1px solid var(--primer-border, #e6e0d4);
           border-radius: var(--primer-radius, 0.6rem);
           box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
-        .runnable .panel { border-radius: 0 0 var(--primer-radius, 0.6rem) var(--primer-radius, 0.6rem); }
         code { font-family: var(--primer-font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
           font-size: 0.9rem; line-height: 1.55; white-space: pre; tab-size: 4; }
         .k { color: var(--code-k); font-weight: 600; }
@@ -73,34 +71,29 @@ export class PrimerCode extends HTMLElement {
         .n { color: var(--code-n); }
         .f { color: var(--code-f); }
         .c { color: var(--code-c); font-style: italic; }
-        .bar { display: flex; align-items: center; gap: 0.3rem; padding: 0.3rem 0.4rem;
+        /* runnable block: one cohesive frame — toolbar, editor, then an always-visible output */
+        .runner { overflow: hidden;
+          background: var(--code-bg, var(--primer-viz-bg, #fff));
+          border: 1px solid var(--primer-border, #e6e0d4);
+          border-radius: var(--primer-radius, 0.6rem);
+          box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
+        .bar { display: flex; align-items: center; gap: 0.4rem; padding: 0.35rem 0.5rem;
           background: var(--primer-control-bg, #f1ede4);
-          border: 1px solid var(--primer-control-border, #ccc); border-bottom: 0;
-          border-radius: var(--primer-radius, 0.6rem) var(--primer-radius, 0.6rem) 0 0; }
-        .tab { font: inherit; font-size: 0.82rem; padding: 0.2rem 0.7rem; cursor: pointer;
-          border: 1px solid transparent; border-radius: 0.35rem; background: transparent;
-          color: var(--primer-ink-soft, #667); }
-        .tab.active { background: var(--code-bg, #fff); color: var(--primer-ink, #111);
-          border-color: var(--primer-control-border, #ccc); font-weight: 600; }
+          border-bottom: 1px solid var(--primer-border, #e6e0d4); }
+        .eyebrow-label { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+          text-transform: uppercase; color: var(--primer-ink-soft, #667); }
         .spacer { flex: 1; }
+        .reset { font: inherit; font-size: 0.82rem; cursor: pointer; padding: 0.2rem 0.7rem;
+          border-radius: 0.35rem; border: 1px solid var(--primer-control-border, #ccc);
+          background: transparent; color: var(--primer-ink-soft, #667); }
+        .reset:hover { color: var(--primer-ink, #111); }
         .run { font: inherit; font-size: 0.82rem; font-weight: 700; cursor: pointer;
           padding: 0.2rem 0.85rem; border-radius: 0.35rem; border: 1px solid transparent;
           color: var(--primer-accent-ink, #fff); background: var(--primer-accent, #4d5bd1);
           box-shadow: 0 0 8px var(--primer-ring, rgba(70,90,230,0.4)); }
         .run:disabled { opacity: 0.55; cursor: default; box-shadow: none; }
-        .output { white-space: pre-wrap; }
-        .output .err { color: #e0564f; font-weight: 600; }
-        .output .muted { color: var(--code-c); font-style: italic; }
-        .reset { font: inherit; font-size: 0.82rem; cursor: pointer; padding: 0.2rem 0.7rem;
-          border-radius: 0.35rem; border: 1px solid var(--primer-control-border, #ccc);
-          background: transparent; color: var(--primer-ink-soft, #667); }
-        .reset:hover { color: var(--primer-ink, #111); }
         /* editable code: a line-number gutter, then a transparent textarea over the highlighted layer */
-        .editor { position: relative; display: flex; align-items: stretch; overflow: hidden;
-          background: var(--code-bg, var(--primer-viz-bg, #fff));
-          border: 1px solid var(--primer-border, #e6e0d4);
-          border-radius: 0 0 var(--primer-radius, 0.6rem) var(--primer-radius, 0.6rem);
-          box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
+        .editor { position: relative; display: flex; align-items: stretch; }
         .gutter { flex: 0 0 auto; box-sizing: border-box; padding: 0.7rem 0.5rem;
           font-family: var(--primer-font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
           font-size: 0.9rem; line-height: 1.55; white-space: pre; text-align: right;
@@ -119,25 +112,39 @@ export class PrimerCode extends HTMLElement {
           color: transparent; background: transparent; caret-color: var(--code-ink, #111); }
         .code-wrap > textarea::-webkit-scrollbar { display: none; }
         .code-wrap > textarea:focus-visible { outline: 2px solid var(--primer-ring, #88f); outline-offset: -2px; }
+        /* always-visible output, divided from the code above it */
+        .out-head { padding: 0.3rem 0.7rem; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+          text-transform: uppercase; color: var(--primer-ink-soft, #667);
+          background: var(--primer-control-bg, #f1ede4);
+          border-top: 1px solid var(--primer-border, #e6e0d4); }
+        .output { margin: 0; padding: 0.7rem 0.95rem; white-space: pre-wrap; overflow: auto;
+          color: var(--code-ink, var(--primer-ink, #111));
+          font-family: var(--primer-font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
+          font-size: 0.9rem; line-height: 1.55;
+          max-height: calc(20 * 1.55 * 0.9rem + 1.4rem); } /* ~20 lines, then scroll */
+        .output .err { color: #e0564f; font-weight: 600; }
+        .output .muted { color: var(--code-c); font-style: italic; }
       </style>
-      <div class="wrap${runnable ? " runnable" : ""}">
+      <div class="wrap">
         ${runnable
-          ? `<div class="bar">
-               <button class="tab code-tab active" type="button">Code</button>
-               <button class="tab out-tab" type="button">Output</button>
-               <button class="reset" type="button" title="Reset the code to the original">Reset code</button>
-               <span class="spacer"></span>
-               <button class="run" type="button">▶ Run</button>
-             </div>
-             <div class="editor code-pane">
-               <div class="gutter" aria-hidden="true">1</div>
-               <div class="code-wrap">
-                 <pre aria-hidden="true"><code></code></pre>
-                 <textarea class="input" spellcheck="false" autocapitalize="off" autocomplete="off"
-                   aria-label="Editable code — edit it, then press Run"></textarea>
+          ? `<div class="runner">
+               <div class="bar">
+                 <span class="eyebrow-label">Code</span>
+                 <span class="spacer"></span>
+                 <button class="reset" type="button" title="Reset the code to the original">Reset code</button>
+                 <button class="run" type="button">▶ Run</button>
                </div>
-             </div>
-             <pre class="panel output out-pane" hidden><span class="muted">▶ Press Run to see the output</span></pre>`
+               <div class="editor">
+                 <div class="gutter" aria-hidden="true">1</div>
+                 <div class="code-wrap">
+                   <pre aria-hidden="true"><code></code></pre>
+                   <textarea class="input" spellcheck="false" autocapitalize="off" autocomplete="off"
+                     aria-label="Editable code — edit it, then press Run"></textarea>
+                 </div>
+               </div>
+               <div class="out-head">Output</div>
+               <pre class="output out-pane"><span class="muted">▶ Press Run to see the output</span></pre>
+             </div>`
           : `<pre class="panel code-pane"><code></code></pre>`}
       </div>`;
     /** @type {HTMLElement} */ (root.querySelector("code")).innerHTML = highlight(code, lang);
@@ -152,8 +159,6 @@ export class PrimerCode extends HTMLElement {
       ta.addEventListener("input", () => this.#renderHighlight());
       ta.addEventListener("scroll", () => this.#syncScroll());
       ta.addEventListener("keydown", (e) => this.#onKey(e));
-      root.querySelector(".code-tab")?.addEventListener("click", () => this.#showTab("code"));
-      root.querySelector(".out-tab")?.addEventListener("click", () => this.#showTab("out"));
       root.querySelector(".reset")?.addEventListener("click", () => this.#reset());
       root.querySelector(".run")?.addEventListener("click", () => void this.#run());
     }
@@ -205,14 +210,13 @@ export class PrimerCode extends HTMLElement {
     this.#renderHighlight();
   }
 
-  /** Restore the original source and return to the Code tab. */
+  /** Restore the original source. */
   #reset() {
     const root = this.shadowRoot;
     if (!root) return;
     const ta = /** @type {HTMLTextAreaElement} */ (root.querySelector(".input"));
     ta.value = this.#code;
     this.#renderHighlight();
-    this.#showTab("code");
     ta.focus();
   }
 
@@ -221,18 +225,7 @@ export class PrimerCode extends HTMLElement {
     this.#onTheme = null;
   }
 
-  /** @param {"code"|"out"} which */
-  #showTab(which) {
-    const root = this.shadowRoot;
-    if (!root) return;
-    const code = which === "code";
-    /** @type {HTMLElement} */ (root.querySelector(".code-pane")).hidden = !code;
-    /** @type {HTMLElement} */ (root.querySelector(".out-pane")).hidden = code;
-    root.querySelector(".code-tab")?.classList.toggle("active", code);
-    root.querySelector(".out-tab")?.classList.toggle("active", !code);
-  }
-
-  /** Transpile (if TS) → load the sandbox → run → show captured output, switching to the Output tab. */
+  /** Transpile (if TS) → load the sandbox → run → show the captured output (always visible below the code). */
   async #run() {
     if (this.#running) return;
     const root = this.shadowRoot;
@@ -242,7 +235,6 @@ export class PrimerCode extends HTMLElement {
     this.#running = true;
     btn.disabled = true;
     out.innerHTML = `<span class="muted">Running…</span>`;
-    this.#showTab("out");
     try {
       const src = /** @type {HTMLTextAreaElement} */ (root.querySelector(".input")).value;
       const js = this.#lang.startsWith("t") ? await transpileTs(src) : src;
