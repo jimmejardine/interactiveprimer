@@ -10,8 +10,10 @@ as a nested tree. It is the master plan for which `concepts/physics/**` pages to
 - **Order = prerequisite order**, which is also the rough 5→18 progression.
 - **Age bands** (UK-flavoured, "what I'd teach"): *Early* 5–7 · *Primary* 7–11 ·
   *Lower secondary* 11–14 · *GCSE* 14–16 · *A-level* 16–18.
-- **No physics pages are built yet** — every leaf is **planned**. When one becomes a page, mark it
-  `✓ built: <slug>` (path under `concepts/physics/`), as in the maths plan.
+- **The primary strands are built; secondary is still planned.** When a leaf becomes a page, mark it
+  `✓ built: <slug>` (path under `concepts/physics/`), as in the maths plan. See **Built so far** at the
+  bottom for the current list. There is also a **UK physics course tree** under
+  `concepts/physics/courses/` (Reception–Year 6 and GCSE Year 10–11) that curates these pages.
 - Many leaves **depend on maths** (graphs, ratio, algebra, trig, calculus); those prerequisites
   live in `concepts/mathematics/`.
 
@@ -303,10 +305,27 @@ as a nested tree. It is the master plan for which `concepts/physics/**` pages to
 ---
 
 ### Notes & next steps
-- **Nothing is built yet** — this is a clean slate; the *Working scientifically* thread and
-  *Forces & Motion* / *Energy* / *Electricity* strands are the natural first pages.
+- **The primary strands are built** — Working Scientifically, Forces & Motion (primary), Energy
+  (primary) and Electricity (primary). The natural next pages are **light** and **sound** (to fill the
+  KS2 course years), then the **lower-secondary / GCSE** strands (motion & graphs, GCSE energy and
+  electricity, waves, particle model, atomic & nuclear).
 - **Maths dependencies:** speed/graphs need ratio & line graphs; GCSE physics needs rearranging
   formulae & standard form; A-level needs trig, vectors and calculus — link those as prerequisites
   into `concepts/mathematics/`.
 - When promoting a leaf to a page, follow `CLAUDE.md`: one idea per page; set `prerequisites` to the
   feeding leaves (including cross-subject maths), and let levels propagate.
+
+### Built so far (`concepts/physics/`)
+- **Hubs:** `physics`, `forces-and-motion/forces-and-motion`, `working-scientifically/working-scientifically`,
+  `energy/energy`, `electricity/electricity`.
+- **Forces & Motion (primary):** `forces-and-motion/pushes-and-pulls`, `.../forces-change-things`,
+  `.../friction`, `.../air-and-water-resistance`, `.../gravity`, `.../magnets`, `.../floating-and-sinking`,
+  `.../levers-gears-and-pulleys`, `.../balanced-forces`.
+- **Working Scientifically:** `working-scientifically/observing-and-questioning`, `.../fair-tests`,
+  `.../measuring-in-science`, `.../recording-results`.
+- **Energy (primary):** `energy/what-is-energy`, `energy/types-of-energy`, `energy/saving-energy`.
+- **Electricity (primary):** `electricity/simple-circuits`, `electricity/switches`,
+  `electricity/conductors-and-insulators`, `electricity/changing-brightness`.
+- **Courses:** the UK tree at `courses/**` — `primary-school/uk/{reception, year-1…year-6}` and
+  `secondary-school/uk/{gcse-year-10, gcse-year-11}` (plus the `courses`, `primary-school`,
+  `secondary-school`, and country hubs).
