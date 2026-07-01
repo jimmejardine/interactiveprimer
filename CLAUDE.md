@@ -5,19 +5,44 @@
 This file is the cheat-sheet for authoring **concept pages**. A page is a single
 `.html` file under `concepts/`; there is **no build step**.
 
-## Pedagogy: one small idea per page
+## Pedagogy: one concept per page — taught thoroughly
 
-Concepts are **short and concise** — a page teaches a single, naturally digestible idea,
-then stops. Prefer **many tiny steps** over a few dense lessons: a learner should finish a
-page feeling they mastered one clear thing.
+A page teaches **exactly one idea** — but it teaches it **richly and completely**, not briefly.
+The limit is **one concept, not one screen**: a good page is as long as it needs to be to make its
+single idea genuinely stick. **Brevity is not the goal** — a page that is a lone sentence and one
+equation has failed the learner. Explore the idea from several angles, work examples, take a couple of
+fun detours, and show it moving. A learner should leave feeling they *deeply* understand one clear thing.
 
-**Split a concept** whenever it grows too long or carries more than one digestible idea —
-make each part its own page and chain them with `prerequisites`. For example, the derivative
-is built power by power: a constant, then `$x$`, then `$x^2$`, then `$x^3$`, *then* the
-general power rule — each its own page, so the pattern is discovered, not asserted. When a
-draft starts covering two things, that's the signal to split.
+**Split a concept** whenever a page starts carrying **more than one idea** (not merely when it gets
+long). Make each part its own page and chain them with `prerequisites`. For example, the derivative
+is built power by power: a constant, then `$x$`, then `$x^2$`, then `$x^3$`, *then* the general power
+rule — each its own page, so the pattern is discovered, not asserted. When a draft starts teaching two
+*different* things, that's the signal to split; when it just goes deep on one thing, that's correct.
 
-See `concepts/mathematics/calculus/README.md` for a worked example of decomposing a subject this way.
+### What a good page contains
+
+**Write for the learner's age and level first.** The language, the contexts, the examples and the quiz
+should all be pitched to whoever meets this idea — the words, situations and numbers for a six-year-old
+counting animals are nothing like those for someone meeting eigenvalues. Match the reading level, the
+worked examples and the quiz difficulty to that learner every time.
+
+Then build the page from the palette below — **select the ingredients that suit *this* idea, and vary the
+mix and the framing from page to page.** There is no fixed template; leaning on the same recipe everywhere
+makes the whole Primer feel uniform, repetitive and boring. Some ideas want a rolling animation and no
+theorem; others want three worked examples and a couple of detours. The one firm rule: a page that is
+only an intro and a quiz is too thin — go deeper. Draw on:
+
+- a **real-world hook** — why this idea matters, in a concrete, age-appropriate situation;
+- the idea in **more than one representation** — words, maths, and a picture (concrete → pictorial → abstract);
+- **worked examples**, done step by step, at the right level;
+- **`<primer-vignette>` digressions** — a catchy question in the header, a fun answer in the expansion:
+  the "why", a bit of history, a surprising case, an extra example the learner doesn't strictly need but
+  will enjoy;
+- **visual aids where they help** — a `<primer-manim>` animation, a `<primer-chart>` / `<primer-chart-3d>`,
+  or a `<primer-geometry>` figure; a moving or interactive diagram beats a static one;
+- a **`<primer-theorem name="Watch out!">`** callout naming a classic misconception;
+- a **randomised `<primer-quiz>`** — variable-driven and age-appropriate, so it never runs out (see the
+  quiz section: an *"eternal" quiz*, not a fixed list of static questions).
 
 ## Page skeleton (copy this)
 
@@ -91,6 +116,16 @@ recursive prerequisite ancestors, with members tinted in the course colour (`--p
 ## Authoring elements (use inside `<primer-card>`)
 
 - `<primer-card>` — top-level content block; use one or more per page.
+- `<primer-vignette title="catchy question">…answer…</primer-vignette>` — a **collapsible digression**
+  (a native `<details>` under the hood) that starts **collapsed**. The `title` is the hook shown on the
+  closed card — phrase it as an intriguing question; the body (prose, `<primer-math>`, `<img>`, even a
+  slotted diagram) is the reveal. Use it for the interesting-but-inessential asides that make a page fun:
+  the "why", a scrap of history, a surprising edge case, a stretch example. Put one or two on a page; sits
+  among your `<primer-card>`s.
+- `<primer-theorem name="…">…</primer-theorem>` — a labelled **callout** box. The eyebrow reads
+  **"Theorem — {name}"** (just "Theorem" if `name` is omitted). Use it for a formal theorem / definition /
+  key rule — and, with **`name="Watch out!"`**, as the standard **misconception / warning** box that names
+  the classic mistake. If it makes several points, list them as **bullets**, not a run-on sentence.
 - `<primer-math>` — LaTeX. Body text is the source: inline by default, block with the
   `display` attribute. e.g. `<primer-math display>\int_0^1 x\,dx</primer-math>`.
 - `<primer-manim scene="name" caption="…">` — plays a registered animation on a Play
@@ -132,6 +167,13 @@ recursive prerequisite ancestors, with members tinted in the course colour (`--p
   The quiz renders its **own** standardized golden "Quick quiz" panel (titled card), so place it
   **directly** — do **not** wrap it in a `<primer-card>` and do **not** add a per-page heading
   (`<h2>Test yourself</h2>` etc.).
+
+  **Make the quiz RANDOMISED — an "eternal" quiz that never repeats.** The default is variable-driven
+  questions: give a question `variables` (+ `constraints`) so every draw gets fresh numbers, and it
+  re-instantiates each time the learner retakes it (see the `variables` / `constraints` /
+  multiple-choice-with-variables machinery below). A fixed list of hard-coded questions is the
+  **exception**, not the norm — reach for it only when a question genuinely can't be parameterised. Keep
+  the numbers and contexts age-appropriate for whoever meets the page.
 
   **Quiz settings live in the builder, not on the element.** The builder's optional **first** item is
   a config object `{ num_questions, preamble }` — recognized by having **no `options` and no
@@ -737,5 +779,5 @@ safety net (e.g. if that maintenance node is deleted).
 
 1. File at `concepts/<path>.html` (the path **is** the id — nothing to declare). Add a `<primer-title>` with the display title.
 2. List `prerequisites` (in a `concept-meta` block **after `</html>`**) by full-path id; a base concept with no natural prerequisite may omit them — or omit the whole block — (it's auto-attached to the `orphans` node).
-3. Author content as `<primer-card>`s; add math/animation/quiz as needed; keep each `scene-strings` block before its card, and put `<script type="module">` builders after `</html>`.
+3. Author content as several `<primer-card>`s, pitched to the learner's age — teach the one idea *richly* (see "What a good page contains"): a hook, multiple representations, worked examples, one or two `<primer-vignette>` digressions, a visual aid where it helps (`<primer-manim>` / `<primer-chart>` / `<primer-geometry>`), usually a `<primer-theorem name="Watch out!">`, and a **randomised** `<primer-quiz>`. Don't ship a lone intro-plus-quiz. Keep each `scene-strings` block before its card, and put `<script type="module">` builders after `</html>`.
 4. `npm run graph` is clean, then preview with `npm run serve`.

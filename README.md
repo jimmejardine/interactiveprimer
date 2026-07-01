@@ -70,7 +70,8 @@ time — **there is no build step**. The toolchain:
   (a TypeScript port of Manim) renders animations. Both are imported as pre-built ESM.
 - **Web Components** in [`js/components/`](js/components/) give every page a consistent
   look-and-feel. Authors write content as `<primer-card>` cards using `<primer-math>`,
-  `<primer-manim>`, and `<primer-quiz>`; the page shell (`<primer-page>` header/footer
+  `<primer-manim>`, `<primer-vignette>` (collapsible digressions), `<primer-theorem>`
+  (callouts), and a randomised `<primer-quiz>`; the page shell (`<primer-page>` header/footer
   and `<primer-concept>` title + confidence control) is built automatically by
   [`js/render.js`](js/render.js) from the page's metadata block. All elements are
   registered by the single [`js/primer.js`](js/primer.js) module.
@@ -120,10 +121,11 @@ npm run serve      # static file server; open /index.html
 ```
 
 Type-checking, tests and graph validation need no compilation; they are *checks*, not a
-build. Authoring a new concept is just adding an `.html` page (copy
-`concepts/mathematics/arithmetic/counting.html`) — its id is simply its path under `concepts/`, and its title
-goes in a `<primer-title>`. An optional quiz is authored in JS with `registerQuiz`
-and shown via `<primer-quiz name="…">` (see `addition.html`).
+build. Authoring a new concept is just adding an `.html` page — its id is simply its path
+under `concepts/`, and its title goes in a `<primer-title>`. A page should teach its one
+idea *richly* and at the right age level (see the authoring brief in
+[`CLAUDE.md`](CLAUDE.md)); every page carries a **randomised** quiz, authored in JS with
+`registerQuiz` and shown via `<primer-quiz name="…">`, so it never runs out of questions.
 
 
 ## License
