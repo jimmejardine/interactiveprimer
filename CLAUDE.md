@@ -40,7 +40,9 @@ only an intro and a quiz is too thin — go deeper. Draw on:
   will enjoy;
 - **visual aids where they help** — a `<primer-manim>` animation, a `<primer-chart>` / `<primer-chart-3d>`,
   or a `<primer-geometry>` figure; a moving or interactive diagram beats a static one;
-- a **`<primer-theorem name="Watch out!">`** callout naming a classic misconception;
+- a **misconception "Watch out!" callout** — name a classic mistake and put it right. Use a
+  **`<primer-vignette title="Watch out!">`** for these; **do not** use `<primer-theorem>` (the theorem
+  pane is for stating actual theorems/laws only);
 - a **randomised `<primer-quiz>`** — variable-driven and age-appropriate, so it never runs out (see the
   quiz section: an *"eternal" quiz*, not a fixed list of static questions).
 
@@ -122,10 +124,12 @@ recursive prerequisite ancestors, with members tinted in the course colour (`--p
   slotted diagram) is the reveal. Use it for the interesting-but-inessential asides that make a page fun:
   the "why", a scrap of history, a surprising edge case, a stretch example. Put one or two on a page; sits
   among your `<primer-card>`s.
-- `<primer-theorem name="…">…</primer-theorem>` — a labelled **callout** box. The eyebrow reads
-  **"Theorem — {name}"** (just "Theorem" if `name` is omitted). Use it for a formal theorem / definition /
-  key rule — and, with **`name="Watch out!"`**, as the standard **misconception / warning** box that names
-  the classic mistake. If it makes several points, list them as **bullets**, not a run-on sentence.
+- `<primer-theorem name="…">…</primer-theorem>` — a labelled **callout** box for **stating a theorem**.
+  The eyebrow reads **"Theorem — {name}"** (just "Theorem" if `name` is omitted). Use it **only** for a
+  formal theorem / law / definition / key result — its content should read as a *statement of that
+  theorem*. It is **not** a general warning box: for a misconception / "Watch out!" note, use a
+  `<primer-vignette title="Watch out!">` instead. If a theorem states several claims, list them as
+  **bullets**, not a run-on sentence.
 - `<primer-math>` — LaTeX. Body text is the source: inline by default, block with the
   `display` attribute. e.g. `<primer-math display>\int_0^1 x\,dx</primer-math>`.
 - `<primer-manim scene="name" caption="…">` — plays a registered animation on a Play
@@ -783,5 +787,5 @@ safety net (e.g. if that maintenance node is deleted).
 
 1. File at `concepts/<path>.html` (the path **is** the id — nothing to declare). Add a `<primer-title>` with the display title.
 2. List `prerequisites` (in a `concept-meta` block **after `</html>`**) by full-path id; a base concept with no natural prerequisite may omit them — or omit the whole block — (it's auto-attached to the `orphans` node).
-3. Author content as several `<primer-card>`s, pitched to the learner's age — teach the one idea *richly* (see "What a good page contains"): a hook, multiple representations, worked examples, one or two `<primer-vignette>` digressions, a visual aid where it helps (`<primer-manim>` / `<primer-chart>` / `<primer-geometry>`), usually a `<primer-theorem name="Watch out!">`, and a **randomised** `<primer-quiz>` with **≥10 questions in the bank** (only ~5 are drawn per attempt). Don't ship a lone intro-plus-quiz. Keep each `scene-strings` block before its card, and put `<script type="module">` builders after `</html>`.
+3. Author content as several `<primer-card>`s, pitched to the learner's age — teach the one idea *richly* (see "What a good page contains"): a hook, multiple representations, worked examples, one or two `<primer-vignette>` digressions (including a `<primer-vignette title="Watch out!">` for the classic misconception), a visual aid where it helps (`<primer-manim>` / `<primer-chart>` / `<primer-geometry>`), and a **randomised** `<primer-quiz>` with **≥10 questions in the bank** (only ~5 are drawn per attempt). Don't ship a lone intro-plus-quiz. Keep each `scene-strings` block before its card, and put `<script type="module">` builders after `</html>`.
 4. `npm run graph` is clean, then preview with `npm run serve`.
