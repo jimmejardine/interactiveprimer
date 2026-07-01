@@ -70,8 +70,8 @@ time — **there is no build step**. The toolchain:
   (a TypeScript port of Manim) renders animations. Both are imported as pre-built ESM.
 - **Web Components** in [`js/components/`](js/components/) give every page a consistent
   look-and-feel. Authors write content as `<primer-card>` cards using `<primer-math>`,
-  `<primer-manim>`, `<primer-vignette>` (collapsible digressions), `<primer-theorem>`
-  (callouts), and a randomised `<primer-quiz>`; the page shell (`<primer-page>` header/footer
+  `<primer-code>` (highlighted code blocks), `<primer-manim>`, `<primer-vignette>` (collapsible
+  digressions), `<primer-theorem>` (callouts), and a randomised `<primer-quiz>`; the page shell (`<primer-page>` header/footer
   and `<primer-concept>` title + confidence control) is built automatically by
   [`js/render.js`](js/render.js) from the page's metadata block. All elements are
   registered by the single [`js/primer.js`](js/primer.js) module.

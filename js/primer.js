@@ -19,6 +19,7 @@ import "./components/primer-theorem.js";
 import "./components/primer-vignette.js";
 import "./components/primer-ref.js";
 import "./components/primer-math.js";
+import "./components/primer-code.js";
 import "./components/primer-manim.js";
 import "./components/primer-chart.js";
 import "./components/primer-chart-3d.js";

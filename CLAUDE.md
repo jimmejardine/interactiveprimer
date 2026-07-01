@@ -132,6 +132,15 @@ recursive prerequisite ancestors, with members tinted in the course colour (`--p
   **bullets**, not a run-on sentence.
 - `<primer-math>` — LaTeX. Body text is the source: inline by default, block with the
   `display` attribute. e.g. `<primer-math display>\int_0^1 x\,dx</primer-math>`.
+- `<primer-code lang="javascript">…code…</primer-code>` — a themed, lightly syntax-highlighted **code
+  block** for programming / algorithm pages. The element's **text content** is the source; leading/
+  trailing blank lines are dropped and the common indent stripped (so you can indent the block in your
+  HTML). `lang`: `javascript`/`js` (default) · `python` · `sql` · `text`/`pseudocode` (panel, no
+  highlighting). Token colours come from the theme palette, so it recolours with light/dark/fun. **Write
+  every code example in JavaScript** — it runs in the browser, so these snippets can be made executable
+  later (do NOT use Python/pseudocode for new examples). **Escape `<` `>` `&` in the body** (`&lt;` `&gt;`
+  `&amp;`) — e.g. `if (x &lt; 10)`. For a short literal in prose, plain inline `<code>` is fine; use
+  `<primer-code>` for multi-line code.
 - `<primer-manim scene="name" caption="…">` — plays a registered animation on a Play
   button (lazy-loads manim-web; supports replay). See scenes below.
 - `<primer-chart scene="name">` — a **JSXGraph chart** (a function plotted on axes, SVG). Two
