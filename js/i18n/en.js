@@ -14,12 +14,16 @@
 export default {
   "app.name": "Interactive Primer",
 
+  "a11y.skipLink": "Skip to main content",
+
   "concept.confidence.prompt": "How confident are you with this concept?",
   "feedback.needsAttention": "This page needs attention",
   "feedback.thanks": "Thanks — flagged for review.",
   "concept.confidence.legend": "Your confidence",
   "concept.confidence.rate": "Rate {n} out of {max}",
   "concept.confidence.rateTitle": "{n} / {max}",
+  "concept.confidence.current": "Current confidence rating: {n} out of {max}.",
+  "concept.confidence.unrated": "Not yet rated.",
   "concept.level.label": "Level {level}",
   "concept.level.word": "Level",
   "concept.level.declaredTitle": "Declared level",

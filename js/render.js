@@ -112,6 +112,17 @@ async function render() {
 
   const main = document.createElement("main");
   main.className = "primer-shell";
+  // Landmark + skip-link target. Concept pages have no static HTML, so the "skip to content" link
+  // (the first focusable element, jumping past the fixed chrome) is injected here too.
+  main.id = "main";
+  main.tabIndex = -1;
+  if (!body.querySelector(".skip-link")) {
+    const skip = document.createElement("a");
+    skip.className = "skip-link";
+    skip.href = "#main";
+    skip.textContent = t("a11y.skipLink");
+    body.insertBefore(skip, body.firstChild);
+  }
   const page = document.createElement("primer-page");
   const concept = document.createElement("primer-concept");
 

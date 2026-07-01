@@ -39,7 +39,7 @@ export const SEARCH_BOX_CSS = `
     box-shadow: var(--primer-shadow-lg, 0 12px 36px rgba(0, 0, 0, 0.18));
   }
   .cg-results[hidden] { display: none; }
-  .cg-result { display: flex; flex-direction: row; align-items: center; gap: 0.5rem; padding: 0.35rem 0.5rem; border-radius: 0.4rem; cursor: pointer; }
+  .cg-result { display: flex; flex-direction: row; align-items: center; gap: 0.5rem; min-height: 44px; padding: 0.45rem 0.55rem; border-radius: 0.4rem; cursor: pointer; }
   .cg-result:hover, .cg-result.is-active { background: var(--primer-accent, #46e); color: var(--primer-accent-ink, #fff); }
   /* The title + id stack in a column; min-width:0 lets them ellipsize beside the icon. */
   .cg-result-text { display: flex; flex-direction: column; gap: 0.05rem; min-width: 0; }

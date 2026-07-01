@@ -76,7 +76,7 @@ const STYLE = `
     font-family: var(--primer-font-ui, sans-serif);
     font-size: 0.8rem; line-height: 1.15;
     max-width: 100%;
-    padding: 0.32rem 0.66rem;
+    padding: 0.42rem 0.7rem;
     border: 1px solid var(--primer-border, #ddd);
     border-radius: 999px;
     background: var(--primer-surface, #fff);
@@ -105,6 +105,11 @@ const STYLE = `
   .wires line.is-course { stroke: var(--primer-course, #b8860b); stroke-width: 3; stroke-opacity: 1; } /* the active course's path — gold */
   .wires line.is-hot { stroke: var(--primer-accent, #46e); stroke-width: 3.4; stroke-opacity: 1; }
   .wires line.is-dim { opacity: 0.2; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .node, .wires line { transition: none; }
+    .node:not(.node--current):hover { transform: none; }
+  }
 `;
 
 export class PrimerPathway extends HTMLElement {

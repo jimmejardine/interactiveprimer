@@ -671,6 +671,39 @@ post-paint `initLocale()` in `js/i18n.js` (the authority). Two URL entry points:
   same `<script src="/js/boot.js">` as concept pages) redirects to the canonical lesson with
   `?lang=<locale>`. When render.js *fetches* an overlay the `<script>` is ignored.
 
+## Accessibility (author with this in mind)
+
+The Primer is for "ages 5 to 105," so lessons must work with a keyboard, a screen reader, and
+reduced-motion / high-zoom settings — not just a mouse. Most of the machinery is already wired
+(real semantic controls, a global skip link + `.sr-only` utility, a `:focus-visible` ring, a
+`prefers-reduced-motion` reset in `css/primer.css`, focus-trapped modals via `js/focus-trap.js`), so
+authoring a page correctly is mostly about **not breaking** these. There is **no automated a11y
+gate** — this section is the checklist.
+
+- **Real controls, real semantics.** Anything clickable is a `<button>`/`<a>`/`<input>`, never a
+  clickable `<div>`. Give an icon-only control an `aria-label`; mark decorative SVGs/emoji
+  `aria-hidden="true"` (and `focusable="false"` on SVG). This is how every existing component is
+  built — follow the pattern rather than hand-rolling.
+- **Colour is never the only signal.** The confidence ramp, quiz correct/incorrect, course tint,
+  etc. must each pair colour with text/shape/ARIA state (see the confidence stars' `aria-pressed`
+  + live-region readout in `js/components/primer-concept.js`). Use only `--primer-*` tokens so
+  contrast holds across light/dark/fun; new token pairs (text on a fill) must clear **WCAG AA
+  4.5:1** in all three themes.
+- **Give figures a text alternative.** Author a real `alt` on `<img>` (`""` if purely decorative);
+  a `<primer-manim>`/`<primer-chart>`/`<primer-geometry>` should carry a `caption` (and manim
+  narration via `speak`) describing what it shows, so the idea survives without the visual.
+- **Respect reduced motion.** Any bespoke animation/transition you add must be gated behind
+  `@media (prefers-reduced-motion: reduce)` (the global reset covers document CSS, but a new
+  component shadow sheet needs its own block — see `js/components/shared.js`).
+- **Keyboard + focus.** Every interactive element must be reachable and operable by keyboard with a
+  visible focus ring, and modal surfaces must trap focus and restore it on close (`trapFocus`).
+- **Localize a11y text too.** Route `aria-label`/status strings through `t(...)` (chrome) or
+  `sceneStrings` (lesson), like any other copy.
+
+Per-PR quick check: Tab through the page (skip link first, visible ring, nothing unreachable);
+toggle OS "reduce motion"; zoom to 200%; and spot-check with a screen reader that figures, math,
+and state changes are announced.
+
 ## Validate & preview
 
 ```bash

@@ -22,6 +22,7 @@ import {
 import { getCurrentCourse, setCurrentCourse, clearCourse } from "../course.js";
 import { loadGraph } from "../graph-data.js";
 import { confirmDialog } from "../confirm-dialog.js";
+import { trapFocus } from "../focus-trap.js";
 
 /** @typedef {import("../theme.js").ThemeId} ThemeId */
 /** @typedef {import("../i18n.js").LocaleId} LocaleId */
@@ -42,6 +43,7 @@ const STYLE = `
     box-shadow: var(--primer-shadow-md, 0 2px 8px rgba(0,0,0,0.12));
   }
   .toggle:hover { transform: translateY(-1px); }
+  @media (prefers-reduced-motion: reduce) { .toggle:hover { transform: none; } }
 
   .panel {
     position: absolute; right: 0; top: calc(100% + 0.45rem);
@@ -231,6 +233,9 @@ export class PrimerMenu extends HTMLElement {
       if (open) showView("root"); // always reopen at the top level
       panel.classList.toggle("open", open);
       toggle.setAttribute("aria-expanded", String(open));
+      // On open, move keyboard focus into the panel (ARIA menu-button pattern). Closing focus is
+      // handled at the call site (Escape returns to the toggle; outside-click/navigation don't).
+      if (open) /** @type {HTMLElement | null} */ (panel.querySelector(".view-root .nav"))?.focus();
     };
 
     toggle.addEventListener("click", () => setOpen(!panel.classList.contains("open")));
@@ -295,6 +300,9 @@ export class PrimerMenu extends HTMLElement {
     const fileInput = /** @type {HTMLInputElement} */ (root.querySelector(".file-input"));
     const status = /** @type {HTMLElement} */ (root.querySelector(".status"));
     const backdrop = /** @type {HTMLElement} */ (root.querySelector(".backdrop"));
+    const dialog = /** @type {HTMLElement} */ (root.querySelector(".dialog"));
+    /** @type {(() => void) | null} Releases the restore dialog's focus trap while it's open. */
+    let releaseDialogTrap = null;
 
     /** @param {string} msg @param {boolean} [isError] */
     const showStatus = (msg, isError = false) => {
@@ -321,10 +329,15 @@ export class PrimerMenu extends HTMLElement {
       viewConfirm.hidden = true;
       viewChoice.hidden = false;
       backdrop.classList.add("open");
+      releaseDialogTrap = trapFocus(dialog, {
+        initial: /** @type {HTMLElement | null} */ (root.querySelector(".merge")),
+      });
     };
     const closeDialog = () => {
       backdrop.classList.remove("open");
       pending = null;
+      releaseDialogTrap?.();
+      releaseDialogTrap = null;
     };
 
     fileInput.addEventListener("change", async () => {
@@ -366,6 +379,8 @@ export class PrimerMenu extends HTMLElement {
     /** @param {"merge" | "overwrite"} mode */
     const finishRestore = (mode) => {
       backdrop.classList.remove("open");
+      releaseDialogTrap?.();
+      releaseDialogTrap = null;
       if (!pending) return;
       applyProgress(pending, mode);
       pending = null;
@@ -376,6 +391,8 @@ export class PrimerMenu extends HTMLElement {
     /** @type {HTMLButtonElement} */ (root.querySelector(".overwrite")).addEventListener("click", () => {
       viewChoice.hidden = true;
       viewConfirm.hidden = false;
+      // Focus follows the revealed view (the button that was focused is now hidden).
+      /** @type {HTMLButtonElement} */ (root.querySelector(".confirm-overwrite")).focus();
     });
     /** @type {HTMLButtonElement} */ (root.querySelector(".confirm-overwrite")).addEventListener(
       "click",
@@ -399,7 +416,10 @@ export class PrimerMenu extends HTMLElement {
     this.#onKeydown = (e) => {
       if (e.key !== "Escape") return;
       if (backdrop.classList.contains("open")) closeDialog();
-      else setOpen(false);
+      else if (panel.classList.contains("open")) {
+        setOpen(false);
+        toggle.focus(); // keyboard dismissal returns focus to the trigger
+      }
     };
     document.addEventListener("keydown", this.#onKeydown);
 

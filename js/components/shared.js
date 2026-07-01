@@ -67,6 +67,17 @@ const COMPONENT_CSS = `
     color: var(--primer-accent-ink, #fff);
     border-color: transparent;
   }
+
+  /* Honour "reduce motion" inside shadow roots — the document-level reset in css/primer.css
+     can't cross the shadow boundary, so each component that adopts this sheet gets it here. */
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      transition-duration: 0.001ms !important;
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+    }
+    button:active { transform: none; }
+  }
 `;
 
 /** @type {CSSStyleSheet} */

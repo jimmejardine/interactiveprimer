@@ -54,18 +54,25 @@ const STAR_CSS = `
   }
   .level-badge.is-declared { box-shadow: inset 0 0 0 1.5px var(--primer-badge-ink, #3a45a6); }
   .level-badge[hidden] { display: none; }
+  /* Visually hidden but readable by assistive tech (the live-region rating readout). */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
   /* Centre the prompt and the star row within the confidence card. */
   .confidence { text-align: center; }
   /* A centred row of stars at their natural size; they shrink together to fit narrow
      screens (flex-shrink) instead of overflowing, and never stretch edge-to-edge. */
   .stars { display: flex; justify-content: center; gap: 0.2rem; width: 100%; }
+  /* A comfortable 44px-tall tap target (the glyph stays 1.5rem, centred in it); the width still
+     shrinks on narrow screens but never below ~24px, so all ten stars keep an accessible hit area. */
   .star {
-    flex: 0 1 1.7rem; min-width: 0; aspect-ratio: 1 / 1;
+    flex: 0 1 2rem; min-width: 1.5rem; min-height: 44px;
     display: grid; place-items: center;
     padding: 0; border: none; background: none; line-height: 0;
     color: var(--primer-border, #ccc); cursor: pointer;
   }
-  .star svg { width: 100%; height: 100%; fill: currentColor; transition: color 0.08s ease; }
+  .star svg { width: 1.5rem; height: 1.5rem; fill: currentColor; transition: color 0.08s ease; }
   .star.filled { color: var(--primer-star, #f5b301); }   /* selected or previewed */
   .star:focus-visible { outline: 2px solid var(--primer-accent, #46e); border-radius: 0.25rem; }
   /* A quiet "this page needs attention" link-button under the stars (lightweight feedback). */
@@ -132,6 +139,7 @@ export class PrimerConcept extends HTMLElement {
         <section class="confidence card" aria-label="${t("concept.confidence.legend")}">
           <p class="meta" id="conf-label" style="margin-top:0;">${t("concept.confidence.prompt")}</p>
           <div class="stars" role="group" aria-labelledby="conf-label">${stars}</div>
+          <p class="sr-only conf-status" role="status" aria-live="polite"></p>
           <div class="feedback">
             <button type="button" class="attn">${t("feedback.needsAttention")}</button>
           </div>
@@ -139,9 +147,11 @@ export class PrimerConcept extends HTMLElement {
       </article>`;
 
     const starEls = /** @type {HTMLButtonElement[]} */ ([...root.querySelectorAll(".star")]);
+    const statusEl = /** @type {HTMLElement} */ (root.querySelector(".conf-status"));
 
     let rating = readEntry(id)?.stars ?? 0;
     paint(starEls, rating);
+    reflectRating(starEls, statusEl, rating);
 
     for (const star of starEls) {
       const value = Number(star.dataset.value);
@@ -150,6 +160,7 @@ export class PrimerConcept extends HTMLElement {
         rating = rating === value ? value - 1 : value;
         writeEntry(id, rating);
         paint(starEls, rating);
+        reflectRating(starEls, statusEl, rating);
         this.dispatchEvent(
           // composed so it escapes this shadow root and reaches the pathway widget,
           // which re-colours the matching node live.
@@ -283,6 +294,23 @@ function paint(stars, upto) {
   for (const s of stars) {
     s.classList.toggle("filled", Number(s.dataset.value) <= upto);
   }
+}
+
+/**
+ * Expose the COMMITTED rating to assistive tech: each star's `aria-pressed` mirrors whether it's
+ * part of the current rating, and a polite live region announces the value on change. (Kept
+ * separate from paint(), which also runs for the transient hover/focus preview — the ARIA state
+ * must reflect the committed rating, not the preview.)
+ * @param {HTMLButtonElement[]} stars
+ * @param {HTMLElement} statusEl
+ * @param {number} rating
+ */
+function reflectRating(stars, statusEl, rating) {
+  for (const s of stars) {
+    s.setAttribute("aria-pressed", String(Number(s.dataset.value) <= rating));
+  }
+  statusEl.textContent =
+    rating > 0 ? t("concept.confidence.current", { n: rating, max: MAX_STARS }) : t("concept.confidence.unrated");
 }
 
 if (!customElements.get("primer-concept")) {

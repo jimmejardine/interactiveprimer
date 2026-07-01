@@ -13,12 +13,16 @@
 export default {
   "app.name": "Cartilla Interactiva",
 
+  "a11y.skipLink": "Saltar al contenido principal",
+
   "concept.confidence.prompt": "¿Qué tan seguro te sientes con este concepto?",
   "feedback.needsAttention": "Esta página necesita atención",
   "feedback.thanks": "Gracias — marcada para revisión.",
   "concept.confidence.legend": "Tu confianza",
   "concept.confidence.rate": "Califica {n} de {max}",
   "concept.confidence.rateTitle": "{n} / {max}",
+  "concept.confidence.current": "Nivel de confianza actual: {n} de {max}.",
+  "concept.confidence.unrated": "Aún sin calificar.",
   "concept.level.label": "Nivel {level}",
   "concept.level.word": "Nivel",
   "concept.level.declaredTitle": "Nivel declarado",

@@ -6,6 +6,8 @@
  * @module
  */
 
+import { trapFocus } from "./focus-trap.js";
+
 let stylesInjected = false;
 
 function injectStyles() {
@@ -73,9 +75,12 @@ export function confirmDialog({ message, confirm = "OK", cancel = "Cancel" }) {
     dialog.append(p, actions);
     backdrop.appendChild(dialog);
 
+    /** @type {(() => void) | null} */
+    let releaseTrap = null;
     /** @param {boolean} result */
     const close = (result) => {
       document.removeEventListener("keydown", onKey);
+      releaseTrap?.();
       backdrop.remove();
       resolve(result);
     };
@@ -92,6 +97,7 @@ export function confirmDialog({ message, confirm = "OK", cancel = "Cancel" }) {
     document.addEventListener("keydown", onKey);
 
     document.body.appendChild(backdrop);
-    okBtn.focus();
+    // Trap focus in the dialog (starting on OK) and restore it to the trigger on close.
+    releaseTrap = trapFocus(dialog, { initial: okBtn });
   });
 }
