@@ -173,7 +173,11 @@ recursive prerequisite ancestors, with members tinted in the course colour (`--p
   re-instantiates each time the learner retakes it (see the `variables` / `constraints` /
   multiple-choice-with-variables machinery below). A fixed list of hard-coded questions is the
   **exception**, not the norm — reach for it only when a question genuinely can't be parameterised. Keep
-  the numbers and contexts age-appropriate for whoever meets the page.
+  the numbers and contexts age-appropriate for whoever meets the page. Put **at least 10 questions in the
+  bank** even though only ~5 are drawn per attempt (`num_questions` defaults to 5), so *which* questions
+  appear — not just their numbers — varies from one visit to the next. (A single variable-driven question
+  re-instantiates to fill many slots, but still author ≥10 distinct entries so the drawn set genuinely
+  rotates.)
 
   **Quiz settings live in the builder, not on the element.** The builder's optional **first** item is
   a config object `{ num_questions, preamble }` — recognized by having **no `options` and no
@@ -779,5 +783,5 @@ safety net (e.g. if that maintenance node is deleted).
 
 1. File at `concepts/<path>.html` (the path **is** the id — nothing to declare). Add a `<primer-title>` with the display title.
 2. List `prerequisites` (in a `concept-meta` block **after `</html>`**) by full-path id; a base concept with no natural prerequisite may omit them — or omit the whole block — (it's auto-attached to the `orphans` node).
-3. Author content as several `<primer-card>`s, pitched to the learner's age — teach the one idea *richly* (see "What a good page contains"): a hook, multiple representations, worked examples, one or two `<primer-vignette>` digressions, a visual aid where it helps (`<primer-manim>` / `<primer-chart>` / `<primer-geometry>`), usually a `<primer-theorem name="Watch out!">`, and a **randomised** `<primer-quiz>`. Don't ship a lone intro-plus-quiz. Keep each `scene-strings` block before its card, and put `<script type="module">` builders after `</html>`.
+3. Author content as several `<primer-card>`s, pitched to the learner's age — teach the one idea *richly* (see "What a good page contains"): a hook, multiple representations, worked examples, one or two `<primer-vignette>` digressions, a visual aid where it helps (`<primer-manim>` / `<primer-chart>` / `<primer-geometry>`), usually a `<primer-theorem name="Watch out!">`, and a **randomised** `<primer-quiz>` with **≥10 questions in the bank** (only ~5 are drawn per attempt). Don't ship a lone intro-plus-quiz. Keep each `scene-strings` block before its card, and put `<script type="module">` builders after `</html>`.
 4. `npm run graph` is clean, then preview with `npm run serve`.
