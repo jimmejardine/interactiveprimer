@@ -132,15 +132,23 @@ recursive prerequisite ancestors, with members tinted in the course colour (`--p
   **bullets**, not a run-on sentence.
 - `<primer-math>` — LaTeX. Body text is the source: inline by default, block with the
   `display` attribute. e.g. `<primer-math display>\int_0^1 x\,dx</primer-math>`.
-- `<primer-code lang="javascript">…code…</primer-code>` — a themed, lightly syntax-highlighted **code
+- `<primer-code lang="typescript">…code…</primer-code>` — a themed, lightly syntax-highlighted **code
   block** for programming / algorithm pages. The element's **text content** is the source; leading/
   trailing blank lines are dropped and the common indent stripped (so you can indent the block in your
-  HTML). `lang`: `javascript`/`js` (default) · `python` · `sql` · `text`/`pseudocode` (panel, no
-  highlighting). Token colours come from the theme palette, so it recolours with light/dark/fun. **Write
-  every code example in JavaScript** — it runs in the browser, so these snippets can be made executable
-  later (do NOT use Python/pseudocode for new examples). **Escape `<` `>` `&` in the body** (`&lt;` `&gt;`
-  `&amp;`) — e.g. `if (x &lt; 10)`. For a short literal in prose, plain inline `<code>` is fine; use
-  `<primer-code>` for multi-line code.
+  HTML). `lang`: `typescript`/`ts` (default) · `javascript`/`js` · `python` · `sql` · `text`/`pseudocode`
+  (panel, no highlighting). Token colours come from the theme palette, so it recolours with light/dark/fun.
+  **Write every code example in TypeScript.** TS is a superset of JS, so it scales across the whole
+  curriculum: beginner examples are just *untyped* TS (identical to JS); introduce types (`: number`,
+  `interface`, `class` with `private`/`readonly`, `enum`, generics) as OOP/FP concepts arrive. Do **not**
+  use Python/pseudocode for new examples. Avoid `const enum` and `namespace` (use plain `enum` / ES modules).
+  **Escape `<` `>` `&` in the body** (`&lt;` `&gt;` `&amp;`) — e.g. `if (x &lt; 10)`. For a short literal in
+  prose, plain inline `<code>` is fine; use `<primer-code>` for multi-line code.
+  - **Runnable — add the `run` attribute** (`<primer-code run>`) to make a snippet executable: the block
+    gains **Code** / **Output** tabs and a **Run ▶** button that transpiles the TS (sucrase) and runs the
+    JS in a sandboxed **QuickJS-WASM** engine (lazy-loaded on first Run; no DOM/network — **`console.log`
+    is what appears in Output**), then switches to the Output tab. An infinite loop is stopped by a ~1 s
+    timeout. Add `run` only to **complete, output-producing** examples (a `console.log`-driven demo); leave
+    fragments / snippets-mid-explanation non-run.
 - `<primer-manim scene="name" caption="…">` — plays a registered animation on a Play
   button (lazy-loads manim-web; supports replay). See scenes below.
 - `<primer-chart scene="name">` — a **JSXGraph chart** (a function plotted on axes, SVG). Two

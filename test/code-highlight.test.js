@@ -7,7 +7,7 @@ test("esc: escapes HTML-special chars", () => {
   assert.equal(esc('a < b & c > d'), "a &lt; b &amp; c &gt; d");
 });
 
-test("highlight: javascript is the default; keywords, builtins, strings, comments, numbers", () => {
+test("highlight: TypeScript is the default; JS keywords/builtins/strings/comments/numbers still work", () => {
   const html = highlight('function f(x) {\n  return console.log("hi", 42);  // note\n}');
   assert.match(html, /<span class="k">function<\/span>/);
   assert.match(html, /<span class="k">return<\/span>/);
@@ -16,6 +16,17 @@ test("highlight: javascript is the default; keywords, builtins, strings, comment
   assert.match(html, /<span class="s">"hi"<\/span>/);
   assert.match(html, /<span class="n">42<\/span>/);
   assert.match(html, /<span class="c">\/\/ note<\/span>/); // // line comment
+});
+
+test("highlight: TypeScript keywords + primitive type names highlight as keywords", () => {
+  const html = highlight("interface P { x: number }\nclass Q { private readonly name: string; }\nenum E { A, B }");
+  assert.match(html, /<span class="k">interface<\/span>/);
+  assert.match(html, /<span class="k">number<\/span>/); // primitive type name
+  assert.match(html, /<span class="k">private<\/span>/);
+  assert.match(html, /<span class="k">readonly<\/span>/);
+  assert.match(html, /<span class="k">string<\/span>/);
+  assert.match(html, /<span class="k">enum<\/span>/);
+  assert.match(html, /<span class="k">class<\/span>/); // shared JS keyword
 });
 
 test("highlight: javascript let/const, block comments, template literals", () => {

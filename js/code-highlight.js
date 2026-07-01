@@ -6,15 +6,24 @@
  * @module
  */
 
+const JS_KEYWORDS = [
+  "let", "const", "var", "function", "return", "if", "else", "for", "while", "do", "break",
+  "continue", "switch", "case", "default", "in", "of", "new", "class", "extends", "super", "this",
+  "typeof", "instanceof", "try", "catch", "finally", "throw", "true", "false", "null", "undefined",
+  "void", "delete", "yield", "async", "await", "import", "export", "from", "as",
+];
+// TypeScript adds structural keywords + the primitive type names (all shown in the keyword colour).
+const TS_KEYWORDS = [
+  "interface", "type", "enum", "implements", "abstract", "public", "private", "protected", "readonly",
+  "is", "keyof", "infer", "satisfies", "override", "declare", "namespace", "get", "set",
+  "string", "number", "boolean", "symbol", "bigint", "any", "unknown", "never", "object",
+];
+
 /** Language keyword sets (control/structure words → the "keyword" colour).
  * @type {Record<string, Set<string>>} */
 const KEYWORDS = {
-  javascript: new Set([
-    "let", "const", "var", "function", "return", "if", "else", "for", "while", "do", "break",
-    "continue", "switch", "case", "default", "in", "of", "new", "class", "extends", "super", "this",
-    "typeof", "instanceof", "try", "catch", "finally", "throw", "true", "false", "null", "undefined",
-    "void", "delete", "yield", "async", "await", "import", "export", "from", "as",
-  ]),
+  typescript: new Set([...JS_KEYWORDS, ...TS_KEYWORDS]),
+  javascript: new Set(JS_KEYWORDS),
   python: new Set([
     "def", "return", "if", "elif", "else", "for", "while", "in", "and", "or", "not", "is",
     "True", "False", "None", "import", "from", "as", "class", "break", "continue", "pass",
@@ -61,13 +70,14 @@ function span(cls, s) {
  * @param {string} [lang]  `javascript`/`js` (default) · `python` · `sql` · `text`/`pseudocode`/`plain` (no highlighting)
  * @returns {string}
  */
-export function highlight(code, lang = "javascript") {
+export function highlight(code, lang = "typescript") {
+  if (lang === "ts") lang = "typescript";
   if (lang === "js") lang = "javascript";
   if (lang === "text" || lang === "pseudocode" || lang === "plain") return esc(code);
-  const kw = KEYWORDS[/** @type {keyof typeof KEYWORDS} */ (lang)] ?? KEYWORDS.javascript;
+  const kw = KEYWORDS[/** @type {keyof typeof KEYWORDS} */ (lang)] ?? KEYWORDS.typescript;
   const bi = BUILTINS[/** @type {keyof typeof BUILTINS} */ (lang)] ?? BUILTINS.javascript;
   const lineComment = lang === "sql" ? "--" : lang === "python" ? "#" : "//";
-  const blockComments = lang === "javascript"; // /* … */
+  const blockComments = lang === "javascript" || lang === "typescript"; // /* … */
   let out = "";
   let i = 0;
   const n = code.length;
