@@ -648,8 +648,8 @@ explorer and badges re-theme themselves; the only theme-coupled JS is animations
 `render.js` also frames each lesson automatically: the mini-explorer (`<primer-pathway>`) at the
 **top**, and an auto-generated **"Up next…"** recommendation control (`<primer-up-next>`, backed by
 the pure `js/up-next.js`) at the **bottom** — it suggests the next course concept + nearby unstarred
-successors, falling back to the mini-explorer when it has nothing to recommend. Authors don't write
-or configure either.
+successors, then (if none) partly-learned successors to review, and finally falls back to the
+mini-explorer when it has nothing to recommend. Authors don't write or configure either.
 
 ## Localization (automatic)
 

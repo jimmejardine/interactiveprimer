@@ -31,6 +31,7 @@ export default {
   "upNext.heading": "Up next",
   "upNext.skipped": "skipped",
   "upNext.next": "next concept",
+  "upNext.review": "review",
 
   "concept.level.implicitTitle": "Implicit level (inherited from prerequisites)",
 

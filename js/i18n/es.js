@@ -30,6 +30,7 @@ export default {
   "upNext.heading": "A continuación",
   "upNext.skipped": "omitido",
   "upNext.next": "siguiente concepto",
+  "upNext.review": "repaso",
 
   "concept.level.implicitTitle": "Nivel implícito (heredado de los prerrequisitos)",
 

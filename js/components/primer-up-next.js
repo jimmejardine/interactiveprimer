@@ -39,10 +39,13 @@ const STYLE = `
     box-shadow: var(--primer-shadow-md, 0 6px 18px rgba(0,0,0,0.06));
     padding: 1.15rem 1.4rem;
   }
+  /* A small signpost icon sits just to the right of the "Up next" heading text. */
   .heading {
+    display: flex; align-items: center; gap: 0.5rem;
     font-family: var(--primer-font-display, var(--primer-font-body, serif));
     font-size: 1.1rem; margin: 0 0 0.7rem; color: var(--primer-ink, #111);
   }
+  .signpost { flex: 0 0 auto; width: auto; height: 1.35rem; }
 
   .rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
   .row {
@@ -113,7 +116,7 @@ export class PrimerUpNext extends HTMLElement {
         currentId: id,
         courseMembers,
         successors,
-        isDone: (cid) => (readEntry(cid)?.stars ?? 0) > 0,
+        starsOf: (cid) => readEntry(cid)?.stars ?? 0,
         levelOf: (cid) => byId.get(cid)?.level ?? 0,
         titleOf: (cid) => titleOf(byId.get(cid), locale, cid),
       });
@@ -128,12 +131,9 @@ export class PrimerUpNext extends HTMLElement {
         .map((it) => {
           const node = byId.get(it.id);
           const title = esc(titleOf(node, locale, it.id));
-          const tag =
-            it.kind === "skipped"
-              ? `<span class="tag">(${esc(t("upNext.skipped"))})</span>`
-              : it.kind === "next"
-                ? `<span class="tag">(${esc(t("upNext.next"))})</span>`
-                : "";
+          const tagKey =
+            it.kind === "skipped" ? "upNext.skipped" : it.kind === "next" ? "upNext.next" : it.kind === "review" ? "upNext.review" : "";
+          const tag = tagKey ? `<span class="tag">(${esc(t(tagKey))})</span>` : "";
           const level =
             node && Number.isFinite(node.level)
               ? `<span class="row-level">${esc(t("concept.level.label", { level: formatLevel(node.level) }))}</span>`
@@ -148,7 +148,8 @@ export class PrimerUpNext extends HTMLElement {
       root.innerHTML =
         `<style>${STYLE}</style>` +
         `<nav class="upnext" aria-label="${esc(t("upNext.heading"))}">` +
-        `<h2 class="heading">${esc(t("upNext.heading"))}</h2>` +
+        `<h2 class="heading">${esc(t("upNext.heading"))}` +
+        `<img class="signpost" src="/images/up-next.png" alt="" aria-hidden="true" /></h2>` +
         `<ul class="rows">${rows}</ul></nav>`;
     } catch (err) {
       console.warn("primer-up-next:", err);

@@ -3,11 +3,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { computeUpNext, MAX_NEARBY } from "../js/up-next.js";
 
-/** isDone backed by a Set of starred ids. @param {string[]} ids */
-const doneSet = (ids) => {
+/** starsOf where every id in `ids` has `n` stars (default 10 = mastered), the rest 0.
+ * @param {string[]} ids @param {number} [n] */
+const starsSet = (ids, n = 10) => {
   const s = new Set(ids);
-  return (/** @type {string} */ id) => s.has(id);
+  return (/** @type {string} */ id) => (s.has(id) ? n : 0);
 };
+
+/** starsOf from an explicit id→stars map (missing → 0). @param {Record<string, number>} m */
+const starsMap = (m) => (/** @type {string} */ id) => m[id] ?? 0;
 
 /** levelOf from a plain map (missing → 0). @param {Record<string, number>} levels */
 const levelOf = (levels) => (/** @type {string} */ id) => levels[id] ?? 0;
@@ -24,7 +28,7 @@ test("not in a course → up to three unstarred successors, closest in difficult
     currentId: "cur",
     courseMembers: null,
     successors: ["s0", "s1", "s2", "s3"],
-    isDone: doneSet([]),
+    starsOf: starsSet([]),
     levelOf: levelOf({ cur: 2, s0: 5, s1: 3, s2: 2, s3: 4 }),
     titleOf,
   });
@@ -39,7 +43,7 @@ test("nearby excludes the current concept and already-starred successors", () =>
     currentId: "cur",
     courseMembers: null,
     successors: ["cur", "done1", "fresh1", "fresh2"],
-    isDone: doneSet(["done1"]),
+    starsOf: starsSet(["done1"]),
     levelOf: levelOf({ cur: 1, fresh1: 1, fresh2: 2 }),
     titleOf,
   });
@@ -51,7 +55,7 @@ test("fewer than three eligible successors → returns only those", () => {
     currentId: "cur",
     courseMembers: null,
     successors: ["a"],
-    isDone: doneSet([]),
+    starsOf: starsSet([]),
     levelOf: levelOf({ cur: 0, a: 1 }),
     titleOf,
   });
@@ -63,7 +67,7 @@ test("no successors and no course → empty (control falls back to the mini-expl
     currentId: "cur",
     courseMembers: null,
     successors: [],
-    isDone: doneSet([]),
+    starsOf: starsSet([]),
     levelOf: levelOf({}),
     titleOf,
   });
@@ -76,7 +80,7 @@ test("equal difficulty distance → tiebreak by absolute level, then title", () 
     currentId: "cur",
     courseMembers: null,
     successors: ["s_high", "s_low", "s_tieB", "s_tieA"],
-    isDone: doneSet([]),
+    starsOf: starsSet([]),
     // s_low=2 (dist1), s_high=4 (dist1), s_tieA=s_tieB=4 (dist1) → order: s_low(2), then level-4 group by title
     levelOf: levelOf({ cur: 3, s_low: 2, s_high: 4, s_tieA: 4, s_tieB: 4 }),
     titleOf,
@@ -90,7 +94,7 @@ test("course: next is the first UNSTARRED member after the current concept", () 
     currentId: "m1",
     courseMembers: members,
     successors: [],
-    isDone: doneSet(["m1", "m2"]), // m2 already starred → next should skip to m3
+    starsOf: starsSet(["m1", "m2"]), // m2 already starred → next should skip to m3
     levelOf: levelOf({}),
     titleOf,
   });
@@ -104,7 +108,7 @@ test("course: skipped appears only when an unstarred member is genuinely earlier
     currentId: "m3",
     courseMembers: members,
     successors: [],
-    isDone: doneSet(["hub", "m3"]),
+    starsOf: starsSet(["hub", "m3"]),
     levelOf: levelOf({}),
     titleOf,
   });
@@ -119,7 +123,7 @@ test("course: no skip when the earliest unstarred is the current or a later memb
     currentId: "m2",
     courseMembers: members,
     successors: [],
-    isDone: doneSet(["hub", "m1"]),
+    starsOf: starsSet(["hub", "m1"]),
     levelOf: levelOf({}),
     titleOf,
   });
@@ -133,7 +137,7 @@ test("course + nearby combine and dedupe (a successor already offered as 'next' 
     currentId: "m1",
     courseMembers: members,
     successors: ["m2", "x"], // m2 is the course-next AND a successor → must appear once, as "next"
-    isDone: doneSet(["hub", "m1"]),
+    starsOf: starsSet(["hub", "m1"]),
     levelOf: levelOf({ m1: 1, m2: 1, x: 2 }),
     titleOf,
   });
@@ -151,11 +155,52 @@ test("course: the hub page (members[0]) is never suggested, even when unstarred"
     currentId: "m1",
     courseMembers: members,
     successors: [],
-    isDone: doneSet(["m1"]),
+    starsOf: starsSet(["m1"]),
     levelOf: levelOf({}),
     titleOf,
   });
   assert.deepEqual(items, [{ id: "m2", kind: "next" }]);
+});
+
+test("review fallback: when no unstarred successor qualifies, offer partly-learned (1..5 stars) ones", () => {
+  const items = computeUpNext({
+    currentId: "cur",
+    courseMembers: null,
+    successors: ["s_master", "s_rev1", "s_rev2"],
+    // s_master=8 (mastered, excluded); s_rev1=3, s_rev2=5 (both partly learned) → review tier.
+    starsOf: starsMap({ s_master: 8, s_rev1: 3, s_rev2: 5 }),
+    levelOf: levelOf({ cur: 2, s_rev1: 2, s_rev2: 4, s_master: 2 }),
+    titleOf,
+  });
+  // s_rev1 (dist 0) before s_rev2 (dist 2); s_master excluded (>5 stars).
+  assert.deepEqual(items, [
+    { id: "s_rev1", kind: "review" },
+    { id: "s_rev2", kind: "review" },
+  ]);
+});
+
+test("review fallback does NOT fire when an unstarred successor is available", () => {
+  const items = computeUpNext({
+    currentId: "cur",
+    courseMembers: null,
+    successors: ["s_fresh", "s_partial"],
+    starsOf: starsMap({ s_partial: 3 }), // s_fresh unrated → nearby wins, no review tier
+    levelOf: levelOf({ cur: 1, s_fresh: 1, s_partial: 1 }),
+    titleOf,
+  });
+  assert.deepEqual(items, [{ id: "s_fresh", kind: "nearby" }]);
+});
+
+test("review fallback excludes mastered successors (> 5 stars) → empty (then the control falls back)", () => {
+  const items = computeUpNext({
+    currentId: "cur",
+    courseMembers: null,
+    successors: ["s_master1", "s_master2"],
+    starsOf: starsMap({ s_master1: 6, s_master2: 10 }),
+    levelOf: levelOf({ cur: 1, s_master1: 1, s_master2: 1 }),
+    titleOf,
+  });
+  assert.deepEqual(items, []);
 });
 
 test("current concept not a member of the active course → course rules skipped, nearby still applies", () => {
@@ -163,7 +208,7 @@ test("current concept not a member of the active course → course rules skipped
     currentId: "outsider",
     courseMembers: ["hub", "m1", "m2"],
     successors: ["s1"],
-    isDone: doneSet([]),
+    starsOf: starsSet([]),
     levelOf: levelOf({ outsider: 0, s1: 1 }),
     titleOf,
   });
