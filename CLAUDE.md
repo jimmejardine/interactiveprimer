@@ -645,6 +645,12 @@ from `--primer-*` tokens defined per theme in `css/primer.css`, so headings, car
 explorer and badges re-theme themselves; the only theme-coupled JS is animations (use
 `themeColors()` above). Levels start at 0; a real number that propagates via `max`.
 
+`render.js` also frames each lesson automatically: the mini-explorer (`<primer-pathway>`) at the
+**top**, and an auto-generated **"Up next…"** recommendation control (`<primer-up-next>`, backed by
+the pure `js/up-next.js`) at the **bottom** — it suggests the next course concept + nearby unstarred
+successors, falling back to the mini-explorer when it has nothing to recommend. Authors don't write
+or configure either.
+
 ## Localization (automatic)
 
 The hamburger menu carries a language switcher; English is the default + fallback. A lesson's

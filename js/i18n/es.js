@@ -26,6 +26,11 @@ export default {
   "concept.level.label": "Nivel {level}",
   "concept.level.word": "Nivel",
   "concept.level.declaredTitle": "Nivel declarado",
+
+  "upNext.heading": "A continuación",
+  "upNext.skipped": "omitido",
+  "upNext.next": "siguiente concepto",
+
   "concept.level.implicitTitle": "Nivel implícito (heredado de los prerrequisitos)",
 
   "quiz.heading": "Cuestionario rápido",

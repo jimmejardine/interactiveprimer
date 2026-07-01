@@ -144,11 +144,13 @@ async function render() {
     concept.appendChild(titleSlot);
   }
 
-  // A navigation pathway at the top and bottom of the lesson; both slot into
-  // <primer-page>'s single <slot> in order. Each fetches the graph and renders itself.
+  // A navigation pathway (the mini-explorer) at the TOP of the lesson, and an "Up next…"
+  // recommendation control at the BOTTOM; both slot into <primer-page>'s single <slot> in order.
+  // Each fetches the graph and renders itself (<primer-up-next> falls back to the mini-explorer
+  // when it has nothing to recommend).
   const topPathway = document.createElement("primer-pathway");
-  const bottomPathway = document.createElement("primer-pathway");
-  page.append(topPathway, concept, bottomPathway);
+  const bottomUpNext = document.createElement("primer-up-next");
+  page.append(topPathway, concept, bottomUpNext);
   main.appendChild(page);
   body.appendChild(main);
 

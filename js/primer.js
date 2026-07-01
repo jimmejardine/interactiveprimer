@@ -28,6 +28,7 @@ import "./components/primer-geometry-problem.js";
 import "./components/primer-video.js";
 import "./components/primer-quiz.js";
 import "./components/primer-pathway.js";
+import "./components/primer-up-next.js";
 import "./components/primer-menu.js";
 
 // Re-exports for page scripts.
