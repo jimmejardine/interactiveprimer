@@ -95,23 +95,30 @@ export class PrimerCode extends HTMLElement {
           border-radius: 0.35rem; border: 1px solid var(--primer-control-border, #ccc);
           background: transparent; color: var(--primer-ink-soft, #667); }
         .reset:hover { color: var(--primer-ink, #111); }
-        /* editable code: a transparent textarea over the highlighted layer (both identical box model) */
-        .editor { position: relative; overflow: hidden;
+        /* editable code: a line-number gutter, then a transparent textarea over the highlighted layer */
+        .editor { position: relative; display: flex; align-items: stretch; overflow: hidden;
           background: var(--code-bg, var(--primer-viz-bg, #fff));
           border: 1px solid var(--primer-border, #e6e0d4);
           border-radius: 0 0 var(--primer-radius, 0.6rem) var(--primer-radius, 0.6rem);
           box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
-        .editor > pre, .editor > textarea { margin: 0; box-sizing: border-box; padding: 0.7rem 0.95rem;
+        .gutter { flex: 0 0 auto; box-sizing: border-box; padding: 0.7rem 0.5rem;
+          font-family: var(--primer-font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
+          font-size: 0.9rem; line-height: 1.55; white-space: pre; text-align: right;
+          user-select: none; -webkit-user-select: none;
+          color: var(--code-c, #999); opacity: 0.75;
+          border-right: 1px solid var(--primer-border, #e6e0d4); }
+        .code-wrap { position: relative; flex: 1 1 auto; overflow: hidden; }
+        .code-wrap > pre, .code-wrap > textarea { margin: 0; box-sizing: border-box; padding: 0.7rem 0.95rem;
           font-family: var(--primer-font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
           font-size: 0.9rem; line-height: 1.55; tab-size: 4; white-space: pre; }
         /* no wrap: long lines scroll horizontally; the textarea is the scroller, the pre mirrors it */
-        .editor > pre { position: relative; pointer-events: none; overflow: hidden; color: var(--code-ink, #111); }
-        .editor > pre code { font: inherit; padding: 0; white-space: inherit; }
-        .editor > textarea { position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
+        .code-wrap > pre { position: relative; pointer-events: none; overflow: hidden; color: var(--code-ink, #111); }
+        .code-wrap > pre code { font: inherit; padding: 0; white-space: inherit; }
+        .code-wrap > textarea { position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
           resize: none; overflow: auto; scrollbar-width: none; outline: none;
           color: transparent; background: transparent; caret-color: var(--code-ink, #111); }
-        .editor > textarea::-webkit-scrollbar { display: none; }
-        .editor > textarea:focus-visible { outline: 2px solid var(--primer-ring, #88f); outline-offset: -2px; }
+        .code-wrap > textarea::-webkit-scrollbar { display: none; }
+        .code-wrap > textarea:focus-visible { outline: 2px solid var(--primer-ring, #88f); outline-offset: -2px; }
       </style>
       <div class="wrap${runnable ? " runnable" : ""}">
         ${runnable
@@ -123,9 +130,12 @@ export class PrimerCode extends HTMLElement {
                <button class="run" type="button">▶ Run</button>
              </div>
              <div class="editor code-pane">
-               <pre aria-hidden="true"><code></code></pre>
-               <textarea class="input" spellcheck="false" autocapitalize="off" autocomplete="off"
-                 aria-label="Editable code — edit it, then press Run"></textarea>
+               <div class="gutter" aria-hidden="true">1</div>
+               <div class="code-wrap">
+                 <pre aria-hidden="true"><code></code></pre>
+                 <textarea class="input" spellcheck="false" autocapitalize="off" autocomplete="off"
+                   aria-label="Editable code — edit it, then press Run"></textarea>
+               </div>
              </div>
              <pre class="panel output out-pane" hidden><span class="muted">▶ Press Run to see the output</span></pre>`
           : `<pre class="panel code-pane"><code></code></pre>`}
@@ -138,6 +148,7 @@ export class PrimerCode extends HTMLElement {
     if (runnable) {
       const ta = /** @type {HTMLTextAreaElement} */ (root.querySelector(".input"));
       ta.value = code;
+      this.#renderGutter();
       ta.addEventListener("input", () => this.#renderHighlight());
       ta.addEventListener("scroll", () => this.#syncScroll());
       ta.addEventListener("keydown", (e) => this.#onKey(e));
@@ -154,7 +165,21 @@ export class PrimerCode extends HTMLElement {
     if (!root) return;
     const ta = /** @type {HTMLTextAreaElement} */ (root.querySelector(".input"));
     /** @type {HTMLElement} */ (root.querySelector(".editor pre code")).innerHTML = highlight(ta.value, this.#lang);
+    this.#renderGutter();
     this.#syncScroll();
+  }
+
+  /** Fill the left gutter with one line number per line of the current source. */
+  #renderGutter() {
+    const root = this.shadowRoot;
+    if (!root) return;
+    const ta = /** @type {HTMLTextAreaElement} */ (root.querySelector(".input"));
+    const gutter = /** @type {HTMLElement} */ (root.querySelector(".gutter"));
+    if (!ta || !gutter) return;
+    const lines = ta.value.split("\n").length;
+    let s = "1";
+    for (let i = 2; i <= lines; i++) s += "\n" + i;
+    gutter.textContent = s;
   }
 
   /** Keep the highlight layer scrolled in lockstep with the (scrollable) textarea. */
@@ -162,7 +187,7 @@ export class PrimerCode extends HTMLElement {
     const root = this.shadowRoot;
     if (!root) return;
     const ta = /** @type {HTMLTextAreaElement} */ (root.querySelector(".input"));
-    const pre = /** @type {HTMLElement} */ (root.querySelector(".editor > pre"));
+    const pre = /** @type {HTMLElement} */ (root.querySelector(".code-wrap > pre"));
     if (ta && pre) {
       pre.scrollLeft = ta.scrollLeft;
       pre.scrollTop = ta.scrollTop;
