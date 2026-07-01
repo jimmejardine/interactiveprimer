@@ -154,6 +154,7 @@ export class PrimerMenu extends HTMLElement {
           <button type="button" class="nav" data-target="progress">${t("menu.progress")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="theme">${t("menu.theme")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="lang">${t("menu.language")}<span class="chev" aria-hidden="true">›</span></button>
+          <button type="button" class="nav" data-href="/accessibility.html">${t("menu.accessibility")}</button>
           <button type="button" class="nav" data-extern="https://github.com/jimmejardine/interactiveprimer/discussions">${t("menu.feedback")}<span class="chev" aria-hidden="true">↗</span></button>
         </div>
         <div class="menu-view view-theme" hidden>

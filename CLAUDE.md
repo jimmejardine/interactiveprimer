@@ -678,7 +678,9 @@ reduced-motion / high-zoom settings — not just a mouse. Most of the machinery 
 (real semantic controls, a global skip link + `.sr-only` utility, a `:focus-visible` ring, a
 `prefers-reduced-motion` reset in `css/primer.css`, focus-trapped modals via `js/focus-trap.js`), so
 authoring a page correctly is mostly about **not breaking** these. There is **no automated a11y
-gate** — this section is the checklist.
+gate** — this section is the checklist. The public **accessibility statement** lives at
+`accessibility.html` (linked from the landing footer + the hamburger menu); keep its "known
+limitations" list honest — update it as gaps are closed.
 
 - **Real controls, real semantics.** Anything clickable is a `<button>`/`<a>`/`<input>`, never a
   clickable `<div>`. Give an icon-only control an `aria-label`; mark decorative SVGs/emoji

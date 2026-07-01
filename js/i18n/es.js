@@ -75,6 +75,7 @@ export default {
   "menu.home": "Inicio",
   "menu.explore": "Explorar",
   "menu.collapse": "Contraer",
+  "menu.accessibility": "Accesibilidad",
   "menu.feedback": "Comentarios",
   "menu.theme": "Tema",
   "menu.language": "Idioma",

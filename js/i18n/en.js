@@ -92,6 +92,7 @@ export default {
   "menu.home": "Home",
   "menu.explore": "Explore",
   "menu.collapse": "Collapse",
+  "menu.accessibility": "Accessibility",
   "menu.feedback": "Feedback",
   "menu.theme": "Theme",
   "menu.language": "Language",
