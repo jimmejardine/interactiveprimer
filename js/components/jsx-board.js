@@ -58,6 +58,35 @@ export function adoptJsxCss(root, stillConnected) {
 }
 
 /**
+ * Free a JSXGraph board safely. JSXGraph re-fits a board when its container (or the window) resizes
+ * — `resize.enabled` on our boards. A resize that fires schedules a THROTTLED `setTimeout` (~200ms)
+ * that calls `board.updateContainerDims()` → `resizeContainer()` → `renderer.resize()`. When such a
+ * resize happens just before the board is torn down — which is routine, because render.js MOVES each
+ * authored figure into the lesson shell (a detach/attach that resizes the container) — `freeBoard`
+ * removes the resize listeners and deletes `board.renderer`, but it cannot cancel the already-queued
+ * `setTimeout`. When that stray timer fires it hits `renderer.resize` on the freed board and throws
+ * an async, uncatchable `TypeError: Cannot read properties of undefined (reading 'resize')` into the
+ * console. Stubbing `updateContainerDims` to a no-op (and disconnecting the resize observer, if the
+ * observer path is in use instead) makes any pending resize inert. Best-effort + null-safe.
+ * @param {any} JSXGraph  the `JXG.JSXGraph` namespace (has `freeBoard`)
+ * @param {any} board  the board to free (may be null)
+ */
+export function disposeBoard(JSXGraph, board) {
+  if (!board) return;
+  try {
+    board.updateContainerDims = () => {}; // neutralize any pending throttled resize (see above)
+    board.resizeObserver?.disconnect?.();
+  } catch {
+    /* best-effort: already torn down */
+  }
+  try {
+    JSXGraph?.freeBoard?.(board);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
  * Return a copy of the JXG namespace whose `JSXGraph.initBoard` injects our teaching-graph defaults
  * (no copyright/nav chrome, no pan/zoom, re-fit on resize, a faint theme-tinted grid) and reports
  * the created board via `onBoard(board, JSXGraph)`. A builder's own initBoard options override the

@@ -25,7 +25,7 @@ import { attachShared } from "./shared.js";
 import { getGeometryProblem } from "../scenes.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
-import { adoptJsxCss, wrapBoard } from "./jsx-board.js";
+import { adoptJsxCss, disposeBoard, wrapBoard } from "./jsx-board.js";
 import { makeGeometryTools } from "../geometry-tools.js";
 import { makeRng } from "../rng.js";
 import { checkAnswer } from "../quiz-vars.js";
@@ -840,9 +840,7 @@ export class PrimerGeometryProblem extends HTMLElement {
   #dispose() {
     this.#resizeObs?.disconnect();
     this.#resizeObs = null;
-    if (this.#board && this.#jsx?.JSXGraph) {
-      try { this.#jsx.JSXGraph.freeBoard(this.#board); } catch { /* ignore */ }
-    }
+    disposeBoard(this.#jsx?.JSXGraph, this.#board);
     this.#board = null;
   }
 }

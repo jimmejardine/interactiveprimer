@@ -20,7 +20,7 @@ import { get3dChart } from "../scenes.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
 import { getSliderGroup, subscribeSliders } from "../charts.js";
-import { adoptJsxCss } from "./jsx-board.js";
+import { adoptJsxCss, disposeBoard } from "./jsx-board.js";
 
 export class PrimerChart3d extends HTMLElement {
   /** @type {any} The active JSXGraph board (captured for disposal + theme rebuild). */
@@ -252,12 +252,7 @@ export class PrimerChart3d extends HTMLElement {
     this.#unsubscribe = null;
     const board = this.#board;
     this.#board = null;
-    if (!board) return;
-    try {
-      this.#jsx?.freeBoard?.(board);
-    } catch {
-      /* best-effort */
-    }
+    disposeBoard(this.#jsx, board);
   }
 }
 

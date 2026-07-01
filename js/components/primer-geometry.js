@@ -35,7 +35,7 @@ import { getGeometryScene } from "../scenes.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
 import { makeStrings } from "../scene-strings.js";
-import { adoptJsxCss, wrapBoard } from "./jsx-board.js";
+import { adoptJsxCss, disposeBoard, wrapBoard } from "./jsx-board.js";
 import { getSliderGroup, subscribeSliders } from "../charts.js";
 import { clampStep, createStepCollector, applyStepVisibility } from "../geometry.js";
 import { makeGeometryTools } from "../geometry-tools.js";
@@ -495,11 +495,7 @@ export class PrimerGeometry extends HTMLElement {
     const root = this.#root;
     if (!root) return;
     for (const b of this.#miniBoards) {
-      try {
-        this.#jsx?.freeBoard?.(b);
-      } catch {
-        /* best-effort */
-      }
+      disposeBoard(this.#jsx, b);
     }
     this.#miniBoards = [];
     const expandedEl = /** @type {HTMLElement} */ (root.querySelector(".expanded"));
@@ -557,13 +553,7 @@ export class PrimerGeometry extends HTMLElement {
     this.#collapse();
     const board = this.#board;
     this.#board = null;
-    if (board) {
-      try {
-        this.#jsx?.freeBoard?.(board);
-      } catch {
-        /* best-effort */
-      }
-    }
+    disposeBoard(this.#jsx, board);
   }
 }
 

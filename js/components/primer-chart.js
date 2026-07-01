@@ -27,7 +27,7 @@ import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
 import { SLIDER_PANEL_CSS, mountSliderPanel } from "./slider-panel.js";
 import { groupForChart, getSliderGroup, subscribeSliders, setSliderValues, getChartMeta, resolveLegend } from "../charts.js";
-import { adoptJsxCss, wrapBoard } from "./jsx-board.js";
+import { adoptJsxCss, disposeBoard, wrapBoard } from "./jsx-board.js";
 
 /**
  * @typedef {object} ChartParam
@@ -324,12 +324,7 @@ export class PrimerChart extends HTMLElement {
     const board = this.#board;
     this.#board = null;
     this.#update = null;
-    if (!board) return;
-    try {
-      this.#jsx?.freeBoard?.(board);
-    } catch {
-      /* best-effort */
-    }
+    disposeBoard(this.#jsx, board);
   }
 
   /**
