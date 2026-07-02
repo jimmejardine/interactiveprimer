@@ -13,8 +13,10 @@
  * block (which may sit after `</html>`, and may be omitted entirely for a base concept):
  *   <script type="application/json" class="concept-meta"> { "prerequisites": [...] } </script>
  *
- * Exit code is non-zero when any error-severity diagnostic is found, so this can
- * gate CI.
+ * Exit code is non-zero when any error-severity diagnostic is found, so this can gate CI.
+ * A *dangling prerequisite* is the exception to "invalid ⇒ no output": the offending edge is
+ * simply omitted from the emitted graph and dist/graph.json is still written — but the problem
+ * is reported and the build still exits non-zero. Any other error still blocks emission.
  * @module
  */
 
@@ -274,19 +276,33 @@ async function main() {
     console.log(`📝 ${todoTargets.size} todo placeholder(s) referenced across ${todoPages} page(s).`);
   }
 
-  if (errors.length > 0) {
+  // A dangling prerequisite is an error, but it does NOT stop us building the graph: every graph
+  // operation already ignores an edge to an unknown id, so the offending edge is simply omitted and
+  // we emit a best-effort graph, then exit non-zero so the problem stays visible (and CI red). Any
+  // OTHER error type (cycle, duplicate id, orphan, missing root, bad metadata) DOES block emission —
+  // the resulting graph couldn't be trusted.
+  const blockingErrors = errors.filter((d) => d.code !== "dangling-prerequisite");
+  if (blockingErrors.length > 0) {
     console.error("\nGraph is invalid — not emitting output.");
     process.exit(1);
   }
 
-  // Attach each concept's immediate successors (the direct mirror of prerequisites)
-  // so the reverse direction is first-class data for the navigation pathway widget, plus
-  // any translated titles harvested from the per-locale overlays.
+  // Attach each concept's immediate successors (the direct mirror of prerequisites) so the reverse
+  // direction is first-class data for the navigation pathway widget, plus any translated titles
+  // harvested from the per-locale overlays. Any prerequisite / explicit-prerequisite edge to a
+  // concept that doesn't exist (a reported dangling prerequisite) is dropped here, so the emitted
+  // graph never references a missing node.
+  const known = new Set(resolved.map((r) => r.id));
   const dependents = buildDependents(indexConcepts(resolved));
   const translatedTitles = await collectTranslatedTitles();
   const withSuccessors = resolved.map((r) => {
     /** @type {any} */
-    const node = { ...r, successors: [...(dependents.get(r.id) ?? [])].sort() };
+    const node = {
+      ...r,
+      prerequisites: r.prerequisites.filter((p) => known.has(p)),
+      explicitPrerequisites: (r.explicitPrerequisites ?? []).filter((p) => known.has(p)),
+      successors: [...(dependents.get(r.id) ?? [])].sort(),
+    };
     const titles = translatedTitles.get(r.id);
     if (titles && Object.keys(titles).length) node.titles = titles;
     return node;
@@ -299,16 +315,24 @@ async function main() {
     concepts: sorted,
   };
 
+  // Emit the graph — unless --check (the validate-only CI gate), which writes nothing.
   if (checkOnly) {
-    console.log("\n--check: graph is valid (no file written).");
-    return;
+    console.log("\n--check: no file written (validate-only).");
+  } else {
+    await mkdir(dirname(OUT), { recursive: true });
+    await writeFile(OUT, JSON.stringify(output, null, 2) + "\n", "utf8");
+    console.log(`\nWrote ${relative(ROOT, OUT)} (${sorted.length} concepts).`);
+    await writeSeoFiles(sorted);
   }
 
-  await mkdir(dirname(OUT), { recursive: true });
-  await writeFile(OUT, JSON.stringify(output, null, 2) + "\n", "utf8");
-  console.log(`\nWrote ${relative(ROOT, OUT)} (${sorted.length} concepts).`);
-
-  await writeSeoFiles(sorted);
+  // Fail the build if any error remains. Only dangling prerequisites can reach here — each was
+  // reported above and its edge omitted from the emitted graph.
+  if (errors.length > 0) {
+    console.error(
+      `\n${errors.length} error(s) found — dangling prerequisite edge(s) were omitted from the graph.`,
+    );
+    process.exit(1);
+  }
 }
 
 /**
