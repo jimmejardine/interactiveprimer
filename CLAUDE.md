@@ -1,58 +1,54 @@
 # CLAUDE.md
 
 - **Read `README.md` first** — it defines the vision and the tree/level model.
+- **Full API reference** for the rarely-used elements (manim, low-level & 3-D charts, geometry-problem,
+  program exercises, video, the geometry toolkit, courses, localization overlays, the a11y checklist,
+  helper list) lives in **`docs/authoring-reference.md`** — read it on demand. This file is the lean core.
 
-This file is the cheat-sheet for authoring **concept pages**. A page is a single
-`.html` file under `concepts/`; there is **no build step**.
+A page is a single `.html` file under `concepts/`; there is **no build step**.
 
 ## Pedagogy: one concept per page — taught thoroughly
 
-A page teaches **exactly one idea** — but it teaches it **richly and completely**, not briefly.
-The limit is **one concept, not one screen**: a good page is as long as it needs to be to make its
-single idea genuinely stick. **Brevity is not the goal** — a page that is a lone sentence and one
-equation has failed the learner. Explore the idea from several angles, work examples, take a couple of
-fun detours, and show it moving. A learner should leave feeling they *deeply* understand one clear thing.
+A page teaches **exactly one idea** — but **richly and completely**, not briefly. The limit is **one
+concept, not one screen**: a good page is as long as it needs to be to make its single idea stick.
+**Brevity is not the goal** — a lone sentence + one equation has failed the learner. Explore the idea from
+several angles, work examples, take a couple of fun detours, show it moving.
 
-**Split a concept** whenever a page starts carrying **more than one idea** (not merely when it gets
-long). Make each part its own page and chain them with `prerequisites`. For example, the derivative
-is built power by power: a constant, then `$x$`, then `$x^2$`, then `$x^3$`, *then* the general power
-rule — each its own page, so the pattern is discovered, not asserted. When a draft starts teaching two
-*different* things, that's the signal to split; when it just goes deep on one thing, that's correct.
+**Split a concept** whenever a page starts carrying **more than one idea** (not merely when it gets long) —
+make each part its own page and chain them with `prerequisites`. (The derivative is built power by power: a
+constant, then `$x$`, then `$x^2$`, *then* the general rule — each its own page.) Two *different* things =
+split; going deep on one thing = correct.
 
 ### What a good page contains
 
-**Write for the learner's age and level first.** The language, the contexts, the examples and the quiz
-should all be pitched to whoever meets this idea — the words, situations and numbers for a six-year-old
-counting animals are nothing like those for someone meeting eigenvalues. Match the reading level, the
-worked examples and the quiz difficulty to that learner every time.
+**Write for the learner's age and level first.** The language, contexts, examples and quiz should all be
+pitched to whoever meets this idea — a six-year-old counting animals vs someone meeting eigenvalues need
+entirely different words, situations and numbers.
 
-Then build the page from the palette below — **select the ingredients that suit *this* idea, and vary the
-mix and the framing from page to page.** There is no fixed template; leaning on the same recipe everywhere
-makes the whole Primer feel uniform, repetitive and boring. Some ideas want a rolling animation and no
-theorem; others want three worked examples and a couple of detours. The one firm rule: a page that is
-only an intro and a quiz is too thin — go deeper. Draw on:
+Then build from the palette below — **select the ingredients that suit *this* idea, and vary the mix and
+framing from page to page.** There is no fixed template; leaning on one recipe everywhere makes the Primer
+feel uniform and boring. The one firm rule: **a page that is only an intro + a quiz is too thin — go
+deeper.** Draw on:
 
 - a **real-world hook** — why this idea matters, in a concrete, age-appropriate situation;
-- the idea in **more than one representation** — words, maths, and a picture (concrete → pictorial → abstract);
-- **worked examples**, done step by step, at the right level;
-- **`<primer-vignette>` digressions** — a catchy question in the header, a fun answer in the expansion:
-  the "why", a bit of history, a surprising case, an extra example the learner doesn't strictly need but
-  will enjoy;
-- **visual aids where they help** — a `<primer-manim>` animation, a `<primer-chart>` / `<primer-chart-3d>`,
-  or a `<primer-geometry>` figure; a moving or interactive diagram beats a static one;
-- a **misconception "Watch out!" callout** — name a classic mistake and put it right. Use a
-  **`<primer-vignette title="Watch out!">`** for these; **do not** use `<primer-theorem>` (the theorem
-  pane is for stating actual theorems/laws only);
-- a **randomised `<primer-quiz>`** — variable-driven and age-appropriate, so it never runs out (see the
-  quiz section: an *"eternal" quiz*, not a fixed list of static questions).
+- the idea in **more than one representation** — words, maths, a picture (concrete → pictorial → abstract);
+- **worked examples**, step by step, at the right level;
+- one or two **`<primer-vignette>` digressions** — a catchy question in the header, a fun answer in the
+  reveal: the "why", a scrap of history, a surprising case, a stretch example;
+- a **visual aid where it helps** — a `<primer-geometry>` figure, a `<primer-chart>`, or a `<primer-manim>`
+  animation; a moving/interactive diagram beats a static one;
+- a **misconception "Watch out!" callout** — name a classic mistake and put it right, in a
+  **`<primer-vignette title="Watch out!">`** (a collapsible aside). **Do NOT** use `<primer-theorem>` for
+  this — the theorem pane is for stating actual theorems/laws only;
+- a **randomised `<primer-quiz>`** — variable-driven and age-appropriate, an *"eternal" quiz* (never a fixed
+  list of static questions).
 
 ## Page skeleton (copy this)
 
-The page splits cleanly in two: **everything a translator edits is in the `<body>` (above
-`</html>`)** — the title, the prose cards, and the `scene-strings`. All **language-neutral
-machinery goes _after_ `</html>`**: the `concept-meta` JSON and every inline `<script type="module">`
-(scene/quiz/chart builders). Browsers relocate post-`</html>` content into `<body>`, so the scripts
-still run and the metadata is still read.
+Everything a translator edits is in the `<body>` (above `</html>`) — the title, the prose cards, the
+`scene-strings`. All **language-neutral machinery goes _after_ `</html>`**: the `concept-meta` JSON and
+every inline `<script type="module">`. Browsers relocate post-`</html>` content into `<body>`, so the
+scripts still run and the metadata is still read.
 
 ```html
 <!doctype html>
@@ -61,13 +57,12 @@ still run and the metadata is still read.
     <!-- 1) The whole toolchain, in one tag. MUST be first in <body>. -->
     <script src="/js/boot.js"></script>
 
-    <!-- 2) The title — its own element (translatable; overlays supply a translated one). -->
+    <!-- 2) The title — its own element (translatable). -->
     <primer-title>Addition</primer-title>
 
-    <!-- 3) Content: one or more cards. The page shell, title, header and confidence
-            control are built automatically — do NOT write <head>, <main>,
-            <primer-page> or <primer-concept>. A scene-strings block (if any) sits
-            DIRECTLY BEFORE the card that uses it (see Localization). -->
+    <!-- 3) Content: one or more cards. The page shell, header and confidence control are built
+            automatically — do NOT write <head>, <main>, <primer-page> or <primer-concept>. A
+            scene-strings block (if any) sits DIRECTLY BEFORE the card that uses it. -->
     <primer-card>
       <p>Addition combines two amounts …</p>
       <primer-math display>a + b = c</primer-math>
@@ -75,522 +70,90 @@ still run and the metadata is still read.
   </body>
 </html>
 
-<!-- 4) Machinery, AFTER </html>: metadata first, then the module script(s). The id is NOT
-        authored — it's this file's path under concepts/ minus ".html". Omit the whole block
-        if the page has no prerequisites/level. -->
+<!-- 4) Machinery, AFTER </html>: metadata first, then the module script(s). The id is NOT authored —
+        it's this file's path under concepts/ minus ".html". Omit the block if there are no
+        prerequisites/level. -->
 <script type="application/json" class="concept-meta">
-  {
-    "prerequisites": ["arithmetic/counting"]
-  }
+  { "prerequisites": ["arithmetic/counting"] }
 </script>
 ```
 
 ## concept-meta fields
 
-The block carries only graph/curation metadata now — **no `id`** (it's the file path under
-`concepts/` minus `.html`) and **no `title`** (that's the `<primer-title>` element). A page with no
-prerequisites or level may omit the block entirely.
+No `id` (it's the file path minus `.html`) and no `title` (that's the `<primer-title>` element). A page with
+no prerequisites/level may omit the whole block. Inline JSON blocks are **JSON5** (`//` comments + trailing
+commas OK).
 
 | Field | Required | Notes |
 |---|---|---|
-| `prerequisites` | no (default `[]`) | Array of full-path ids (the DAG edges). The final edge set is the **union of this list and the inline `<primer-ref>`s in the prose** (see below), so a prerequisite you already link to in the copy needn't be repeated here. The tree has exactly **one root**, the page at path `root`; every other concept reaches it through prerequisites. A base concept with no natural prerequisite of its own may simply omit `prerequisites` (or the whole block) — the graph build auto-attaches any such page to the `orphans` maintenance node (which hangs off `root`), so it joins the tree instead of failing as an orphan. |
-| `declaredLevel` | no | Real number. Levels start at 0 and propagate downstream via `max(declared, all prerequisite levels)`. Fractions allowed (e.g. `2.5`). |
-| `completedDate` | no | ISO date `YYYY-MM-DD` — when the lesson content was finished. Surfaced by the graph tool; omit on stubs. |
-| `needsReviewDate` | no | ISO date `YYYY-MM-DD` — when this concept was flagged as needing review (the date the flag was raised, not a deadline). |
-| `course` | no | Boolean. `true` marks this page as a **course** — see "Courses" below. |
+| `prerequisites` | no (default `[]`) | Array of full-path ids (the DAG edges). The final edge set is the **union of this list and the inline `<primer-ref>`s** in the prose. The tree has one root, `root`; every concept reaches it through prerequisites. A base concept may omit `prerequisites` (or the whole block) — it auto-attaches to the `orphans` node. |
+| `declaredLevel` | no | Real number. Levels start at 0 and propagate downstream via `max(declared, all prerequisite levels)`. Fractions allowed. |
+| `completedDate` | no | ISO date `YYYY-MM-DD` — when the lesson content was finished. Omit on stubs. |
+| `needsReviewDate` | no | ISO date — when this concept was flagged as needing review. |
+| `course` | no | Boolean. `true` marks this page as a **course** (see courses in the reference doc). |
 
-## Courses
+## Authoring elements (inside `<primer-card>`)
 
-A **course** is a curated path through a set of concepts. Mark the course's hub page with
-`"course": true` in its `concept-meta`; the build then harvests every `<primer-ref>` on that page
-(**normal + soft**, deduped, in document order — `forward`/`todo` excluded) into the course's ordered
-member list (emitted as `courseMembers` on that node in `dist/graph.json`). So a course page is
-usually a prose index that `soft`-refs its concepts stage by stage (see
-`concepts/applied-mathematics/game-development-math/game-development-math.html`).
+- **`<primer-card>`** — top-level content block; one or more per page.
+- **`<primer-vignette title="catchy question">…</primer-vignette>`** — a **collapsible digression** (native
+  `<details>`, starts collapsed). The `title` is the hook shown closed (phrase as an intriguing question);
+  the body (prose, `<primer-math>`, `<img>`, a slotted diagram) is the reveal. **This is also the "Watch
+  out!" misconception box** — `title="Watch out!"`.
+- **`<primer-theorem name="…">…</primer-theorem>`** — a callout for **stating a theorem/law/definition**
+  only (eyebrow reads "Theorem — {name}"). **Not** a warning box (use a vignette for that). Multiple claims
+  → **bullets**, not a run-on sentence.
+- **`<primer-math>`** — LaTeX; body text is the source. Inline by default, block with `display`:
+  `<primer-math display>\int_0^1 x\,dx</primer-math>`.
+- **`<primer-code lang="typescript">…</primer-code>`** — a themed, lightly highlighted **code block**. The
+  element's **text content** is the source (leading/trailing blank lines dropped, common indent stripped).
+  `lang`: `typescript`/`ts` (default) · `javascript`/`js` · `python` · `sql` · `text`. **Write every code
+  example in TypeScript** (a superset of JS — beginner examples are untyped TS; add `: number`, `interface`,
+  `class` with `private`/`readonly`, `enum`, generics as OOP/FP arrives; avoid `const enum`/`namespace`).
+  **Escape `<` `>` `&` in the body** as `&lt;` `&gt;` `&amp;` — e.g. `if (x &lt; 10)`. For a short literal
+  in prose use plain inline `<code>`.
+  - **Runnable — add `run`** (`<primer-code run>`): the block gains **Code**/**Output** tabs, an editable
+    code pane (line-number gutter, Reset button), and a **Run ▶** that transpiles the TS and runs the JS in
+    a sandboxed **QuickJS-WASM** engine (no DOM/network — **`console.log` is what shows**; a ~1 s timeout
+    kills infinite loops). Add `run` only to **complete, output-producing** examples; leave fragments
+    non-run.
+- **`<primer-ref to="full/path/id">words</primer-ref>`** — an inline link to **another concept** (empty body
+  → auto-fills the target's title). **Every `<primer-ref>` also declares a prerequisite** (harvested into
+  this page's `prerequisites`), so it must point **backward** to a concept this page builds on (a wrong-way
+  ref makes a cycle). Variants:
+  - **`forward`** (`<primer-ref forward to="…">`) — mention a *later* concept; **reverses** the edge (this
+    page becomes the target's prerequisite). Fails the build if the id is unknown.
+  - **`soft`** (`<primer-ref soft to="…">`) — an incidental "see also" with **no** learning dependency;
+    harvests **no edge** (but still fails the build if the id names no concept). Used for course members.
+  - **`todo`** (`<primer-ref todo to="…">`) — a concept you intend to write but haven't; **no edge, never
+    validated** (the `to` is just a label), renders as a muted "todo" chip. It's the **`todo` attribute**
+    that does this — a plain `<primer-ref to="todo/foo">` is an ordinary backward ref and fails as dangling.
+- **Other elements** (see `docs/authoring-reference.md`): `<primer-manim>` (animations), `<primer-video>`,
+  `<primer-chart-3d>`, `<primer-geometry-problem>` (interactive theorem practice), `<primer-program>`
+  (write-a-program exercises).
 
-A learner picks a **current course** (the "Focus on this course" button under the title, or the
-**Course** hamburger menu → Exit course). It's stored per-profile (`localStorage["primer:course"]`,
-via `js/course.js`) and travels with the progress export/import (a clash on import asks which to
-keep). While a course is active: the top/bottom mini-explorer tints the course predecessor/successor
-of the current concept; the big `/concepts.html` graph collapses to the course members + their
-recursive prerequisite ancestors, with members tinted in the course colour (`--primer-course`).
+The **confidence control** (0–10 star rating) is added to every page automatically — do not author it.
 
-## Authoring elements (use inside `<primer-card>`)
+## The colour rule (all scenes/charts/geometry)
 
-- `<primer-card>` — top-level content block; use one or more per page.
-- `<primer-vignette title="catchy question">…answer…</primer-vignette>` — a **collapsible digression**
-  (a native `<details>` under the hood) that starts **collapsed**. The `title` is the hook shown on the
-  closed card — phrase it as an intriguing question; the body (prose, `<primer-math>`, `<img>`, even a
-  slotted diagram) is the reveal. Use it for the interesting-but-inessential asides that make a page fun:
-  the "why", a scrap of history, a surprising edge case, a stretch example. Put one or two on a page; sits
-  among your `<primer-card>`s.
-- `<primer-theorem name="…">…</primer-theorem>` — a labelled **callout** box for **stating a theorem**.
-  The eyebrow reads **"Theorem — {name}"** (just "Theorem" if `name` is omitted). Use it **only** for a
-  formal theorem / law / definition / key result — its content should read as a *statement of that
-  theorem*. It is **not** a general warning box: for a misconception / "Watch out!" note, use a
-  `<primer-vignette title="Watch out!">` instead. If a theorem states several claims, list them as
-  **bullets**, not a run-on sentence.
-- `<primer-math>` — LaTeX. Body text is the source: inline by default, block with the
-  `display` attribute. e.g. `<primer-math display>\int_0^1 x\,dx</primer-math>`.
-- `<primer-code lang="typescript">…code…</primer-code>` — a themed, lightly syntax-highlighted **code
-  block** for programming / algorithm pages. The element's **text content** is the source; leading/
-  trailing blank lines are dropped and the common indent stripped (so you can indent the block in your
-  HTML). `lang`: `typescript`/`ts` (default) · `javascript`/`js` · `python` · `sql` · `text`/`pseudocode`
-  (panel, no highlighting). Token colours come from the theme palette, so it recolours with light/dark/fun.
-  **Write every code example in TypeScript.** TS is a superset of JS, so it scales across the whole
-  curriculum: beginner examples are just *untyped* TS (identical to JS); introduce types (`: number`,
-  `interface`, `class` with `private`/`readonly`, `enum`, generics) as OOP/FP concepts arrive. Do **not**
-  use Python/pseudocode for new examples. Avoid `const enum` and `namespace` (use plain `enum` / ES modules).
-  **Escape `<` `>` `&` in the body** (`&lt;` `&gt;` `&amp;`) — e.g. `if (x &lt; 10)`. For a short literal in
-  prose, plain inline `<code>` is fine; use `<primer-code>` for multi-line code.
-  - **Runnable — add the `run` attribute** (`<primer-code run>`) to make a snippet executable: the block
-    gains **Code** / **Output** tabs and a **Run ▶** button that transpiles the TS (sucrase) and runs the
-    JS in a sandboxed **QuickJS-WASM** engine (lazy-loaded on first Run; no DOM/network — **`console.log`
-    is what appears in Output**), then switches to the Output tab. An infinite loop is stopped by a ~1 s
-    timeout. The Code pane is **editable** (line-number gutter, horizontal scroll, and a **Reset code**
-    button that restores your original), so learners can tweak the snippet and re-run it. Add `run` only to
-    **complete, output-producing** examples (a `console.log`-driven demo); leave fragments /
-    snippets-mid-explanation non-run.
-- `<primer-manim scene="name" caption="…">` — plays a registered animation on a Play
-  button (lazy-loads manim-web; supports replay). See scenes below.
-- `<primer-chart scene="name">` — a **JSXGraph chart** (a function plotted on axes, SVG). Two
-  modes: **static** (no body) draws once; **interactive** carries sliders + number boxes that
-  re-plot the curve live. Add the controls with an inline `params` config and read them in the
-  chart builder. See charts below.
-- `<primer-video src="…" caption="…">` — an inline YouTube video. `src` is a YouTube URL
-  (watch / youtu.be / embed / shorts) or a bare 11-char id. Shows a thumbnail + play
-  facade and only loads YouTube on click. In a translation overlay, keep the same `src`
-  to pin the English video or set a different one for a localized video.
-- `<primer-ref to="full/path/id">words</primer-ref>` — an inline link to **another concept**.
-  Renders the words as a concept link (to `/concepts/<id>.html`) followed by a small confidence
-  dot; leave the body empty to auto-fill the target's title. **Every `<primer-ref>` also declares
-  a prerequisite** — it's harvested by the graph build and unioned into this concept's
-  `prerequisites` — so it must point **backward** to a concept this page builds on. (A wrong-way
-  ref makes a cycle, which `npm run graph` flags.) To point **forward** — mention a concept that
-  comes *later* — use `<primer-ref forward to="full/path/id">`: it shows the **same control** but
-  **reverses** the edge, so *this* page becomes a prerequisite of the target (a weak/implicit edge,
-  like any harvested ref; a `forward` ref to an unknown id fails the build). For an incidental "see
-  also" between concepts with **no** learning dependency either way (e.g. two peers), use
-  `<primer-ref soft to="full/path/id">`: same styled link + confidence dot, but it harvests **no
-  edge** (the build still fails if the id names no concept). `soft` wins if combined with `forward`.
-  (A plain `<a href="/concepts/<id>.html">` also makes no edge, but without the confidence dot.)
-  To reference a concept you **intend to write but haven't yet**, add the boolean **`todo`**
-  attribute: `<primer-ref todo to="stochastic-calculus">`. It harvests **no edge** and is **never
-  validated** (so it can't fail the build — the `to` value is just a label here and need not name a
-  real page), and renders as a muted **"todo"** chip (not a working link, no confidence dot). `todo`
-  wins if combined with `forward`/`soft`. `npm run graph` prints a tally of outstanding `todo`
-  placeholders. **It is the `todo` *attribute* that does this — not the `to` value.** A plain
-  `<primer-ref to="todo/foo">` (a `todo/`-style path but *no* attribute) is still an ordinary
-  backward ref and fails the build as a dangling prerequisite — so always write the attribute, and
-  the moment the page exists, drop the `todo` (the same `to` then becomes a real validated link).
-- `<primer-quiz name="…">` — a random test. The question bank is built in JS by
-  `registerQuiz(name, builder)` (in an inline module script, like `registerManimScene`), and the
-  element references it by `name`. The builder receives a toolkit `{ sceneStrings }` and returns the
-  bank. A question is **multiple-choice** (has `options`) or **free-text** (has `answer`).
-  The quiz renders its **own** standardized golden "Quick quiz" panel (titled card), so place it
-  **directly** — do **not** wrap it in a `<primer-card>` and do **not** add a per-page heading
-  (`<h2>Test yourself</h2>` etc.).
+**NEVER pick your own colours — always use the theme.** Every scene/chart/geometry colour comes from
+`const colors = themeColors()` (imported from `primer`): `{ bg, ink, line, cat }` — `bg` backdrop, `ink`
+labels/text, `line` axes/strokes, and `cat` an **ordered categorical palette** (take `cat[0]`, `cat[1]`, …
+in order so all diagrams share colours). Do **not** hardcode hex/`hsl`/`rgb` or use library named colours
+(manim's `BLUE`/`RED`, etc.), and no `|| BLUE` fallbacks. In JSXGraph, text is coloured via `strokeColor`.
+This keeps every diagram on-theme and re-themes on a theme change. Give **every** mobject/element an
+explicit theme colour (defaults are white and vanish on light themes).
 
-  **Make the quiz RANDOMISED — an "eternal" quiz that never repeats.** The default is variable-driven
-  questions: give a question `variables` (+ `constraints`) so every draw gets fresh numbers, and it
-  re-instantiates each time the learner retakes it (see the `variables` / `constraints` /
-  multiple-choice-with-variables machinery below). A fixed list of hard-coded questions is the
-  **exception**, not the norm — reach for it only when a question genuinely can't be parameterised. Keep
-  the numbers and contexts age-appropriate for whoever meets the page. Put **at least 10 questions in the
-  bank** even though only ~5 are drawn per attempt (`num_questions` defaults to 5), so *which* questions
-  appear — not just their numbers — varies from one visit to the next. (A single variable-driven question
-  re-instantiates to fill many slots, but still author ≥10 distinct entries so the drawn set genuinely
-  rotates.)
+## Geometry diagrams (`registerGeometryScene`) — the workhorse visual
 
-  **Quiz settings live in the builder, not on the element.** The builder's optional **first** item is
-  a config object `{ num_questions, preamble }` — recognized by having **no `options` and no
-  `answer`** (so it isn't mistaken for a question). `num_questions` is how many questions to draw at
-  random (**defaults to 5** when omitted, or when there's no config item); `preamble` is an
-  instructions sentence rendered in normal font directly under the heading. Both live in the
-  language-neutral builder, so the count + instructions are **common to every locale** — there is no
-  `count` attribute and no separate intro `<p>` to keep in sync with a translation overlay. Route a
-  `preamble` through `sceneStrings` so it translates (an all-maths quiz needs none).
-
-  ```html
-  <primer-quiz name="addingQuiz@1"></primer-quiz>
-
-  <!-- Translatable prose, keyed by the quiz name (its own scene-strings block). -->
-  <script type="application/json" class="scene-strings">
-    { "addingQuiz@1": { "instructions": "Add the two numbers.", "sumWords": "What is the sum?" } }
-  </script>
-
-  <script type="module">
-    import { registerQuiz } from "primer";
-    registerQuiz("addingQuiz@1", ({ sceneStrings }) => [
-      { num_questions: 3, preamble: sceneStrings("instructions") },  // config: no options/answer
-      { prompt: () => sceneStrings("sumWords"),                 // localized prose → must be a function
-        options: [ { text: "$5$", correct: true }, { text: "$6$", correct: false } ] },
-      { prompt: "What is ${a} + {b}$?",                         // simple string: {a},{b} fill from the draw
-        variables: "a=[1:10] b=[1:10]",
-        answer: "a + b" },                                      // string expression  ≡  (v) => v.a + v.b
-    ]);
-  </script>
-  ```
-
-  `num_questions` questions are picked at random; multiple-choice options are shuffled. Prompts and
-  option text may contain inline LaTeX delimited by `$…$`. **Version the `name` (`@1`)** and bump it on
-  an incompatible change (an overlay pinning the old version is then flagged — like a scene pin).
-
-  **The prose/maths split (this is the i18n contract).** Route every translatable string through
-  `sceneStrings("key")` (its English lives in the quiz's `scene-strings` block; an overlay supplies the
-  translation — see Localization). Keep language-neutral maths as **inline literals** in the
-  builder. So a translation overlay carries only the translated `scene-strings` — never the bank —
-  and an all-maths quiz needs no translation at all.
-
-  **A `sceneStrings` string only interpolates simple `{name}` placeholders — never expressions.**
-  A *translatable* string is filled by `fillVars`, which substitutes a bare `{name}` and nothing else.
-  So `sceneStrings("q", v)` on a string like `"the number ${10*t + o}$"` does **not** compute — it
-  renders the literal `10*t+o`. (This is the opposite of a *literal* `prompt`/`text`/`answer` string,
-  whose `{…}` the quiz engine evaluates — see below — because those aren't translated.) When a prompt
-  must show a *computed* value, precompute it in the builder and pass it as a named variable:
-  `prompt: (v) => sceneStrings("q", { ...v, n: 10*v.t + v.o })` with `"q": "the number ${n}$…"`. Keep
-  language collisions out with the `{{…}}` literal escape. `npm run check` enforces this two ways: a
-  scene-string containing a `{…}` expression over the quiz's variables fails the build, and every
-  locale overlay must reference the **same** `{placeholders}` as its English source.
-
-  **`prompt`, option `text`, and `answer` each accept two equivalent forms** — use whichever is
-  simpler:
-  - a **string** — any `{…}` inside it is **evaluated against the drawn variables**: `{a + b}`,
-    `{2 * a}`, a bare `{a}`, and adjacent groups concatenate (`{a}{b}` → "412"). For `answer` the
-    whole string is the expression (`"a + b"`) or a literal (`"Paris"`, a number). Double the braces
-    (`{{12}}`) to keep a literal LaTeX `{12}`.
-  - a **function of the drawn bindings `v`** — `text: (v) => \`$${v.a + v.b}$\``,
-    `answer: (v) => v.a + v.b`.
-
-  They are identical — `{ text: "${a + b}$" }` ≡ `{ text: (v) => \`$${v.a + v.b}$\` }` — so strings
-  keep simple quizzes terse and functions handle anything awkward to express inline. **Localized
-  prose is the exception:** it must be a function, so it can call `sceneStrings("key", v)` (passing
-  `v` interpolates a `{name}` placeholder in the translated string).
-
-  **Free-text questions** (`answer`):
-  - `variables` — space-separated `name=[…]`; the bracket separator picks the kind:
-    `[lo:hi]` integer, `[lo;hi]` real (3 dp), `[v1,v2,…]` a choice. Negatives ok (`[-5:5]`).
-  - `answer` — a function of `v` (e.g. `(v) => v.a * v.b`), or a literal (a number, or text like
-    `"Paris"`; a function returning text — `() => sceneStrings("capital")` — localizes it). Typed
-    answers are graded numerically with a small tolerance, or as case/space-insensitive text.
-  - A question **with** `variables` is **re-instantiable**, so one entry can fill many `count`
-    slots — each with fresh random values.
-  - `compare: "polynomial"` grades the answer by **algebraic equivalence** via the CortexJS Compute
-    Engine (lazy-loaded), so any equivalent form is accepted — factored, reordered, fractions, etc.
-    (`(x+3)(x+4)` ≡ `x^2+7x+12`). The box becomes a MathLive math editor (type `^` for an exponent).
-    `answer` is the expected expression as a string, e.g.
-    `{ prompt: () => \`${sceneStrings("expand")} $(x+3)(x+4)$\`, answer: "x^2 + 7x + 12", compare: "polynomial" }`.
-    Offline (CE can't load) it falls back to a simple expanded-polynomial comparator. Its on-screen
-    keyboard defaults to `algebra-basic`; set `keyboard: "<name>"` to pick a different per-module
-    keyboard (see js/math-keyboards.js — add exponents/geometry/trig there).
-  - `constraints` (either kind) — a boolean expression over the variables that must hold; values are
-    **re-rolled** (up to 100×) until it does. `== != < > <= >= && ||`, e.g. `"a != b"`,
-    `"a > b && b > 0"`. If a question's constraints can't be met, the quiz falls back to others.
-
-  **Multiple-choice with variables:** an `options` question may carry `variables` too; write each
-  option's `text` as a string with `{expr}` (e.g. `"${a + b}$"`, `"${2 * a}$"`) or as a function,
-  and keep its `correct` flag. Use `constraints` to stop distractors colliding — e.g. with
-  `a,b∈[1:20]`, set `"a != b"` so `{a+b}`, `{2*a}`, `{2*b}` don't render identically.
-
-  **Chart / geometry options** (the choices are figures, not text): give an option a `chart` (a
-  registered chart-scene name) **or** a `geometry` (a registered geometry-scene name) instead of `text`,
-  and it renders as a small `<primer-chart>` / `<primer-geometry>` figure in a 2-column grid; `correct`
-  works the same. Example:
-  `{ prompt: () => sceneStrings("whichParallel"),
-     options: [ { geometry: "optParallel", correct: true }, { geometry: "optCrossing", correct: false } ] }`.
-  Figure options carry no `text`, so they need no translation.
-
-  **A figure above the prompt**: add `figure: "sceneName"` to any question (MC or free-text) to render a
-  `<primer-geometry>` (read-only) **above** the prompt — a "given this diagram, find ∠x" question. Pair a
-  free-text geometry answer with `keyboard: "geometry-angles"` (digits, `°`, `+ − × ÷`, parens, the angle
-  unknowns `x α β θ`) or `keyboard: "geometry-lengths"` (digits, `√`, the four operations, `x`, no degree
-  sign); a numeric angle answer accepts `70`, `70°` or `70 degrees` (the `°` is stripped before grading).
-  See `js/math-keyboards.js`.
-
-  **An interactive geometry PROBLEM as a question**: add `{ problem: "name" }` (a registered
-  `registerGeometryProblem`, see its section below) as a bank item — it embeds the engine-generated
-  "apply-the-theorem" sandbox and folds its solved/unsolved state into the score. It carries no
-  options/answer (recognised by its `problem` field), so it's never mistaken for the leading config.
-
-  **A "write a program" question**: add `{ program: "name" }` (a registered `registerProgram`, see
-  its section below) as a bank item — it embeds a `<primer-program>` code sandbox and folds its
-  correct/incorrect state into the score. Recognised by its `program` field (no options/answer), so
-  it's never mistaken for the leading config. Because its `check()` runs the sandbox asynchronously,
-  "Check answers" grades program questions after a short run.
-
-  Inline JSON blocks (the `concept-meta`, `scene-strings`) are parsed with **JSON5**, so `//` and
-  `/* … */` comments and trailing commas are allowed.
-
-The **confidence control** (a 0–10 star rating, persisted to `localStorage` under
-`primer:confidence:<id>`) is added to every page automatically — do not author it.
-
-## Animations + narration (manim-web scenes)
-
-Register a scene in an inline module script (anywhere in `<body>`), then reference it
-by name from a `<primer-manim>`. The builder receives a **single `toolkit` object** — destructure
-what you need — so the only `primer` import is `registerManimScene`:
-
-```html
-<script type="module">
-  import { registerManimScene } from "primer";
-
-  registerManimScene("addNumberLine", async ({ scene, manim, speak, themeColors }) => {
-    const { Circle, Create } = manim;               // `manim` = manim-web namespace
-    const colors = themeColors();                   // theme palette (see colour rules below)
-    await Promise.all([                             // `scene` is ready — just animate + narrate
-      scene.play(new Create(new Circle({ color: colors.cat[0] }))),
-      speak("Start at a, then count on."),
-    ]);
-  });
-</script>
-```
-
-- The `toolkit` carries everything a scene needs: `scene` (the manim Scene, already built on the
-  stage with the theme backdrop — just `scene.play(...)`, no `new Scene`), `manim`, `sceneStrings`
-  (call `sceneStrings(key, vars?)` for localized narration words, interpolating any `{name}`
-  placeholders; see Localization), `speak`, `cancelSpeech`, and `themeColors`. There is nothing
-  else to import.
-- `speak(text, { rate, pitch })` returns a Promise that resolves when narration finishes
-  (silent no-op if the browser lacks speech). Narration is spoken in the **active locale's**
-  voice automatically — authors don't deal with `lang`/`bcp47`; just pass the (localized) text.
-  `cancelSpeech()` stops it; the manim component already cancels speech on replay.
-- **NEVER pick your own colours — always use the theme.** A scene must take every colour from
-  `const colors = themeColors()` (imported from `primer`). Do **not** use manim's named colour
-  constants (`BLUE`, `RED`, `WHITE`, …), do **not** hardcode hex/`hsl`/`rgb`, and do **not**
-  write an `|| BLUE`-style fallback (`themeColors()` always returns valid colours). This is what
-  keeps every diagram on-theme and mutually consistent, and re-themes them on a theme change.
-  `themeColors()` returns `{ bg, ink, line, cat }`: `bg` backdrop, `ink` for labels/text, `line`
-  for axes/strokes/number lines, and `cat` — an **ordered categorical palette** (a generated
-  golden-angle sequence, so early entries are maximally distinct). Take `colors.cat[0]`,
-  `colors.cat[1]`, … in order so all diagrams share the same colours. A replay after a theme
-  change re-reads them.
-- **No animation item should be colourless.** Give every mobject an explicit theme colour
-  (`colors.cat[i]`, `colors.line`, or `colors.ink`). manim's defaults are white and vanish on
-  light themes — e.g. a `NumberLine` with no `color` is invisible on the light backdrop. Watch
-  sub-parts: a `NumberLine`'s `color` is the **stroke** (line + ticks) only — its number labels
-  are filled text and must be coloured separately, e.g.
-  `for (const l of line.getNumberLabels()) l.setColor(colors.ink);` (`setColor` on the labels
-  covers their fill).
-- manim-web is pinned (v0.3.22 in `js/boot.js`), so call its API **directly** — don't write
-  feature-detection fallbacks (`const Grow = GrowFromCenter ?? FadeIn`, `Integer ? … : Text`,
-  `if (MoveAlongPath) … else …`): the exports are guaranteed present, so those branches are dead
-  code. Keep scenes simple; the component already shows a friendly message if a scene throws.
-- **Cartoon images (the exception to the colour rule).** A scene can show a picture with
-  `new manim.ImageMobject({ source: "foo.png", height, center, opacity: 0.999 })` (it grows / fades
-  like any mobject; `await img.waitForLoad()` before animating so it doesn't pop in). Such a
-  **content image keeps its own colours** — it is *not* themed. Workflow for getting one:
-  1. Find art on [OpenClipart](https://openclipart.org) (100% public domain) — always pick the
-     **most cartoonish** image available.
-  2. **Download the "small" PNG** (the PNG render, e.g. `https://openclipart.org/image/800px/<id>`)
-     **into the same directory as the page that uses it**. Use a **PNG, not the SVG**: manim's WebGL
-     texture loader can't decode an SVG (it shows a black box).
-  3. The image **must be transparent** — if it has no alpha / is fully opaque, pick a different one.
-  4. **Crop it tight** to the subject: `node scripts/trim-png.js <file.png>` (trims the transparent
-     padding OpenClipart leaves; it also rejects a non-transparent PNG).
-  Reference it by a **relative** path (`source: "frog.png"`, resolved against the page URL) — don't
-  hotlink, don't use an absolute `/concepts/…` path. manim only honours the PNG's transparency when
-  `opacity < 1`, so pass `opacity: 0.999` (looks opaque; drops the transparent background). See
-  `concepts/mathematics/arithmetic/counting.html` (counting frogs).
-
-## Charts (JSXGraph plots)
-
-Charts are drawn with **JSXGraph** (an SVG plotting/geometry library) — separate from the manim
-animations behind `<primer-manim>`. There are **two** ways to author them: the high-level
-`registerCharts` helper (use this by default), or the low-level `registerChart` builder (for
-full control / one-off boards). Both render into a `<primer-chart scene="name">`. Because JSXGraph
-is SVG there's no WebGL context (and no context cap), so charts are cheap and you can use as many as
-you like.
-
-### Authoring charts the easy way: `registerCharts`
-
-`registerCharts(charts, chartOptions, sliders?)` registers a whole **family** of charts that share
-one identical domain + range — no board/axes/plot boilerplate. The markup is just an empty
-`<primer-chart scene="name"></primer-chart>`.
-
-```html
-<primer-chart scene="sinLab"></primer-chart>
-
-<script type="module">
-  import { registerCharts } from "primer";
-  const DEG = Math.PI / 180;
-  registerCharts(
-    [{
-      name: "sinLab",
-      // f is (x, sliders) => y, or an ARRAY of them (one curve each). Slider values arrive as `s`.
-      f: [ (x) => Math.sin(x * DEG),
-           (x, s) => s.A * Math.sin((s.f * x + s.phi) * DEG) ],
-      // line: one style object (all curves) | array (per curve) | (colors, i) => style. The FUNCTION
-      // form is the theme-safe way to colour curves — it gets fresh themeColors + the curve index.
-      line: (colors, i) => i === 0 ? { strokeColor: colors.line, strokeOpacity: 0.35 } : { strokeColor: colors.cat[0] },
-      // legend (optional): one label per curve (parallel to f). Renders a swatch + label row at the
-      // BOTTOM of the chart; each swatch mirrors that curve's colour + solid/dashed style. A label is
-      // a string or a thunk (() => …) — route translatable text through sceneStrings like a title.
-      legend: [ "sin(x)", "A·sin(fx + φ)" ],
-    }],
-    { id: "sinLab", xmin: -360, xmax: 360, xticks: 180, yticks: 1, ymin: -3.2, ymax: 3.2 },
-    // sliders: inline defs (single chart only). They render inside this chart; values feed every f.
-    [ { name: "A", label: "Amplitude (A)", min: 0, max: 3, step: 0.1, value: 1, anchors: [0,1,2,3] },
-      { name: "f", label: "Frequency (f)", min: 0, max: 4, step: 0.1, value: 1 },
-      { name: "phi", label: "Phase (φ°)", min: -360, max: 360, step: 15, value: 0 } ],
-  );
-</script>
-```
-
-- **`chartOptions`** (all optional): `{ id, title, xmin=-1, xmax=1, ymin=null, ymax=null,
-  xticks=null, yticks=null, xaxisname="x", yaxisname="y" }`. The whole series shares one domain +
-  range. **null `ymin`/`ymax` are auto-computed** by sampling every curve of every chart across
-  `[xmin,xmax]` — one **shared** range, so e.g. quiz options stay visually comparable (a taller
-  amplitude really looks taller). `xticks`/`yticks` are the major-tick spacing; null → JSXGraph
-  auto-spacing. `title` renders as a heading above the board. `id` defaults to the joined chart
-  names. (Interactive charts whose curve grows with a slider should set an explicit `ymin/ymax` so
-  the axes don't jump — auto-range only samples the initial slider values.)
-- **`sliders`** (optional, 3rd arg) is a **union**:
-  - a **string** — the name of a *shared* slider group registered with `registerChartSliders(name,
-    defs)` and placed on the page with `<primer-chart-sliders name="…">`. Any number of charts may
-    name the same group; they all re-plot together as it moves.
-  - an **array** of slider defs — inline, allowed only for a **single-chart** series; the panel
-    renders inside that chart.
-
-  **Placement convention — sliders go BELOW the diagram.** Always put the
-  `<primer-chart-sliders>` element **after** the `<primer-chart>` / `<primer-geometry>` it drives, so
-  the controls sit *under* the visual they change (you watch the diagram, then reach down for the
-  knobs). This holds everywhere a slider group is used (charts and geometry scenes alike).
-
-  ```html
-  <primer-chart scene="chartA"></primer-chart>
-  <primer-chart scene="chartB"></primer-chart>
-  <primer-chart-sliders name="wave"></primer-chart-sliders>   <!-- controls go below the chart(s) -->
-  <script type="module">
-    import { registerCharts, registerChartSliders } from "primer";
-    registerChartSliders("wave", [ { name: "A", label: "Amplitude", min: 0, max: 3, step: 0.1, value: 1 } ]);
-    registerCharts([{ name: "chartA", f: (x, s) => s.A * Math.sin(x) },
-                    { name: "chartB", f: (x, s) => s.A * Math.cos(x) }], { xmin: -6.3, xmax: 6.3 }, "wave");
-  </script>
-  ```
-
-  A slider def is `{ name, label?, min, max, step?=0.1, value?=min, anchors? }` (the same shape as a
-  low-level `params` entry; `anchors` are snap points).
-
-  **Control kinds.** A def defaults to a slider (range + linked number box). Set
-  `type: "choice"` with `options: ["…","…"]` for a **segmented button group** instead — its value
-  is the **index** of the selected option (so a chart/diagram reads `sliders.<name>` as a number,
-  `0,1,2,…`), and `min`/`max`/`step`/`anchors` don't apply. A group's defs may mix sliders and
-  choices in one panel. Use a choice for a discrete switch — e.g. flipping a diagram between two
-  cases. See `concepts/mathematics/calculus/what-is-a-function.html` (function vs not-a-function, and the
-  curve in the vertical-line test).
-
-### For full control: the low-level `registerChart`
-
-`registerChart(name, builder)` is the primitive `registerCharts` is built on. The builder receives
-the host element and the `JXG` namespace, sets up a **board** (via `JXG.JSXGraph.initBoard`)
-**once**, and returns an `update(params)` the component calls — initially, on every control change,
-and after a theme change. Drive it from a `<primer-chart>` carrying an inline `params` block:
-
-```html
-<primer-chart scene="sinLab">
-  <script type="application/json">
-    { "params": [ { "name": "A", "label": "Amplitude (A)", "min": 0, "max": 3, "step": 0.1, "value": 1 } ] }
-  </script>
-</primer-chart>
-
-<script type="module">
-  import { registerChart, themeColors } from "primer";
-  registerChart("sinLab", (host, JXG) => {
-    const colors = themeColors();
-    const board = JXG.JSXGraph.initBoard(host, { boundingbox: [-6.6, 3, 6.6, -3], axis: false });
-    board.create("axis", [[0, 0], [1, 0]], { strokeColor: colors.line });          // x-axis
-    board.create("axis", [[0, 0], [0, 1]], { strokeColor: colors.line });          // y-axis
-    const cur = { A: 1 };                                                      // live values
-    // functiongraph re-evaluates its function on board.update(), so close over `cur` and just
-    // mutate it — no need to recreate the curve.
-    board.create("functiongraph", [(x) => cur.A * Math.sin(x), -6.3, 6.3],
-      { strokeColor: colors.cat[0], strokeWidth: 4, highlight: false });
-    return (p) => {                                   // p = current control values, e.g. { A: 2 }
-      if (Number.isFinite(p.A)) cur.A = p.A;
-      board.update();
-    };
-  });
-</script>
-```
-
-- Same colour rule as scenes: **every** colour from `themeColors()` (axes `colors.line`, curves
-  `colors.cat[i]`, any text labels `colors.ink` — JSXGraph colours text via `strokeColor`), never a
-  hardcoded value. The component disables pan/zoom/navigation chrome and re-fits on resize by
-  default; a builder's own `initBoard` options override that.
-- A **static** chart (no `params` config / a builder whose `update` ignores `p`) draws once —
-  this is what quiz **chart options** use. The component rebuilds the board on a theme change, so
-  read `themeColors()` at the top of the builder (not cached outside it).
-- The board fills a 7:4 stage. Give `functiongraph` an explicit `[fn, xmin, xmax]` range so it
-  only plots the visible span.
-- **Localizing a chart.** A chart's `title` and each slider `label` may be a **function** returning
-  the string. Pull the words from the page's `scene-strings` block (see Localization) via
-  `makeStrings(namespace)` and pass them as thunks so they resolve when the chart RENDERS — after a
-  translation overlay has been applied — not at registration: `const s = makeStrings("sinLab");`
-  then `{ …, title: () => s("title") }` and a slider `{ name: "A", label: () => s("amplitude"), … }`.
-  See `concepts/mathematics/trigonometry/sine-properties.html` for the full showcase.
-
-### 3D charts: `register3dChart`
-
-For a **3D** figure (points, vectors, surfaces in space) use `register3dChart(name, builder, opts)`
-+ a **`<primer-chart-3d scene="name">`** element. It renders a JSXGraph **View3D** projected to SVG
-(no WebGL, no context cap — themeable like every other figure) and is **drag-rotatable**. Sliders
-work exactly as for 2D charts: name a `registerChartSliders` group via `opts.sliders` and place a
-`<primer-chart-sliders>` below.
-
-Unlike the 2D builder, the 3D builder gets a single **toolkit** `{ view, JXG, board, colors,
-sliders }` and does NOT return an `update` — like a geometry scene it reads live slider values in
-**functional coordinates** and the component calls `board.update()` on every change. `view` is the
-themed View3D (author draws with `view.create('point3d' | 'line3d' | 'curve3d' | 'functiongraph3d' |
-'scatter3d', …)`); `board` is the underlying 2D board (handy for a 2D overlay readout, pinned in its
-`[-8,8]` coords); colours come from `themeColors()` (`colors.line`/`colors.cat[i]`/`colors.ink`),
-never hardcoded. The view's axes + x/y/z labels are drawn and themed for you.
-
-`opts`: `{ bounds = [[-5,5],[-5,5],[-5,5]], xName='x', yName='y', zName='z', title, sliders, az, el }`
-— `bounds` the 3D extent, `az`/`el` the initial azimuth/elevation, `title` a string or thunk.
-
-```html
-<primer-chart-3d scene="vec3d"></primer-chart-3d>
-<primer-chart-sliders name="vec3d"></primer-chart-sliders>
-
-<script type="module">
-  import { register3dChart, registerChartSliders } from "primer";
-  registerChartSliders("vec3d", [ { name: "vx", min: -4, max: 4, step: 1, value: 3 }, /* vy, vz … */ ]);
-  register3dChart("vec3d", ({ view, colors, sliders }) => {
-    const O = view.create("point3d", [0, 0, 0], { visible: false, fixed: true });
-    const tip = view.create("point3d", [() => sliders.vx, () => sliders.vy, () => sliders.vz],
-      { size: 4, strokeColor: colors.cat[1], fillColor: colors.cat[1], withLabel: false, fixed: true, highlight: false });
-    view.create("line3d", [O, tip], { strokeColor: colors.cat[1], strokeWidth: 4, straightFirst: false, straightLast: false });
-  }, { bounds: [[-4.5, 4.5], [-4.5, 4.5], [-4.5, 4.5]], sliders: "vec3d", title: "a 3D vector" });
-</script>
-```
-
-See `concepts/mathematics/linear-algebra/spaces/vectors-in-3d.html` and
-`concepts/computer-science/machine-learning/foundations/the-feature-vector.html` (a 3D scatter +
-vector). The 2D `<primer-chart>`/`<primer-geometry>` boards strip pointer handlers (static figures);
-`<primer-chart-3d>` keeps them so the view can rotate. **Because those handlers stay live, every
-`point3d` is draggable by default** — always pass `fixed: true` (and `highlight: false`) on points
-the learner shouldn't grab, so the only interaction is rotating the box.
-
-## Geometry diagrams (`registerGeometryScene`)
-
-For **figures** rather than function plots — lines, angles, polygons, Greek-letter labels — register a
-geometry scene and reference it from a **`<primer-geometry scene="name">`** element (a peer of
-`<primer-chart>`, also JSXGraph/SVG). The board is **equal-aspect, grid-less and axis-less** by default, so
-angles/circles aren't distorted; every element is **read-only** (no dragging). Greek letters and `°` are
-plain Unicode (no math engine).
-
-A diagram is a **timeline of waypoints**: the builder draws everything up front, and each `step(caption, fn)`
-tags the elements `fn` creates. The student steps the proof forwards/backwards (elements fade in by an
-`i < current` threshold); elements created outside any `step()` are "base" (always visible).
-
-Like a manim scene, the builder gets a single **toolkit** object: `{ board, JXG, step, sliders, colors,
-sceneStrings, parallelMark, crossing, makeGraph }` — `colors` is the resolved `themeColors()` palette,
-`sceneStrings` the localized strings, and `parallelMark`/`crossing`/`makeGraph` the drawing tools.
+For **figures** (lines, angles, polygons, Greek labels) register a geometry scene and reference it from a
+**`<primer-geometry scene="name">`**. The board is **equal-aspect, grid-less, axis-less, read-only** by
+default. A diagram is a **timeline of waypoints**: draw base content up front; each `step(caption, fn)` tags
+the elements `fn` creates, which the learner reveals forwards/backwards. Elements outside any `step()` are
+always-visible base content.
 
 ```html
 <primer-geometry scene="rightTriangle"></primer-geometry>
 
-<!-- Localized text, keyed by scene name → key (same block manim scenes use). -->
 <script type="application/json" class="scene-strings">
   { "rightTriangle": { "title": "Right triangle", "tri": "A right triangle", "ra": "The right angle" } }
 </script>
@@ -607,249 +170,146 @@ sceneStrings, parallelMark, crossing, makeGraph }` — `colors` is the resolved 
 </script>
 ```
 
-- **i18n**: `sceneStrings(key, vars?)` resolves a scene-scoped string (locale overlay → English →
-  `$$scene.key$$`), exactly like manim's. Put the English in a `<script class="scene-strings">` block keyed
-  by scene name; titles localize via a `() => makeStrings(name)("title")` thunk (the title is defined outside
-  the builder). Numbers / Greek / `a∥b` stay literal.
-- **Tools** (board-bound, on the toolkit):
-  - `parallelMark(x, y, { dir = "h"|"v", along, count = 1, color })` — the "these are parallel" arrowheads
-    (use `count: 2` for a second, distinct parallel pair; `color` defaults to `colors.line`).
-  - `tickMark(p, q, { count = 1, color })` — equal-length **hatch ticks** across the middle of the side
-    `p`→`q` (each a `[x,y]`); `count: 2`/`3` for a second/third congruent-side group.
-  - `angleMark(vertex, p1, p2, { count = 1, label, color, radius })` — equal-**angle** arc(s) at `vertex`
-    between the rays to `p1`/`p2`, with an optional `label` on the bisector (`count` draws concentric arcs).
-  - `rightAngle(vertex, p1, p2, { color })` — the right-angle **square** marker.
-  - `extend(p, q, { both, dash, color })` — an **auxiliary/extension** line through `p`→`q` past `q` (and
-    past `p` if `both`), themed dashed by default.
-  - `label(at, text, { color, style })` — themed text at `[x,y]`; `style: "unknown"` renders the muted
-    "fill me in" accent (vs `"given"`, the ink colour). Greek/`°` stay literal Unicode.
-    See `concepts/mathematics/geometry/angle-chasing.html` for all of these in one figure.
-  - `crossing(vertex, dirA, dirB)` — the four angles where two lines cross. Returns
-    `{ number(corner, text, opts?), wedge(corner, opts?) }`, addressing an angle by screen corner
-    (`"ul"|"ur"|"ll"|"lr"`): `number` writes a label inside the wedge (along its bisector); `wedge`
-    fills/highlights it and returns the element (so a `step` captures it). `vertex`/`dirA`/`dirB` may each
-    be a **function** returning the value — pass functions for a slider-driven figure (a moving crossing /
-    rotating line) and the wedge + label re-plot live on `board.update()`. See the static figures in
-    `concepts/mathematics/geometry/alternate-interior-angles.html` and the live transversal in `parallel-lines.html`.
-  - `makeGraph(opts?)` — for a **graph diagram** (a function plotted on Cartesian axes), draws the
-    standard themed axes (faint lines, arrowheads at the positive ends, tick numbers, `"x"`/`"y"` labels)
-    that auto-span the board — the **same axes the `registerCharts` charts use**, so don't hand-roll
-    `segment` axes + `"x"`/`"y"` text. Set the board's `boundingbox` (usually `keepAspect: false`) in the
-    scene options; then call `makeGraph()` and plot your curve. Options (all defaulted, see
-    js/graph-axes.js): `xName`/`yName` (axis labels, `""` hides one), `xticks`/`yticks` (spacing, null =
-    auto), `ticks` (false → clean unticked axes), `arrows` (false → no arrowheads). E.g.
-    `makeGraph({ yName: "f(x)" })`. See `concepts/mathematics/calculus/functions/what-is-a-function.html`.
-- **Colours** as everywhere: from `themeColors()` (`colors.line`/`colors.cat[i]` strokes, fills
-  `colors.cat[i]` at opacity, **text via `strokeColor: colors.ink`**) — never hardcoded.
-- **No endpoint dots**: a `segment`/`line`/`arrow` built from coordinates hides its auto-created endpoint
-  points by default (teaching figures draw lines, not points). To show a dot, create an explicit `point`.
-- **`opts`**: `{ boundingbox, keepAspect = true, title, sliders, start, stepMs = 450, random = false }`.
-  A figure opens **collapsed at the first step** by default and plays through forward; set `start` to a
-  step count to open further along — e.g. `start: <number of steps>` for the fully-revealed finished
-  render. A zero-`step` figure is static (only base content, always shown) — the control bar auto-hides.
-  `stepMs` is the reveal fade.
-- **Random scenes**: set `opts.random: true` for a figure with random initial conditions, and draw them with
-  the toolkit's **`rng`** — `rng()` → `[0,1)`, `rng.int(lo, hi)` (inclusive), `rng.pick(arr)` — **inside** the
-  builder (never `Math.random()`, and never outside the builder). This shows a **Refresh** button (between
-  Play and All steps) that re-draws a fresh example. The `rng` is seeded per *run* and reused for the main
-  board AND every "All steps" mini-board, so a run is internally coherent; Refresh bumps the seed (a page
-  reload also gives a fresh one; a theme switch does not). See `concepts/mathematics/arithmetic/operations/number-bonds.html`.
-- **Controls**: the element shows « Rewind · ‹ Prev · k/N · Next › · » Skip-to-end · Play · [**Refresh** — random
-  scenes only] · **All steps** (Expand → a vertical comic-strip of every step, each cumulative, under its
-  caption). Add the **`no-controls`** attribute to hide the bar for an externally-driven figure.
-- **External sliders** (no draggable points): set `opts.sliders = "groupName"` (a `registerChartSliders`
-  group rendered by a separate `<primer-chart-sliders name="groupName">`); the builder gets the live values
-  as `sliders` — read them in **functional coordinates** so the figure re-plots as the sliders move:
-  `board.create("point", [() => r * Math.cos(sliders.t * DEG), () => r * Math.sin(sliders.t * DEG)])`.
-- **External control / manim sync**: the element exposes `goTo(k)`, `next()`, `prev()`, `play()`, `reset()`,
-  and `step`/`stepCount`, and fires `primer:geometry-step` `{ detail: { name, step, stepCount } }`. A manim
-  scene (or any script) can `document.querySelector('primer-geometry[scene="x"]').goTo(k)` to drive a proof
-  in lockstep. See `concepts/mathematics/geometry/parallel-lines.html` for the showcase.
+- **Toolkit** (destructure what you need): `{ board, JXG, step, sliders, colors, sceneStrings, label,
+  makeGraph, parallelMark, tickMark, angleMark, rightAngle, extend, crossing, rng }`. `label(at, text, opts)`
+  = themed text; `makeGraph(opts?)` draws standard themed Cartesian axes (use it for a function graph, don't
+  hand-roll axes); the marker tools (`parallelMark`/`tickMark`/`angleMark`/`rightAngle`/`extend`/`crossing`)
+  and `rng` (random scenes) are in `docs/authoring-reference.md`.
+- **`opts`**: `{ boundingbox, keepAspect = true, title, sliders, start, stepMs = 450, random = false }`. A
+  multi-step figure **opens fully-revealed with a Play button** by default; a zero-`step` figure is static
+  (control bar auto-hides). Set `title` as a `() => makeStrings(name)("title")` thunk (defined outside the
+  builder). Numbers / Greek / `°` stay literal Unicode.
+- **No endpoint dots**: a `segment`/`line`/`arrow` from coordinates hides its endpoint points; add an
+  explicit `point` for a visible dot.
 
-## Interactive theorem practice (`registerGeometryProblem` + `<primer-geometry-problem>`)
+## Charts (`registerCharts` + `registerChartSliders`)
 
-For a figure the learner **works**, not just watches — an "apply-the-theorem" angle chase — use
-`<primer-geometry-problem name="…">` + `registerGeometryProblem(name, config)`. Problems are **generated
-by a forward-chaining theorem engine** (`js/geometry-engine/*`, pure + unit-tested): it picks a scaffold
-(a parametric figure), synthesises a fresh figure with some angles **given** and others **blank** plus an
-ordered solution chain, and is **different every Refresh**. The usable theorem pool is **gated by the
-page's prerequisite-DAG closure** — a problem only ever chains theorems taught in the lessons leading to
-this page (each engine rule names the lesson `conceptId` that teaches it).
+For a **function plotted on axes** (SVG, no WebGL cap). `registerCharts(charts, chartOptions, sliders?)`
+registers a family sharing one domain+range — no board boilerplate. Markup is an empty
+`<primer-chart scene="name"></primer-chart>`.
 
 ```html
-<primer-geometry-problem name="angleChase"></primer-geometry-problem>
+<primer-chart scene="sinLab"></primer-chart>
+<primer-chart-sliders name="wave"></primer-chart-sliders>   <!-- sliders go BELOW the diagram -->
+
 <script type="module">
-  import { registerGeometryProblem } from "primer";
-  registerGeometryProblem("angleChase", {
-    generate: { scaffolds: ["parallelTransversal"], minSteps: 2, maxSteps: 4 },
-  });
+  import { registerCharts, registerChartSliders } from "primer";
+  registerChartSliders("wave", [ { name: "A", label: "Amplitude", min: 0, max: 3, step: 0.1, value: 1 } ]);
+  registerCharts(
+    [{ name: "sinLab",
+       f: [ (x) => Math.sin(x), (x, s) => s.A * Math.sin(x) ],   // (x, sliders) => y, or an array (one curve each)
+       line: (colors, i) => i === 0 ? { strokeColor: colors.line, strokeOpacity: 0.35 } : { strokeColor: colors.cat[0] },
+       legend: [ "sin(x)", "A·sin(x)" ] }],                      // optional: one label per curve, swatch row at bottom
+    { xmin: -6.3, xmax: 6.3, ymin: -3.2, ymax: 3.2 },            // shared domain+range (null ymin/ymax → auto)
+    "wave",                                                      // slider group name (or inline defs for a single chart)
+  );
 </script>
 ```
 
-- **`config.generate`**: `{ scaffolds: string[], minSteps?, maxSteps?, theorems?, pageId? }`. `scaffolds`
-  are engine scaffold names (v1: `"parallelTransversal"`, `"triangle"`). `minSteps`/`maxSteps` bound the
-  chain length. `theorems` (optional) pins the rule pool explicitly (else it's DAG-gated); `pageId`
-  overrides the page id (else inferred from the URL). v1 generates **angle** chases (clean integer
-  answers by construction).
-- **The learner** fills in EVERY unknown angle (that's how a chase works) via small on-figure
-  **MathLive `<math-field>`** boxes — angle boxes pop the `geometry-angles` keyboard, length boxes the
-  `geometry-lengths` one — with the highlighted box the final target; they may also use the
-  **construction toolbar** (draw line · mark ∥ · mark = · right ∟ · undo) to reason. **Check** grades
-  every filled box, requires the target correct, and colour-codes the solution/mistakes by step (a
-  numbered badge on each angle matching its numbered explanation); **Refresh** rolls a new problem;
-  **Reset** clears.
-- **Embed in a quiz** as a `{ problem: "name" }` question (see below): it renders inline, hides its own
-  Check (the quiz's "Check answers" drives it), and folds `solved`/not into the scorecard.
-- Colours from `themeColors()`; re-themes on theme change. The board is **interactive** (the one place a
-  Primer figure keeps JSXGraph's pointer handlers — via `wrapBoard(…, { interactive: true })`).
-  Showcase: `concepts/mathematics/geometry/angle-chasing.html`.
+- **`chartOptions`** (all optional): `{ id, title, xmin=-1, xmax=1, ymin=null, ymax=null, xticks=null,
+  yticks=null, xaxisname="x", yaxisname="y" }`. `null` ymin/ymax auto-compute from the curves (one shared
+  range, so quiz options stay comparable). An interactive chart whose curve grows with a slider should set
+  explicit `ymin/ymax` so the axes don't jump.
+- **Sliders** (3rd arg): a **string** (a `registerChartSliders(name, defs)` group placed with
+  `<primer-chart-sliders name="…">` — any number of charts/geometry scenes may share it) or an **array** of
+  inline defs (single-chart only). A slider def is `{ name, label?, min, max, step?=0.1, value?=min,
+  anchors? }`; set `type: "choice"` with `options: [...]` for a segmented button group (value = the chosen
+  index). Same colour rule; `title`/`label` may be thunks for localization. Low-level `registerChart` and
+  `register3dChart` → reference.
 
-## "Write a program" exercises (`registerProgram` + `<primer-program>`)
+## Quiz (`<primer-quiz>` + `registerQuiz`)
 
-For a **coding** exercise — the learner writes a program, we test it on data — use
-`<primer-program name="…">` + `registerProgram(name, config)`. Each attempt (and each **New input**)
-hands the learner a **random value in the global `INPUT`** (a number, string, array, object, …); they
-write TypeScript that reads `INPUT` and assigns the global **`ANSWER`**. We wrap + transpile + run it
-in the QuickJS sandbox (same engine as `<primer-code run>` — no DOM/network, ~1 s timeout) and grade
-the reported `ANSWER` against a reference `solution` (numbers with a small tolerance; arrays/objects
-compared structurally; a numeric string like `"10"` is accepted for `10`).
+`<primer-quiz name="quizName@1">` references a bank built in an inline module by
+`registerQuiz(name, builder)`. Place it **directly** — do NOT wrap it in a `<primer-card>` or add a heading
+(it renders its own "Quick quiz" panel). A question is **multiple-choice** (`options`) or **free-text**
+(`answer`).
 
 ```html
-<primer-program name="sumArray"></primer-program>
+<primer-quiz name="addingQuiz@1"></primer-quiz>
+
+<script type="application/json" class="scene-strings">
+  { "addingQuiz@1": { "instructions": "Add the two numbers.", "sumWords": "What is the sum?" } }
+</script>
+
 <script type="module">
-  import { registerProgram } from "primer";
-  registerProgram("sumArray", {
-    prompt: "Add up all the numbers in the list INPUT and store the total in ANSWER.",
-    variables: "n=[3:6]",                                   // optional: drawn each attempt
-    input: (b, rng) => Array.from({ length: b.n }, () => rng.int(1, 9)),  // → the INPUT value
-    solution: (INPUT) => INPUT.reduce((a, c) => a + c, 0),  // → the reference ANSWER
-    starter: "let total = 0;\nfor (const x of INPUT) total += x;\nANSWER = total;",
-  });
+  import { registerQuiz } from "primer";
+  registerQuiz("addingQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },  // config: recognised by NO options/answer
+    { prompt: () => sceneStrings("sumWords"),                      // localized prose → a function
+      options: [ { text: "$5$", correct: true }, { text: "$6$", correct: false } ] },
+    { prompt: "What is ${a} + {b}$?",                              // string prompt: {a},{b} fill from the draw
+      variables: "a=[1:10] b=[1:10]",
+      answer: "a + b" },                                           // string expression ≡ (v) => v.a + v.b
+  ]);
 </script>
 ```
 
-- **`config`**: `{ prompt?, variables?, input, solution, starter? }`. `input(bindings, rng)` builds the
-  INPUT from the drawn `variables` bindings (+ a seeded `rng` for arrays/strings); `solution(INPUT,
-  bindings)` returns the correct `ANSWER`. `prompt` is the task text (a function to localize it, e.g.
-  `() => makeStrings("sumArray")("task")`); `starter` is the initial editor code (language-neutral —
-  keep it inline, like a `<primer-code>` body). INPUT/ANSWER are globals — the learner must **not**
-  redeclare them.
-- **The learner** edits the code (a `<primer-code>`-style editor), presses **Run** to see `console.log`
-  output + the value their `ANSWER` came out as, or **Check** to grade it; **New input** rolls a fresh
-  INPUT, **Reset code** restores the starter.
-- **Embed in a quiz** as a `{ program: "name" }` question (see the quiz section): it renders inline,
-  hides its own Check + New-input (the quiz's "Check answers" drives it), and folds correct/incorrect
-  into the scorecard. Its `check()` is async (it runs the sandbox), which the quiz awaits.
-- Colours from `themeColors()`; re-themes on theme change. Showcase:
-  `concepts/instructors/quizzes.html`.
+- **Make it RANDOMISED — an "eternal" quiz.** Give questions `variables` so every draw gets fresh numbers.
+  Put **≥10 questions in the bank** (only ~5 drawn per attempt, `num_questions` defaults to 5) so *which*
+  questions appear rotates. A fixed hard-coded list is the exception, not the norm.
+- **Config item** (optional **first** entry, recognised by no `options`/`answer`): `{ num_questions,
+  preamble }`. Route a translatable `preamble` through `sceneStrings` (an all-maths quiz needs none).
+- **`variables`** — space-separated `name=[…]`; the bracket picks the kind: `[lo:hi]` integer, `[lo;hi]`
+  real (3 dp), `[v1,v2,…]` a choice. Negatives ok (`[-5:5]`).
+- **`prompt`, option `text`, and `answer`** each accept **a string** (any `{…}` is **evaluated against the
+  drawn variables** — `{a + b}`, `{2 * a}`, adjacent groups concatenate; double braces `{{12}}` keep a
+  literal LaTeX `{12}`) **or a function of `v`** (`answer: (v) => v.a + v.b`). For `answer` a bare string is
+  the whole expression (`"a + b"`) or a literal (`"Paris"`, a number). Inline LaTeX with `$…$`.
+- **`constraints`** — a boolean expr over the variables (`== != < > <= >= && ||`, e.g. `"a != b"`) that must
+  hold; values re-roll until it does. **MC-with-variables**: options may carry `{expr}` text too — use
+  `constraints` so distractors don't collide.
+- **Version the `name` (`@1`)** and bump it on an incompatible change.
+- **Localization / advanced options** — route translatable prose through `sceneStrings` (keep maths
+  literal). The full i18n contract (`fillVars`, `{{…}}`, the `npm run check` enforcement) and the advanced
+  option kinds (chart/geometry figure options, `figure:`, `{ problem }`, `{ program }`,
+  `compare: "polynomial"`, `keyboard`) are in `docs/authoring-reference.md`.
 
-## Helpers re-exported from `primer` (for inline scripts)
+## Localization (brief)
 
-`registerManimScene`, `getManimScene`, `registerChart`, `getChart`, `register3dChart`, `get3dChart`, `registerCharts`, `registerChartSliders`,
-`computeRange`, `registerGeometryScene`, `getGeometryScene`, `registerGeometryProblem`, `getGeometryProblem`, `registerProgram`, `getProgram`, `registerQuiz`, `getQuiz`, `speak`, `cancelSpeech`, `themeColors`, `makeStrings`, `getConceptMeta`,
-`parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`,
-`getTheme`, `applyTheme`, `initTheme`), and the graph helpers (`resolveLevels`,
-`validateGraph`, …). Pinned KaTeX/manim-web/JSXGraph versions live in `js/boot.js`.
+English is the default + fallback; translations are automatic (overlays under `i18n/<locale>/`, the
+`?lang=` link, `sourceHash`, `npm run i18n:check` — all in the reference doc). As an **author**: route every
+translatable string through **`sceneStrings("key")`** (its English in a `<script class="scene-strings">`
+block, keyed by scene/quiz name), and keep language-neutral maths as inline literals. Put each
+`scene-strings` block **directly before the card/element that uses it**. A `sceneStrings` string only fills
+bare `{name}` placeholders — never expressions.
 
-## Themes & page chrome (automatic)
+## Accessibility (brief)
 
-You don't author any of this per page. `boot.js` applies the saved theme (light / dark /
-fun) with no flash and mounts a top-right hamburger menu (the theme switcher). Colours come
-from `--primer-*` tokens defined per theme in `css/primer.css`, so headings, cards, the
-explorer and badges re-theme themselves; the only theme-coupled JS is animations (use
-`themeColors()` above). Levels start at 0; a real number that propagates via `max`.
-
-`render.js` also frames each lesson automatically: the mini-explorer (`<primer-pathway>`) at the
-**top**, and an auto-generated **"Up next…"** recommendation control (`<primer-up-next>`, backed by
-the pure `js/up-next.js`) at the **bottom** — it suggests the next course concept + nearby unstarred
-successors, then (if none) partly-learned successors to review, and finally falls back to the
-mini-explorer when it has nothing to recommend. Authors don't write or configure either.
-
-## Localization (automatic)
-
-The hamburger menu carries a language switcher; English is the default + fallback. A lesson's
-translation lives in a per-locale **overlay** at `i18n/<locale>/<id>.html`. An overlay is just the
-**translatable top part**: a translated `<primer-title>`, the translated cards, and the
-`scene-strings` — **no `concept-meta` and no module scripts** (those are canonical-only). It records
-which English version it was translated from in a single trailing **`<!-- sourceHash: … -->` comment
-after `</html>`**. `js/render.js` fetches and swaps the overlay in when the locale isn't English.
-`npm run i18n:check` flags stale/missing overlays (and prints the hash to stamp into that comment).
-
-**Convention:** put each `scene-strings` block **directly before the card (or element) that uses
-it** — on both the canonical page and its overlays — so the strings travel with the prose they
-annotate. One block per scene/chart/quiz namespace; `makeStrings` merges them, so keeping quiz
-strings in their own block (separate from scene strings) is encouraged.
-
-The active locale is resolved + persisted (`localStorage["primer:locale"]`) in three in-step
-places: the synchronous pre-paint scripts in `js/boot.js` and `index.html`, and the shared
-post-paint `initLocale()` in `js/i18n.js` (the authority). Two URL entry points:
-
-- **`?lang=<locale>`** (e.g. `…/addition.html?lang=es`) — a shareable "open in this language"
-  link: it wins over storage/browser, is **persisted** (the whole site stays in that language),
-  then stripped from the URL so a later menu switch can't snap back.
-- **Direct visit to an overlay URL** (`/i18n/<locale>/<id>.html`) — `boot.js` (overlays carry the
-  same `<script src="/js/boot.js">` as concept pages) redirects to the canonical lesson with
-  `?lang=<locale>`. When render.js *fetches* an overlay the `<script>` is ignored.
-
-## Accessibility (author with this in mind)
-
-The Primer is for "ages 5 to 105," so lessons must work with a keyboard, a screen reader, and
-reduced-motion / high-zoom settings — not just a mouse. Most of the machinery is already wired
-(real semantic controls, a global skip link + `.sr-only` utility, a `:focus-visible` ring, a
-`prefers-reduced-motion` reset in `css/primer.css`, focus-trapped modals via `js/focus-trap.js`), so
-authoring a page correctly is mostly about **not breaking** these. There is **no automated a11y
-gate** — this section is the checklist. The public **accessibility statement** lives at
-`accessibility.html` (linked from the landing footer + the hamburger menu); keep its "known
-limitations" list honest — update it as gaps are closed.
-
-- **Real controls, real semantics.** Anything clickable is a `<button>`/`<a>`/`<input>`, never a
-  clickable `<div>`. Give an icon-only control an `aria-label`; mark decorative SVGs/emoji
-  `aria-hidden="true"` (and `focusable="false"` on SVG). This is how every existing component is
-  built — follow the pattern rather than hand-rolling.
-- **Colour is never the only signal.** The confidence ramp, quiz correct/incorrect, course tint,
-  etc. must each pair colour with text/shape/ARIA state (see the confidence stars' `aria-pressed`
-  + live-region readout in `js/components/primer-concept.js`). Use only `--primer-*` tokens so
-  contrast holds across light/dark/fun; new token pairs (text on a fill) must clear **WCAG AA
-  4.5:1** in all three themes.
-- **Give figures a text alternative.** Author a real `alt` on `<img>` (`""` if purely decorative);
-  a `<primer-manim>`/`<primer-chart>`/`<primer-geometry>` should carry a `caption` (and manim
-  narration via `speak`) describing what it shows, so the idea survives without the visual.
-- **Respect reduced motion.** Any bespoke animation/transition you add must be gated behind
-  `@media (prefers-reduced-motion: reduce)` (the global reset covers document CSS, but a new
-  component shadow sheet needs its own block — see `js/components/shared.js`).
-- **Keyboard + focus.** Every interactive element must be reachable and operable by keyboard with a
-  visible focus ring, and modal surfaces must trap focus and restore it on close (`trapFocus`).
-- **Localize a11y text too.** Route `aria-label`/status strings through `t(...)` (chrome) or
-  `sceneStrings` (lesson), like any other copy.
-
-Per-PR quick check: Tab through the page (skip link first, visible ring, nothing unreachable);
-toggle OS "reduce motion"; zoom to 200%; and spot-check with a screen reader that figures, math,
-and state changes are announced.
+The Primer is for "ages 5 to 105" — it must work with a keyboard, screen reader, and reduced-motion/zoom.
+Most machinery is wired already; authoring is mostly about **not breaking** it:
+- **Real controls**: anything clickable is a `<button>`/`<a>`/`<input>`; icon-only controls get an
+  `aria-label`; decorative SVG/emoji get `aria-hidden="true"`.
+- **Colour is never the only signal** — pair it with text/shape/ARIA; use only `--primer-*` tokens (WCAG AA
+  4.5:1 in all themes).
+- **Figures need a text alternative** — a real `alt` on `<img>` (`""` if decorative); a `caption` on
+  `<primer-manim>`/`<primer-chart>`/`<primer-geometry>` (+ manim `speak` narration).
+- **Keyboard + focus** reachable/operable with a visible ring. Full checklist → reference doc.
 
 ## Validate & preview
 
 ```bash
-npm run serve        # static dev server → open http://localhost:8080/
+npm run serve        # static dev server → http://localhost:8080/
 npm run graph        # validate the tree + (re)write dist/graph.json
 npm run check:graph  # validate only (CI gate; non-zero exit on error)
 npm run check        # typecheck + tests + graph validation (run before done)
 ```
 
-**Dev server: reuse it, never kill it.** A dev server is normally already running on
-`http://localhost:8080/` — just use it (curl/open URLs against it). Do **not** spawn a second
-`npm run serve`, and do **not** kill the server (no `taskkill`/`Stop-Process` on it) when you're done.
-There is no build step, so the running server already serves your edits. Only start one if nothing is
-listening on `:8080`, and if you do, leave it running.
+**Dev server: reuse it, never kill it.** One is normally already running on `http://localhost:8080/` — just
+use it (curl/open URLs). Do **not** spawn a second `npm run serve` or kill it. There's no build step, so the
+running server already serves your edits.
 
-`npm run graph` reports **errors** (duplicate id, id≠path, dangling/cyclic
-prerequisites, an orphan unreachable from the root, a missing root) and **warnings** (a declared
-level below a prerequisite, or no declared level in a concept's ancestry). Orphans are
-auto-attached to the `orphans` node during the build, so the orphan error is now only a
-safety net (e.g. if that maintenance node is deleted).
+`npm run graph` reports errors (duplicate id, id≠path, dangling/cyclic prerequisites, orphan, missing root)
+and warnings (declared level below a prerequisite, or no declared level in the ancestry). A **dangling
+prerequisite** still emits the graph (edge omitted) but exits non-zero; orphans auto-attach to the `orphans`
+node.
 
 ## Checklist for a new page
 
-1. File at `concepts/<path>.html` (the path **is** the id — nothing to declare). Add a `<primer-title>` with the display title.
-2. List `prerequisites` (in a `concept-meta` block **after `</html>`**) by full-path id; a base concept with no natural prerequisite may omit them — or omit the whole block — (it's auto-attached to the `orphans` node).
-3. Author content as several `<primer-card>`s, pitched to the learner's age — teach the one idea *richly* (see "What a good page contains"): a hook, multiple representations, worked examples, one or two `<primer-vignette>` digressions (including a `<primer-vignette title="Watch out!">` for the classic misconception), a visual aid where it helps (`<primer-manim>` / `<primer-chart>` / `<primer-geometry>`), and a **randomised** `<primer-quiz>` with **≥10 questions in the bank** (only ~5 are drawn per attempt). Don't ship a lone intro-plus-quiz. Keep each `scene-strings` block before its card, and put `<script type="module">` builders after `</html>`.
+1. File at `concepts/<path>.html` (the path **is** the id). Add a `<primer-title>`.
+2. List `prerequisites` in a `concept-meta` block **after `</html>`** (a base concept may omit them).
+3. Author several `<primer-card>`s, pitched to the learner's age — teach the one idea *richly*: a hook,
+   multiple representations, worked examples, one or two `<primer-vignette>` digressions (incl. a
+   `<primer-vignette title="Watch out!">` for the classic misconception), a visual aid where it helps, and a
+   **randomised** `<primer-quiz>` with **≥10 questions** in the bank. Don't ship a lone intro-plus-quiz. Keep
+   each `scene-strings` block before its card; put `<script type="module">` builders after `</html>`.
 4. `npm run graph` is clean, then preview with `npm run serve`.

@@ -7,6 +7,7 @@
  *   node scripts/build-graph.js              # validate + write dist/graph.json
  *   node scripts/build-graph.js --check      # validate only, write nothing (CI)
  *   node scripts/build-graph.js --out x.json # custom output path
+ *   node scripts/build-graph.js --stale      # list lessons oldest-edited-first (no validate/emit)
  *
  * Each concept's id is its file path under concepts/ (without .html); its title is read from
  * the page's `<primer-title>` element; and its prerequisites/level come from the inline JSON
@@ -21,9 +22,11 @@
  */
 
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
+import { statSync } from "node:fs";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseConceptMeta } from "../js/concept-meta.js";
+import { buildStaleRows, formatStaleRow } from "../js/stale-report.js";
 import { extractConceptRefs, extractForwardRefs, extractSoftRefs, extractTodoRefs, extractCourseMembers } from "../js/concept-refs.js";
 import { decodeEntities } from "../js/html-entities.js";
 import { validateGraph, indexConcepts, buildDependents, attachOrphans } from "../js/graph.js";
@@ -40,8 +43,18 @@ const I18N_DIR = join(ROOT, "i18n");
 
 const args = process.argv.slice(2);
 const checkOnly = args.includes("--check");
+const staleOnly = args.includes("--stale");
 const outArgIndex = args.indexOf("--out");
 const OUT = outArgIndex !== -1 ? args[outArgIndex + 1] : join(ROOT, "dist", "graph.json");
+
+/**
+ * Map a concept id back to its absolute .html path — the inverse of {@link idFromPath}.
+ * @param {string} id
+ * @returns {string}
+ */
+function pathFromId(id) {
+  return join(CONCEPTS_DIR, id.split("/").join(sep) + ".html");
+}
 
 /**
  * Recursively list all .html files under a directory.
@@ -216,6 +229,25 @@ async function main() {
         message: `${relative(ROOT, file)}: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
+  }
+
+  // --stale: print the lessons (non-course pages) oldest-edited-first by filesystem mtime, then
+  // stop — no validation, no graph emission. A quick "what to freshen next" listing. stdout stays a
+  // clean, pipeable list; the summary goes to stderr (so `--stale | head` isn't polluted).
+  if (staleOnly) {
+    /** @type {Map<string, number>} */
+    const mtimeById = new Map();
+    for (const c of concepts) {
+      try {
+        mtimeById.set(c.id, statSync(pathFromId(c.id)).mtimeMs);
+      } catch {
+        /* file vanished between listing and stat — skip it */
+      }
+    }
+    const rows = buildStaleRows(concepts, mtimeById);
+    for (const row of rows) console.log(formatStaleRow(row));
+    console.error(`\n${rows.length} lesson(s), oldest first (by file mtime).`);
+    return;
   }
 
   // Reverse-wire forward refs: a `<primer-ref forward to="X">` on page P makes P an IMPLICIT
