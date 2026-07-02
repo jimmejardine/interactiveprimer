@@ -19,26 +19,12 @@ topics and the whole **A-level** tier. Everything already built has been removed
 
 ## Still to build — GCSE (14–16)
 
-- **Working scientifically (secondary)** *(folder `working-scientifically/`)* — SI base & derived
-  units; prefixes & standard form; scalars vs vectors; precision, accuracy & resolution; uncertainty &
-  significant figures; interpreting graphs (gradient & area-under-graph meanings); systematic vs random
-  error; anomalies, reliability & validity. *(None built; the 4 built WS pages are primary-level.)*
-- **Forces** *(folder `forces-and-motion/`)* — pressure in fluids & upthrust *(only the primary
-  `floating-and-sinking` intro exists)*; a dedicated contact vs non-contact forces / force-diagram page
-  *(if not adequately covered by `resultant-force`/`balanced-forces`)*.
-- **Energy** *(folder `energy/`)* — thermal transfer: conduction, convection & radiation; reducing
-  unwanted transfers / insulation.
-- **Electricity** *(folder `electricity/`)* — static electricity & charging by friction; thermistors &
-  LDRs (and their I–V / sensing circuits).
-- **Waves** *(folder `waves/`)* — lenses & image formation (the eye & the camera); colour & filters;
-  echoes & ultrasound; hearing & the ear.
-- **Matter & particle model** *(folder `matter/`)* — pressure in liquids (depth) & atmospheric
-  pressure; the gas laws (Charles's & the pressure law, beyond the built Boyle's law); reversible vs
-  irreversible changes *(primary-level)*.
-- **Earth & space** *(folder `earth-and-space/`)* — orbits of moons, planets & satellites; galaxies &
-  the scale of the universe.
-- **Atomic & nuclear** *(folder `atomic/`)* — uses & dangers of radiation, background radiation;
-  nuclear fission; nuclear fusion (in stars & reactors).
+The GCSE tier is now essentially complete. Two small optional leaves remain:
+
+- **Forces** *(folder `forces-and-motion/`)* — a dedicated contact vs non-contact forces / force-types
+  page, *if* it isn't judged adequately covered by `pushes-and-pulls` / `resultant-force` /
+  `balanced-forces`.
+- **Matter** *(folder `matter/`)* — reversible vs irreversible changes *(primary/KS3 level)*.
 
 ## Still to build — A-level (16–18)
 
