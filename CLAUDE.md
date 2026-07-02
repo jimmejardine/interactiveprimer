@@ -285,6 +285,22 @@ Most machinery is wired already; authoring is mostly about **not breaking** it:
   `<primer-manim>`/`<primer-chart>`/`<primer-geometry>` (+ manim `speak` narration).
 - **Keyboard + focus** reachable/operable with a visible ring. Full checklist → reference doc.
 
+## People pages (biographies)
+
+Mathematicians, physicists and computer scientists get a **biography** at `concepts/people/<surname>.html`
+(id `people/<surname>`) — e.g. `people/gauss.html`, `<primer-title>` = the person's **full name**. When a
+concept is named after someone (a theorem, law, unit, algorithm), that person deserves a page, and the
+concept should link to it.
+
+**Tone: friendly, funny, informative, lightweight.** A bio is a warm little **portrait**, not a dry CV or a
+Wikipedia dump. Lead with what makes them *human* and memorable — the schoolboy Gauss writing `5050` in
+seconds, a rivalry, a stubborn quirk, a motto ("*pauca sed matura*"), a wild side-quest (rediscovering a lost
+asteroid). Keep it short and lively (a few `<primer-card>`s), pitched so a curious teenager grins and learns
+something. Sprinkle in the ideas that bear their name as **`<primer-ref soft>`** links (soft = no
+prerequisite edge — a person isn't a maths prerequisite), so the page becomes a hub into "everything named
+after them". Dates as `(1777–1855)`. Usually **no quiz** — a biography isn't a concept to be tested. Set
+`prerequisites` to one representative concept they're known for (or omit the block).
+
 ## Validate & preview
 
 ```bash
