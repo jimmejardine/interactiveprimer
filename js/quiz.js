@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * Generation of randomly-generated test pages. Two question kinds:
+ * Generation of randomly-generated test pages. Question kinds:
  *  - multiple-choice (the authored entry has `options`): pick distinct questions and
  *    shuffle each one's options.
  *  - free-text (the authored entry has `answer`): the learner types an answer. When the
@@ -8,6 +8,9 @@
  *    placeholders in the prompt are filled, and the `answer` expression is evaluated to
  *    the expected value. A template is re-instantiable, so one template can produce many
  *    questions in a single quiz.
+ *  - geometry problem (`problem`) and program exercise (`program`): a self-contained
+ *    interactive element (`<primer-geometry-problem>` / `<primer-program>`) that generates
+ *    and grades itself; generation just passes its registered name through as the `scene`.
  *
  * All randomness flows through an injectable RNG (`() => number` in [0, 1)) so the logic
  * is deterministic under test. In the browser, pass `Math.random`.
@@ -72,6 +75,10 @@ function isText(q) {
 function isProblem(q) {
   return typeof /** @type {any} */ (q).problem === "string";
 }
+/** @param {AuthoredQuestion} q @returns {boolean} Whether it's a "write a program" question. */
+function isProgram(q) {
+  return typeof /** @type {any} */ (q).program === "string";
+}
 
 /**
  * Split a builder's returned array into an optional config object + the question bank. The
@@ -84,7 +91,7 @@ function isProblem(q) {
  */
 export function extractConfig(bank) {
   const first = /** @type {AuthoredQuestion} */ (bank[0]);
-  if (first && !isChoice(first) && !isText(first) && !isProblem(first)) {
+  if (first && !isChoice(first) && !isText(first) && !isProblem(first) && !isProgram(first)) {
     return { config: /** @type {QuizConfig} */ (bank[0]), questions: /** @type {AuthoredQuestion[]} */ (bank.slice(1)) };
   }
   return { config: {}, questions: /** @type {AuthoredQuestion[]} */ (bank) };
@@ -110,6 +117,11 @@ export function generateQuestion(question, rng) {
   // through (the <primer-geometry-problem> generates and grades itself; the quiz folds in its result).
   if (isProblem(question)) {
     return { kind: "problem", scene: /** @type {any} */ (question).problem };
+  }
+  // A "write a program" question carries no options/answer — pass its program name straight through
+  // (the <primer-program> generates + grades itself; the quiz folds in its result).
+  if (isProgram(question)) {
+    return { kind: "program", scene: /** @type {any} */ (question).program };
   }
   const choice = isChoice(question);
   const text = isText(question);

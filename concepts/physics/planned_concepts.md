@@ -28,38 +28,30 @@ The GCSE tier is now essentially complete. Two small optional leaves remain:
 
 ## Still to build — A-level (16–18)
 
-The **entire A-level tier is unbuilt** across all eight strands — the largest remaining block.
+The A-level tier is now built across all eight strands — mechanics (suvat, projectiles, calculus
+motion, resolving forces, friction/inclines, momentum & impulse, conservation, collisions, circular
+motion, SHM, gravitational fields & orbits), work–energy & elastic PE, fields & capacitance
+(Kirchhoff, internal resistance, potential dividers, electric fields, magnetic force on charges,
+Faraday's law, capacitance), waves & quantum (superposition, standing waves, diffraction grating,
+polarisation, TIR, photoelectric effect, wave–particle duality), thermal (ideal gas, kinetic theory,
+first law), astrophysics (H–R diagram, cosmology), nuclear & particle (fundamental particles,
+Standard Model, binding energy, decay law), and the A-level practical/maths skills (propagating
+uncertainties, linearising). Curated into `secondary-school/uk/a-level-year-12` and `-year-13`.
 
-- **Mechanics** *(`forces-and-motion/`)* — equations of motion (suvat); projectile motion; motion
-  graphs from calculus (v = ds/dt, a = dv/dt); free-body diagrams & resolving forces; friction &
-  inclined planes; momentum & impulse; conservation of momentum; elastic/inelastic collisions;
-  circular motion (centripetal force); simple harmonic motion; gravitation (Newton's law, orbits).
-- **Energy** *(`energy/`)* — vector work–energy theorem; elastic potential energy at A-level depth.
-- **Electricity & fields** *(`electricity/`, `electromagnetism/`)* — Kirchhoff's laws; internal
-  resistance & EMF; potential dividers; electric fields (Coulomb's law, field & potential); magnetic
-  fields & forces on currents/charges; electromagnetic induction (Faraday's & Lenz's laws);
-  capacitance (charge, energy, RC circuits).
-- **Waves & quantum** *(`waves/`)* — superposition & interference; standing/stationary waves;
-  diffraction & the diffraction grating; polarisation; total internal reflection & optical fibres;
-  lenses (deeper); the photoelectric effect & photons; wave–particle duality & the de Broglie
-  wavelength.
-- **Thermal physics** *(`matter/`)* — absolute (kelvin) temperature; the ideal gas equation; kinetic
-  theory of gases; the first law of thermodynamics (intro).
-- **Astrophysics (option)** *(`earth-and-space/`)* — stellar properties & the Hertzsprung–Russell
-  diagram; cosmology & the fate of the universe.
-- **Particle & nuclear** *(`atomic/`)* — fundamental particles (quarks & leptons); antimatter & the
-  standard model (intro); mass–energy equivalence (E = mc²); binding energy & stability; the
-  radioactive decay law (calculus link).
-- **Working scientifically (A-level)** *(`working-scientifically/`)* — combining & propagating
-  uncertainties; linearising relationships / lines of best fit.
+One small optional leaf remains:
+
+- **Waves / optics** *(`waves/`)* — the **lens equation** (1/f = 1/v − 1/u) and lens power at A-level
+  depth; the GCSE `lenses-and-image-formation` page already covers ray diagrams, image types and
+  magnification.
 
 ---
 
 ## Notes
 
-- **Course re-packagings** live under `concepts/physics/courses/`: the UK tree covers Reception–Year 6
-  and **GCSE Year 10–11**. There are **no KS3 (Year 7–9)** year pages (the tree jumps from Year 6 to
-  GCSE Year 10) and **no A-level** year pages yet — add those as the corresponding concepts land.
+- **Course re-packagings** live under `concepts/physics/courses/`: the UK tree covers Reception–Year 6,
+  **GCSE Year 10–11**, and **A-level Year 12–13**. The only remaining gap is **KS3 (Year 7–9)** year
+  pages — the tree jumps from Year 6 to GCSE Year 10, though many lower-secondary leaves already exist
+  and would populate KS3 years.
 - **Maths dependencies:** GCSE physics needs rearranging formulae & standard form; A-level needs trig,
   vectors and calculus — link those as prerequisites from `concepts/mathematics/`.
 - If a leaf above gets built, delete it from this list.

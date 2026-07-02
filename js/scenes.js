@@ -284,6 +284,52 @@ export function getGeometryProblem(name) {
 }
 
 /**
+ * A "write a program" exercise, used by `<primer-program name="…">` (standalone, or embedded in a
+ * `<primer-quiz>` as a `{ program: "name" }` question). Each attempt draws a fresh random INPUT: the
+ * learner writes TypeScript that reads the global `INPUT` and assigns the global `ANSWER`, which is run
+ * in the QuickJS sandbox and graded against the reference `solution`. See js/components/primer-program.js.
+ *
+ * @typedef {object} ProgramConfig
+ * @property {string | (() => string)} [prompt]   The task description (may contain inline `$…$` LaTeX).
+ *   A function to localize it (e.g. `() => makeStrings("myProg")("task")`).
+ * @property {string} [variables]   Optional `variables` spec (see js/quiz-vars.js) drawn each attempt;
+ *   the bindings are passed to `input`/`solution` so the INPUT can scale with them.
+ * @property {(bindings: Record<string, string | number>, rng: import("./rng.js").Rng) => unknown} input
+ *   Build the INPUT value from the drawn `bindings` (and a seeded `rng` for arrays/strings). Returns a
+ *   number, string, array, object, … — whatever the exercise supplies as the global `INPUT`.
+ * @property {(input: any, bindings: Record<string, string | number>) => unknown} solution   The reference
+ *   solution: compute the correct `ANSWER` from the INPUT (and bindings). Its return value is what the
+ *   learner's `ANSWER` is graded against (numbers with tolerance; arrays/objects structurally).
+ * @property {string} [starter]   Starter TypeScript shown in the editor (language-neutral; keep inline).
+ */
+
+/** @type {Map<string, ProgramConfig>} */
+const programs = new Map();
+
+/**
+ * Register a named program exercise. Re-registering overwrites. Announces the registration (like
+ * {@link registerQuiz}) so a `<primer-program>` that connected before this deferred script ran can
+ * finish building.
+ * @param {string} name
+ * @param {ProgramConfig} config
+ */
+export function registerProgram(name, config) {
+  programs.set(name, config);
+  if (typeof document !== "undefined") {
+    document.dispatchEvent(new CustomEvent("primer:program-registered", { detail: { name } }));
+  }
+}
+
+/**
+ * Look up a program config by name (or undefined if not registered).
+ * @param {string} name
+ * @returns {ProgramConfig | undefined}
+ */
+export function getProgram(name) {
+  return programs.get(name);
+}
+
+/**
  * A quiz builder, used by <primer-quiz name="…">. It returns the question bank (an array of
  * authored questions) for the named quiz. Authored once, in the (language-independent) page JS —
  * so the bank's logic (variable specs, `correct` flags, expressions) lives in ONE place and is

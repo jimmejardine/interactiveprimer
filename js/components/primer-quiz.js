@@ -171,6 +171,14 @@ export class PrimerQuiz extends HTMLElement {
             <primer-geometry-problem scene="${escapeHtml(q.scene)}" embedded></primer-geometry-problem>
           </li>`;
       }
+      // A "write a program" question: drop in the self-contained editor + sandbox. Like the geometry
+      // problem it generates + grades itself; the quiz triggers its check() and folds the result in.
+      if (q.kind === "program") {
+        return `
+          <li class="q problem-q">
+            <primer-program scene="${escapeHtml(q.scene)}" embedded></primer-program>
+          </li>`;
+      }
       // An optional figure (a registered geometry scene) drawn ABOVE the prompt — "given this diagram…".
       const figure = q.figure
         ? `<primer-geometry class="q-figure" scene="${escapeHtml(q.figure)}" no-controls></primer-geometry>`
@@ -337,6 +345,7 @@ export class PrimerQuiz extends HTMLElement {
     const anyAnswered = () =>
       root.querySelector('input[type="radio"]:checked') !== null ||
       root.querySelector("primer-geometry-problem") !== null ||
+      root.querySelector("primer-program") !== null ||
       [...root.querySelectorAll("input.answer")].some(
         (el) => /** @type {HTMLInputElement} */ (el).value.trim() !== "",
       );
@@ -468,7 +477,7 @@ export class PrimerQuiz extends HTMLElement {
    * @param {ShadowRoot} root
    * @param {GeneratedQuiz} quiz
    */
-  #grade(root, quiz) {
+  async #grade(root, quiz) {
     let score = 0;
     let answered = 0; // questions the learner actually responded to
 
@@ -484,7 +493,9 @@ export class PrimerQuiz extends HTMLElement {
     for (const el of root.querySelectorAll(".correct-feedback")) el.remove();
 
     const questionEls = root.querySelectorAll(".q");
-    quiz.questions.forEach((q, qi) => {
+    // A sequential loop (not forEach) so an embedded program's async check() can be awaited.
+    for (let qi = 0; qi < quiz.questions.length; qi++) {
+      const q = quiz.questions[qi];
       let correct = false;
       if (q.kind === "problem") {
         // An embedded geometry problem grades itself: trigger its Check and read `solved`.
@@ -492,6 +503,13 @@ export class PrimerQuiz extends HTMLElement {
         if (probEl) {
           correct = Boolean(probEl.check?.());
           answered++; // an interactive problem always counts as attempted on submit
+        }
+      } else if (q.kind === "program") {
+        // An embedded program exercise grades itself: run it, compare ANSWER to the reference.
+        const progEl = /** @type {any} */ (questionEls[qi]?.querySelector("primer-program"));
+        if (progEl) {
+          correct = Boolean(await progEl.check?.());
+          answered++; // an interactive exercise always counts as attempted on submit
         }
       } else if (q.kind === "text") {
         const input = /** @type {HTMLInputElement | null} */ (
@@ -560,7 +578,7 @@ export class PrimerQuiz extends HTMLElement {
       const el = questionEls[qi];
       el?.classList.toggle("right", correct);
       el?.classList.toggle("wrong", !correct);
-    });
+    }
     const total = quiz.questions.length;
     const fraction = total ? score / total : 0;
     const pct = Math.round(fraction * 100);

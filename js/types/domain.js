@@ -146,8 +146,17 @@
  * @property {string} problem   Name of a registered geometry problem (see `registerGeometryProblem`).
  */
 
-/** A question as authored: multiple-choice (`options`), free-text (`answer`), or a geometry problem (`problem`).
- * @typedef {QuizQuestion | TextQuestion | ProblemQuestion} AuthoredQuestion */
+/**
+ * A "write a program" question: embeds a `<primer-program>` (an editor + sandbox). Recognised by its
+ * `program` field (it has no `options`/`answer`/`problem`). Its correct/incorrect state folds into the
+ * quiz scorecard, exactly like a geometry problem.
+ * @typedef {object} ProgramQuestion
+ * @property {string} program   Name of a registered program exercise (see `registerProgram`).
+ */
+
+/** A question as authored: multiple-choice (`options`), free-text (`answer`), a geometry problem
+ * (`problem`), or a program exercise (`program`).
+ * @typedef {QuizQuestion | TextQuestion | ProblemQuestion | ProgramQuestion} AuthoredQuestion */
 
 /**
  * Quiz-level settings, supplied as the OPTIONAL FIRST item returned by a `registerQuiz` builder.
@@ -212,8 +221,16 @@
  * @property {string} scene   The registered geometry-problem name.
  */
 
+/**
+ * A program question, ready to render: the quiz drops in a `<primer-program>` and folds its
+ * correct/incorrect state into the score.
+ * @typedef {object} GeneratedProgramQuestion
+ * @property {"program"} kind
+ * @property {string} scene   The registered program name.
+ */
+
 /** A generated question, ready to render and grade.
- * @typedef {GeneratedChoiceQuestion | GeneratedTextQuestion | GeneratedProblemQuestion} GeneratedQuestion */
+ * @typedef {GeneratedChoiceQuestion | GeneratedTextQuestion | GeneratedProblemQuestion | GeneratedProgramQuestion} GeneratedQuestion */
 
 /**
  * The learner's self-attested confidence for a concept, as a number of stars from

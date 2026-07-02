@@ -312,6 +312,12 @@ recursive prerequisite ancestors, with members tinted in the course colour (`--p
   "apply-the-theorem" sandbox and folds its solved/unsolved state into the score. It carries no
   options/answer (recognised by its `problem` field), so it's never mistaken for the leading config.
 
+  **A "write a program" question**: add `{ program: "name" }` (a registered `registerProgram`, see
+  its section below) as a bank item — it embeds a `<primer-program>` code sandbox and folds its
+  correct/incorrect state into the score. Recognised by its `program` field (no options/answer), so
+  it's never mistaken for the leading config. Because its `check()` runs the sandbox asynchronously,
+  "Check answers" grades program questions after a short run.
+
   Inline JSON blocks (the `concept-meta`, `scene-strings`) are parsed with **JSON5**, so `//` and
   `/* … */` comments and trailing commas are allowed.
 
@@ -698,10 +704,49 @@ this page (each engine rule names the lesson `conceptId` that teaches it).
   Primer figure keeps JSXGraph's pointer handlers — via `wrapBoard(…, { interactive: true })`).
   Showcase: `concepts/mathematics/geometry/angle-chasing.html`.
 
+## "Write a program" exercises (`registerProgram` + `<primer-program>`)
+
+For a **coding** exercise — the learner writes a program, we test it on data — use
+`<primer-program name="…">` + `registerProgram(name, config)`. Each attempt (and each **New input**)
+hands the learner a **random value in the global `INPUT`** (a number, string, array, object, …); they
+write TypeScript that reads `INPUT` and assigns the global **`ANSWER`**. We wrap + transpile + run it
+in the QuickJS sandbox (same engine as `<primer-code run>` — no DOM/network, ~1 s timeout) and grade
+the reported `ANSWER` against a reference `solution` (numbers with a small tolerance; arrays/objects
+compared structurally; a numeric string like `"10"` is accepted for `10`).
+
+```html
+<primer-program name="sumArray"></primer-program>
+<script type="module">
+  import { registerProgram } from "primer";
+  registerProgram("sumArray", {
+    prompt: "Add up all the numbers in the list INPUT and store the total in ANSWER.",
+    variables: "n=[3:6]",                                   // optional: drawn each attempt
+    input: (b, rng) => Array.from({ length: b.n }, () => rng.int(1, 9)),  // → the INPUT value
+    solution: (INPUT) => INPUT.reduce((a, c) => a + c, 0),  // → the reference ANSWER
+    starter: "let total = 0;\nfor (const x of INPUT) total += x;\nANSWER = total;",
+  });
+</script>
+```
+
+- **`config`**: `{ prompt?, variables?, input, solution, starter? }`. `input(bindings, rng)` builds the
+  INPUT from the drawn `variables` bindings (+ a seeded `rng` for arrays/strings); `solution(INPUT,
+  bindings)` returns the correct `ANSWER`. `prompt` is the task text (a function to localize it, e.g.
+  `() => makeStrings("sumArray")("task")`); `starter` is the initial editor code (language-neutral —
+  keep it inline, like a `<primer-code>` body). INPUT/ANSWER are globals — the learner must **not**
+  redeclare them.
+- **The learner** edits the code (a `<primer-code>`-style editor), presses **Run** to see `console.log`
+  output + the value their `ANSWER` came out as, or **Check** to grade it; **New input** rolls a fresh
+  INPUT, **Reset code** restores the starter.
+- **Embed in a quiz** as a `{ program: "name" }` question (see the quiz section): it renders inline,
+  hides its own Check + New-input (the quiz's "Check answers" drives it), and folds correct/incorrect
+  into the scorecard. Its `check()` is async (it runs the sandbox), which the quiz awaits.
+- Colours from `themeColors()`; re-themes on theme change. Showcase:
+  `concepts/instructors/quizzes.html`.
+
 ## Helpers re-exported from `primer` (for inline scripts)
 
 `registerManimScene`, `getManimScene`, `registerChart`, `getChart`, `register3dChart`, `get3dChart`, `registerCharts`, `registerChartSliders`,
-`computeRange`, `registerGeometryScene`, `getGeometryScene`, `registerGeometryProblem`, `getGeometryProblem`, `registerQuiz`, `getQuiz`, `speak`, `cancelSpeech`, `themeColors`, `makeStrings`, `getConceptMeta`,
+`computeRange`, `registerGeometryScene`, `getGeometryScene`, `registerGeometryProblem`, `getGeometryProblem`, `registerProgram`, `getProgram`, `registerQuiz`, `getQuiz`, `speak`, `cancelSpeech`, `themeColors`, `makeStrings`, `getConceptMeta`,
 `parseConceptMeta`, `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`,
 `getTheme`, `applyTheme`, `initTheme`), and the graph helpers (`resolveLevels`,
 `validateGraph`, …). Pinned KaTeX/manim-web/JSXGraph versions live in `js/boot.js`.
