@@ -84,6 +84,26 @@
         slow-memory traffic plummets. Same exact result, a fraction of the IO.
       </p>
 
+      <primer-vignette title="Watch out!">
+        <p>
+          It's tempting to think FlashAttention is only an <em>inference</em> trick — serving a trained
+          model faster. It isn't. The exact same
+          <primer-math>\operatorname{softmax}(QK^{\top}/\sqrt{d_k})\,V</primer-math> has to be computed on
+          every <strong>training</strong> forward pass too (and the backward pass needs its own IO-aware
+          recomputation), so the HBM-traffic bottleneck FlashAttention removes is just as present during
+          training — which is why it also speeds up training throughput and cuts training memory, not only
+          inference.
+        </p>
+        <p>
+          A second trap: FlashAttention is <strong>not an approximation</strong>. It doesn't drop terms,
+          skip tokens, or round more aggressively to save memory — the running-max rescaling in Step 4
+          reconstructs <em>exactly</em> the same softmax the naive algorithm would compute, just without
+          ever writing the full <primer-math>n \times n</primer-math> matrix to HBM. So swapping a model's
+          attention kernel for FlashAttention changes nothing about what the model learns or its final
+          accuracy — only how fast and how memory-efficiently that identical computation runs.
+        </p>
+      </primer-vignette>
+
       <primer-theorem name="FlashAttention">
         Exact attention can be computed block-by-block:
         <ul>
@@ -174,7 +194,32 @@
           "whyA": "moves far less data to/from slow HBM (it is IO-aware), not because it does fewer FLOPs",
           "whyB": "uses a lower-precision softmax",
           "whyC": "skips most of the keys",
-          "whyD": "runs on more GPUs"
+          "whyD": "runs on more GPUs",
+          "trainQ": "FlashAttention's IO-aware speedup helps…",
+          "trainA": "both training and inference — the same $n \\times n$ HBM traffic occurs on every forward (and backward) pass",
+          "trainB": "only inference; training uses a different attention algorithm",
+          "trainC": "only training; inference always uses standard attention",
+          "trainD": "neither — it changes memory use but not runtime",
+          "accQ": "Swapping a trained model's attention kernel for FlashAttention changes its final accuracy how?",
+          "accA": "not at all — it produces the same attention values, bit for bit",
+          "accB": "slightly improves it, thanks to better numerics",
+          "accC": "slightly reduces it, trading precision for speed",
+          "accD": "it depends on the sequence length",
+          "rescaleQ": "The online-softmax update multiplies the running normaliser and output by $e^{\\,m-m_{\\text{new}}}$ mainly to…",
+          "rescaleA": "rescale the earlier blocks' partial sums onto the newly discovered larger max, keeping the final result exact",
+          "rescaleB": "normalise gradients during backpropagation",
+          "rescaleC": "apply dropout to the attention weights",
+          "rescaleD": "convert the scores from float16 to float32",
+          "flopsQ": "Compared with standard attention, FlashAttention's total floating-point operations (FLOPs) are…",
+          "flopsA": "essentially the same — the speedup comes from far less HBM traffic, not fewer FLOPs",
+          "flopsB": "roughly halved",
+          "flopsC": "roughly doubled, from the online-softmax bookkeeping",
+          "flopsD": "reduced by a factor of $n$",
+          "backwardQ": "Does FlashAttention's IO-aware trick apply only to the forward pass?",
+          "backwardA": "no — the backward pass is also IO-aware, recomputing needed values instead of storing the full $n\\times n$ matrix",
+          "backwardB": "yes — the backward pass always materialises the full matrix",
+          "backwardC": "no, but the backward pass is only approximate",
+          "backwardD": "the backward pass doesn't need attention scores at all"
         }
       }
     </script>
@@ -186,7 +231,7 @@
 <script type="application/json" class="concept-meta">
   {
     "prerequisites": ["computer-science/deep-learning/training-at-scale/zero-and-fsdp"],
-    "completedDate": "2026-06-25"
+    "completedDate": "2026-07-03"
   }
 </script>
 
@@ -243,6 +288,63 @@
       prompt: "For a sequence of length ${n}$, standard attention stores an $n \\times n$ score matrix ($O(n^2)$) while FlashAttention uses $O(n)$. The full matrix needs about $n^2/n = n$ times more memory. State that factor for ${n}$.",
       variables: "n=[512,1024,2048,4096]",
       answer: (v) => v.n,
+    },
+    {
+      prompt: () => sceneStrings("trainQ"),
+      options: [
+        { text: () => sceneStrings("trainA"), correct: true },
+        { text: () => sceneStrings("trainB"), correct: false },
+        { text: () => sceneStrings("trainC"), correct: false },
+        { text: () => sceneStrings("trainD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("accQ"),
+      options: [
+        { text: () => sceneStrings("accA"), correct: true },
+        { text: () => sceneStrings("accB"), correct: false },
+        { text: () => sceneStrings("accC"), correct: false },
+        { text: () => sceneStrings("accD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rescaleQ"),
+      options: [
+        { text: () => sceneStrings("rescaleA"), correct: true },
+        { text: () => sceneStrings("rescaleB"), correct: false },
+        { text: () => sceneStrings("rescaleC"), correct: false },
+        { text: () => sceneStrings("rescaleD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("flopsQ"),
+      options: [
+        { text: () => sceneStrings("flopsA"), correct: true },
+        { text: () => sceneStrings("flopsB"), correct: false },
+        { text: () => sceneStrings("flopsC"), correct: false },
+        { text: () => sceneStrings("flopsD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("backwardQ"),
+      options: [
+        { text: () => sceneStrings("backwardA"), correct: true },
+        { text: () => sceneStrings("backwardB"), correct: false },
+        { text: () => sceneStrings("backwardC"), correct: false },
+        { text: () => sceneStrings("backwardD"), correct: false },
+      ],
+    },
+    {
+      // Sequence length n tiled into blocks of fixed size 128 (chosen so n is always an exact multiple).
+      prompt: "A sequence of length ${n}$ is tiled into blocks of $128$ tokens each. How many query blocks does FlashAttention sweep over?",
+      variables: "n=[512,1024,2048,4096]",
+      answer: (v) => v.n / 128,
+    },
+    {
+      // Total S_ij tile computations in the sweep = query blocks × key blocks.
+      prompt: "FlashAttention sweeps ${qb}$ query blocks against ${kb}$ key blocks. How many $S_{ij}$ tile computations does the full sweep perform?",
+      variables: "qb=[2:8] kb=[2:8]",
+      answer: (v) => v.qb * v.kb,
     },
   ]);
 
