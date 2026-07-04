@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Monte Carlo Methods</primer-title>
+
+    <primer-card>
+      <p>
+        Here is a strange idea that turns out to be one of the most powerful tools in all of computational
+        science: <strong>when a problem is too hard to solve exactly, throw random numbers at it.</strong>
+        Not because you have given up — but because a careful flood of randomness, counted correctly, can
+        measure things that no neat formula can reach. Physicists use this trick to compute the energy of a
+        magnet, the price of a financial option, the path of a neutron through a reactor, and integrals in
+        hundreds of dimensions that would defeat any pen, any grid, any supercomputer running the "sensible"
+        way. The family of tricks is called the <strong>Monte Carlo method</strong>, after the famous casino —
+        because at its heart it is gambling, done on purpose, for answers.
+      </p>
+      <p>
+        The whole idea fits in one sentence, worth reading twice: <strong>if you can't calculate a quantity,
+        sometimes you can measure it by random sampling.</strong> Below we build the method from the simplest
+        possible game — measuring an area by throwing darts — sharpen it into a way of doing integrals,
+        discover the one magic property that makes it beat every rival in high dimensions, and finish with the
+        <strong>Metropolis algorithm</strong>, the engine that lets a computer wander through the states of a
+        physical system exactly as often as nature itself would visit them.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Throwing darts to measure π</h2>
+      <p>
+        Picture a square dartboard, one metre on each side, with a quarter-circle of radius <primer-math>1</primer-math>
+        drawn inside it, centred on one corner. Now throw darts at the square completely at random — blindfolded,
+        so every spot is equally likely. Some land inside the quarter-circle; some land in the corner outside it.
+        Here is the key: the <em>fraction</em> that land inside the curve equals the <em>fraction of the square's
+        area</em> the quarter-circle covers.
+      </p>
+      <p>
+        The square has area <primer-math>1</primer-math>. The quarter-circle has area
+        <primer-math>\tfrac14 \pi r^2 = \tfrac{\pi}{4}</primer-math>. So the fraction of darts landing inside
+        should settle down towards <primer-math>\pi/4 \approx 0.785</primer-math>. Turn that around and you have a
+        way to <strong>measure <primer-math>\pi</primer-math> by throwing darts</strong>:
+      </p>
+      <primer-math display>\frac{\text{darts inside}}{\text{darts thrown}} \;\approx\; \frac{\pi}{4}
+        \quad\Longrightarrow\quad \pi \;\approx\; 4 \times \frac{\text{darts inside}}{\text{darts thrown}}.</primer-math>
+      <p>
+        A point <primer-math>(x, y)</primer-math> with <primer-math>0 \le x, y \le 1</primer-math> lands inside
+        the quarter-circle exactly when <primer-math>x^2 + y^2 \le 1</primer-math> — it is closer than one unit
+        to the corner. That single test, <primer-math>x^2 + y^2 \le 1</primer-math>, is the whole physics of the
+        game. Watch it converge in code:
+      </p>
+      <primer-code run>
+// Estimate π by sampling random points in the unit square and
+// counting how many fall inside the quarter-circle (x² + y² ≤ 1).
+// A tiny seeded PRNG (mulberry32) makes the run reproducible.
+function mulberry32(seed: number) {
+  let a = seed &gt;&gt;&gt; 0;
+  return function (): number {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a &gt;&gt;&gt; 15), 1 | a);
+    t = (t + Math.imul(t ^ (t &gt;&gt;&gt; 7), 61 | t)) ^ t;
+    return ((t ^ (t &gt;&gt;&gt; 14)) &gt;&gt;&gt; 0) / 4294967296;
+  };
+}
+
+const rand = mulberry32(12345);
+let inside = 0;
+const Ns = [100, 1000, 10000, 100000];
+let thrown = 0;
+let checkpoint = 0;
+
+for (let i = 1; i &lt;= 100000; i++) {
+  const x = rand();
+  const y = rand();
+  if (x * x + y * y &lt;= 1) inside++;
+  thrown++;
+  if (thrown === Ns[checkpoint]) {
+    const estimate = (4 * inside) / thrown;
+    const error = Math.abs(estimate - Math.PI);
+    console.log(
+      `N=${thrown.toString().padStart(6)}  π≈${estimate.toFixed(5)}  error=${error.toFixed(5)}`,
+    );
+    checkpoint++;
+  }
+}
+console.log(`true π = ${Math.PI.toFixed(5)}`);
+      </primer-code>
+      <p>
+        Run it a few times (change the seed) and you will see the estimate wobble towards
+        <primer-math>3.14159\ldots</primer-math>, tightening as <primer-math>N</primer-math> grows — but
+        <em>slowly</em>. Look at the error column: going from <primer-math>N = 100</primer-math> to
+        <primer-math>N = 10{,}000</primer-math> (a hundredfold more darts) only shrinks it by roughly ten. That
+        is not a coincidence; it is the signature of Monte Carlo, and we will pin it down shortly.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>From darts to integrals</h2>
+      <p>
+        Measuring an area is really measuring an <strong>integral</strong> in disguise — the area under a curve
+        is <primer-math>\int f\,dx</primer-math>. So the dart trick generalises into a way of computing
+        <em>any</em> integral, and this is where Monte Carlo earns its living. The idea rests on a plain fact
+        about averages. The <strong>average value</strong> of a function <primer-math>f</primer-math> over a
+        region of volume <primer-math>V</primer-math> is
+      </p>
+      <primer-math display>\langle f \rangle = \frac{1}{V}\int_V f\,dV
+        \quad\Longrightarrow\quad \int_V f\,dV = V\,\langle f \rangle.</primer-math>
+      <p>
+        You usually can't do the integral — but you <em>can</em> estimate the average: scatter
+        <primer-math>N</primer-math> random points across the region, evaluate <primer-math>f</primer-math> at
+        each, and take the ordinary mean. That estimated average, times the volume, estimates the integral:
+      </p>
+      <primer-theorem name="Monte Carlo integration">
+        <ul>
+          <li>
+            <strong>The estimator.</strong> For <primer-math>N</primer-math> points
+            <primer-math>x_1,\ldots,x_N</primer-math> drawn uniformly from a region of volume
+            <primer-math>V</primer-math>,
+            <primer-math display>\int_V f\,dV \;\approx\; \frac{V}{N}\sum_{i=1}^{N} f(x_i).</primer-math>
+          </li>
+          <li>
+            <strong>The error falls like <primer-math>1/\sqrt{N}</primer-math>.</strong> The typical error of
+            the estimate is proportional to <primer-math>\sigma/\sqrt{N}</primer-math>, where
+            <primer-math>\sigma</primer-math> is the spread of <primer-math>f</primer-math>'s values. To halve
+            the error you need <strong>four times</strong> as many samples.
+          </li>
+          <li>
+            <strong>The dimension does not appear.</strong> That <primer-math>1/\sqrt{N}</primer-math> is the
+            same whether the integral is over a line, a plane, or a thousand-dimensional space. This is the
+            method's superpower.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Let's test it on a concrete integral that has no elementary antiderivative — the bell-shaped
+        <primer-math>\int_0^1 e^{-x^2}\,dx</primer-math>. Its true value is about
+        <primer-math>0.746824</primer-math>. Since the interval <primer-math>[0,1]</primer-math> has
+        "volume" <primer-math>V = 1</primer-math>, the estimate is simply the average of
+        <primer-math>e^{-x^2}</primer-math> at random points:
+      </p>
+      <primer-code run>
+// Monte Carlo integration of ∫₀¹ e^(−x²) dx (no elementary antiderivative).
+// Estimate = V · ⟨f⟩ with V = 1, so it's just the mean of f at random x.
+function mulberry32(seed: number) {
+  let a = seed &gt;&gt;&gt; 0;
+  return function (): number {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a &gt;&gt;&gt; 15), 1 | a);
+    t = (t + Math.imul(t ^ (t &gt;&gt;&gt; 7), 61 | t)) ^ t;
+    return ((t ^ (t &gt;&gt;&gt; 14)) &gt;&gt;&gt; 0) / 4294967296;
+  };
+}
+
+const rand = mulberry32(2024);
+const f = (x: number): number =&gt; Math.exp(-x * x);
+const TRUE = 0.7468241328; // reference value
+
+for (const N of [100, 1000, 10000, 50000]) {
+  let sum = 0;
+  let sumSq = 0;
+  for (let i = 0; i &lt; N; i++) {
+    const y = f(rand());
+    sum += y;
+    sumSq += y * y;
+  }
+  const mean = sum / N;                         // ⟨f⟩  (V = 1)
+  const variance = sumSq / N - mean * mean;     // spread of f values
+  const stdErr = Math.sqrt(variance / N);       // predicted ~1/√N error
+  console.log(
+    `N=${N.toString().padStart(5)}  estimate=${mean.toFixed(5)}` +
+      `  actual error=${Math.abs(mean - TRUE).toFixed(5)}` +
+      `  predicted ±${stdErr.toFixed(5)}`,
+  );
+}
+console.log(`true value ≈ ${TRUE.toFixed(5)}`);
+      </primer-code>
+      <p>
+        Notice the third column (the actual error) and the fourth (the error the
+        <primer-math>1/\sqrt{N}</primer-math> rule <em>predicts</em> from the spread of the samples) stay in the
+        same ballpark — Monte Carlo not only gives you an answer, it hands you an honest estimate of its own
+        uncertainty, for free, from the scatter of the very samples you already drew.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why <primer-math>1/\sqrt{N}</primer-math> is a superpower</h2>
+      <p>
+        A slow-shrinking error sounds like bad news, and in <strong>one</strong> dimension it is: to integrate a
+        smooth function on a line, the old-fashioned way — chop the interval into <primer-math>N</primer-math>
+        strips and add up rectangles (a Riemann sum, "grid quadrature") — has an error that falls like
+        <primer-math>1/N</primer-math> or even <primer-math>1/N^2</primer-math>, far faster than Monte Carlo's
+        limp <primer-math>1/\sqrt{N}</primer-math>. In 1-D, don't gamble; use a grid.
+      </p>
+      <p>
+        But watch what happens as the dimension climbs. To keep the same grid spacing in
+        <primer-math>d</primer-math> dimensions you need <primer-math>N \sim m^d</primer-math> points — a grid of
+        <primer-math>m</primer-math> steps per axis. Ten points per axis is <primer-math>10</primer-math> in 1-D,
+        <primer-math>100</primer-math> in 2-D, and <primer-math>10^{30}</primer-math> in
+        <primer-math>30</primer-math> dimensions — more grid points than there are atoms in a mountain. The grid
+        error, expressed in the number of samples <primer-math>N</primer-math>, degrades to
+        <primer-math>N^{-k/d}</primer-math>, which crawls to a standstill as <primer-math>d</primer-math> grows.
+        This is the notorious <strong>curse of dimensionality</strong>.
+      </p>
+      <p>
+        Monte Carlo simply does not care. Its error is <primer-math>\sigma/\sqrt{N}</primer-math> in
+        <strong>every</strong> dimension — the <primer-math>d</primer-math> never appears. So there is a
+        crossover: below a handful of dimensions grids win, but somewhere around
+        <primer-math>d \approx 4</primer-math> to <primer-math>8</primer-math> Monte Carlo pulls ahead, and by
+        the time you reach the integrals physics actually needs it is the <em>only</em> game in town.
+        Statistical mechanics is the classic customer: the properties of a material come from integrals over the
+        <strong>phase space</strong> of every particle's position and momentum — easily
+        <primer-math>10^{23}</primer-math> coupled dimensions. No grid can touch that. Random sampling can.
+      </p>
+      <primer-chart
+        scene="convergence"
+        caption="Log–log plot of estimation error against the number of samples N. The blue curve is the Monte Carlo error, which falls like 1/√N — a straight line of slope −1/2 on log axes. The faint reference line has slope −1 (grid quadrature in 1-D), falling faster. Monte Carlo's shallower slope means it converges slowly per sample; its virtue is that this same slope holds in ANY number of dimensions, while a grid's advantage evaporates as the dimension grows."
+      ></primer-chart>
+    </primer-card>
+
+    <primer-vignette title="Why is it named after a casino on the French Riviera?">
+      <p>
+        The method was born in secret. In the 1940s at Los Alamos, working on the atomic bomb, the mathematician
+        <strong>Stanislaw Ulam</strong> was recovering from illness and playing endless games of solitaire. He
+        wondered what the odds of winning were — and realised that instead of untangling the combinatorics, he
+        could just <em>deal many random hands and count</em>. He mentioned it to <strong>John von Neumann</strong>,
+        who saw at once that the same idea could trace neutrons diffusing through fissile material, a problem no
+        formula could crack. They needed a secret code-name for the classified technique, and their colleague
+        Nicholas Metropolis suggested "<strong>Monte Carlo</strong>", after the Monaco casino where Ulam's uncle
+        would famously borrow money to gamble. The name — and the method — stuck. The very first large-scale runs
+        were done on <strong>ENIAC</strong>, one of the first electronic computers, quietly launching an entire
+        branch of computational science.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The Metropolis algorithm and the Ising model</h2>
+      <p>
+        Plain "throw uniform darts" sampling works when every point is equally worth visiting. But in physics
+        that is rarely true. At temperature <primer-math>T</primer-math>, a system in state with energy
+        <primer-math>E</primer-math> occurs with the <strong>Boltzmann probability</strong>
+        <primer-math>P \propto e^{-E/k_BT}</primer-math> — low-energy states are common, high-energy states rare.
+        If you want the average energy or magnetisation of a magnet, you must sample states <em>weighted by that
+        distribution</em>, and almost all of the weight sits in a vanishingly small, oddly-shaped sliver of a
+        gigantic space. Scattering uniform darts would waste essentially all of them on states nature never
+        visits.
+      </p>
+      <p>
+        The <strong>Metropolis algorithm</strong> (1953) solves this with breathtaking simplicity. Instead of
+        placing independent points, take a <em>walk</em>: from the current state, propose a small random change,
+        and decide whether to accept it by a single rule:
+      </p>
+      <primer-theorem name="The Metropolis rule">
+        <ul>
+          <li>
+            <strong>Propose.</strong> From the current configuration, propose a small change (e.g. flip one
+            spin), and compute the energy change <primer-math>\Delta E</primer-math> it would cause.
+          </li>
+          <li>
+            <strong>Accept downhill moves always.</strong> If <primer-math>\Delta E \le 0</primer-math> (energy
+            drops or stays), <strong>accept</strong> the change — the acceptance probability is
+            <primer-math>1</primer-math>.
+          </li>
+          <li>
+            <strong>Accept uphill moves sometimes.</strong> If <primer-math>\Delta E &gt; 0</primer-math>, accept
+            it with probability <primer-math>e^{-\Delta E/k_BT}</primer-math> — draw a random number in
+            <primer-math>[0,1)</primer-math> and accept if it is below that. Otherwise stay put.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Do this over and over and the walk visits each configuration exactly as often as its Boltzmann weight
+        demands — it <strong>samples the Boltzmann distribution</strong> without ever computing the impossible
+        normalising sum. The reason it works is <strong>detailed balance</strong>: the accept-rule is arranged
+        so that, in equilibrium, the flow of the walk from state <primer-math>A</primer-math> to state
+        <primer-math>B</primer-math> exactly matches the flow back from <primer-math>B</primer-math> to
+        <primer-math>A</primer-math>. When every pair of states balances like this, the population sitting in
+        each state stops changing — and that steady population is precisely
+        <primer-math>P \propto e^{-E/k_BT}</primer-math>. Accepting occasional uphill moves is what lets the walk
+        climb out of local dips and explore, rather than freezing at the first minimum it finds.
+      </p>
+      <p>
+        The classic playground is the <strong>Ising model</strong> of a magnet: a grid of little arrows
+        ("spins") each pointing up (<primer-math>s_i = +1</primer-math>) or down
+        (<primer-math>s_i = -1</primer-math>). Neighbouring spins prefer to line up, so the energy is
+      </p>
+      <primer-math display>E = -J \sum_{\langle i,j\rangle} s_i\,s_j,</primer-math>
+      <p>
+        summed over neighbouring pairs, with <primer-math>J &gt; 0</primer-math> the coupling strength: aligned
+        neighbours (<primer-math>s_i s_j = +1</primer-math>) lower the energy, clashing ones raise it. Now the
+        drama is a tug-of-war between two tendencies. <strong>Energy</strong> wants order — all spins aligned,
+        a magnet. <strong>Temperature</strong> wants chaos — random thermal kicks scramble the alignment. At low
+        <primer-math>T</primer-math> order wins and the material is <strong>ferromagnetic</strong> (a strong net
+        magnetisation); at high <primer-math>T</primer-math> chaos wins and the magnetisation averages to zero.
+        Between them, at a sharp <strong>critical temperature</strong> <primer-math>T_c</primer-math>, the
+        magnet abruptly loses its magnetism — a genuine <em>phase transition</em>, of exactly the kind you can
+        watch a fridge magnet undergo if you heat it past its Curie point. Let Metropolis play it out:
+      </p>
+      <primer-code run>
+// A tiny 2-D Ising magnet on an 8×8 grid (64 spins), driven by Metropolis.
+// Low temperature → spins align → magnetisation near 1.
+// High temperature → thermal chaos → magnetisation near 0.
+function mulberry32(seed: number) {
+  let a = seed &gt;&gt;&gt; 0;
+  return function (): number {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a &gt;&gt;&gt; 15), 1 | a);
+    t = (t + Math.imul(t ^ (t &gt;&gt;&gt; 7), 61 | t)) ^ t;
+    return ((t ^ (t &gt;&gt;&gt; 14)) &gt;&gt;&gt; 0) / 4294967296;
+  };
+}
+
+const L = 8;                 // 8×8 lattice = 64 spins
+const N = L * L;
+const J = 1;
+
+function runIsing(T: number, seed: number): number {
+  const rand = mulberry32(seed);
+  // Start fully aligned (all spins up).
+  const s: number[] = new Array(N).fill(1);
+  const idx = (r: number, c: number): number =&gt; ((r + L) % L) * L + ((c + L) % L);
+
+  const sweeps = 400;        // 400 sweeps × 64 sites ≈ 25k proposals — fast
+  for (let sweep = 0; sweep &lt; sweeps; sweep++) {
+    for (let k = 0; k &lt; N; k++) {
+      const r = Math.floor(rand() * L);
+      const c = Math.floor(rand() * L);
+      const spin = s[idx(r, c)];
+      // Sum of the four neighbours (periodic wrap-around).
+      const nb = s[idx(r + 1, c)] + s[idx(r - 1, c)] + s[idx(r, c + 1)] + s[idx(r, c - 1)];
+      const dE = 2 * J * spin * nb;             // energy cost of flipping this spin
+      // Metropolis: accept if downhill, else with prob e^(−ΔE/T).
+      if (dE &lt;= 0 || rand() &lt; Math.exp(-dE / T)) {
+        s[idx(r, c)] = -spin;
+      }
+    }
+  }
+  let sum = 0;
+  for (const v of s) sum += v;
+  return Math.abs(sum) / N;   // |magnetisation| per spin, 0…1
+}
+
+// The 2-D Ising critical temperature is about T_c ≈ 2.27 (in units of J/k_B).
+for (const T of [1.0, 1.5, 2.0, 2.5, 3.5, 5.0]) {
+  const m = runIsing(T, 777);
+  const bar = "#".repeat(Math.round(m * 20));
+  console.log(`T=${T.toFixed(1)}  |m|=${m.toFixed(3)}  ${bar}`);
+}
+      </primer-code>
+      <p>
+        Read the bars from top to bottom: at low temperature the magnetisation
+        <primer-math>|m|</primer-math> sits near <primer-math>1</primer-math> (ordered, magnetic), and as the
+        temperature climbs past <primer-math>T_c \approx 2.27</primer-math> it collapses towards
+        <primer-math>0</primer-math> (disordered, non-magnetic). You have just simulated a phase transition with
+        a few dozen lines of code and a stream of random numbers — the same technique, scaled up, computes the
+        properties of real materials.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! Why won't a million samples just make everything precise?">
+      <p>
+        The single most common Monte Carlo mistake is expecting the error to fall in step with the effort. It
+        does <strong>not</strong>: the error shrinks like <primer-math>1/\sqrt{N}</primer-math>, so
+        <strong>100 times</strong> the samples buys only <strong>10 times</strong> the accuracy, and
+        <strong>10{,}000</strong> times the samples just <strong>100</strong> times. Chasing one more decimal
+        place of <primer-math>\pi</primer-math> this way costs a hundredfold more darts <em>each time</em> — a
+        brutal law of diminishing returns. This is why real work leans on <em>variance reduction</em>
+        (importance sampling, control variates) rather than brute force: shrink <primer-math>\sigma</primer-math>,
+        not just grow <primer-math>N</primer-math>.
+      </p>
+      <p>
+        Two subtler traps bite in the Metropolis world specifically. First, <strong>the samples are
+        correlated</strong>: each step of the walk is a small nudge from the last, so successive
+        configurations are <em>not</em> independent, and the naive <primer-math>1/\sqrt{N}</primer-math> is too
+        optimistic unless you account for the <em>autocorrelation time</em> between genuinely independent
+        samples. Second, <strong>burn-in</strong>: the walk starts in whatever state you chose, which may be
+        wildly untypical, so you must discard the first stretch of the walk before it has "forgotten" its start
+        and settled into equilibrium. Measure too early and you bias every average. And underneath it all: a
+        <strong>bad random-number generator</strong> — one with hidden patterns or a short period — can quietly
+        poison the results, which is why physicists fuss so much over their PRNGs.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "monteCarloQuiz@1": {
+          "intro": "Monte Carlo methods estimate hard quantities by random sampling. Remember the pillars: the error falls like 1/√N in ANY dimension (so 4× the samples halves the error); an integral ≈ V·⟨f⟩ (volume times the average of f at random points); and Metropolis accepts a downhill move (ΔE ≤ 0) with probability 1 and an uphill move with probability e^(−ΔE/kT), sampling the Boltzmann distribution. A fresh mix each time.",
+          "whyQ": "What is the core idea behind every Monte Carlo method?",
+          "whyRandom": "Estimate a hard-to-compute quantity by averaging over many random samples",
+          "whyExact": "Find an exact closed-form formula by algebra",
+          "whyGrid": "Always evaluate the function on a fine regular grid",
+          "whyGuess": "Guess the answer once and hope it is right",
+          "scalingQ": "How does the typical error of a Monte Carlo estimate depend on the number of samples N?",
+          "scalingSqrt": "It falls like 1/√N",
+          "scalingLinear": "It falls like 1/N",
+          "scalingSquare": "It falls like 1/N²",
+          "scalingNone": "It does not depend on N at all",
+          "dimQ": "Why does Monte Carlo integration beat grid quadrature in high dimensions?",
+          "dimIndep": "Its 1/√N error is independent of the dimension, while a grid needs exponentially many points",
+          "dimFaster": "Its error per sample is always smaller than a grid's in every dimension",
+          "dimExact": "It gives the exact answer in high dimensions",
+          "dimNever": "It doesn't — grids are always better",
+          "integQ": "In Monte Carlo integration, the integral of f over a region is estimated as…",
+          "integVmean": "the region's volume V times the average of f at random sample points, V·⟨f⟩",
+          "integSum": "the sum of f at every grid point, with no volume factor",
+          "integMax": "the maximum value of f on the region",
+          "integMid": "f evaluated at the exact midpoint of the region",
+          "metroDownQ": "In the Metropolis algorithm, a proposed move that LOWERS the energy (ΔE < 0) is accepted with probability…",
+          "metroDownOne": "1 — downhill moves are always accepted",
+          "metroDownHalf": "1/2 — a coin flip",
+          "metroDownZero": "0 — such moves are rejected",
+          "metroDownExp": "e^(−ΔE/kT), which is less than 1",
+          "metroUpQ": "In the Metropolis algorithm, a proposed move that RAISES the energy (ΔE > 0) is accepted with probability…",
+          "metroUpExp": "e^(−ΔE/kT) — sometimes accepted, more rarely for larger ΔE",
+          "metroUpOne": "1 — always accepted",
+          "metroUpZero": "0 — always rejected",
+          "metroUpHalf": "always exactly 1/2",
+          "balanceQ": "The Metropolis accept/reject rule is designed so the walk samples the Boltzmann distribution. The principle that guarantees this is…",
+          "balanceDetail": "detailed balance — in equilibrium the flow A→B matches the flow B→A for every pair of states",
+          "balanceEnergy": "conservation of energy along the walk",
+          "balanceMax": "always moving to the lowest-energy state available",
+          "balanceRandom": "using truly uniform random numbers only",
+          "isingQ": "In the Ising model E = −J Σ sᵢsⱼ with J > 0, what happens as the temperature rises past the critical temperature T_c?",
+          "isingLose": "The spins disorder and the net magnetisation collapses towards zero",
+          "isingGain": "The spins align more strongly and magnetisation grows",
+          "isingFreeze": "The spins freeze permanently in place",
+          "isingNothing": "Nothing changes; temperature has no effect",
+          "burninQ": "Why must you discard the first stretch of a Metropolis run ('burn-in')?",
+          "burninEquil": "The walk starts in an untypical state and must reach equilibrium before its samples are representative",
+          "burninSpeed": "To make the program run faster",
+          "burninRng": "Because the random-number generator is wrong at the start",
+          "burninNever": "You shouldn't — every sample is equally good from step one",
+          "corrQ": "Successive configurations in a Metropolis walk are…",
+          "corrDep": "correlated — each is a small change from the last, so they are not independent samples",
+          "corrIndep": "completely independent of one another",
+          "corrIdentical": "always identical to one another",
+          "corrRandom": "unrelated to the energy of the system",
+          "originQ": "Where does the name 'Monte Carlo' come from?",
+          "originCasino": "A wartime code-name, after the Monaco casino — coined by Ulam, von Neumann and Metropolis at Los Alamos",
+          "originCity": "The city where the first computer was built",
+          "originAuthor": "The surname of the mathematician who invented it",
+          "originGreek": "An ancient Greek word for randomness",
+          "piCompQ": "You throw {n} random darts at the unit square and {h} of them land inside the quarter-circle. Your Monte Carlo estimate of π is 4·(hits/throws). Compute it to 3 decimal places.",
+          "halveCompQ": "Monte Carlo error falls like 1/√N. To make the error {k} times smaller, you must multiply the number of samples by a factor of… (give the number).",
+          "integCompQ": "Estimating ∫ f over a region of volume V = {v}, you find the average value of f at your random points is ⟨f⟩ = {m}. Your estimate of the integral is V·⟨f⟩. Compute it (to 3 decimal places)."
+        }
+      }
+    </script>
+
+    <primer-quiz name="monteCarloQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "physics/computational-physics/computational-physics",
+      "mathematics/statistics/probability/probability-basics"
+    ]
+  }
+</script>
+
+<!-- Interactive machinery. Chart: a log–log convergence plot showing Monte Carlo's 1/√N error (slope −1/2)
+     against a faster grid reference (slope −1); explicit log-scaled axes drawn as a plain function of a
+     "log10(N)" x-variable so JSXGraph stays linear-friendly. Quiz: draws 5 from a pool of 13 (10 conceptual
+     MCQ + 3 computed — π from hits/throws, the sample-multiplier to shrink error by k (k²), and V·⟨f⟩ — all
+     within the allowed function set, answered to 3 dp). Every colour comes from themeColors() via the
+     toolkit's `colors`; no hardcoded hues. -->
+<script type="module">
+  import { registerCharts, registerQuiz } from "primer";
+
+  /* ---------- Convergence: Monte Carlo 1/√N vs a faster grid reference ----------
+     Plotted on a log10(N) x-axis so the power laws become straight lines. The
+     y-value is log10(error): for error = C·N^p, log10(err) = log10(C) + p·log10(N).
+     Monte Carlo p = −1/2 (slope −0.5); grid reference p = −1 (slope −1, steeper). */
+  registerCharts(
+    [{
+      name: "convergence",
+      f: [
+        (u) => -0.5 * u,        // Monte Carlo: log10(err) = −0.5·log10(N)
+        (u) => -1.0 * u - 0.3,  // Grid (1-D) reference: slope −1, offset so it sits below
+      ],
+      line: (colors, i) =>
+        i === 0
+          ? { strokeColor: colors.cat[0], strokeWidth: 3 }
+          : { strokeColor: colors.line, strokeWidth: 2, dash: 2, strokeOpacity: 0.7 },
+      legend: ["Monte Carlo: error ∝ 1/√N", "Grid (1-D): error ∝ 1/N"],
+    }],
+    {
+      xmin: 1, xmax: 6, ymin: -6, ymax: 0,
+      xaxisname: "log₁₀ N", yaxisname: "log₁₀ error",
+      xticks: 1, yticks: 1,
+    },
+  );
+
+  /* ---------- Quiz: draw 5 from a pool of 13 (10 MCQ + 3 computed) ---------- */
+  registerQuiz("monteCarloQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+
+    { prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("whyRandom"), correct: true },
+        { text: () => sceneStrings("whyExact"), correct: false },
+        { text: () => sceneStrings("whyGrid"), correct: false },
+        { text: () => sceneStrings("whyGuess"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("scalingQ"),
+      options: [
+        { text: () => sceneStrings("scalingSqrt"), correct: true },
+        { text: () => sceneStrings("scalingLinear"), correct: false },
+        { text: () => sceneStrings("scalingSquare"), correct: false },
+        { text: () => sceneStrings("scalingNone"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("dimQ"),
+      options: [
+        { text: () => sceneStrings("dimIndep"), correct: true },
+        { text: () => sceneStrings("dimFaster"), correct: false },
+        { text: () => sceneStrings("dimExact"), correct: false },
+        { text: () => sceneStrings("dimNever"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("integQ"),
+      options: [
+        { text: () => sceneStrings("integVmean"), correct: true },
+        { text: () => sceneStrings("integSum"), correct: false },
+        { text: () => sceneStrings("integMax"), correct: false },
+        { text: () => sceneStrings("integMid"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("metroDownQ"),
+      options: [
+        { text: () => sceneStrings("metroDownOne"), correct: true },
+        { text: () => sceneStrings("metroDownHalf"), correct: false },
+        { text: () => sceneStrings("metroDownZero"), correct: false },
+        { text: () => sceneStrings("metroDownExp"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("metroUpQ"),
+      options: [
+        { text: () => sceneStrings("metroUpExp"), correct: true },
+        { text: () => sceneStrings("metroUpOne"), correct: false },
+        { text: () => sceneStrings("metroUpZero"), correct: false },
+        { text: () => sceneStrings("metroUpHalf"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("balanceQ"),
+      options: [
+        { text: () => sceneStrings("balanceDetail"), correct: true },
+        { text: () => sceneStrings("balanceEnergy"), correct: false },
+        { text: () => sceneStrings("balanceMax"), correct: false },
+        { text: () => sceneStrings("balanceRandom"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("isingQ"),
+      options: [
+        { text: () => sceneStrings("isingLose"), correct: true },
+        { text: () => sceneStrings("isingGain"), correct: false },
+        { text: () => sceneStrings("isingFreeze"), correct: false },
+        { text: () => sceneStrings("isingNothing"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("burninQ"),
+      options: [
+        { text: () => sceneStrings("burninEquil"), correct: true },
+        { text: () => sceneStrings("burninSpeed"), correct: false },
+        { text: () => sceneStrings("burninRng"), correct: false },
+        { text: () => sceneStrings("burninNever"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("corrQ"),
+      options: [
+        { text: () => sceneStrings("corrDep"), correct: true },
+        { text: () => sceneStrings("corrIndep"), correct: false },
+        { text: () => sceneStrings("corrIdentical"), correct: false },
+        { text: () => sceneStrings("corrRandom"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("originQ"),
+      options: [
+        { text: () => sceneStrings("originCasino"), correct: true },
+        { text: () => sceneStrings("originCity"), correct: false },
+        { text: () => sceneStrings("originAuthor"), correct: false },
+        { text: () => sceneStrings("originGreek"), correct: false },
+      ] },
+
+    // ---- Computed (answered to 3 decimal places; allowed functions only) ----
+    { prompt: (v) => sceneStrings("piCompQ", v),
+      variables: "n=[400,1000,2000,5000] h=[314,785,1571,3927]",
+      constraints: "h < n",
+      answer: "4 * h / n" },
+    { prompt: (v) => sceneStrings("halveCompQ", v),
+      variables: "k=[2,3,4,5,10]",
+      answer: "k^2" },
+    { prompt: (v) => sceneStrings("integCompQ", v),
+      variables: "v=[1;4] m=[0.2;0.9]",
+      answer: "v * m" },
+  ]);
+</script>

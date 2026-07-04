@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Molecular Dynamics and N-body Simulation</primer-title>
+
+    <primer-card>
+      <p>
+        Point a computer at the night sky and you can grow your own galaxy. Give it a hundred thousand stars,
+        tell each one that it is pulled by the gravity of every other, and let time crawl forward in tiny
+        steps. Spiral arms curl out of nothing; clusters form, merge, and fling stray stars into the dark.
+        Point that same machinery at a droplet of argon instead — a few thousand atoms nudging one another —
+        and you watch a liquid boil, a crystal melt, a protein fold. It is the <em>same</em> program. Only
+        the force law and the length scale change.
+      </p>
+      <p>
+        That program has a name in two dialects. Astronomers call it an <strong>N-body simulation</strong>;
+        chemists and materials scientists call it <strong>molecular dynamics</strong> (MD). Both do exactly
+        one thing: take many interacting particles and push them all forward together by
+        <primer-ref to="physics/computational-physics/numerical-integration-of-odes">integrating Newton's
+        laws</primer-ref>. This page is about how to do that <em>well</em> — because with millions of steps
+        stacked end to end, a mediocre integrator quietly destroys your world, and a good one keeps it alive
+        for as long as you care to watch.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The N-body problem: everybody pulls on everybody</h2>
+      <p>
+        Take <primer-math>N</primer-math> particles with positions <primer-math>\mathbf{r}_1, \dots,
+        \mathbf{r}_N</primer-math>. The rule of the game is simple to state: each particle feels the
+        <strong>sum</strong> of the forces from all the others. For gravity, the pull on particle
+        <primer-math>i</primer-math> from particle <primer-math>j</primer-math> is
+      </p>
+      <primer-math display>\mathbf{F}_{ij} = -\,G\,m_i m_j\,\frac{\mathbf{r}_i - \mathbf{r}_j}{\lvert \mathbf{r}_i - \mathbf{r}_j \rvert^{3}},</primer-math>
+      <p>
+        which points from <primer-math>i</primer-math> toward <primer-math>j</primer-math> and falls off as
+        <primer-math>1/r^2</primer-math> in strength (the cube in the denominator is one power for the
+        <primer-math>1/r^2</primer-math> law and one to normalise the direction vector). The total force on
+        <primer-math>i</primer-math>, and hence its acceleration
+        <primer-math>\mathbf{a}_i = \mathbf{F}_i/m_i</primer-math>, is the sum over every other particle:
+      </p>
+      <primer-math display>\mathbf{F}_i = \sum_{j \neq i} \mathbf{F}_{ij}, \qquad \mathbf{a}_i = -\,G \sum_{j \neq i} m_j\,\frac{\mathbf{r}_i - \mathbf{r}_j}{\lvert \mathbf{r}_i - \mathbf{r}_j \rvert^{3}}.</primer-math>
+      <p>
+        Here is the sting in the tail. To take a single step you must, for every one of the
+        <primer-math>N</primer-math> particles, add up contributions from the other
+        <primer-math>N-1</primer-math>. That is <primer-math>N(N-1)/2</primer-math> distinct pairwise
+        interactions per step — the cost grows as <primer-math>N^2</primer-math>. Double the number of stars
+        and you quadruple the work; a thousand-fold bigger simulation is a million times slower. This
+        <primer-math>O(N^2)</primer-math> wall is the central obstacle of the whole field, and taming it (see
+        the tree-code digression below) is what makes billion-body cosmology possible.
+      </p>
+      <p>
+        For <primer-math>N = 2</primer-math> Newton solved this by hand and got ellipses. For
+        <primer-math>N = 3</primer-math> there is <strong>no</strong> general closed-form solution — the
+        three-body problem is famously chaotic. So from three particles upward, the computer is not a
+        convenience; it is the <em>only</em> way through.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "verletTheorem": {}
+      }
+    </script>
+
+    <primer-card>
+      <h2>The heart of the matter: velocity-Verlet</h2>
+      <p>
+        Once you can compute every particle's acceleration, you need to march the positions forward in time.
+        The obvious choice — plain <strong>Euler</strong>, "new position = old position + velocity × step" —
+        is a disaster over long runs. It has a fatal habit: it steadily <strong>leaks or pumps energy</strong>.
+        An Euler-integrated orbit spirals slowly outward (or inward) not because the physics says so, but
+        because the method quietly adds a little false energy every step. Run it for a million steps and your
+        tidy ellipse has unwound into a spiral. For a simulation whose whole point is to run for a very long
+        time, that is fatal.
+      </p>
+      <p>
+        The workhorse of MD and N-body work is instead <strong>velocity-Verlet</strong>. It updates position
+        and velocity in a carefully paired dance, using the acceleration at both the old and the new position:
+      </p>
+      <primer-theorem name="Velocity-Verlet integrator">
+        <ul>
+          <li>
+            <strong>Drift the position</strong> using the current velocity and acceleration:
+            <primer-math>\mathbf{x}_{n+1} = \mathbf{x}_n + \mathbf{v}_n\,\Delta t + \tfrac{1}{2}\,\mathbf{a}_n\,\Delta t^2.</primer-math>
+          </li>
+          <li>
+            <strong>Recompute the force</strong> at the new positions to get
+            <primer-math>\mathbf{a}_{n+1}</primer-math> — this is the single, all-important force evaluation
+            of the step, and it must happen <em>before</em> the velocity is finished.
+          </li>
+          <li>
+            <strong>Kick the velocity</strong> with the <em>average</em> of the old and new accelerations:
+            <primer-math>\mathbf{v}_{n+1} = \mathbf{v}_n + \tfrac{1}{2}\,(\mathbf{a}_n + \mathbf{a}_{n+1})\,\Delta t.</primer-math>
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Why is this modest-looking scheme the near-universal choice, beating the fancier Runge–Kutta methods
+        that dominate elsewhere? Four reasons, and they matter:
+      </p>
+      <ul>
+        <li>
+          <strong>It is symplectic.</strong> Verlet preserves the geometric structure of the equations of
+          motion, so its energy error stays <em>bounded</em> — it wobbles around the true value forever
+          instead of drifting away. Your orbit stays an orbit for a billion steps.
+        </li>
+        <li>
+          <strong>It is time-reversible.</strong> Run it forward then flip the velocities and run back, and
+          you return exactly to the start (to round-off). The physics has that symmetry; so does the method.
+        </li>
+        <li>
+          <strong>It is cheap.</strong> Just <em>one</em> force evaluation per step. Since computing all
+          those <primer-math>O(N^2)</primer-math> pairwise forces is where nearly all the time goes, a method
+          that asks for the force four times a step (like classical RK4) is four times as slow for the same
+          <primer-math>\Delta t</primer-math>.
+        </li>
+        <li>
+          <strong>It is second-order accurate.</strong> Halve the step and the per-step error drops by a
+          factor of four — accurate enough, and paired with the bounded-energy property, it is the sweet
+          spot for long simulations.
+        </li>
+      </ul>
+      <p>
+        The tension is worth stating plainly: RK4 is <em>more accurate on any single step</em> than Verlet.
+        But accuracy per step is the wrong thing to optimise for a run of millions of steps. What you want is
+        for the <strong>total energy not to drift</strong> — and there, cheap symplectic Verlet crushes
+        expensive non-symplectic RK4. The next block lets you watch the difference with your own eyes.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Verlet vs. Euler: watch the energy</h2>
+      <p>
+        Here is a body orbiting a fixed mass (units where <primer-math>GM = 1</primer-math>), launched on a
+        circular orbit of radius <primer-math>1</primer-math>. The total energy per unit mass,
+        <primer-math>E = \tfrac{1}{2}v^2 - 1/r</primer-math>, should stay pinned at
+        <primer-math>-0.5</primer-math> forever. We integrate the <em>same</em> orbit two ways and print the
+        energy as it goes. Watch Verlet hold steady while Euler slides away.
+      </p>
+      <primer-code run>
+// Two-body Kepler orbit, GM = 1. Compare velocity-Verlet with plain Euler.
+// State: position (x,y), velocity (vx,vy). Total energy per unit mass:
+//   E = 0.5*(vx^2 + vy^2) - 1/r   should stay constant at -0.5.
+
+function accel(x: number, y: number): [number, number] {
+  const r = Math.sqrt(x * x + y * y);
+  const r3 = r * r * r;
+  return [-x / r3, -y / r3];               // GM = 1
+}
+function energy(x: number, y: number, vx: number, vy: number): number {
+  return 0.5 * (vx * vx + vy * vy) - 1 / Math.sqrt(x * x + y * y);
+}
+
+const dt = 0.05, steps = 200;
+
+// ---- velocity-Verlet ----
+let x = 1, y = 0, vx = 0, vy = 1;          // circular orbit: r = 1, speed = 1
+let [ax, ay] = accel(x, y);
+console.log("velocity-Verlet  (E should hold near -0.5):");
+for (let n = 1; n &lt;= steps; n++) {
+  x += vx * dt + 0.5 * ax * dt * dt;       // 1) drift with old acceleration
+  y += vy * dt + 0.5 * ay * dt * dt;
+  const [nx, ny] = accel(x, y);            // 2) force at the NEW position
+  vx += 0.5 * (ax + nx) * dt;              // 3) kick with the averaged accel
+  vy += 0.5 * (ay + ny) * dt;
+  ax = nx; ay = ny;
+  if (n % 40 === 0) console.log(`  t=${(n * dt).toFixed(2)}  E=${energy(x, y, vx, vy).toFixed(5)}`);
+}
+
+// ---- plain Euler, same start ----
+x = 1; y = 0; vx = 0; vy = 1;
+console.log("plain Euler  (E drifts away):");
+for (let n = 1; n &lt;= steps; n++) {
+  const [ex, ey] = accel(x, y);
+  x += vx * dt; y += vy * dt;              // position from OLD velocity
+  vx += ex * dt; vy += ey * dt;            // velocity from OLD position
+  if (n % 40 === 0) console.log(`  t=${(n * dt).toFixed(2)}  E=${energy(x, y, vx, vy).toFixed(5)}`);
+}
+      </primer-code>
+      <p>
+        The Verlet energy jitters in the fifth decimal place and comes right back; the Euler energy marches
+        off in one direction and never returns. Multiply that drift by the millions of steps a real
+        simulation takes and the Euler orbit is long gone. This single output is the whole argument for
+        symplectic integrators, made concrete.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>From two bodies to many</h2>
+      <p>
+        Scaling up to a genuine N-body system changes nothing about the integrator — it changes only the
+        force routine, which now has to loop over all pairs. Here are three equal masses released near one
+        another (with a little "softening" added to the distance so a close encounter can't blow up to
+        infinity), advanced with the very same velocity-Verlet dance. Notice the inner double loop: that is
+        the <primer-math>O(N^2)</primer-math> cost in the flesh, doing exactly
+        <primer-math>N(N-1)/2 = 3</primer-math> pairwise force calculations per step.
+      </p>
+      <primer-code run>
+// Three equal masses (m = 1, G = 1) pulled together by gravity, advanced
+// with velocity-Verlet. The double loop is the O(N^2) all-pairs force sum.
+
+type Vec = [number, number];
+const N = 3;
+const pos: Vec[] = [[-1, 0], [1, 0], [0, 0.6]];
+const vel: Vec[] = [[0, -0.25], [0, 0.25], [0, 0]];
+const soft = 0.15;                          // softening: avoids infinite forces
+
+function forces(p: Vec[]): Vec[] {
+  const a: Vec[] = p.map(() => [0, 0] as Vec);
+  for (let i = 0; i &lt; N; i++) {
+    for (let j = i + 1; j &lt; N; j++) {       // each unordered pair once
+      const dx = p[j][0] - p[i][0], dy = p[j][1] - p[i][1];
+      const r2 = dx * dx + dy * dy + soft * soft;
+      const inv = 1 / (r2 * Math.sqrt(r2)); // 1 / r^3
+      a[i][0] += dx * inv; a[i][1] += dy * inv;   // Newton's 3rd law: equal
+      a[j][0] -= dx * inv; a[j][1] -= dy * inv;   // and opposite, for free
+    }
+  }
+  return a;
+}
+
+let acc = forces(pos);
+const dt = 0.01;
+for (let n = 1; n &lt;= 300; n++) {
+  for (let i = 0; i &lt; N; i++) {             // drift every body
+    pos[i][0] += vel[i][0] * dt + 0.5 * acc[i][0] * dt * dt;
+    pos[i][1] += vel[i][1] * dt + 0.5 * acc[i][1] * dt * dt;
+  }
+  const nacc = forces(pos);                 // one force sweep at new positions
+  for (let i = 0; i &lt; N; i++) {             // kick every body
+    vel[i][0] += 0.5 * (acc[i][0] + nacc[i][0]) * dt;
+    vel[i][1] += 0.5 * (acc[i][1] + nacc[i][1]) * dt;
+  }
+  acc = nacc;
+  if (n % 100 === 0) {
+    const s = pos.map((p) => `(${p[0].toFixed(2)}, ${p[1].toFixed(2)})`).join("  ");
+    console.log(`t=${(n * dt).toFixed(2)}  ${s}`);
+  }
+}
+      </primer-code>
+      <p>
+        The three bodies swing around their common centre in a genuinely three-body dance — no formula could
+        have told you these coordinates in advance. To simulate a galaxy you change three numbers:
+        <primer-math>N</primer-math> becomes a hundred thousand, the initial positions become a disc, and the
+        loop becomes the bottleneck. Everything else is identical.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "ljPotential": {}
+      }
+    </script>
+
+    <primer-card>
+      <h2>Molecular dynamics: atoms and the Lennard–Jones potential</h2>
+      <p>
+        Swap gravity for the force between two neutral atoms and you have molecular dynamics. Atoms do not
+        pull on each other like planets. Push two of them together and they <strong>repel</strong> ferociously
+        (their electron clouds refuse to overlap); pull them apart and they feel a gentle
+        <strong>attraction</strong> (the fleeting van der Waals stickiness). The classic model that captures
+        both in one tidy formula is the <strong>Lennard–Jones potential</strong>:
+      </p>
+      <primer-math display>V(r) = 4\varepsilon\!\left[\left(\frac{\sigma}{r}\right)^{12} - \left(\frac{\sigma}{r}\right)^{6}\right].</primer-math>
+      <p>
+        The <primer-math>(\sigma/r)^{12}</primer-math> term is the steep <strong>repulsive core</strong> —
+        the wall an atom hides behind; the <primer-math>-(\sigma/r)^{6}</primer-math> term is the softer,
+        longer-ranged <strong>attractive tail</strong>. Here <primer-math>\varepsilon</primer-math> sets the
+        depth of the well (how sticky) and <primer-math>\sigma</primer-math> sets the distance scale (how
+        big). The curve dips to a minimum — the comfortable spacing atoms settle into — at
+        <primer-math>r = 2^{1/6}\sigma \approx 1.122\,\sigma</primer-math>, where the potential equals
+        exactly <primer-math>-\varepsilon</primer-math>. The <strong>force</strong> along the line joining the
+        atoms is just the downhill slope of this curve:
+      </p>
+      <primer-math display>F(r) = -\frac{dV}{dr} = \frac{24\varepsilon}{r}\!\left[2\left(\frac{\sigma}{r}\right)^{12} - \left(\frac{\sigma}{r}\right)^{6}\right].</primer-math>
+      <primer-chart
+        scene="ljPotential"
+        caption="The Lennard–Jones potential V(r) = 4ε[(σ/r)¹² − (σ/r)⁶], in reduced units where ε = σ = 1, plotted against separation r. At small r the curve rockets up: this is the steep repulsive core (the r⁻¹² wall) that keeps atoms from overlapping. It crosses zero near r = σ = 1, dips to its minimum of −ε at r = 2^(1/6) ≈ 1.122 — the equilibrium spacing where the net force is zero — and then climbs gently back toward zero along the attractive r⁻⁶ tail. Atoms held in that well vibrate; atoms with enough energy to clear it fly apart, which is what melting and boiling look like at the level of a single pair."
+      ></primer-chart>
+      <p>
+        In a real MD run you drop a few thousand of these atoms into a box, give them random starting
+        velocities, and integrate — with velocity-Verlet, of course. Two ideas make such a run physical:
+      </p>
+      <ul>
+        <li>
+          <strong>Temperature is average kinetic energy.</strong> The temperature of the sample is not an
+          extra ingredient you impose; it simply <em>is</em> the mean kinetic energy of the atoms,
+          <primer-math>\tfrac{3}{2}k_B T = \langle \tfrac{1}{2}mv^2 \rangle</primer-math>. Heat the box and the
+          atoms jiggle harder; cool it and they settle into a lattice. "Melting" is nothing more than the
+          jiggling getting violent enough to break the Lennard–Jones cages.
+        </li>
+        <li>
+          <strong>Periodic boundary conditions.</strong> A few thousand atoms is a speck; to imitate bulk
+          matter without walls, an atom that drifts out the right face of the box reappears at the left, and
+          it feels forces from the nearest copies of its neighbours. The little box thus pretends to be an
+          infinite crystal, dodging the artefacts a hard container would create.
+        </li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>An atom pair, oscillating in its well</h2>
+      <p>
+        Let us make that Lennard–Jones curve move. Take a single pair of atoms in one dimension (reduced units
+        <primer-math>\varepsilon = \sigma = 1</primer-math>), start them stretched apart at
+        <primer-math>r = 1.5</primer-math> and release from rest. They should fall inward toward the bottom of
+        the well near <primer-math>1.122</primer-math>, overshoot, and swing back — a vibrating molecule. The
+        energy sloshes between kinetic and potential, but the <strong>total</strong> holds steady, because
+        Verlet is on the job.
+      </p>
+      <primer-code run>
+// 1-D Lennard-Jones pair (ε = σ = 1, mass = 1). Released from rest while
+// stretched, it oscillates in the well. KE and PE trade off; total holds.
+
+function V(q: number): number {
+  const s6 = Math.pow(1 / q, 6);
+  return 4 * (s6 * s6 - s6);                 // 4[(1/q)^12 - (1/q)^6]
+}
+function F(q: number): number {
+  const s6 = Math.pow(1 / q, 6);
+  return 24 * (2 * s6 * s6 - s6) / q;        // -dV/dq
+}
+
+let q = 1.5, v = 0;                          // separation, relative velocity
+let a = F(q);                                // reduced mass = 1
+const dt = 0.01;
+const rmin = Math.pow(2, 1 / 6);             // well bottom
+console.log(`well minimum: r = ${rmin.toFixed(3)},  V = ${V(rmin).toFixed(3)}`);
+for (let n = 1; n &lt;= 400; n++) {
+  q += v * dt + 0.5 * a * dt * dt;           // velocity-Verlet, as before
+  const na = F(q);
+  v += 0.5 * (a + na) * dt;
+  a = na;
+  if (n % 50 === 0) {
+    const ke = 0.5 * v * v, pe = V(q);
+    console.log(`t=${(n * dt).toFixed(2)}  r=${q.toFixed(3)}  KE=${ke.toFixed(3)}  PE=${pe.toFixed(3)}  E=${(ke + pe).toFixed(3)}`);
+  }
+}
+      </primer-code>
+      <p>
+        Follow the <primer-math>r</primer-math> column: it dives from <primer-math>1.5</primer-math> down
+        through the minimum and back out — an oscillation, exactly like a mass on a spring, only the "spring"
+        is the curved floor of the Lennard–Jones well. The <primer-math>\text{KE}</primer-math> and
+        <primer-math>\text{PE}</primer-math> columns trade places while the <primer-math>E</primer-math>
+        column barely twitches. A whole vibrational spectrum of matter is hiding in that one little loop.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out!">
+      <p>
+        <strong>Do not reach for RK4 just because it is "more accurate."</strong> The single most common
+        rookie mistake in N-body/MD work is to pick a high-order, non-symplectic method — usually classical
+        fourth-order Runge–Kutta — on the reasoning that it is more accurate per step than humble Verlet. It
+        <em>is</em>. But it is not <strong>symplectic</strong>, so over a long run its energy slowly and
+        systematically <em>drifts</em> — leaking or gaining — while cheap Verlet's energy merely wobbles
+        within a fixed band forever. For a simulation of millions of steps you want boundedness, not per-step
+        precision, and RK4 also costs four force evaluations a step to Verlet's one. Wrong tool.
+      </p>
+      <p>
+        Two more traps in the same family:
+      </p>
+      <ul>
+        <li>
+          <strong>Ordering.</strong> Velocity-Verlet insists on the force at the <em>new</em> positions
+          <em>before</em> the final half-kick to the velocity. Compute the velocity from the old
+          acceleration alone and you have silently downgraded to plain Euler and thrown away every good
+          property. The middle line of the loop is not optional.
+        </li>
+        <li>
+          <strong>Step size.</strong> Even a perfect integrator explodes if <primer-math>\Delta t</primer-math>
+          is too large. A fast close encounter — two stars nearly colliding, two atoms slamming together —
+          needs many steps to resolve; step over it in one giant <primer-math>\Delta t</primer-math> and the
+          particles gain enormous spurious energy and rocket off to infinity. When close approaches matter,
+          shrink the step (or soften the force, as the three-body code above quietly does).
+        </li>
+      </ul>
+    </primer-vignette>
+
+    <primer-vignette title="How do you ever simulate a billion stars if the cost grows like N²?">
+      <p>
+        You cheat — cleverly. The <primer-math>O(N^2)</primer-math> all-pairs sum is hopeless past a few tens
+        of thousands of bodies, so modern codes never compute it exactly. The trick, due to Josh Barnes and
+        Piet Hut in 1986, is a <strong>tree code</strong>. Divide space into a hierarchy of nested cells (an
+        octree in 3-D). A clump of distant stars, viewed from far enough away, pulls almost exactly like a
+        single point mass sitting at the clump's centre — so replace the whole clump by that one effective
+        mass and skip the individual sums. Only nearby particles are treated one by one. This
+        <strong>Barnes–Hut</strong> approximation drops the cost from <primer-math>O(N^2)</primer-math> to
+        <primer-math>O(N \log N)</primer-math>, and it is the reason a laptop can now push millions of bodies
+        and a supercomputer can do the whole observable-universe's worth. (For long-range electrostatics,
+        MD uses a cousin trick — the "particle-mesh" and fast-multipole methods — for the same reason.)
+      </p>
+      <p>
+        And a footnote on names: the Verlet scheme is often traced to the astronomer Jean-Baptiste Delambre,
+        who used essentially this update rule around <strong>1791</strong>, and it was rediscovered several
+        times before the French physicist <strong>Loup Verlet</strong> put it to work on molecular liquids in
+        <strong>1967</strong> and lent it his name. A two-hundred-year-old idea still running at the heart of
+        the world's biggest simulations — because good geometry never goes out of date.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "mdNbodyQuiz@1": {
+          "intro": "Molecular dynamics and N-body simulation: many particles, each feeling the summed force of all the others, marched forward with velocity-Verlet. Remember the loop — drift the position, recompute the force at the NEW positions, then kick the velocity with the averaged acceleration. A fresh mix of ideas and numbers each time.",
+          "whyVerletQ": "Why is velocity-Verlet preferred over plain Euler for long N-body / MD runs?",
+          "whyVerletRight": "It is symplectic, so its energy error stays bounded over millions of steps",
+          "whyVerletAcc": "It is exact, with no error at all on any step",
+          "whyVerletFast": "It needs no force evaluations at all",
+          "whyVerletEuler": "It is really just Euler with a different name",
+          "symplecticQ": "What does it mean, in practice, that velocity-Verlet is a symplectic integrator?",
+          "symplecticRight": "The total energy oscillates within a fixed band instead of drifting away over time",
+          "symplecticExact": "The trajectory is computed with zero error",
+          "symplecticFast": "Each step is guaranteed to run in constant time regardless of N",
+          "symplecticNoForce": "The force never has to be recomputed after the first step",
+          "orderQ": "Velocity-Verlet is accurate to which order in the time step Δt?",
+          "orderSecond": "Second order — halving Δt cuts the per-step error by about a factor of four",
+          "orderFirst": "First order, like plain Euler",
+          "orderFourth": "Fourth order, like classical Runge–Kutta",
+          "orderZero": "Zeroth order — the error does not depend on Δt",
+          "forceEvalQ": "How many force evaluations does velocity-Verlet require per time step?",
+          "forceEvalOne": "One — the force at the new positions, reused for both the drift and the kick",
+          "forceEvalFour": "Four, the same as classical RK4",
+          "forceEvalTwo": "Two independent evaluations, one for position and one for velocity",
+          "forceEvalZero": "None; it uses only the initial force throughout",
+          "costQ": "The naive all-pairs force sum for N bodies costs, per step, on the order of…",
+          "costN2": "N², because every particle interacts with every other",
+          "costN": "N, one operation per particle",
+          "costLogN": "log N, independent of how many particles there are",
+          "costConst": "a constant, no matter how large N grows",
+          "barnesQ": "What does the Barnes–Hut tree code do to the cost of an N-body step?",
+          "barnesRight": "Cuts it from O(N²) to about O(N log N) by treating distant clumps as single masses",
+          "barnesExact": "Makes the force sum exact with no approximation",
+          "barnesWorse": "Raises it to O(N³) in exchange for accuracy",
+          "barnesNothing": "Leaves the cost unchanged but uses less memory",
+          "ljQ": "In the Lennard–Jones potential, which term does which job?",
+          "ljRight": "The (σ/r)¹² term is the steep repulsive core; the −(σ/r)⁶ term is the attractive tail",
+          "ljFlip": "The (σ/r)¹² term attracts and the −(σ/r)⁶ term repels",
+          "ljBoth": "Both terms are purely repulsive at every separation",
+          "ljNone": "Neither term depends on the separation r",
+          "tempQ": "In a molecular-dynamics simulation, the temperature of the sample corresponds to…",
+          "tempRight": "the average kinetic energy of the atoms",
+          "tempPot": "the total potential energy stored in the bonds",
+          "tempCount": "simply the number of atoms in the box",
+          "tempStep": "the size of the time step Δt",
+          "pbcQ": "Why do MD simulations use periodic boundary conditions?",
+          "pbcRight": "So a small box of atoms mimics infinite bulk matter, with no artificial walls",
+          "pbcSpeed": "To make each force evaluation exactly twice as fast",
+          "pbcEnergy": "To deliberately let energy leak out of the box over time",
+          "pbcStop": "To freeze the atoms in place so nothing moves",
+          "orderingQ": "In the velocity-Verlet loop, when must the force at the new positions be computed?",
+          "orderingRight": "After the position drift but before the final velocity kick",
+          "orderingBefore": "Before the position is updated, using only the old positions",
+          "orderingNever": "Never — the initial force is reused for the whole run",
+          "orderingEnd": "Only at the very end of the whole simulation",
+          "eulerQ": "What is the characteristic failure of plain Euler on an orbit?",
+          "eulerRight": "The total energy steadily drifts, so a closed orbit unwinds into a spiral",
+          "eulerFreeze": "The particle stops moving entirely after a few steps",
+          "eulerExact": "It reproduces the orbit exactly, with no drawback",
+          "eulerBackward": "It always runs time backward instead of forward",
+          "pairsQ": "How many distinct pairwise interactions are there among {n} bodies, N(N−1)/2?",
+          "scaleQ": "A naive N-body force sum costs on the order of N². If N is multiplied by {k}, the work multiplies by roughly…?",
+          "driftQ": "Velocity-Verlet drift step: with position x = {x}, velocity v = {v}, acceleration a = {a} and step Δt = {dt}, the new position x + vΔt + ½aΔt² is…? (3 dp)",
+          "kickQ": "Velocity-Verlet kick: with old velocity v = {v}, old acceleration a₁ = {a1}, new acceleration a₂ = {a2} and step Δt = {dt}, the new velocity v + ½(a₁+a₂)Δt is…? (3 dp)",
+          "forceQ": "Gravitational force magnitude with G = {g}, masses m₁ = {m1}, m₂ = {m2} and separation r = {r}: F = G·m₁·m₂ / r² is…? (3 dp)",
+          "distQ": "Two particles differ by dx = {dx}, dy = {dy}. Their separation √(dx² + dy²) is…? (3 dp)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="mdNbodyQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["physics/computational-physics/numerical-integration-of-odes"]
+  }
+</script>
+
+<!-- Interactive machinery. Chart: the Lennard-Jones potential V(r) = 4[(1/r)^12 - (1/r)^6] in reduced units
+     over r in [0.9, 3], with explicit ymin/ymax so the r^-12 wall doesn't run off the top and the -1 well is
+     visible. Quiz: draws 5 from a pool of 16 (10 conceptual MCQ + 6 computed) — pair count N(N-1)/2, N^2
+     scaling factor, the Verlet drift + kick updates, gravitational force magnitude, and a distance, all
+     answered to 3 dp within the checker's tolerance and using only sqrt/pow/(+-*/^). Every colour comes from
+     themeColors() via the chart toolkit's `colors`; no hardcoded hues. -->
+<script type="module">
+  import { registerCharts, registerQuiz } from "primer";
+
+  /* ---------- The Lennard-Jones potential V(r) ---------- */
+  registerCharts(
+    [{
+      name: "ljPotential",
+      f: (r) => 4 * (Math.pow(1 / r, 12) - Math.pow(1 / r, 6)),
+      line: (colors) => ({ strokeColor: colors.cat[0], strokeWidth: 3 }),
+      legend: ["V(r) = 4ε[(σ/r)¹² − (σ/r)⁶]"],
+    }],
+    { xmin: 0.9, xmax: 3, ymin: -1.5, ymax: 2, xaxisname: "r / σ", yaxisname: "V / ε", xticks: 0.5, yticks: 0.5 },
+  );
+
+  /* ---------- Quiz: draw 5 from a pool of 16 (10 MCQ + 6 computed) ---------- */
+  registerQuiz("mdNbodyQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+
+    { prompt: () => sceneStrings("whyVerletQ"),
+      options: [
+        { text: () => sceneStrings("whyVerletRight"), correct: true },
+        { text: () => sceneStrings("whyVerletAcc"), correct: false },
+        { text: () => sceneStrings("whyVerletFast"), correct: false },
+        { text: () => sceneStrings("whyVerletEuler"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("symplecticQ"),
+      options: [
+        { text: () => sceneStrings("symplecticRight"), correct: true },
+        { text: () => sceneStrings("symplecticExact"), correct: false },
+        { text: () => sceneStrings("symplecticFast"), correct: false },
+        { text: () => sceneStrings("symplecticNoForce"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("orderQ"),
+      options: [
+        { text: () => sceneStrings("orderSecond"), correct: true },
+        { text: () => sceneStrings("orderFirst"), correct: false },
+        { text: () => sceneStrings("orderFourth"), correct: false },
+        { text: () => sceneStrings("orderZero"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("forceEvalQ"),
+      options: [
+        { text: () => sceneStrings("forceEvalOne"), correct: true },
+        { text: () => sceneStrings("forceEvalFour"), correct: false },
+        { text: () => sceneStrings("forceEvalTwo"), correct: false },
+        { text: () => sceneStrings("forceEvalZero"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("costQ"),
+      options: [
+        { text: () => sceneStrings("costN2"), correct: true },
+        { text: () => sceneStrings("costN"), correct: false },
+        { text: () => sceneStrings("costLogN"), correct: false },
+        { text: () => sceneStrings("costConst"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("barnesQ"),
+      options: [
+        { text: () => sceneStrings("barnesRight"), correct: true },
+        { text: () => sceneStrings("barnesExact"), correct: false },
+        { text: () => sceneStrings("barnesWorse"), correct: false },
+        { text: () => sceneStrings("barnesNothing"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("ljQ"),
+      options: [
+        { text: () => sceneStrings("ljRight"), correct: true },
+        { text: () => sceneStrings("ljFlip"), correct: false },
+        { text: () => sceneStrings("ljBoth"), correct: false },
+        { text: () => sceneStrings("ljNone"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("tempQ"),
+      options: [
+        { text: () => sceneStrings("tempRight"), correct: true },
+        { text: () => sceneStrings("tempPot"), correct: false },
+        { text: () => sceneStrings("tempCount"), correct: false },
+        { text: () => sceneStrings("tempStep"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("pbcQ"),
+      options: [
+        { text: () => sceneStrings("pbcRight"), correct: true },
+        { text: () => sceneStrings("pbcSpeed"), correct: false },
+        { text: () => sceneStrings("pbcEnergy"), correct: false },
+        { text: () => sceneStrings("pbcStop"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("orderingQ"),
+      options: [
+        { text: () => sceneStrings("orderingRight"), correct: true },
+        { text: () => sceneStrings("orderingBefore"), correct: false },
+        { text: () => sceneStrings("orderingNever"), correct: false },
+        { text: () => sceneStrings("orderingEnd"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("eulerQ"),
+      options: [
+        { text: () => sceneStrings("eulerRight"), correct: true },
+        { text: () => sceneStrings("eulerFreeze"), correct: false },
+        { text: () => sceneStrings("eulerExact"), correct: false },
+        { text: () => sceneStrings("eulerBackward"), correct: false },
+      ] },
+
+    // ---- Computed (answered to 3 decimal places; sqrt/pow/(+-*/^) only) ----
+    { prompt: (v) => sceneStrings("pairsQ", v),
+      variables: "n=[3:12]",
+      answer: "n*(n-1)/2" },
+    { prompt: (v) => sceneStrings("scaleQ", v),
+      variables: "k=[2:5]",
+      answer: "pow(k,2)" },
+    { prompt: (v) => sceneStrings("driftQ", v),
+      variables: "x=[0:5] v=[1:4] a=[-3:-1] dt=[0.1,0.2,0.5]",
+      answer: "x + v*dt + 0.5*a*dt^2" },
+    { prompt: (v) => sceneStrings("kickQ", v),
+      variables: "v=[1:5] a1=[-3:-1] a2=[1:3] dt=[0.1,0.2,0.5]",
+      answer: "v + 0.5*(a1 + a2)*dt" },
+    { prompt: (v) => sceneStrings("forceQ", v),
+      variables: "g=[1,2] m1=[1:9] m2=[1:9] r=[2:5]",
+      answer: "g*m1*m2/(r^2)" },
+    { prompt: (v) => sceneStrings("distQ", v),
+      variables: "dx=[1:8] dy=[1:8]",
+      answer: "sqrt(dx^2 + dy^2)" },
+  ]);
+</script>
