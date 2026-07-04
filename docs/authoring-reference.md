@@ -191,7 +191,9 @@ angleMark, rightAngle, extend, label, crossing, makeGraph, rng }`. Board-bound t
   board — the **same axes `registerCharts` uses**, so don't hand-roll `segment` axes + `"x"`/`"y"` text.
   Set the board's `boundingbox` (usually `keepAspect: false`); call `makeGraph()`; plot your curve. Options
   (see js/graph-axes.js): `xName`/`yName` (`""` hides one), `xticks`/`yticks` (null = auto), `ticks` (false
-  → unticked), `arrows` (false → no arrowheads). E.g. `makeGraph({ yName: "f(x)" })`.
+  → unticked), `arrows` (false → no arrowheads), `xUnit`/`yUnit` (`"pi"`|`"e"` → label that axis in proper
+  fractions of π/e — `π/2, π, 3π/2` — instead of decimals; pin the matching `xticks` to a π multiple). E.g.
+  `makeGraph({ yName: "f(x)" })` or `makeGraph({ xUnit: "pi", xticks: Math.PI/2 })`.
 
 See `concepts/mathematics/geometry/angle-chasing.html` for the marker tools, and `parallel-lines.html`
 for a live transversal.

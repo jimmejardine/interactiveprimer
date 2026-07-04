@@ -56,6 +56,13 @@ export class PrimerChart3d extends HTMLElement {
           border-radius: var(--primer-radius, 0.6rem); box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
         .stage.jxgbox { background: var(--primer-viz-bg, #fff); }
         .stage svg { display: block; width: 100% !important; height: 100% !important; }
+        /* JSXGraph makes the board/SVG focusable so it can be rotated by keyboard. Suppress the browser's
+           default (black) focus box on click, and show the themed ring only for keyboard users. */
+        .stage :focus, .stage:focus { outline: none; }
+        .stage:has(:focus-visible), .stage:focus-visible { outline: 2px solid var(--primer-accent, #46e); outline-offset: 2px; }
+        /* View3D paints its default axes pure black; pull them onto the theme's line colour (CSS beats the
+           SVG stroke attribute, and re-applies after each theme rebuild). */
+        .stage svg line[stroke="#000000"], .stage svg path[stroke="#000000"] { stroke: var(--primer-line, #999) !important; }
         /* A tiny hint tucked into the chart's bottom-right corner (pointer-transparent so it
            doesn't intercept a rotate drag). */
         .hint { position: absolute; right: 0.55rem; bottom: 0.45rem; margin: 0; pointer-events: none;

@@ -207,9 +207,13 @@ registers a family sharing one domain+range — no board boilerplate. Markup is 
 ```
 
 - **`chartOptions`** (all optional): `{ id, title, xmin=-1, xmax=1, ymin=null, ymax=null, xticks=null,
-  yticks=null, xaxisname="x", yaxisname="y" }`. `null` ymin/ymax auto-compute from the curves (one shared
-  range, so quiz options stay comparable). An interactive chart whose curve grows with a slider should set
-  explicit `ymin/ymax` so the axes don't jump.
+  yticks=null, xUnit, yUnit, xaxisname="x", yaxisname="y" }`. `null` ymin/ymax auto-compute from the curves
+  (one shared range, so quiz options stay comparable). An interactive chart whose curve grows with a slider
+  should set explicit `ymin/ymax` so the axes don't jump.
+  - **`xUnit`/`yUnit`** (`"pi"` | `"e"`): label that axis's ticks as **proper fractions of π / e**
+    (`0, π/2, π, 3π/2, 2π, −π/4 …`) instead of decimals — use it for any **radian** (or e-scaled) axis so it
+    reads `π` not `3.14`. Pin `xticks` to a π multiple (e.g. `Math.PI/2` or `Math.PI/4`); if omitted it
+    defaults to `base/2`. (Degree-axis trig charts — `xmin:-360…360` — keep plain decimals; don't set this.)
 - **Sliders** (3rd arg): a **string** (a `registerChartSliders(name, defs)` group placed with
   `<primer-chart-sliders name="…">` — any number of charts/geometry scenes may share it) or an **array** of
   inline defs (single-chart only). A slider def is `{ name, label?, min, max, step?=0.1, value?=min,

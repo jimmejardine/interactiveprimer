@@ -86,6 +86,8 @@ import { drawAxes } from "./graph-axes.js";
  * @property {number|null} [ymax]   null → autocomputed from the data.
  * @property {number|null} [xticks] Major x-tick spacing; null → JSXGraph auto-spacing.
  * @property {number|null} [yticks] Major y-tick spacing; null → JSXGraph auto-spacing.
+ * @property {"pi"|"e"} [xUnit]     Label x ticks as multiples of π / e ("π/2","π","3π/2") instead of decimals.
+ * @property {"pi"|"e"} [yUnit]     Label y ticks as multiples of π / e instead of decimals.
  * @property {string} [xaxisname]   Default "x".
  * @property {string} [yaxisname]   Default "y".
  */
@@ -292,11 +294,11 @@ export function resolveLegend(legend, line, colors) {
  * `initBoard` injects the teaching defaults (no chrome, faint grid, resize, board capture).
  * @param {HTMLElement} host
  * @param {Record<string, any>} JXG
- * @param {{ xmin: number, xmax: number, ymin: number, ymax: number, xticks: number|null, yticks: number|null, xName: string, yName: string }} opts
+ * @param {{ xmin: number, xmax: number, ymin: number, ymax: number, xticks: number|null, yticks: number|null, xName: string, yName: string, xUnit?: "pi"|"e", yUnit?: "pi"|"e" }} opts
  * @returns {{ board: any, colors: ThemeColors, domain: [number, number] }}
  */
 function makeChartBoard(host, JXG, opts) {
-  const { xmin, xmax, ymin, ymax, xticks, yticks, xName, yName } = opts;
+  const { xmin, xmax, ymin, ymax, xticks, yticks, xName, yName, xUnit, yUnit } = opts;
   const colors = themeColors();
   // A small horizontal margin (6% of the span each side) so the curve doesn't touch the frame —
   // proportional, so it works at any scale (≈40 units on a ±360° window, ≈0.12 on a ±1 window).
@@ -309,7 +311,7 @@ function makeChartBoard(host, JXG, opts) {
   });
   // Axes via the shared helper so charts and geometry graph diagrams look identical (see
   // js/graph-axes.js). `ticksDistance` null → JSXGraph auto-spacing; a number pins a fixed spacing.
-  drawAxes(board, colors, { xName, yName, xticks, yticks });
+  drawAxes(board, colors, { xName, yName, xticks, yticks, xUnit, yUnit });
   return { board, colors, domain: [xmin, xmax] };
 }
 
@@ -363,6 +365,8 @@ export function registerCharts(charts, chartOptions = {}, sliders) {
     ymax = null,
     xticks = null,
     yticks = null,
+    xUnit,
+    yUnit,
     xaxisname = "x",
     yaxisname = "y",
   } = chartOptions;
@@ -419,6 +423,8 @@ export function registerCharts(charts, chartOptions = {}, sliders) {
         ymax: /** @type {number} */ (hi),
         xticks,
         yticks,
+        xUnit,
+        yUnit,
         xName: xaxisname,
         yName: yaxisname,
       });
