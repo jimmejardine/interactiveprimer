@@ -141,6 +141,7 @@ export class PrimerRef extends HTMLElement {
     // Move the author's inline content (text, <primer-math>, …) into the anchor.
     while (this.firstChild) a.appendChild(this.firstChild);
     this.appendChild(a);
+    const authoredEmpty = (a.textContent ?? "").trim() === ""; // no author text → fill from the graph
 
     // The ⧉ confidence icon, tinted from the TARGET concept's rating and kept in sync. It's a
     // second link to the same page (a mouse convenience), but hidden from assistive tech and
@@ -167,17 +168,28 @@ export class PrimerRef extends HTMLElement {
       document.addEventListener("theme-change", this.#onTheme);
     }
 
-    // No author text → use the target's title. Show a fallback immediately, then upgrade
-    // to the real (locale-aware) title once the graph loads. Never block the lesson on it.
-    if (id && (a.textContent ?? "").trim() === "") {
-      a.textContent = leaf(id);
+    // Immediate fallback label for an empty ref (upgraded to the real, locale-aware title once the
+    // graph loads below).
+    if (id && authoredEmpty) a.textContent = leaf(id);
+
+    // One cached graph fetch resolves both graph-derived bits: an empty ref's title, and whether the
+    // TARGET is a course (course: true) → a small gold crest prepended to the LEFT of the link, the
+    // inline echo of the shield on course nodes/titles. Never block the lesson on it.
+    if (id) {
       try {
         const { byId } = await loadGraph();
         if (!this.isConnected) return;
         const c = byId.get(id);
-        if (c) a.textContent = c.titles?.[getLocale()] ?? c.title ?? leaf(id);
+        if (c && authoredEmpty) a.textContent = c.titles?.[getLocale()] ?? c.title ?? leaf(id);
+        if (c?.course) {
+          const crest = document.createElement("img");
+          crest.className = "concept-ref-crest";
+          crest.src = "/images/course_shield.png";
+          crest.alt = "";
+          a.insertBefore(crest, a.firstChild);
+        }
       } catch {
-        // Keep the fallback label — a missing graph must not break the page.
+        // A missing graph must not break the page — keep the fallback label and skip the crest.
       }
     }
   }

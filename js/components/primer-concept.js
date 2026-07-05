@@ -41,6 +41,9 @@ const STAR_CSS = `
     line-height: 1.1;
     letter-spacing: -0.018em;
   }
+  /* The gold course crest inside the <h1> on a course page — sized in em so it scales with the
+     responsive title, and nudged onto the text baseline. */
+  .course-crest { height: 0.82em; width: auto; vertical-align: -0.08em; margin-right: 0.4rem; }
   /* The level sits in a small pill beside the title (uppercase, accent-tinted), bolder when
      the level is declared in metadata, lighter when implicit (inherited from prerequisites). */
   .level-badge {
@@ -130,10 +133,17 @@ export class PrimerConcept extends HTMLElement {
         `aria-label="${t("concept.confidence.rate", { n: i + 1, max: MAX_STARS })}" title="${t("concept.confidence.rateTitle", { n: i + 1, max: MAX_STARS })}">${STAR_SVG}</button>`,
     ).join("");
 
+    // A course page (course: true) wears the gold crest inside its <h1>, just left of the title —
+    // matching the shield shown on course nodes in the tree-of-knowledge graph. Decorative (alt=""):
+    // the "Focus on this course" button below already announces course-ness to assistive tech.
+    const crest = meta?.course
+      ? '<img class="course-crest" src="/images/course_shield.png" alt="">'
+      : "";
+
     root.innerHTML = `
       <style>${STAR_CSS}</style>
       <article>
-        <div class="title-row"><h1><slot name="title">${title}</slot></h1>${levelBadge}</div>
+        <div class="title-row"><h1>${crest}<slot name="title">${title}</slot></h1>${levelBadge}</div>
         <div class="course-focus" hidden><button type="button" class="focus-course"></button></div>
         <div class="body"><slot></slot></div>
         <section class="confidence card" aria-label="${t("concept.confidence.legend")}">

@@ -26,6 +26,7 @@ const PREWARM = 320; // synchronous ticks before first paint, so the graph opens
 const CLICK_PX = 4; // pointer travel under this (screen px) counts as a click, not a drag
 const PAD_X = 12, PAD_Y = 7, EDGE_GAP = 4; // node text padding; gap between an edge end and a node
 const LABEL_MAXW = 120, LINE_H = 15; // wrap node labels to this width (px); line height
+const SHIELD = 18, SHIELD_GAP = 5; // course-page crest: size (px) + gap to the label (see buildNodeDom)
 const EXPLICIT_WEIGHT = 2.2; // spring strength for an explicit (concept-meta) prerequisite edge
 const IMPLICIT_WEIGHT = 0.3; // a much weaker pull for an implicit edge (only a prose <primer-ref>)
 // A course's own edges dominate the layout: members shove each other a bit harder apart (charge)
@@ -228,6 +229,7 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
   const buildNodeDom = (n) => {
     const g = /** @type {SVGGElement} */ (mk("g", { class: "cg-node" }));
     g.setAttribute("data-id", n.id);
+    const isCourse = byId.get(n.id)?.course === true; // a course PAGE → gets the gold crest inside the pill
     if (n.id === centerId) g.classList.add("cg-node--root"); // bigger, bold central node
     if (courseMembers.has(n.id)) g.classList.add("cg-node--course"); // gold outline (stroke set in paint)
     const rect = mk("rect", { rx: "10", ry: "10" });
@@ -270,7 +272,7 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
       cw = bb.width;
       ch = bb.height;
     }
-    const w = Math.max(36, cw + PAD_X * 2);
+    const w = Math.max(36, cw + PAD_X * 2 + (isCourse ? SHIELD + SHIELD_GAP : 0)); // reserve left room for a course crest
     const h = Math.max(24, ch + PAD_Y * 2);
     n.hw = w / 2;
     n.hh = h / 2;
@@ -283,6 +285,23 @@ export function mountConceptGraph(host, { byId, locale, focusId }) {
       n.fo.setAttribute("y", String(-n.hh));
       n.fo.setAttribute("width", String(w));
       n.fo.setAttribute("height", String(h));
+    }
+
+    // Course pages carry the gold crest at the pill's left; the label is shifted right to make room,
+    // so it reads as "🛡 Label" inside the node. The image's pointer-events:none (CSS) lets clicks fall
+    // through to the node g/rect, just like the label.
+    if (isCourse) {
+      if (n.fo) {
+        n.fo.setAttribute("x", String(-n.hw + SHIELD + SHIELD_GAP));
+        n.fo.setAttribute("width", String(w - (SHIELD + SHIELD_GAP)));
+      } else {
+        n.text?.setAttribute("transform", `translate(${(SHIELD + SHIELD_GAP) / 2},0)`);
+      }
+      g.appendChild(mk("image", {
+        href: "/images/course_shield.png",
+        x: -n.hw + PAD_X, y: -SHIELD / 2, width: SHIELD, height: SHIELD,
+        preserveAspectRatio: "xMidYMid meet", class: "cg-shield",
+      }));
     }
 
     // The "+N hidden neighbours" badge, pinned to the pill's top-right corner. Hidden until
@@ -976,6 +995,7 @@ function injectStyleOnce() {
       font-family: var(--primer-font-ui, sans-serif); font-size: 13px;
       pointer-events: none; user-select: none;
     }
+    .cg-shield { pointer-events: none; } /* the course crest: clicks fall through to the node */
     /* HTML label inside a node's foreignObject (math titles). The wrap fills the pill and
        flex-centres the label both ways (no SVG dominant-baseline for HTML); the label shrink-wraps
        its content for measuring. KaTeX inherits the colour paint() sets via color. pointer-events:
