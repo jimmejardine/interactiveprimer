@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Monitors &amp; Condition Variables</primer-title>
+
+    <primer-card>
+      <p>
+        Walk into a small doctor's surgery. There is <strong>one</strong> office, and the rule is simple:
+        only one patient may be with the doctor at a time. When you arrive you sit in the
+        <strong>waiting room</strong> until the office is free; then you go in. But sometimes you go in and
+        the doctor says, "your blood test isn't back yet — go and wait in room B, I'll call you the moment
+        it arrives." You leave the office (freeing it for the next patient!), sit in <em>that particular</em>
+        waiting room, and doze until a nurse calls your name.
+      </p>
+      <p>
+        That surgery is a <strong>monitor</strong>. The one-patient-at-a-time office is
+        <strong>mutual exclusion</strong>, enforced automatically. Room B — a queue you sleep in until a
+        specific condition ("your results are back") becomes true — is a <strong>condition variable</strong>.
+        Being <em>called</em> is a <strong>signal</strong>. This page is about that one idea: a
+        <strong>monitor</strong> — shared data, the lock that guards it, and condition variables — bundled
+        into a single construct so that <em>synchronisation is built in</em> rather than bolted on with raw
+        <primer-ref to="computer-science/concurrency/semaphores">semaphores</primer-ref>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What a monitor bundles together</h2>
+      <p>
+        With raw semaphores or a bare
+        <primer-ref to="computer-science/concurrency/locks-and-mutexes">mutex</primer-ref>, the lock and the
+        data it protects are <em>separate things you must remember to pair correctly</em>. Forget one
+        <code>lock()</code> on one code path and you have a race; forget one <code>unlock()</code> and you
+        have a frozen program. A <strong>monitor</strong> removes the temptation to forget by wrapping three
+        things into one object:
+      </p>
+      <primer-theorem name="The three parts of a monitor">
+        <ul>
+          <li>
+            <strong>Shared data</strong> — the state being protected (a buffer, a counter, a bank balance),
+            reachable <em>only</em> from inside the monitor's methods.
+          </li>
+          <li>
+            <strong>An implicit lock</strong> — every monitor method acquires it on entry and releases it on
+            exit, automatically. At most <em>one</em> thread is ever active inside the monitor.
+          </li>
+          <li>
+            <strong>Condition variables</strong> — named wait queues, each tied to the monitor's lock, on
+            which a thread can sleep until some other thread signals that a condition may now hold.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The payoff is that <strong>mutual exclusion is no longer your job</strong>. You do not write
+        <code>lock()</code> / <code>unlock()</code>; you just declare that a method belongs to the monitor
+        and the construct guarantees only one thread runs it at a time. In Java, that is literally the
+        <code>synchronized</code> keyword; the object's built-in lock <em>is</em> the monitor.
+      </p>
+      <primer-code lang="typescript">
+// A monitor, sketched. Every method implicitly acquires the SAME lock on
+// entry and releases it on exit — so the body is always a critical section.
+class Counter {
+  private count = 0;              // shared data, reachable only through methods
+
+  increment(): void {            // implicitly: lock; ... ; unlock
+    this.count = this.count + 1; // guaranteed exclusive — no race possible
+  }
+  read(): number {
+    return this.count;
+  }
+}
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Condition variables: sleeping <em>inside</em> the monitor</h2>
+      <p>
+        Mutual exclusion alone is not enough. Often a thread gets into the monitor only to discover it
+        <em>can't proceed yet</em>: a consumer finds the buffer empty; a producer finds it full. It must
+        wait — but if it just spins holding the lock, no other thread can ever get in to <em>change</em> the
+        thing it is waiting for. That is a deadlock of its own making. The condition variable is the way out.
+        It offers three operations:
+      </p>
+      <primer-theorem name="The three condition-variable operations">
+        <ul>
+          <li>
+            <strong><code>wait()</code></strong> — <em>atomically</em> release the monitor lock and put this
+            thread to sleep on the condition's queue. When later woken, it <strong>re-acquires</strong> the
+            lock before <code>wait()</code> returns. The atomic release-and-sleep is the whole point: no
+            other thread can sneak in during the gap.
+          </li>
+          <li>
+            <strong><code>signal()</code></strong> (a.k.a. <code>notify()</code>) — wake <em>one</em> thread
+            waiting on this condition. If none is waiting, it does nothing (the signal is <em>not</em>
+            remembered).
+          </li>
+          <li>
+            <strong><code>broadcast()</code></strong> (a.k.a. <code>notifyAll()</code>) — wake <em>all</em>
+            threads waiting on this condition. Use it when more than one waiter might now be able to proceed,
+            or when you're not sure which one should.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The crucial detail is that <code>wait()</code> <strong>gives up the lock</strong>. A sleeping waiter
+        is not hogging the monitor — the office is free for the next patient, who is exactly the thread that
+        will eventually make the waiter's condition true and signal it. In Java these are
+        <code>wait()</code>, <code>notify()</code>, <code>notifyAll()</code> on any object; in POSIX C they
+        are <code>pthread_cond_wait</code>, <code>pthread_cond_signal</code>,
+        <code>pthread_cond_broadcast</code> paired with a <code>pthread_mutex_t</code>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Watch one thread wait and get signalled</h2>
+      <p>
+        The timeline below is a monitor with one active slot (the office), an <strong>entry queue</strong>
+        (threads waiting to <em>acquire</em> the monitor), and a condition-variable queue we'll call
+        <code>notReady</code> (threads that called <code>wait()</code> and gave up the lock). Read each row
+        as a snapshot in time. Watch <strong>T1</strong> enter, find its condition false, <code>wait()</code>
+        — releasing the monitor so <strong>T2</strong> can get in — then get moved back to the entry queue by
+        T2's signal, and finally resume. Press play:
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "monitorFlow": {
+            "title": "One thread waits, releases the monitor, and is later signalled",
+            "hEntry": "entry queue",
+            "hMon": "monitor (active)",
+            "hCV": "notReady queue",
+            "free": "(free)",
+            "s1": "T1 acquires the free monitor and runs. It checks its condition and finds ready = false.",
+            "s2": "T1 calls notReady.wait(): it atomically RELEASES the monitor and sleeps in the notReady queue. The office is now free — T2 arrives in the entry queue.",
+            "s3": "T2 acquires the free monitor, does its work, sets ready = true, and calls notReady.signal().",
+            "s4": "signal() makes T1 runnable — but under Mesa semantics T1 does NOT get the lock yet. It moves to the ENTRY queue to re-acquire, while T2 keeps running.",
+            "s5": "T2 leaves the monitor. T1 re-acquires it, its wait() returns, it RE-CHECKS the while condition (ready = true now) and proceeds."
+          }
+        }
+      </script>
+      <primer-geometry scene="monitorFlow" caption="A monitor timeline: columns are the entry queue, the single active slot, and the notReady condition-variable queue. Rows show T1 entering, calling wait() and releasing the lock, T2 entering and signalling, and T1 moving back to the entry queue to re-acquire and re-check."></primer-geometry>
+      <p>
+        Notice the two queues are <strong>different</strong>. The entry queue holds threads that want the
+        lock but have never had it. The <code>notReady</code> queue holds threads that <em>had</em> the lock,
+        called <code>wait()</code>, and gave it back. A signal moves a thread from the second queue toward
+        the first — it makes the thread <em>runnable</em>, not <em>running</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Hoare vs. Mesa: who holds the lock right after a signal?</h2>
+      <p>
+        When thread T2 signals and thread T1 was waiting, there is a genuine ambiguity: T2 is still running
+        inside the monitor, and now T1 wants to be too — but only one may be active. Two classic answers
+        exist, and <em>which one your system uses changes how you must write your code</em>.
+      </p>
+      <primer-theorem name="Two signalling semantics">
+        <ul>
+          <li>
+            <strong>Hoare semantics</strong> — <code>signal()</code> immediately hands the lock (and the CPU)
+            straight to the woken waiter, which resumes at once. The signaller blocks until the waiter gives
+            the monitor back. The waiter is therefore guaranteed the condition still holds — but the
+            implementation needs extra bookkeeping and context switches.
+          </li>
+          <li>
+            <strong>Mesa semantics</strong> — <code>signal()</code> merely marks the waiter
+            <em>runnable</em>; the signaller <strong>keeps</strong> the lock and keeps running. The woken
+            thread rejoins the queue for the lock and only re-enters <em>later</em>. By then, other threads
+            may have run and changed the state, so the condition <strong>may no longer hold</strong>.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Almost every real system — <strong>Java</strong>, <strong>pthreads</strong>, C#, Python — uses
+        <strong>Mesa</strong> semantics, because it is simpler and faster to implement. And Mesa has one
+        iron consequence that every undergraduate must burn into memory: <strong>a woken thread must
+        re-check the condition itself</strong>, because being signalled is only a <em>hint</em> that the
+        condition <em>might</em> be true, not a promise that it is.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The golden rule: <code>while</code>, never <code>if</code></h2>
+      <p>
+        This single line is the most important thing on the page. Guard a condition-variable wait with a
+        <strong><code>while</code></strong> loop, not an <strong><code>if</code></strong>:
+      </p>
+      <primer-code lang="typescript">
+// RIGHT — re-checks the condition after every wakeup.
+while (!ready) {
+  notReady.wait();     // when this returns, the loop RE-TESTS !ready
+}
+// ... here, ready is guaranteed true ...
+
+// WRONG — tests the condition only once, before ever sleeping.
+if (!ready) {
+  notReady.wait();     // when this returns, we blindly assume ready is true
+}
+// ... here, ready MIGHT be false — bug! ...
+      </primer-code>
+      <p>
+        There are <strong>two independent reasons</strong> the <code>while</code> is mandatory, and either
+        one alone would be enough:
+      </p>
+      <ul>
+        <li>
+          <strong>Mesa semantics</strong> — after your <code>wait()</code> returns you are back in the queue
+          behind the signaller; another thread may have grabbed the lock first and <em>consumed</em> the very
+          thing you were signalled about. The state you were promised is gone. Re-check, and if it's not
+          there, wait again.
+        </li>
+        <li>
+          <strong>Spurious wakeups</strong> — real thread libraries (POSIX explicitly permits this) may
+          return from <code>wait()</code> occasionally with <em>no</em> matching signal at all, for
+          efficiency reasons deep in the implementation. A <code>while</code> loop simply notices the
+          condition is still false and goes back to sleep; an <code>if</code> marches on into corrupt state.
+        </li>
+      </ul>
+      <p>
+        The rule is beautifully robust: <code>while (!condition) cv.wait();</code> is correct under Hoare
+        semantics, under Mesa semantics, and in the presence of spurious wakeups. There is no situation in
+        which the <code>if</code> is safer, so the <code>while</code> is simply always right.
+      </p>
+
+      <primer-vignette title="Watch out! — an if-guarded wait() is a lurking corruption bug">
+        <p>
+          Beginners write <code>if (bufferEmpty) notEmpty.wait();</code> because it reads like English and
+          <em>usually works</em> — which is exactly what makes it dangerous. Under Mesa semantics (i.e.
+          Java, pthreads, almost everything), a woken consumer can find the item already taken by another
+          consumer that raced ahead of it; with an <code>if</code>, it never re-checks and happily "consumes"
+          an item that isn't there, reading past the end of a buffer or driving a count negative. Add
+          spurious wakeups and it can misfire even with no bug in <em>your</em> logic. The fix is one
+          character of thought: <strong>always guard <code>wait()</code> with a <code>while</code> loop that
+          re-tests the exact condition.</strong> Never <code>if</code>.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Run it: why <code>while</code> beats <code>if</code></h2>
+      <p>
+        The sandbox is single-threaded, so we can <strong>script the exact schedule</strong> and force the
+        bug to happen every time. Two consumers <code>C1</code> and <code>C2</code> both find the buffer
+        empty and <code>wait()</code>. A producer adds <em>one</em> item and calls <code>notifyAll()</code>,
+        so <strong>both</strong> consumers wake — but there is only one item to go round. The <em>only</em>
+        difference between the two runs is what a woken consumer does before consuming: an <code>if</code>
+        just barrels ahead; a <code>while</code> re-checks first. Press <strong>Run ▶</strong>:
+      </p>
+      <primer-code run>
+        // Two consumers were parked on notEmpty; a producer added ONE item and
+        // called notifyAll(), waking both. Under Mesa semantics each woken
+        // consumer re-runs; the guard decides whether it re-checks first.
+        type Guard = "if" | "while";
+
+        function drain(guard: Guard): void {
+          let items = 1;   // producer just added one item and notifyAll()'d
+
+          // C1 and C2 were both signalled and now run one after another.
+          for (const c of ["C1", "C2"]) {
+            const empty = items === 0;
+
+            if (guard === "while" &amp;&amp; empty) {
+              // while-loop re-checks: nothing here, so go back to sleep.
+              console.log("  " + c + " woke, re-checks: items=0 =&gt; wait() again (no consume)");
+              continue;
+            }
+            // if-guard: never re-checks. while-guard: item still present.
+            items = items - 1;
+            const bug = items &lt; 0 ? "   &lt;-- BUG: consumed an item that isn't there!" : "";
+            console.log("  " + c + " consumes =&gt; items=" + items + bug);
+          }
+
+          const verdict = items &lt; 0 ? "CORRUPT (buffer underflow)" : "ok";
+          console.log("  final items = " + items + "   [" + verdict + "]");
+        }
+
+        console.log("Guard the wait with an  if  (WRONG):");
+        drain("if");
+        console.log("");
+        console.log("Guard the wait with a  while  (RIGHT):");
+        drain("while");
+      </primer-code>
+      <p>
+        The <code>if</code> run drives <code>items</code> to <primer-math>-1</primer-math>: the second
+        consumer was signalled, never re-checked, and took an item that C1 had already consumed. The
+        <code>while</code> run has C2 notice the buffer is empty again and go back to sleep — no corruption.
+        Same schedule, one keyword's difference.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Producer–consumer, re-solved with a monitor</h2>
+      <p>
+        The classic bounded-buffer problem needs two conditions: producers wait when the buffer is
+        <strong>full</strong>, consumers wait when it is <strong>empty</strong>. So the monitor carries two
+        condition variables, <code>notFull</code> and <code>notEmpty</code>. Compare this with the raw
+        <primer-ref to="computer-science/concurrency/semaphores">semaphore</primer-ref> solution, where you
+        juggle a mutex plus two counting semaphores by hand and a single misordered
+        <code>wait</code>/<code>signal</code> deadlocks the lot — the monitor version simply reads like the
+        english description of the problem:
+      </p>
+      <primer-code lang="typescript">
+// Bounded buffer as a monitor. Every method is implicitly mutually exclusive;
+// the two condition variables handle the two ways a thread can have to wait.
+class BoundedBuffer&lt;T&gt; {
+  private readonly buf: T[] = [];
+  private readonly capacity: number;
+  private readonly notFull = new Condition();   // producers wait here
+  private readonly notEmpty = new Condition();  // consumers wait here
+
+  constructor(capacity: number) { this.capacity = capacity; }
+
+  put(item: T): void {                          // implicitly locked
+    while (this.buf.length === this.capacity) { // WHILE, not if
+      this.notFull.wait();                      // full: release lock &amp; sleep
+    }
+    this.buf.push(item);
+    this.notEmpty.signal();                     // a consumer may now proceed
+  }
+
+  take(): T {                                   // implicitly locked
+    while (this.buf.length === 0) {             // WHILE, not if
+      this.notEmpty.wait();                     // empty: release lock &amp; sleep
+    }
+    const item = this.buf.shift() as T;
+    this.notFull.signal();                      // a producer may now proceed
+  return item;
+  }
+}
+      </primer-code>
+      <p>
+        Two <code>while</code> loops, two <code>signal</code>s, and not a single manual <code>lock()</code>
+        in sight. Each method says exactly what it means: <em>wait until there is room, then add and wake a
+        consumer</em>; <em>wait until there is an item, then remove and wake a producer</em>. That
+        readability — synchronisation folded into the data type — is the whole reason monitors exist.
+      </p>
+
+      <primer-vignette title="Why are they called 'Hoare' and 'Mesa' semantics?">
+        <p>
+          The monitor idea and its hand-the-lock-over signalling were formalised by
+          <strong>Tony Hoare</strong> in 1974 (the same Hoare of quicksort and, to his lasting regret, the
+          null reference — "my billion-dollar mistake"). A few years later, engineers at
+          <strong>Xerox PARC</strong> built monitors into their systems programming language <strong>Mesa</strong>
+          and found Hoare's immediate hand-off expensive and awkward to implement, so they chose the "just
+          make it runnable, let it re-check later" rule instead. Mesa's pragmatic choice won: it is what Java,
+          C#, and pthreads all use today — which is precisely why "always loop on the condition" is drilled
+          into every concurrency course. A language design decision from a 1970s photocopier company still
+          shapes how you must write your <code>wait()</code> loops.
+        </p>
+      </primer-vignette>
+
+      <primer-vignette title="The 'lost wakeup': what if you signal before anyone waits?">
+        <p>
+          A condition variable has <strong>no memory</strong>. If you call <code>signal()</code> when no
+          thread is currently in <code>wait()</code>, the signal simply <em>evaporates</em> — unlike a
+          semaphore, whose count would remember it. So this sequence hangs forever: a consumer is <em>about</em>
+          to check the buffer, the producer runs first, adds an item and signals into the void, then the
+          consumer checks, sees… well, that depends. The cure is the very structure we've been building:
+          hold the monitor lock while you both <strong>check the condition and wait</strong>, so no
+          signal can slip through the gap between "I decided to wait" and "I am asleep." Because
+          <code>wait()</code> releases the lock <em>atomically</em>, and the signaller holds that same lock
+          while changing state and signalling, a wakeup can never be lost. This is exactly why
+          <code>wait()</code> must be married to a lock — it's not an accident of the API.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-quiz name="monitorQuiz@1"></primer-quiz>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "monitorQuiz@1": {
+          "preamble": "Check your understanding of monitors, condition variables, wait/signal, and Mesa vs. Hoare semantics.",
+          "qBundle": "A monitor bundles together which three things?",
+          "qExcl": "How many threads may be actively executing inside a monitor at once?",
+          "qWait": "What does a condition variable's wait() do?",
+          "qWhy": "Why must wait() release the monitor lock while it sleeps?",
+          "qSignal": "signal() (a.k.a. notify()) does what?",
+          "qBroadcast": "broadcast() / notifyAll() differs from signal() in that it…",
+          "qNoWaiter": "You call signal() but no thread is currently waiting on that condition. What happens?",
+          "qWhile": "You should guard a condition-variable wait() with…",
+          "qWhyWhile": "Which reasons force the while-loop guard around wait()?",
+          "qMesa": "Under Mesa semantics, when a waiter is signalled it…",
+          "qHoare": "Under Hoare semantics, signal()…",
+          "qWhichReal": "Which signalling semantics do Java, pthreads and most real systems use?",
+          "qSpurious": "A 'spurious wakeup' is when…",
+          "qTwoCV": "In the bounded-buffer monitor, why are there two condition variables (notFull, notEmpty)?",
+          "qJava": "In Java, the monitor's implicit lock is entered using which keyword?",
+          "qLostWakeup": "The 'lost wakeup' bug happens because a condition variable…",
+          "qRoom": "A bounded buffer of capacity {c} currently holds {k} items. How many more items can producers add before put() must wait on notFull?"
+        }
+      }
+    </script>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/concurrency/semaphores"],
+    "completedDate": "2026-07-04"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // A monitor as a snapshot timeline. Columns: step | entry queue | monitor
+  // (single active slot) | notReady condition-variable queue. Each step reveals
+  // one row (one snapshot) so the learner watches T1 enter, wait() and release
+  // the lock, T2 enter and signal, and T1 move back to the entry queue.
+  registerGeometryScene("monitorFlow", ({ board, step, colors, sceneStrings }) => {
+    const colT   = 0.4;   // step number
+    const colEnt = 2.6;   // entry queue
+    const colMon = 6.4;   // monitor active slot
+    const colCV  = 10.0;  // notReady condition-variable queue
+    const top    = 5.5;
+    const rowH   = 1.0;
+
+    const text = (x, y, s, col, size = 15, bold = false) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: size,
+        fixed: true, highlight: false, strokeColor: col, color: col,
+        cssStyle: bold ? "font-weight:700" : "",
+      });
+
+    // A translucent band behind the monitor column, to say "this is the monitor".
+    board.create("polygon",
+      [[colMon - 1.7, top - 5.6], [colMon + 1.7, top - 5.6],
+       [colMon + 1.7, top + 0.45], [colMon - 1.7, top + 0.45]],
+      { fillColor: colors.cat[0], fillOpacity: 0.07, vertices: { visible: false },
+        fixed: true, highlight: false,
+        borders: { strokeColor: colors.cat[0], strokeWidth: 1.5 } });
+
+    // header row
+    text(colT,  top, "t",                  colors.ink, 14);
+    text(colEnt, top, sceneStrings("hEntry"), colors.cat[1], 14, true);
+    text(colMon, top, sceneStrings("hMon"),   colors.cat[0], 14, true);
+    text(colCV,  top, sceneStrings("hCV"),    colors.cat[2], 14, true);
+
+    board.create("segment",
+      [[-0.2, top - 0.5], [11.4, top - 0.5]],
+      { strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false });
+
+    // one snapshot row
+    const drawRow = (n, y, ent, mon, cv) => {
+      text(colT,  y, String(n), colors.ink, 14);
+      text(colEnt, y, ent, colors.cat[1], 14);
+      text(colMon, y, mon, colors.cat[0], 14, true);
+      text(colCV,  y, cv, colors.cat[2], 14);
+    };
+
+    step(sceneStrings("s1"), () => {
+      drawRow(1, top - rowH, "—", "T1 · ready:F", "—");
+    });
+    step(sceneStrings("s2"), () => {
+      drawRow(2, top - 2 * rowH, "T2", sceneStrings("free"), "T1");
+    });
+    step(sceneStrings("s3"), () => {
+      drawRow(3, top - 3 * rowH, "—", "T2 · signal()", "T1");
+    });
+    step(sceneStrings("s4"), () => {
+      drawRow(4, top - 4 * rowH, "T1", "T2", "—");
+    });
+    step(sceneStrings("s5"), () => {
+      drawRow(5, top - 5 * rowH, "—", "T1 · ready:T ✓", "—");
+    });
+  }, {
+    boundingbox: [-0.3, 6.2, 11.6, -0.6],
+    keepAspect: false,
+    playOverlay: true,
+    title: () => makeStrings("monitorFlow")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("monitorQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 7, preamble: sceneStrings("preamble") },
+
+    { prompt: () => sceneStrings("qBundle"),
+      options: [
+        { text: "Shared data, an implicit lock, and condition variables", correct: true },
+        { text: "Two CPUs, a cache, and a scheduler", correct: false },
+        { text: "A stack, a heap, and a register file", correct: false },
+        { text: "A producer, a consumer, and a buffer", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qExcl"),
+      options: [
+        { text: "At most one — mutual exclusion is automatic", correct: true },
+        { text: "As many as there are condition variables", correct: false },
+        { text: "One per CPU core", correct: false },
+        { text: "Unlimited — the monitor does not lock", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qWait"),
+      options: [
+        { text: "Atomically releases the monitor lock and sleeps until signalled, then re-acquires the lock", correct: true },
+        { text: "Spins in a busy loop while still holding the lock", correct: false },
+        { text: "Permanently destroys the calling thread", correct: false },
+        { text: "Acquires a second lock without releasing the first", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qWhy"),
+      options: [
+        { text: "So another thread can enter the monitor and make the awaited condition true", correct: true },
+        { text: "So the waiter can run on a different core", correct: false },
+        { text: "Because releasing the lock speeds up the CPU", correct: false },
+        { text: "It does not — wait() keeps the lock held", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qSignal"),
+      options: [
+        { text: "Wakes one thread waiting on that condition (and does nothing if none is waiting)", correct: true },
+        { text: "Wakes every thread in the whole program", correct: false },
+        { text: "Increments a remembered counter for later", correct: false },
+        { text: "Blocks the caller until a waiter appears", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qBroadcast"),
+      options: [
+        { text: "wakes ALL threads waiting on the condition, not just one", correct: true },
+        { text: "wakes no threads but resets the lock", correct: false },
+        { text: "is remembered if no one is waiting", correct: false },
+        { text: "hands the lock directly to the newest waiter", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qNoWaiter"),
+      options: [
+        { text: "Nothing — the signal is lost, condition variables have no memory", correct: true },
+        { text: "It is saved and delivered to the next thread that waits", correct: false },
+        { text: "The program throws an exception", correct: false },
+        { text: "The monitor lock is released to no one", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qWhile"),
+      options: [
+        { text: "a while loop that re-tests the condition after every wakeup", correct: true },
+        { text: "a single if statement checked once before waiting", correct: false },
+        { text: "no test at all — wait() guarantees the condition", correct: false },
+        { text: "a for loop that runs a fixed number of times", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qWhyWhile"),
+      options: [
+        { text: "Mesa semantics (state may change before you re-acquire) AND spurious wakeups", correct: true },
+        { text: "Only to make the code run faster", correct: false },
+        { text: "Because if statements are not allowed inside monitors", correct: false },
+        { text: "Only because the compiler requires a loop there", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qMesa"),
+      options: [
+        { text: "is merely made runnable and must re-check the condition, since another thread may run first", correct: true },
+        { text: "is handed the lock immediately and is guaranteed the condition holds", correct: false },
+        { text: "runs before the signaller finishes its critical section", correct: false },
+        { text: "never needs to re-check anything", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qHoare"),
+      options: [
+        { text: "hands the lock straight to the woken waiter, which resumes at once with the condition guaranteed", correct: true },
+        { text: "just marks the waiter runnable and keeps running itself", correct: false },
+        { text: "wakes all waiters and lets them fight for the lock", correct: false },
+        { text: "is remembered until a thread later waits", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qWhichReal"),
+      options: [
+        { text: "Mesa semantics", correct: true },
+        { text: "Hoare semantics", correct: false },
+        { text: "Neither — they use no lock at all", correct: false },
+        { text: "A different one on every operating system", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qSpurious"),
+      options: [
+        { text: "wait() returns with no matching signal, which real thread libraries are permitted to do", correct: true },
+        { text: "two threads signal the same condition at once", correct: false },
+        { text: "a signal is delivered to the wrong condition variable", correct: false },
+        { text: "a thread signals itself by mistake", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qTwoCV"),
+      options: [
+        { text: "Producers wait when the buffer is full; consumers wait when it is empty — two distinct conditions", correct: true },
+        { text: "One is a backup in case the other breaks", correct: false },
+        { text: "Each CPU core needs its own condition variable", correct: false },
+        { text: "One holds the lock and the other holds the data", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qJava"),
+      options: [
+        { text: "synchronized", correct: true },
+        { text: "volatile", correct: false },
+        { text: "transient", correct: false },
+        { text: "static", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qLostWakeup"),
+      options: [
+        { text: "has no memory: a signal sent while no one is waiting simply evaporates", correct: true },
+        { text: "always remembers every signal, causing double wakeups", correct: false },
+        { text: "stores signals on disk and replays them at startup", correct: false },
+        { text: "wakes threads waiting on a different condition", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qRoom"),
+      variables: "c=[3:8] k=[0:2]",
+      answer: "c - k" },
+  ]);
+</script>

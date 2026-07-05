@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Semaphores</primer-title>
+
+    <primer-card>
+      <p>
+        Drive up to a busy multi-storey car park and the first thing you meet is a big lit sign:
+        <strong>SPACES: 42</strong>. Every time a car noses in, the number ticks down — 41, 40, 39. Every
+        time a car leaves, it ticks back up. And the moment it reaches <strong>0</strong>, the barrier stays
+        down: the next driver simply <em>waits</em> at the entrance until someone drives out and the counter
+        climbs to 1 again.
+      </p>
+      <p>
+        That sign is a <strong>semaphore</strong>, exactly. It is a single integer — a count of how many
+        identical things (parking spaces) are still available — with two rules: taking one makes the count go
+        down, returning one makes it go up, and you cannot take one when the count is already zero. Swap
+        "parking space" for "database connection", "buffer slot" or "download permit" and you have one of the
+        most useful synchronisation tools in all of concurrent programming.
+      </p>
+      <p>
+        A semaphore is the big brother of the
+        <primer-ref to="computer-science/concurrency/locks-and-mutexes">mutex</primer-ref>. A mutex lets
+        <em>one</em> thread through; a semaphore lets <em>N</em> through, counts them, and — as we'll see — can
+        even be used by one thread to send a signal to another. This page is about that one idea: <strong>a
+        semaphore is a counter of permits</strong>, and everything it can do falls out of that.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two operations: <code>wait()</code> and <code>signal()</code></h2>
+      <p>
+        A semaphore holds a non-negative integer, the number of <strong>available permits</strong>, and
+        offers exactly two operations. They travel under many names — pick whichever your language uses, they
+        are the same two moves:
+      </p>
+      <ul>
+        <li>
+          <strong><code>wait()</code></strong> (also <strong><code>P()</code></strong>, <code>down()</code> or
+          <code>acquire()</code>) — try to take a permit. It <strong>decrements</strong> the count; if that
+          would push the count below zero, the calling thread <strong>blocks</strong> (goes to sleep) until a
+          permit becomes available.
+        </li>
+        <li>
+          <strong><code>signal()</code></strong> (also <strong><code>V()</code></strong>, <code>up()</code> or
+          <code>release()</code>) — hand a permit back. It <strong>increments</strong> the count, and if any
+          thread is blocked waiting, it <strong>wakes one</strong> of them.
+        </li>
+      </ul>
+      <p>
+        In our car park, <code>wait()</code> is a car taking a space (SPACES 42 → 41) and <code>signal()</code>
+        is a car leaving (41 → 42). Take one when the sign reads 0 and you must queue at the barrier — that is
+        <code>wait()</code> blocking. The count is <em>never</em> allowed to drop below zero; that invariant is
+        the whole guarantee.
+      </p>
+      <primer-theorem name="The semaphore invariant">
+        <ul>
+          <li>
+            The count equals the number of <strong>permits currently available</strong>, and never goes
+            negative.
+          </li>
+          <li>
+            <code>wait()</code> = "take a permit, or sleep until one exists" — <strong>decrement, block if
+            it would go negative</strong>.
+          </li>
+          <li>
+            <code>signal()</code> = "return a permit and wake a sleeper" — <strong>increment, wake one
+            waiter</strong>.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        A neat way to read the count when it matters: if it is positive, it is the number of permits still
+        free; conceptually, if it were allowed to go negative, the magnitude would be the number of threads
+        currently queued waiting. A real implementation keeps the count at zero and holds a wait queue
+        instead, but the accounting is the same.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Counting vs binary semaphores</h2>
+      <p>
+        The initial value you choose is what gives a semaphore its character.
+      </p>
+      <p>
+        A <strong>counting semaphore</strong> starts at some <primer-math>N &gt; 1</primer-math> and guards a
+        <strong>pool of N identical resources</strong>. Set it to the number of things you have, and it hands
+        out exactly that many permits before making the next thread wait. Classic uses:
+      </p>
+      <ul>
+        <li><strong>A connection pool</strong> — 10 database connections, a semaphore initialised to 10.</li>
+        <li><strong>Parking spaces</strong> — 42 spaces, initialise to 42.</li>
+        <li><strong>Rate limiting</strong> — "at most 4 downloads at once", initialise to 4.</li>
+      </ul>
+      <p>
+        A <strong>binary semaphore</strong> starts at <primer-math>1</primer-math> and can only ever be
+        <primer-math>0</primer-math> or <primer-math>1</primer-math> — one permit, held or free. That makes it
+        behave a lot like a <primer-ref to="computer-science/concurrency/locks-and-mutexes">mutex</primer-ref>:
+        the first <code>wait()</code> takes the single permit (count 1 → 0), and anyone else calling
+        <code>wait()</code> blocks until a <code>signal()</code> returns it (0 → 1). Initialise to
+        <primer-math>1</primer-math> for mutual exclusion; initialise to <primer-math>N</primer-math> to admit
+        <primer-math>N</primer-math> at once.
+      </p>
+      <primer-vignette title="If a binary semaphore acts like a mutex, why keep both?">
+        <p>
+          Because they are <em>not</em> the same, and the difference is <strong>ownership</strong> (the next
+          card is all about it). A mutex remembers <em>which</em> thread locked it and insists that same thread
+          unlock it — great for catching bugs and for reentrancy. A binary semaphore has no owner: any thread
+          may <code>signal()</code> it, even one that never called <code>wait()</code>. So use a binary
+          semaphore when you actually want that freedom — chiefly, to <em>signal an event</em> from one thread
+          to another — and a mutex when you want a plain, owned lock. Reaching for a semaphore where a mutex
+          belongs is a well-worn way to write an ownerless bug.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>The killer feature: a semaphore has no owner</h2>
+      <p>
+        Here is the property that makes semaphores genuinely more powerful than mutexes, not just "a mutex that
+        counts". A mutex has an <strong>owner</strong>: the thread that locks it is the only one allowed to
+        unlock it. A semaphore has <strong>no owner at all</strong>. One thread can call <code>wait()</code>
+        and a <em>completely different</em> thread can call <code>signal()</code>.
+      </p>
+      <p>
+        That sounds like a small technicality. It is the difference between "protecting data" and
+        "coordinating threads". Because <code>signal()</code> can come from another thread, a semaphore can
+        <strong>signal an event across threads</strong>: thread A blocks on <code>wait()</code> until thread B
+        reaches some milestone and calls <code>signal()</code>. Start such a semaphore at <strong>0</strong>
+        — no permits — so the waiter genuinely sleeps until the event fires:
+      </p>
+      <primer-code lang="typescript">
+// A semaphore used as an EVENT / signal, initialised to 0 (no permits yet).
+const ready = new Semaphore(0);
+
+// Thread A (consumer of the event)
+ready.wait();          // blocks here — there are no permits yet
+useTheThing();         // runs only after B signals
+
+// Thread B (producer of the event), some time later, on ANOTHER thread
+prepareTheThing();
+ready.signal();        // count 0 -&gt; 1, wakes A. B never called wait() — and that's fine.
+      </primer-code>
+      <p>
+        Try that with a mutex and the runtime will (rightly) complain that B is unlocking a lock it never
+        locked. The semaphore is happy: it is just a counter, and <code>signal()</code> from anyone is a legal
+        move. This ownerless signalling is exactly what powers the headline application below.
+      </p>
+
+      <primer-theorem name="Mutex vs. semaphore, sharpened">
+        <ul>
+          <li>
+            <strong>Mutex</strong> — an <em>owned</em> lock; the same thread that locks must unlock. For mutual
+            exclusion over a critical section.
+          </li>
+          <li>
+            <strong>Semaphore</strong> — an <em>ownerless</em> counter of permits; any thread may
+            <code>wait</code> or <code>signal</code>. For resource pools <em>and</em> for signalling events
+            between threads.
+          </li>
+        </ul>
+      </primer-theorem>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "pvOrigin": {
+            "title": "Why 'P' and 'V'?"
+          }
+        }
+      </script>
+      <primer-vignette title="Where do the strange names P and V come from?">
+        <p>
+          The semaphore was invented by the Dutch computer scientist
+          <primer-ref soft to="people/dijkstra">Edsger Dijkstra</primer-ref> around 1962–63. He named the two
+          operations <strong>P</strong> and <strong>V</strong> after Dutch words — the usual story is
+          <em>P</em> for <em>proberen</em> ("to try") and <em>V</em> for <em>verhogen</em> ("to increase" or
+          "raise"). English textbooks later softened these to the friendlier <code>wait()</code> and
+          <code>signal()</code>, or <code>down()</code> and <code>up()</code>, but you will still meet
+          <code>P</code> and <code>V</code> constantly in operating-systems papers and exam questions — now you
+          know they are just take-a-permit and give-a-permit-back.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>The headline application: producer–consumer (bounded buffer)</h2>
+      <p>
+        Picture a fixed-size shelf between a baker (the <strong>producer</strong>) and a customer (the
+        <strong>consumer</strong>). The baker puts loaves on the shelf; the customer takes them off. Two things
+        can go wrong, and both are about <em>waiting for the right moment</em>:
+      </p>
+      <ul>
+        <li>the <strong>shelf is full</strong> — the baker must wait for a free slot before adding a loaf;</li>
+        <li>the <strong>shelf is empty</strong> — the customer must wait for a loaf before taking one.</li>
+      </ul>
+      <p>
+        This is the <strong>bounded-buffer problem</strong>, and it is the textbook reason semaphores exist.
+        The classic solution uses <strong>two counting semaphores</strong> plus one mutex:
+      </p>
+      <ul>
+        <li>
+          <strong><code>empty</code></strong> — counts <em>free</em> slots. Starts at the buffer's capacity
+          <primer-math>N</primer-math>. The producer <code>wait()</code>s on it (no free slot ⇒ producer
+          blocks).
+        </li>
+        <li>
+          <strong><code>full</code></strong> — counts <em>filled</em> slots. Starts at <primer-math>0</primer-math>.
+          The consumer <code>wait()</code>s on it (no item ⇒ consumer blocks).
+        </li>
+        <li>
+          <strong><code>mutex</code></strong> — a binary semaphore (or a plain mutex) protecting the shared
+          buffer's own pointers while an item is actually inserted or removed.
+        </li>
+      </ul>
+      <p>
+        The beautiful part is how <code>empty</code> and <code>full</code> pass permits back and forth. Every
+        insert does <code>wait(empty)</code> then <code>signal(full)</code>: it spends a free slot and produces
+        an item. Every remove does <code>wait(full)</code> then <code>signal(empty)</code>: it spends an item
+        and frees a slot. The producer's <code>signal(full)</code> is precisely the ownerless cross-thread
+        signal that wakes the sleeping consumer — and vice versa.
+      </p>
+      <primer-code lang="typescript">
+// Shared: buffer of capacity N, plus three semaphores.
+const empty = new Semaphore(N);   // free slots, starts full of permits
+const full  = new Semaphore(0);   // items ready, starts empty
+const mutex = new Semaphore(1);   // binary: guards the buffer itself
+
+function producer(): void {
+  while (true) {
+    const item = produceItem();
+    empty.wait();        // take a free slot — BLOCKS if the buffer is full
+    mutex.wait();        // lock the buffer
+    insert(item);        //   critical section: touch shared pointers
+    mutex.signal();      // unlock the buffer
+    full.signal();       // announce a new item — wakes a waiting consumer
+  }
+}
+
+function consumer(): void {
+  while (true) {
+    full.wait();         // take an item — BLOCKS if the buffer is empty
+    mutex.wait();        // lock the buffer
+    const item = remove();
+    mutex.signal();      // unlock the buffer
+    empty.signal();      // announce a free slot — wakes a waiting producer
+    consumeItem(item);
+  }
+}
+      </primer-code>
+      <p>
+        Follow the diagram below: an item is inserted (a free slot is spent, an item appears — <code>empty</code>
+        down, <code>full</code> up) and removed (an item is spent, a slot frees — <code>full</code> down,
+        <code>empty</code> up). Watch what happens when the producer runs ahead and the buffer fills:
+        <code>empty</code> hits 0 and the next <code>wait(empty)</code> puts the producer to sleep until the
+        consumer frees a slot.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "boundedBuffer": {
+            "title": "Producer–consumer: two semaphores pass permits back and forth",
+            "s1": "Start: 1 item on the shelf. empty = 2 free slots, full = 1 item.",
+            "s2": "Producer inserts: wait(empty) 2→1, put an item, signal(full) 1→2.",
+            "s3": "Producer inserts again: wait(empty) 1→0, put an item, signal(full) 2→3. The buffer is now FULL.",
+            "s4": "Producer tries once more: wait(empty) on 0 → the producer BLOCKS (no free slot).",
+            "s5": "Consumer removes: wait(full) 3→2, take an item, signal(empty) 0→1 — which wakes the blocked producer!",
+            "who": "who",
+            "buffer": "buffer",
+            "produce": "Producer",
+            "consume": "Consumer",
+            "blocked": "Producer ✗ blocked",
+            "emptyLbl": "empty",
+            "fullLbl": "full"
+          }
+        }
+      </script>
+      <primer-geometry scene="boundedBuffer" caption="A bounded buffer of three slots shown as a timeline. Each row is one action: a producer insert spends an 'empty' permit and adds a 'full' permit; a consumer remove does the reverse. When empty reaches 0 the producer blocks until a remove frees a slot."></primer-geometry>
+
+      <primer-vignette title="Watch out! — the order of the two wait()s matters">
+        <p>
+          In the producer, the resource semaphore <code>empty</code> is acquired <em>before</em> the
+          <code>mutex</code>, and released in mirror order. <strong>Swap them at your peril.</strong> If the
+          producer does <code>mutex.wait()</code> <em>first</em> and then <code>empty.wait()</code>, picture a
+          full buffer: the producer grabs the mutex, then blocks forever on <code>empty</code> — while still
+          holding the mutex. The consumer needs that same mutex to remove an item and free a slot, so it can
+          never run, so <code>empty</code> is never signalled. Nothing races; the whole thing simply
+          <strong>deadlocks</strong>. Rule of thumb: acquire the <em>counting</em> semaphore that might block
+          for a long time <em>before</em> the short-lived mutex, and release in the reverse order.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Run it yourself: the producer blocks when the buffer is full</h2>
+      <p>
+        The sandbox runs on a single thread, so it can't truly <em>sleep</em> a producer — which is perfect,
+        because it lets us <strong>script the exact schedule</strong> and watch the invariant do its job every
+        time. Below, a tiny <code>Semaphore</code> class (just a count, with a <code>wait()</code> that reports
+        whether it could proceed) drives a bounded buffer of capacity 3. We run a schedule that deliberately
+        over-produces so you can see <code>empty</code> hit 0 and the fourth <code>produce</code> refuse to
+        proceed — then a <code>consume</code> frees a slot and the producer gets in. Press
+        <strong>Run ▶</strong>:
+      </p>
+      <primer-code run>
+        // A scripted semaphore: a count, plus a wait() that tells us whether a
+        // permit was available. On a real thread, "no permit" would SLEEP the
+        // caller; here we just report it so we can watch the buffer block.
+        class Semaphore {
+          constructor(private count: number, public name: string) {}
+          // returns true if a permit was taken, false if the caller would BLOCK
+          wait(): boolean {
+            if (this.count &gt; 0) { this.count--; return true; }
+            return false;              // count is 0 -&gt; would go negative -&gt; block
+          }
+          signal(): void { this.count++; }        // return a permit
+          get value(): number { return this.count; }
+        }
+
+        const CAP = 3;
+        const buffer: number[] = [];
+        const empty = new Semaphore(CAP, "empty");   // free slots: 3 permits
+        const full  = new Semaphore(0, "full");      // items ready: 0 permits
+        let nextItem = 1;
+
+        function show(msg: string): void {
+          const cells: string[] = [];
+          for (let i = 0; i &lt; CAP; i++) {
+            cells.push(i &lt; buffer.length ? String(buffer[i]) : "_");
+          }
+          console.log(msg + "  buffer=[" + cells.join(" ") +
+                      "]  empty=" + empty.value + " full=" + full.value);
+        }
+
+        function produce(): void {
+          const item = nextItem;
+          if (!empty.wait()) {                       // no free slot
+            console.log("produce(" + item + "): empty=0 -&gt; PRODUCER BLOCKS (buffer full)");
+            return;                                  // a real thread sleeps here
+          }
+          buffer.push(item);                         // (mutex around this on a real thread)
+          nextItem++;
+          full.signal();                             // wake a waiting consumer
+          show("produce(" + item + "):");
+        }
+
+        function consume(): void {
+          if (!full.wait()) {                        // no item
+            console.log("consume():  full=0 -&gt; CONSUMER BLOCKS (buffer empty)");
+            return;
+          }
+          const item = buffer.shift();
+          empty.signal();                            // wake a waiting producer
+          show("consume(" + item + "):");
+        }
+
+        // Over-produce on purpose: fill all 3 slots, try a 4th (blocks),
+        // then consume one (frees a slot) and retry the producer (now succeeds).
+        console.log("start:              buffer=[_ _ _]  empty=" + empty.value + " full=" + full.value);
+        produce();   // 1
+        produce();   // 2
+        produce();   // 3  -> buffer now full, empty = 0
+        produce();   // 4  -> BLOCKS
+        consume();   //     -> frees a slot, empty back to 1
+        produce();   //     -> the producer gets in
+      </primer-code>
+      <p>
+        Notice that the count never goes negative and the buffer never overflows: <code>empty</code> falling to
+        0 is exactly the signal that stops the producer, and <code>full</code> falling to 0 is what would stop
+        the consumer. The two semaphores are doing all the coordination — the producer and consumer never have
+        to check the buffer's length themselves.
+      </p>
+
+      <primer-vignette title="Watch out! — a semaphore is not owned, so an extra signal() is a silent bug">
+        <p>
+          Because <em>anyone</em> may <code>signal()</code>, a semaphore has no way to notice that you handed
+          back a permit you never took. Call <code>signal(empty)</code> one time too many — a stray extra
+          release, a double-free, an off-by-one in a loop — and you have quietly invented a slot that doesn't
+          exist. Now two producers can both pass <code>wait(empty)</code> for the same physical space, and they
+          <strong>overwrite each other's item</strong>: the very corruption the buffer was meant to prevent,
+          with no crash and no error message. A mutex would have caught "you unlocked something you didn't
+          lock"; a semaphore trusts you completely. Signal exactly once per successful wait, and treat the
+          count as a sacred invariant.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-quiz name="semaphoreQuiz@1"></primer-quiz>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "semaphoreQuiz@1": {
+          "preamble": "Check your understanding of semaphores: permits, wait/signal, counting vs binary, ownership, and the bounded buffer.",
+          "qCount": "The integer inside a semaphore represents…",
+          "qWait": "What does wait() (P / down) do?",
+          "qSignal": "What does signal() (V / up) do?",
+          "qNeg": "The count of a semaphore is never allowed to…",
+          "qBinary": "A binary semaphore is initialised to…",
+          "qPool": "To guard a pool of {n} identical database connections, initialise a counting semaphore to…",
+          "qOwner": "The crucial difference between a semaphore and a mutex is that a semaphore…",
+          "qEvent": "To signal an event from one thread to another, you initialise the semaphore to 0 because…",
+          "qBB": "In the bounded-buffer solution, what do the two counting semaphores count?",
+          "qBBinit": "For a bounded buffer of capacity N, the empty and full semaphores start at…",
+          "qBBblock": "In the bounded buffer, a producer blocks when…",
+          "qDeadlock": "Why must a producer acquire the counting semaphore (empty) BEFORE the mutex?",
+          "qPV": "The names P and V for the semaphore's operations come from…",
+          "qArith": "A semaphore is initialised to {n}. After {k} wait() calls and {j} signal() calls, with none ever blocking, the count is…",
+          "qEmpty": "A bounded buffer has capacity {c}, so its empty semaphore starts at {c}. After the producer inserts {k} items (the consumer stays idle), the empty count is…",
+          "qExtra": "Calling signal() one extra time on the empty semaphore of a bounded buffer can…"
+        }
+      }
+    </script>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/concurrency/locks-and-mutexes"],
+    "completedDate": "2026-07-04"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // The bounded buffer as a timeline table (like a race table). Each step reveals
+  // one more row: a short actor tag, the buffer drawn as CAP small squares (filled
+  // = an item), and the empty / full counter values. The producer-blocks row
+  // highlights empty = 0.
+  registerGeometryScene("boundedBuffer", ({ board, step, colors, sceneStrings }) => {
+    const CAP = 3;
+
+    // column x-centres
+    const colStep  = 0.4;
+    const colWho   = 2.0;
+    const slot0    = 4.0;    // centre of first buffer square
+    const slotGap  = 0.66;
+    const colEmpty = 6.7;
+    const colFull  = 7.8;
+    const top      = 6.2;
+    const rowH     = 0.95;
+
+    const text = (x, y, s, col, size = 14, bold = false) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: size,
+        fixed: true, highlight: false, strokeColor: col, color: col,
+        cssStyle: bold ? "font-weight:700" : "",
+      });
+
+    const square = (cx, cy, filled) =>
+      board.create("polygon",
+        [[cx - 0.26, cy - 0.3], [cx + 0.26, cy - 0.3],
+         [cx + 0.26, cy + 0.3], [cx - 0.26, cy + 0.3]],
+        { fillColor: colors.cat[0], fillOpacity: filled ? 0.85 : 0,
+          vertices: { visible: false }, fixed: true, highlight: false,
+          borders: { strokeColor: colors.line, strokeWidth: 1.4 } });
+
+    const hotCell = (cx, cy) =>
+      board.create("polygon",
+        [[cx - 0.42, cy - 0.32], [cx + 0.42, cy - 0.32],
+         [cx + 0.42, cy + 0.32], [cx - 0.42, cy + 0.32]],
+        { fillColor: colors.cat[2], fillOpacity: 0.22,
+          vertices: { visible: false }, fixed: true, highlight: false,
+          borders: { strokeColor: colors.cat[2], strokeWidth: 1.2 } });
+
+    // header row
+    text(colStep, top, "#", colors.ink, 13);
+    text(colWho, top, sceneStrings("who"), colors.ink, 14, true);
+    text(slot0 + slotGap, top, sceneStrings("buffer"), colors.ink, 14, true);
+    text(colEmpty, top, sceneStrings("emptyLbl"), colors.cat[0], 14, true);
+    text(colFull, top, sceneStrings("fullLbl"), colors.cat[1], 14, true);
+    board.create("segment",
+      [[-0.2, top - 0.5], [8.4, top - 0.5]],
+      { strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false });
+
+    // draw one timeline row
+    const drawRow = (n, y, who, whoCol, filled, empty, full, hotEmpty, hotFull) => {
+      text(colStep, y, String(n), colors.ink, 13);
+      text(colWho, y, who, whoCol, 13, true);
+      for (let i = 0; i < CAP; i++) square(slot0 + i * slotGap, y, filled[i]);
+      if (hotEmpty) hotCell(colEmpty, y);
+      if (hotFull) hotCell(colFull, y);
+      text(colEmpty, y, String(empty), hotEmpty ? colors.cat[2] : colors.ink, 15, true);
+      text(colFull, y, String(full), colors.ink, 15, true);
+    };
+
+    const P = () => sceneStrings("produce");
+    const C = () => sceneStrings("consume");
+
+    step(sceneStrings("s1"), () => {
+      drawRow(1, top - rowH, "start", colors.ink, [true, false, false], 2, 1, false, false);
+    });
+    step(sceneStrings("s2"), () => {
+      drawRow(2, top - 2 * rowH, P(), colors.cat[0], [true, true, false], 1, 2, false, false);
+    });
+    step(sceneStrings("s3"), () => {
+      drawRow(3, top - 3 * rowH, P(), colors.cat[0], [true, true, true], 0, 3, true, false);
+    });
+    step(sceneStrings("s4"), () => {
+      drawRow(4, top - 4 * rowH, sceneStrings("blocked"), colors.cat[2], [true, true, true], 0, 3, true, false);
+    });
+    step(sceneStrings("s5"), () => {
+      drawRow(5, top - 5 * rowH, C(), colors.cat[1], [false, true, true], 1, 2, false, false);
+    });
+  }, {
+    boundingbox: [-0.6, 6.9, 8.6, 0.1],
+    keepAspect: false,
+    playOverlay: true,
+    title: () => makeStrings("boundedBuffer")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("semaphoreQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("preamble") },
+
+    { prompt: () => sceneStrings("qCount"),
+      options: [
+        { text: "The number of permits currently available", correct: true },
+        { text: "The number of CPU cores in the machine", correct: false },
+        { text: "The priority of the waiting thread", correct: false },
+        { text: "The number of times the program has run", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qWait"),
+      options: [
+        { text: "Decrements the count, and blocks the caller if that would take it below zero", correct: true },
+        { text: "Increments the count and wakes a waiter", correct: false },
+        { text: "Resets the count to its initial value", correct: false },
+        { text: "Always blocks the caller until a timeout", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qSignal"),
+      options: [
+        { text: "Increments the count and wakes one blocked waiter, if any", correct: true },
+        { text: "Decrements the count and blocks if it would go negative", correct: false },
+        { text: "Destroys the semaphore", correct: false },
+        { text: "Wakes every waiting thread at once, guaranteed", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qNeg"),
+      options: [
+        { text: "go below zero — wait() blocks instead", correct: true },
+        { text: "exceed the number of CPU cores", correct: false },
+        { text: "be an even number", correct: false },
+        { text: "equal its initial value", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qBinary"),
+      options: [
+        { text: "1 — it holds a single permit and acts like a mutex", correct: true },
+        { text: "0 — so the first wait() always blocks", correct: false },
+        { text: "2 — one permit for each of two threads", correct: false },
+        { text: "the number of threads in the program", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qPool"),
+      variables: "n=[3:10]",
+      options: [
+        { text: "{n} — one permit per connection", correct: true },
+        { text: "1 — a pool is always a binary semaphore", correct: false },
+        { text: "0 — so callers wait for a connection to appear", correct: false },
+        { text: "{2 * n} — two permits per connection", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qOwner"),
+      options: [
+        { text: "has no owner — any thread may signal, even one that never waited", correct: true },
+        { text: "can only ever admit exactly one thread", correct: false },
+        { text: "must be released by the same thread that acquired it", correct: false },
+        { text: "cannot be shared between threads at all", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qEvent"),
+      options: [
+        { text: "with 0 permits the waiter genuinely sleeps until another thread signals the event", correct: true },
+        { text: "0 makes the semaphore run faster", correct: false },
+        { text: "a semaphore can only be initialised to 0", correct: false },
+        { text: "0 permits let unlimited threads through", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qBB"),
+      options: [
+        { text: "empty counts free slots; full counts filled slots (items ready)", correct: true },
+        { text: "empty counts producers; full counts consumers", correct: false },
+        { text: "both count the total number of threads", correct: false },
+        { text: "empty counts errors; full counts successes", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qBBinit"),
+      options: [
+        { text: "empty = N and full = 0", correct: true },
+        { text: "empty = 0 and full = N", correct: false },
+        { text: "both start at N", correct: false },
+        { text: "both start at 0", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qBBblock"),
+      options: [
+        { text: "the buffer is full — wait(empty) finds 0 free slots", correct: true },
+        { text: "the buffer is empty — wait(full) finds 0 items", correct: false },
+        { text: "the consumer holds the mutex", correct: false },
+        { text: "the count goes above N", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qDeadlock"),
+      options: [
+        { text: "Otherwise a full buffer leaves the producer blocked on empty while still holding the mutex, so the consumer can never free a slot — deadlock", correct: true },
+        { text: "Because the mutex is faster to acquire than a counting semaphore", correct: false },
+        { text: "Because the mutex must always be acquired last, in every program", correct: false },
+        { text: "It makes no difference which order you use", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qPV"),
+      options: [
+        { text: "Dutch words — proberen (to try) and verhogen (to raise) — from Dijkstra", correct: true },
+        { text: "Pause and Verify", correct: false },
+        { text: "the initials of two engineers who invented them", correct: false },
+        { text: "Positive and Void", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qArith"),
+      variables: "n=[1:6] k=[0:5] j=[0:5]",
+      constraints: "n - k + j >= 0 && k <= n + j",
+      answer: "n - k + j" },
+
+    { prompt: () => sceneStrings("qEmpty"),
+      variables: "c=[3:9] k=[1:3]",
+      constraints: "k <= c",
+      answer: "c - k" },
+
+    { prompt: () => sceneStrings("qExtra"),
+      options: [
+        { text: "invent a slot that doesn't exist, letting two producers overwrite the same buffer entry", correct: true },
+        { text: "safely do nothing, because the semaphore ignores extra signals", correct: false },
+        { text: "raise an ownership error, because the wrong thread signalled", correct: false },
+        { text: "reset the buffer to empty", correct: false },
+      ] },
+  ]);
+</script>

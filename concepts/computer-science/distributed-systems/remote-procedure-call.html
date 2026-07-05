@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Remote Procedure Call</primer-title>
+
+    <primer-card>
+      <p>
+        You write one modest line of code:
+      </p>
+      <primer-math display>\texttt{result = add(2, 3)}</primer-math>
+      <p>
+        It looks exactly like calling a function you wrote ten lines up. But <code>add</code> does not live in
+        your program. It lives on a machine in another building — maybe another <em>continent</em>. When your
+        line runs, the numbers <primer-math>2</primer-math> and <primer-math>3</primer-math> are packed into a
+        message, flung across the network to that faraway computer, added there, and the answer
+        <primer-math>5</primer-math> is packed up and shipped all the way back — and only then does your
+        variable <code>result</code> get its value. Yet in your source, none of that shows. It reads like an
+        ordinary call.
+      </p>
+      <p>
+        That illusion is a <strong>Remote Procedure Call</strong>, or <strong>RPC</strong>: the idea that
+        invoking code on <em>another</em> machine should look and feel like calling a function on your
+        <em>own</em>. Instead of making the programmer hand-write socket code, serialise bytes, and parse
+        replies, RPC hides the whole
+        <primer-ref to="computer-science/networks/client-server-and-the-web">client–server</primer-ref>
+        conversation behind a plain function call. This page is about the machinery that pulls off that trick —
+        and, just as importantly, about the places where the illusion <em>leaks</em>, because a call across a
+        network can never truly be the same as a call across a stack frame.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The trick: stubs and marshalling</h2>
+      <p>
+        How can <code>add(2, 3)</code> possibly look local when the real <code>add</code> is elsewhere? The
+        secret is a piece of stand-in code called a <strong>stub</strong>. On the caller's side there is a
+        <strong>client stub</strong> — a fake <code>add</code> with the right name and signature that the
+        programmer calls without a second thought. It looks like the function; it is really an impostor whose
+        only job is to smuggle the call across the network.
+      </p>
+      <p>
+        When you call the client stub, four things happen in order:
+      </p>
+      <ul>
+        <li>
+          <strong>Marshal</strong> the arguments — the stub takes <primer-math>2</primer-math> and
+          <primer-math>3</primer-math> and serialises them into a flat sequence of bytes: a message. (Turning
+          them back into values on the far side is <strong>unmarshalling</strong>. The pair is also called
+          <em>serialisation</em> / <em>deserialisation</em>.)
+        </li>
+        <li>
+          <strong>Transport</strong> — the message is sent over the network to the server.
+        </li>
+        <li>
+          On the server, a matching <strong>server stub</strong> (often called the <strong>skeleton</strong>)
+          <strong>unmarshals</strong> the bytes back into <primer-math>2</primer-math> and
+          <primer-math>3</primer-math>, then calls the <em>real</em> <code>add</code> — an ordinary local call,
+          on that machine.
+        </li>
+        <li>
+          The return value <primer-math>5</primer-math> is marshalled into a reply message, sent back, and the
+          client stub unmarshals it and hands it to you as <code>result</code>.
+        </li>
+      </ul>
+      <p>
+        Neither the programmer who wrote <code>add(2, 3)</code> nor the programmer who wrote the real
+        <code>add</code> had to think about bytes, packets, or ports. The two stubs did all the packing and
+        unpacking; the network sat invisibly in the middle. Follow one round trip below, step by step.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "rpcFlow": {
+            "title": "One RPC round trip: the client stub, the wire, the server skeleton",
+            "call": "Programmer calls the client stub: result = add(2, 3). Looks like an ordinary local call.",
+            "marshal": "Client stub MARSHALS the arguments 2 and 3 into a request message (bytes).",
+            "send": "The request travels over the network to the server.",
+            "run": "Server skeleton UNMARSHALS the bytes and calls the real add(2, 3), which returns 5.",
+            "reply": "The result 5 is MARSHALLED into a reply message and sent back over the network.",
+            "return": "Client stub UNMARSHALS the reply and returns 5. The programmer just sees result == 5."
+          }
+        }
+      </script>
+      <primer-geometry scene="rpcFlow" caption="A message-sequence diagram of one RPC. Two vertical lifelines, Client on the left and Server on the right. A request arrow labelled 'add(2,3) marshalled request' travels right; a box on the server reads 'unmarshal, run add -> 5'; a reply arrow labelled 'result 5 marshalled reply' travels back left."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>A toy RPC you can run</h2>
+      <p>
+        To see the mechanism with nothing hidden, here is a whole RPC squeezed into a single process — no real
+        network, just the same <em>shape</em>. There is a <code>marshal</code>/<code>unmarshal</code> pair (JSON
+        standing in for the wire format), a <code>transport</code> that would be the network, a
+        <strong>client stub</strong> that serialises a call, and a <strong>server dispatcher</strong> that
+        unmarshals it, runs the real function, and marshals the reply. Press <strong>Run ▶</strong> and watch
+        the bytes go across and come back.
+      </p>
+      <primer-code run>
+        // ---- the "wire format": values <-> a string of bytes ----
+        function marshal(value: unknown): string {
+          return JSON.stringify(value);            // serialise to bytes-on-the-wire
+        }
+        function unmarshal(bytes: string): any {
+          return JSON.parse(bytes);                // deserialise back to values
+        }
+
+        // ---- the SERVER: real functions, plus a dispatcher (skeleton) ----
+        const functions: Record&lt;string, (...a: number[]) =&gt; number&gt; = {
+          add: (a, b) =&gt; a + b,
+          mul: (a, b) =&gt; a * b,
+        };
+
+        function server(requestBytes: string): string {
+          const req = unmarshal(requestBytes);              // UNMARSHAL the request
+          console.log("  server got:   " + requestBytes);
+          const fn = functions[req.method];                 // find the real function
+          const result = fn(...req.args);                   // ordinary LOCAL call here
+          const replyBytes = marshal({ result });           // MARSHAL the reply
+          console.log("  server sends: " + replyBytes);
+          return replyBytes;
+        }
+
+        // ---- the "network": just hands bytes from client to server ----
+        function transport(requestBytes: string): string {
+          return server(requestBytes);            // a real one would send packets
+        }
+
+        // ---- the CLIENT STUB: looks like a normal function ----
+        function stub(method: string, ...args: number[]): number {
+          const requestBytes = marshal({ method, args });   // MARSHAL the call
+          console.log("client sends: " + requestBytes);
+          const replyBytes = transport(requestBytes);       // over the "network"
+          const reply = unmarshal(replyBytes);              // UNMARSHAL the reply
+          console.log("client got:   " + replyBytes);
+          return reply.result;
+        }
+
+        // ---- the programmer just writes this ----
+        const result = stub("add", 2, 3);
+        console.log("");
+        console.log("result = add(2, 3) = " + result);   // looks totally local!
+      </primer-code>
+      <p>
+        The programmer's whole world is the last three lines: <code>stub("add", 2, 3)</code> returns
+        <primer-math>5</primer-math>. Everything above it — marshalling, the transport, the dispatcher — is
+        exactly the plumbing a real RPC library generates for you from an interface definition.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The abstraction leaks</h2>
+      <p>
+        Making a remote call <em>look</em> local is a beautiful convenience, and also a quiet trap. A local
+        call and a remote call are alike on the surface and profoundly different underneath. Wherever the two
+        differ, the abstraction <strong>leaks</strong> — the network reality seeps through the pretty function
+        call, and code written as if the call were local behaves badly.
+      </p>
+      <primer-theorem name="Local calls vs remote calls">
+        <ul>
+          <li>
+            <strong>Failure.</strong> A local call cannot fail because of a network partition — the callee is
+            right there. A remote call can time out, get lost, or hit a dead server, and must handle that.
+          </li>
+          <li>
+            <strong>Latency.</strong> A local call costs nanoseconds. A remote call costs milliseconds — often
+            a <em>million</em> times more. A loop of a thousand innocent calls is a thousand round trips.
+          </li>
+          <li>
+            <strong>Passing data.</strong> A local call can pass a pointer/reference and share the same object.
+            A remote call must pass everything <strong>by value</strong> — the argument is copied into the
+            message. There is no shared memory across machines to point into.
+          </li>
+          <li>
+            <strong>Partial failure.</strong> On a timeout you face a question a local call never raises:
+            <em>did it run at all, once, or more than once?</em> The reply's absence tells you nothing.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        These are not bugs in any particular RPC library; they are the unavoidable difference between "in this
+        process" and "across a network." The danger is precisely that the syntax hides them. This tension is
+        old and famous — the "<strong>Fallacies of Distributed Computing</strong>" begin with programmers
+        assuming the network is reliable, instant, and free, exactly because RPC let them <em>pretend</em> it
+        was.
+      </p>
+
+      <primer-vignette title="Watch out! — 'RPC makes a remote call exactly like a local one'">
+        <p>
+          This is the seductive misconception at the heart of RPC, and believing it will burn you. RPC makes a
+          remote call <em>look</em> like a local one — same syntax — but it can never make it <em>behave</em>
+          like one. A local call does not spend milliseconds on the wire, does not vanish into a network
+          partition, cannot execute "somewhere between zero and two times." If you write remote calls as though
+          they were free and infallible — chatty loops of tiny calls, no timeouts, no retry policy, sharing
+          objects by reference in your head — the leak becomes a flood. Treat every RPC as what it is: a
+          message that <em>might</em> not arrive, to a machine that <em>might</em> be gone, taking a time you
+          <em>cannot</em> predict. Design for that, and RPC is a gift. Forget it, and it is a landmine.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>The hard question: how many times did it run?</h2>
+      <p>
+        The nastiest leak deserves its own page-worth of care. Suppose your client sends a request and then …
+        silence. The timeout fires. Something went wrong — but <strong>what</strong>? There are two very
+        different possibilities, and from the client's chair they look <em>identical</em>:
+      </p>
+      <ul>
+        <li>The <strong>request</strong> was lost — the server never even heard about it. The call did
+          <em>not</em> run.</li>
+        <li>The <strong>reply</strong> was lost — the server ran the call perfectly and sent the answer, which
+          fell into the network on the way back. The call <em>did</em> run.</li>
+      </ul>
+      <p>
+        The client cannot tell these apart. All it knows is "no answer came." So what should it do — give up,
+        or retry? That single decision is the whole subject of <strong>delivery semantics</strong>:
+      </p>
+      <primer-theorem name="Delivery semantics">
+        <ul>
+          <li>
+            <strong>At-most-once.</strong> The client never retries. The call runs zero or one time — it is
+            never duplicated, but it might silently not happen.
+          </li>
+          <li>
+            <strong>At-least-once.</strong> The client retries until it gets a reply. The call is guaranteed to
+            run — but on a lost <em>reply</em>, it may run <strong>more than once</strong>.
+          </li>
+          <li>
+            <strong>Exactly-once.</strong> The ideal: the effect happens precisely one time, retries or not.
+            It is the hardest to build, and needs help (deduplication, request IDs, idempotency).
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Now the danger becomes concrete. Suppose the remote call is <code>transfer($100)</code>, and you chose
+        at-least-once (retry on timeout). The server receives the request, moves the $100, sends "done" — and
+        the reply is lost. Your client, hearing nothing, retries. The server moves <em>another</em> $100. Your
+        friend just got paid twice, and your account is short. The retry that saves a lost-request call
+        <em>doubles</em> a lost-reply call.
+      </p>
+      <p>
+        The property that rescues you is <strong>idempotency</strong>: an operation is idempotent if doing it
+        twice has the same effect as doing it once. "<em>Set</em> the balance to $500" is idempotent — running
+        it again changes nothing. "<em>Add</em> $100 to the balance" is <strong>not</strong> — each run adds
+        again. Retrying an idempotent call is harmless, so at-least-once is safe for it. Retrying a
+        non-idempotent call is a bug waiting to happen. That is why well-built RPC systems attach a unique
+        <strong>request ID</strong> to each call: the server remembers IDs it has already processed and quietly
+        ignores duplicates — turning an at-least-once transport into effectively exactly-once <em>effects</em>.
+      </p>
+
+      <primer-vignette title="If retrying can double a payment, why ever retry?">
+        <p>
+          Because <em>not</em> retrying doesn't make the problem go away — it just swaps a double-execution risk
+          for a zero-execution risk. If you never retry (at-most-once) and it was the <em>request</em> that got
+          lost, the transfer simply never happened and nobody told you. Neither extreme is safe on its own; the
+          real fix is to make retries safe. Give each request a unique ID and have the server deduplicate: the
+          first time it sees ID <code>#1734</code> it does the transfer and records "done for #1734"; every
+          retry of <code>#1734</code> it recognises and returns the stored result without moving money again.
+          Now the client can retry freely — the <em>transport</em> is at-least-once, but the <em>effect</em> is
+          exactly-once. This is how real payment and messaging systems get correctness out of an unreliable
+          network: not by avoiding retries, but by making the operation safe to repeat.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>RPC today</h2>
+      <p>
+        The idea is decades old, but it is everywhere in modern systems, just under newer names. <strong>gRPC</strong>
+        (Google's framework) marshals with a compact binary format called Protocol Buffers and runs over HTTP/2;
+        you write an <code>.proto</code> interface and it <em>generates</em> your client and server stubs in a
+        dozen languages. <strong>JSON-RPC</strong> is a lightweight cousin that marshals calls as small JSON
+        objects — much like our toy above. Older relatives include Sun RPC, CORBA, and Java RMI. Even a plain
+        REST/HTTP API is RPC-flavoured: a request names an operation and carries marshalled arguments, and a
+        marshalled reply comes back. The vocabulary changes; the shape — stub, marshal, transport, unmarshal,
+        run, reply — does not, and neither do the leaks. Whatever the badge on the box, a call that crosses the
+        network is slow, can fail, passes by value, and might run more than once.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "rpcQuiz@1": { "instructions": "Check your understanding of RPC: stubs, marshalling, the leaky abstraction, and delivery semantics." } }
+    </script>
+    <primer-quiz name="rpcQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/distributed-systems/models-and-failure", "computer-science/networks/client-server-and-the-web"],
+    "completedDate": "2026-07-04"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // A UML-style message-sequence diagram of one RPC round trip.
+  // Two vertical lifelines (Client on the left, Server on the right). Steps reveal
+  // the local-looking call, the marshalled request arrow, server processing, the
+  // marshalled reply arrow, and the client returning the value.
+  registerGeometryScene("rpcFlow", ({ board, step, colors, sceneStrings }) => {
+    const clientX = 1.6;
+    const serverX = 8.4;
+    const top = 8.2;
+    const bottom = 0.4;
+
+    const text = (x, y, s, col, size = 14, bold = false, anchor = "middle") =>
+      board.create("text", [x, y, s], {
+        anchorX: anchor, anchorY: "middle", fontSize: size,
+        fixed: true, highlight: false, strokeColor: col, color: col,
+        cssStyle: bold ? "font-weight:700" : "",
+      });
+
+    const box = (cx, cy, hw, hh, col, fill) =>
+      board.create("polygon",
+        [[cx - hw, cy - hh], [cx + hw, cy - hh], [cx + hw, cy + hh], [cx - hw, cy + hh]],
+        { fillColor: fill, fillOpacity: 0.18, vertices: { visible: false },
+          fixed: true, highlight: false,
+          borders: { strokeColor: col, strokeWidth: 1.5 } });
+
+    // --- base content: the two actor boxes and their lifelines ---
+    box(clientX, top, 1.15, 0.45, colors.cat[0], colors.cat[0]);
+    text(clientX, top, "Client", colors.cat[0], 15, true);
+    box(serverX, top, 1.15, 0.45, colors.cat[1], colors.cat[1]);
+    text(serverX, top, "Server", colors.cat[1], 15, true);
+
+    board.create("segment", [[clientX, top - 0.5], [clientX, bottom]],
+      { strokeColor: colors.line, strokeWidth: 1.2, dash: 2, fixed: true, highlight: false });
+    board.create("segment", [[serverX, top - 0.5], [serverX, bottom]],
+      { strokeColor: colors.line, strokeWidth: 1.2, dash: 2, fixed: true, highlight: false });
+
+    const arrow = (x1, y1, x2, y2, col) =>
+      board.create("arrow", [[x1, y1], [x2, y2]],
+        { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false,
+          lastArrow: { type: 2, size: 6 } });
+
+    // 1) the local-looking call
+    step(sceneStrings("call"), () => {
+      text(clientX, 7.0, "result = add(2, 3)", colors.ink, 14, true);
+    });
+
+    // 2) marshal + 3) send: the request arrow crossing right
+    step(sceneStrings("marshal"), () => {
+      text(clientX - 0.05, 6.2, "marshal → bytes", colors.cat[0], 13);
+    });
+    step(sceneStrings("send"), () => {
+      arrow(clientX + 0.2, 5.6, serverX - 0.2, 5.2, colors.cat[0]);
+      text((clientX + serverX) / 2, 5.9, "add(2,3)  [marshalled request]", colors.ink, 13);
+    });
+
+    // 4) server unmarshals and runs
+    step(sceneStrings("run"), () => {
+      box(serverX, 4.3, 1.55, 0.55, colors.cat[1], colors.cat[1]);
+      text(serverX, 4.45, "unmarshal, run add", colors.cat[1], 13, true);
+      text(serverX, 4.05, "add(2,3) → 5", colors.cat[1], 13);
+    });
+
+    // 5) reply arrow crossing back left
+    step(sceneStrings("reply"), () => {
+      arrow(serverX - 0.2, 3.1, clientX + 0.2, 2.7, colors.cat[1]);
+      text((clientX + serverX) / 2, 3.4, "5  [marshalled reply]", colors.ink, 13);
+    });
+
+    // 6) client returns the value
+    step(sceneStrings("return"), () => {
+      text(clientX, 2.0, "unmarshal → result = 5", colors.cat[0], 13, true);
+    });
+  }, {
+    boundingbox: [-0.6, 9.0, 10.6, -0.2],
+    keepAspect: false,
+    title: () => makeStrings("rpcFlow")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("rpcQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "What is the core goal of a Remote Procedure Call?",
+      options: [
+        { text: "To make calling code on another machine look like an ordinary local function call", correct: true },
+        { text: "To make local function calls run faster", correct: false },
+        { text: "To encrypt every function's return value", correct: false },
+        { text: "To let two threads share the same memory", correct: false },
+      ] },
+
+    { prompt: "What is the job of the client stub?",
+      options: [
+        { text: "To stand in for the remote function, marshalling the call and shipping it across the network", correct: true },
+        { text: "To run the real function locally so the network is never used", correct: false },
+        { text: "To compile the program into machine code", correct: false },
+        { text: "To store the return value permanently on disk", correct: false },
+      ] },
+
+    { prompt: "What does 'marshalling' an argument mean?",
+      options: [
+        { text: "Serialising it into a flat message of bytes to send over the network", correct: true },
+        { text: "Encrypting it so nobody can read it", correct: false },
+        { text: "Rounding it to the nearest integer", correct: false },
+        { text: "Copying it into a faster CPU register", correct: false },
+      ] },
+
+    { prompt: "On the server side, what turns the received bytes back into usable argument values?",
+      options: [
+        { text: "Unmarshalling (deserialisation), done by the server stub / skeleton", correct: true },
+        { text: "Marshalling, done a second time", correct: false },
+        { text: "The network transport layer discards the bytes", correct: false },
+        { text: "Garbage collection", correct: false },
+      ] },
+
+    { prompt: "Compared with a local call, a remote call differs in that it…",
+      options: [
+        { text: "can time out, is far slower, and must pass arguments by value", correct: true },
+        { text: "is always faster and can never fail", correct: false },
+        { text: "shares memory with the caller by reference", correct: false },
+        { text: "runs in exactly the same number of nanoseconds", correct: false },
+      ] },
+
+    { prompt: "Why can't a remote call pass an argument by reference (a pointer) the way a local call can?",
+      options: [
+        { text: "The two machines have separate memory; there is no shared address to point into, so data is copied by value", correct: true },
+        { text: "Pointers are illegal in every programming language", correct: false },
+        { text: "References are too large to fit in a message", correct: false },
+        { text: "The network automatically shares all memory between machines", correct: false },
+      ] },
+
+    { prompt: "RPC is called a 'leaky abstraction' because…",
+      options: [
+        { text: "the network's realities (latency, failure, by-value passing) seep through despite the local-looking syntax", correct: true },
+        { text: "it leaks memory on every call", correct: false },
+        { text: "it always loses one argument in transit", correct: false },
+        { text: "the return value slowly drains away over time", correct: false },
+      ] },
+
+    { prompt: "A client sends an RPC and the timeout fires with no reply. What are the two indistinguishable possibilities?",
+      options: [
+        { text: "The request was lost (call didn't run) OR the reply was lost (call did run)", correct: true },
+        { text: "The server is faster than the client OR slower than the client", correct: false },
+        { text: "The argument was even OR odd", correct: false },
+        { text: "The function returned 0 OR returned 1", correct: false },
+      ] },
+
+    { prompt: "Under 'at-least-once' delivery semantics, the client…",
+      options: [
+        { text: "retries until it gets a reply, so the call runs one or more times (possibly duplicated)", correct: true },
+        { text: "never retries, so the call runs zero or one time", correct: false },
+        { text: "runs the call exactly once with no extra machinery", correct: false },
+        { text: "runs the call on the client instead of the server", correct: false },
+      ] },
+
+    { prompt: "Under 'at-most-once' delivery semantics, the call runs…",
+      options: [
+        { text: "zero or one time — never duplicated, but it might silently not happen", correct: true },
+        { text: "at least once, possibly many times", correct: false },
+        { text: "always exactly one time, guaranteed", correct: false },
+        { text: "twice, to be safe", correct: false },
+      ] },
+
+    { prompt: "An operation is 'idempotent' when…",
+      options: [
+        { text: "performing it twice has the same effect as performing it once", correct: true },
+        { text: "it can only ever be run by one client", correct: false },
+        { text: "it runs faster the second time", correct: false },
+        { text: "it returns a different result on every call", correct: false },
+      ] },
+
+    { prompt: "Which operation is idempotent, and therefore safe to retry blindly?",
+      options: [
+        { text: "'Set the balance to $500'", correct: true },
+        { text: "'Add $100 to the balance'", correct: false },
+        { text: "'Withdraw $50 from the balance'", correct: false },
+        { text: "'Append a line to the log'", correct: false },
+      ] },
+
+    { prompt: "Why is blindly retrying a non-idempotent RPC like 'transfer $100' on a timeout dangerous?",
+      options: [
+        { text: "If the original reply was lost but the call succeeded, the retry transfers the money a second time", correct: true },
+        { text: "Retrying always corrupts the network cable", correct: false },
+        { text: "The second request is guaranteed to be rejected, so nothing happens", correct: false },
+        { text: "Retries make the function idempotent automatically", correct: false },
+      ] },
+
+    { prompt: "How do RPC systems turn an at-least-once transport into effectively exactly-once effects?",
+      options: [
+        { text: "Attach a unique request ID so the server deduplicates and ignores repeats of an ID it already processed", correct: true },
+        { text: "Send every request twice on purpose", correct: false },
+        { text: "Forbid the client from ever retrying", correct: false },
+        { text: "Run the function on the client instead", correct: false },
+      ] },
+
+    { prompt: "Which of these is a modern RPC framework using Protocol Buffers over HTTP/2 with generated stubs?",
+      options: [
+        { text: "gRPC", correct: true },
+        { text: "HTML", correct: false },
+        { text: "TCP", correct: false },
+        { text: "SQL", correct: false },
+      ] },
+
+    { prompt: "In our toy in-process RPC, what did the JSON marshal/unmarshal pair stand in for?",
+      options: [
+        { text: "The wire format — turning values into bytes and back across the transport", correct: true },
+        { text: "The CPU scheduler choosing which thread runs", correct: false },
+        { text: "A database storing the results", correct: false },
+        { text: "The user interface of the program", correct: false },
+      ] },
+
+    { prompt: "'Exactly-once' delivery is described as the hardest to achieve because…",
+      options: [
+        { text: "guaranteeing the effect happens precisely once despite lost messages needs deduplication and request IDs", correct: true },
+        { text: "it requires the network to be infinitely fast", correct: false },
+        { text: "it can only work with a single client", correct: false },
+        { text: "it forbids the server from ever replying", correct: false },
+      ] },
+  ]);
+</script>

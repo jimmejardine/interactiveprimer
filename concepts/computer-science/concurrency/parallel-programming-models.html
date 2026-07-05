@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Parallel Programming Models</primer-title>
+
+    <primer-card>
+      <p>
+        Picture a busy restaurant kitchen the night before it opens. There are two completely different ways
+        to get a mountain of work done fast. In the first, the head chef hands ten cooks an identical job:
+        "each of you take a pile of onions and chop it, exactly the same way." Ten piles shrink at once —
+        <strong>the same operation applied across many pieces of data</strong>. In the second, the chef gives
+        each cook a <em>different</em> job: one chops, one stirs the stock, one plates the starters, one
+        washes up — <strong>different tasks running at the same time</strong>.
+      </p>
+      <p>
+        Those two pictures are the two oldest ideas in parallel computing —
+        <strong>data parallelism</strong> and <strong>task parallelism</strong> — and almost every way we
+        structure parallel work is a variation or combination of them. This page is a tour of these
+        <em>models</em>: the high-level shapes we pour concurrent work into, sitting a level above the
+        <primer-ref to="computer-science/concurrency/threads-vs-processes">threads and processes</primer-ref>
+        that actually run it. We will meet data vs. task parallelism, two ways processes can talk (shared
+        memory vs. message passing), the actor model, the fork–join pattern, and the law that spoils the
+        party — Amdahl's.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Data parallelism vs. task parallelism</h2>
+      <p>
+        <strong>Data parallelism</strong> is the ten-cooks-chopping-onions model. You have one operation and
+        a large collection of data; you apply the operation to every element, and the elements do not depend
+        on each other, so they can all be done at once. Doubling a million numbers, brightening every pixel
+        in an image, running the same physics update on a million particles — all data-parallel. It shows up
+        as <code>map</code>, as a <strong>parallel-for</strong> loop, as <strong>SIMD</strong> (Single
+        Instruction, Multiple Data — one instruction driving many arithmetic lanes), and most spectacularly
+        as a <strong>GPU kernel</strong>, where thousands of tiny cores each run the identical program on a
+        different slice of the data.
+      </p>
+      <primer-code lang="typescript">
+// DATA PARALLEL: one operation ("double it") applied across every element.
+// Every lane is independent, so a runtime can spread them over many cores.
+const data = [3, 1, 4, 1, 5, 9, 2, 6];
+const doubled = data.map((x) =&gt; x * 2);   // conceptually all at once
+      </primer-code>
+      <p>
+        <strong>Task parallelism</strong> is the other kitchen: <em>different</em> jobs, run concurrently. A
+        web server that, for one request, kicks off "query the database", "call the payment API" and "render
+        the template" at the same time is task-parallel. So is a <strong>thread pool</strong> chewing through
+        a queue of heterogeneous jobs. Here the parallelism comes not from splitting <em>data</em> but from
+        the fact that the <em>tasks themselves</em> are independent of one another.
+      </p>
+      <script type="application/json" class="scene-strings">
+        {
+          "dataVsTask": {
+            "title": "Same operation over data, vs. different jobs at once",
+            "dataTitle": "Data parallel",
+            "taskTitle": "Task parallel",
+            "dataCap": "Data parallel: apply the SAME operation (×2) to every element.",
+            "taskCap": "Task parallel: run DIFFERENT jobs at the same time.",
+            "dataNote": "one op, many elements",
+            "taskNote": "many ops, different work",
+            "job1": "query the database",
+            "job2": "call the payment API",
+            "job3": "render the template"
+          }
+        }
+      </script>
+      <primer-geometry scene="dataVsTask"></primer-geometry>
+      <p>
+        The two are not rivals — real programs mix them. A video encoder might run <em>task</em>-parallel
+        stages (read, transform, compress, write) where the transform stage is itself <em>data</em>-parallel
+        across every pixel block. The question a model answers is: <em>where does the independence live</em> —
+        in the data, or in the work?
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>How do the workers talk? Shared memory vs. message passing</h2>
+      <p>
+        Once several workers run at once, they usually need to coordinate. There are two fundamentally
+        different communication models, and choosing between them shapes everything else.
+      </p>
+      <p>
+        In the <strong>shared-memory</strong> model, threads live in one address space and simply read and
+        write the same variables. Communication is implicit: I write <code>total</code>, you read
+        <code>total</code>. It is fast and convenient, and it is exactly the world of the previous pages —
+        which is also why it needs
+        <primer-ref to="computer-science/concurrency/locks-and-mutexes">locks and mutexes</primer-ref> to
+        tame <primer-ref to="computer-science/concurrency/race-conditions">race conditions</primer-ref>.
+        Sharing memory buys speed at the price of careful synchronisation.
+      </p>
+      <p>
+        In the <strong>message-passing</strong> model there is <em>no</em> shared memory. Each process keeps
+        its own private data and the only way to communicate is to <strong>send a message</strong> — an
+        explicit <code>send</code> and <code>receive</code>. This is the model behind <strong>MPI</strong>
+        (the Message Passing Interface that powers supercomputers) and behind essentially every
+        <strong>distributed system</strong>, where the "processes" sit on different machines and could not
+        share memory even if they wanted to. There are no data races because there is no shared data to race
+        over; the trade is that every exchange is explicit, and messages take time and can arrive out of
+        order.
+      </p>
+      <primer-theorem name="Shared memory vs. message passing">
+        <ul>
+          <li>
+            <strong>Shared memory</strong> — workers read/write the same variables; communication is
+            implicit and fast, but needs locks to avoid races. Natural within one machine.
+          </li>
+          <li>
+            <strong>Message passing</strong> — workers own private state and exchange explicit messages; no
+            shared data means no races, at the cost of explicit, latency-bearing communication. The only
+            option across machines.
+          </li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The actor model: state you can only reach by mail</h2>
+      <p>
+        The <strong>actor model</strong> takes message passing and makes it the <em>only</em> rule. The world
+        is a swarm of <strong>actors</strong>, each a tiny independent unit with <strong>private
+        state</strong> nobody else can touch and a <strong>mailbox</strong>. An actor does exactly three
+        kinds of thing in response to a message: change its own state, send messages to other actors it
+        knows, and create new actors. Crucially, an actor processes its mailbox <strong>one message at a
+        time</strong>, so its private state is never touched by two things at once.
+      </p>
+      <p>
+        That single restriction is the whole point. Because no state is shared, there is <strong>nothing to
+        lock and no data race is even possible</strong> — you have traded shared-memory hazards for the
+        simpler discipline of "just send a message." It is the model behind <strong>Erlang</strong> and the
+        <strong>Akka</strong> framework, and it scales beautifully: actors are cheap, so you can have
+        millions of them, and because they only talk by messages, it does not matter whether the actor you
+        message is in the same process or on a machine across the world.
+      </p>
+      <primer-vignette title="How did Erlang keep phone switches running for decades?">
+        <p>
+          Erlang was built at Ericsson to run telephone exchanges, which are allowed roughly a few minutes of
+          downtime <em>per century</em>. Its answer was millions of lightweight actor-like processes, each
+          isolated, each cheap to spawn — and a motto of <em>"let it crash"</em>. If one process hits a bug,
+          it dies alone without corrupting anyone else's memory (there is no shared memory to corrupt), and a
+          supervisor simply restarts it. Isolated state turned crashes from catastrophes into a shrug. The
+          same design now underpins WhatsApp, which famously handled millions of connections per server.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Fork–join: split, run in parallel, combine</h2>
+      <p>
+        <strong>Fork–join</strong> is the pattern that turns
+        <primer-ref soft to="computer-science/algorithms/divide-and-conquer">divide and conquer</primer-ref>
+        into parallel work. You <strong>fork</strong> a task into independent subtasks, let them run in
+        parallel, then <strong>join</strong> — wait for them all to finish and combine their results. Because
+        each subtask can itself fork, the pattern is naturally recursive, which is exactly why it fits
+        divide-and-conquer algorithms like parallel merge sort, or simply summing a huge array.
+      </p>
+      <script type="application/json" class="scene-strings">
+        {
+          "forkJoin": {
+            "title": "Fork–join: split the array down, combine the sums back up",
+            "fork": "Fork: split the array in half, then in half again, into leaf chunks.",
+            "leaves": "Compute each independent leaf chunk (these can run in parallel).",
+            "join": "Join: combine the partial sums upward — 9 + 22 = 31."
+          }
+        }
+      </script>
+      <primer-geometry scene="forkJoin"></primer-geometry>
+      <p>
+        Read the tree top-down for the <strong>fork</strong>: the whole array splits in half, and each half
+        splits again, until the pieces are small enough to add up directly. Then read it bottom-up for the
+        <strong>join</strong>: each pair of partial sums combines into its parent, and the totals bubble all
+        the way up to the answer. The leaves are independent, so on a machine with several cores they can be
+        computed genuinely at the same time; the joins impose the only ordering (a parent must wait for its
+        children).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Run a fork–join sum</h2>
+      <p>
+        The sandbox below is single-threaded, so nothing here <em>really</em> runs in parallel — but that is
+        fine, because the fork–join <em>structure</em> is what we are showing. The function splits the array,
+        recurses into each half (these are the subtasks a real runtime would hand to different cores), and
+        then joins the two partial sums. Watch the <code>fork</code> lines march inward as the work splits,
+        and the <code>join</code> lines march back out as the sums combine. Press <strong>Run ▶</strong>:
+      </p>
+      <primer-code run>
+        // FORK-JOIN parallel sum. Each recursive call is a "task" that a real
+        // parallel runtime could run on its own core. We fork into two halves,
+        // (conceptually) run them in parallel, then JOIN their partial sums.
+
+        function parallelSum(arr: number[], lo: number, hi: number, depth: number): number {
+          const n = hi - lo;
+          const pad = "  ".repeat(depth);
+
+          // Base case: a small chunk is summed directly (a "leaf" task).
+          if (n &lt;= 2) {
+            let s = 0;
+            for (let i = lo; i &lt; hi; i++) s += arr[i];
+            console.log(pad + "leaf  sum[" + lo + ".." + hi + ") = " + s);
+            return s;
+          }
+
+          // FORK: split the range in half into two independent subtasks.
+          const mid = Math.floor((lo + hi) / 2);
+          console.log(pad + "fork  [" + lo + ".." + hi + ")  into  [" + lo + ".." + mid + ")  and  [" + mid + ".." + hi + ")");
+
+          const left  = parallelSum(arr, lo, mid, depth + 1);   // subtask 1
+          const right = parallelSum(arr, mid, hi, depth + 1);   // subtask 2
+
+          // JOIN: wait for both, then combine their results.
+          const total = left + right;
+          console.log(pad + "join  " + left + " + " + right + " = " + total);
+          return total;
+        }
+
+        const data = [3, 1, 4, 1, 5, 9, 2, 6];
+        const answer = parallelSum(data, 0, data.length, 0);
+        console.log("");
+        console.log("TOTAL = " + answer);
+      </primer-code>
+      <p>
+        The shape of the output <em>is</em> the tree from the diagram above: every <code>fork</code> has a
+        matching <code>join</code>, and the deepest indentation is where the independent leaf work lives — the
+        part that parallel hardware actually speeds up.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The reality check: Amdahl's law</h2>
+      <p>
+        It is tempting to think "twice the cores, twice the speed." Almost never true. Nearly every program
+        has some part that is stubbornly <strong>serial</strong> — it cannot be parallelised (reading the
+        input, a final combine step, a bit of coordination). <strong>Amdahl's law</strong> makes the
+        consequence brutally precise. If a fraction <primer-math>p</primer-math> of the work is parallelisable
+        and the rest is serial, then with <primer-math>N</primer-math> processors the speedup is
+      </p>
+      <primer-math display>S(N) = \dfrac{1}{(1 - p) + \dfrac{p}{N}}</primer-math>
+      <p>
+        As <primer-math>N</primer-math> grows, the <primer-math>p/N</primer-math> term shrinks toward zero,
+        so the whole thing is capped at <primer-math>S_\infty = \dfrac{1}{1 - p}</primer-math>. If even
+        <primer-math>5\%</primer-math> of your work is serial (<primer-math>p = 0.95</primer-math>), the most
+        you can <em>ever</em> get — with a million cores — is a <primer-math>20\times</primer-math> speedup.
+        The serial slice, not the core count, is the ceiling.
+      </p>
+      <script type="application/json" class="scene-strings">
+        {
+          "amdahl": {
+            "title": "Amdahl's law: speedup vs. processors, for three parallel fractions",
+            "p95": "p = 0.95  (ceiling 20×)",
+            "p90": "p = 0.90  (ceiling 10×)",
+            "p75": "p = 0.75  (ceiling 4×)"
+          }
+        }
+      </script>
+      <primer-chart scene="amdahl" caption="Amdahl's law: the parallel speedup S(N) = 1/((1-p) + p/N) plotted against processor count N for parallel fractions p = 0.95, 0.90 and 0.75. Each curve rises steeply at first, then bends over toward a fixed ceiling of 1/(1-p) — 20×, 10× and 4× respectively — so adding cores past that gives diminishing returns."></primer-chart>
+      <p>
+        Notice how flat the curves go. Each one races upward at first and then bends over toward its ceiling:
+        more cores buy less and less, and the smaller the parallel fraction, the sooner the wall arrives.
+        This is why real speedups are measured, not assumed — and why shrinking the serial fraction often
+        beats buying more cores.
+      </p>
+
+      <primer-vignette title="Watch out! — 'more cores means proportionally more speed'">
+        <p>
+          This is the single most common misconception in parallel programming, and Amdahl's law is its
+          antidote. Speedup is <strong>not</strong> proportional to the number of cores; it is throttled by
+          whatever fraction of the work stays serial. At <primer-math>p = 0.95</primer-math> you are capped at
+          <primer-math>20\times</primer-math> no matter how many cores you throw at it, and you hit
+          <em>half</em> that ceiling by around <primer-math>20</primer-math> cores — everything after that is
+          diminishing returns. Before scaling out, ask "what is my serial fraction?" A 5% serial part is a
+          20× wall; a 1% serial part is a 100× wall. Reducing the serial slice is usually more valuable than
+          adding hardware.
+        </p>
+      </primer-vignette>
+
+      <primer-vignette title="Does the actor model make concurrency bugs disappear?">
+        <p>
+          It removes one whole class — data races — because there is no shared state to race over. But it does
+          <strong>not</strong> make concurrency <em>easy</em>; it <em>trades</em> one kind of hard problem for
+          another. Instead of reasoning about locks and interleavings, you now reason about
+          <strong>message ordering</strong>, <strong>mailbox back-pressure</strong> (what if messages arrive
+          faster than an actor can process them?), and <strong>deadlocks of a new flavour</strong> (actor A
+          waits for a reply from B while B waits for A). No model makes concurrency free — each one just moves
+          the difficulty to a place you might reason about more clearly.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "parallelModelsQuiz@1": {
+          "intro": "Check your grasp of the parallel models: data vs. task, shared memory vs. message passing, actors, fork–join, and Amdahl's law."
+        }
+      }
+    </script>
+    <primer-quiz name="parallelModelsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/concurrency/threads-vs-processes"],
+    "completedDate": "2026-07-04"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // A side-by-side sketch: data parallelism (one op over an array) vs task
+  // parallelism (distinct jobs). Two steps reveal each half in turn.
+  registerGeometryScene("dataVsTask", ({ board, step, colors, sceneStrings }) => {
+    const text = (x, y, s, col, size = 14, bold = false) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: size,
+        fixed: true, highlight: false, strokeColor: col, color: col,
+        cssStyle: bold ? "font-weight:700" : "",
+      });
+    const box = (x, y, w, h, col, fill) =>
+      board.create("polygon",
+        [[x - w, y - h], [x + w, y - h], [x + w, y + h], [x - w, y + h]],
+        { fillColor: fill, fillOpacity: 0.18, vertices: { visible: false },
+          fixed: true, highlight: false,
+          borders: { strokeColor: col, strokeWidth: 1.4 } });
+
+    // headings (base content)
+    text(-3.2, 5.4, sceneStrings("dataTitle"), colors.cat[0], 15, true);
+    text(3.2, 5.4, sceneStrings("taskTitle"), colors.cat[1], 15, true);
+    board.create("segment", [[0, 5.9], [0, -0.4]],
+      { strokeColor: colors.line, strokeWidth: 1, dash: 2, fixed: true, highlight: false });
+
+    // LEFT: data parallel — same "×2" over each cell of an array
+    step(sceneStrings("dataCap"), () => {
+      const xs = [-4.6, -3.85, -3.1, -2.35, -1.6];
+      const vals = ["3", "1", "4", "1", "5"];
+      xs.forEach((x, i) => {
+        box(x, 3.7, 0.33, 0.33, colors.cat[0], colors.cat[0]);
+        text(x, 3.7, vals[i], colors.ink, 13);
+        text(x, 2.7, "×2", colors.cat[0], 12);
+        box(x, 1.7, 0.33, 0.33, colors.cat[0], colors.cat[0]);
+        text(x, 1.7, String(Number(vals[i]) * 2), colors.ink, 13);
+      });
+      text(-3.1, 0.6, sceneStrings("dataNote"), colors.ink, 12);
+    });
+
+    // RIGHT: task parallel — distinct labelled jobs
+    step(sceneStrings("taskCap"), () => {
+      const jobs = [sceneStrings("job1"), sceneStrings("job2"), sceneStrings("job3")];
+      const ys = [3.9, 2.6, 1.3];
+      jobs.forEach((j, i) => {
+        box(3.2, ys[i], 1.6, 0.42, colors.cat[1], colors.cat[1]);
+        text(3.2, ys[i], j, colors.ink, 12);
+      });
+      text(3.2, 0.5, sceneStrings("taskNote"), colors.ink, 12);
+    });
+  }, {
+    boundingbox: [-5.6, 6.1, 5.6, -0.9],
+    keepAspect: false,
+    title: () => makeStrings("dataVsTask")("title"),
+  });
+
+  // A fork-join tree: an 8-element array splits down into leaf chunks (fork),
+  // then partial sums combine back up to the total (join).
+  registerGeometryScene("forkJoin", ({ board, step, colors, sceneStrings }) => {
+    const text = (x, y, s, col, size = 13, bold = false) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: size,
+        fixed: true, highlight: false, strokeColor: col, color: col,
+        cssStyle: bold ? "font-weight:700" : "",
+      });
+    const edge = (a, b) =>
+      board.create("segment", [a, b],
+        { strokeColor: colors.line, strokeWidth: 1.4, fixed: true, highlight: false });
+
+    // node coordinates
+    const R  = [0, 6.3];
+    const L  = [-3.4, 4.4],  Rt = [3.4, 4.4];
+    const LL = [-5.0, 2.5], LR = [-1.8, 2.5], RL = [1.8, 2.5], RR = [5.0, 2.5];
+
+    // root (base content): the whole array
+    text(R[0], R[1], "[3,1,4,1,5,9,2,6]", colors.ink, 13, true);
+
+    // FORK: split down into halves then leaf chunks
+    step(sceneStrings("fork"), () => {
+      edge(R, L); edge(R, Rt);
+      edge(L, LL); edge(L, LR);
+      edge(Rt, RL); edge(Rt, RR);
+      text(L[0], L[1], "[3,1,4,1]", colors.cat[0], 12);
+      text(Rt[0], Rt[1], "[5,9,2,6]", colors.cat[1], 12);
+      text(LL[0], LL[1], "[3,1]", colors.ink, 12);
+      text(LR[0], LR[1], "[4,1]", colors.ink, 12);
+      text(RL[0], RL[1], "[5,9]", colors.ink, 12);
+      text(RR[0], RR[1], "[2,6]", colors.ink, 12);
+    });
+
+    // COMPUTE leaves
+    step(sceneStrings("leaves"), () => {
+      text(LL[0], LL[1] - 0.7, "= 4", colors.cat[2], 13, true);
+      text(LR[0], LR[1] - 0.7, "= 5", colors.cat[2], 13, true);
+      text(RL[0], RL[1] - 0.7, "= 14", colors.cat[2], 13, true);
+      text(RR[0], RR[1] - 0.7, "= 8", colors.cat[2], 13, true);
+    });
+
+    // JOIN: combine upward to the total
+    step(sceneStrings("join"), () => {
+      text(L[0], L[1] - 0.7, "4 + 5 = 9", colors.cat[2], 13, true);
+      text(Rt[0], Rt[1] - 0.7, "14 + 8 = 22", colors.cat[2], 13, true);
+      text(R[0], R[1] - 0.75, "9 + 22 = 31", colors.cat[2], 15, true);
+      board.create("polygon",
+        [[-1.6, 5.15], [1.6, 5.15], [1.6, 5.85], [-1.6, 5.85]],
+        { fillColor: colors.cat[2], fillOpacity: 0.18, vertices: { visible: false },
+          fixed: true, highlight: false,
+          borders: { strokeColor: colors.cat[2], strokeWidth: 1.2 } });
+    });
+  }, {
+    boundingbox: [-6.0, 7.1, 6.0, 1.2],
+    keepAspect: false,
+    title: () => makeStrings("forkJoin")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerCharts, makeStrings } from "primer";
+
+  const a = makeStrings("amdahl");
+
+  // Amdahl's law: speedup S(N) = 1 / ((1-p) + p/N) vs processor count N,
+  // for three parallel fractions. Each curve bends toward its ceiling 1/(1-p).
+  const amdahl = (p) => (n) => 1 / ((1 - p) + p / n);
+
+  registerCharts(
+    [{
+      name: "amdahl",
+      f: [amdahl(0.95), amdahl(0.90), amdahl(0.75)],
+      line: (colors, i) => ({
+        strokeColor: colors.cat[i],
+        strokeWidth: 3,
+      }),
+      legend: [() => a("p95"), () => a("p90"), () => a("p75")],
+    }],
+    {
+      id: "amdahl",
+      xmin: 1, xmax: 64, ymin: 0, ymax: 22,
+      xticks: 8, yticks: 4,
+      xaxisname: "processors N", yaxisname: "speedup S(N)",
+      title: () => a("title"),
+    },
+  );
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("parallelModelsQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 7, preamble: () => sceneStrings("intro") },
+
+    { prompt: "Applying the SAME operation across every element of a large array, with the elements independent of each other, is which model?",
+      options: [
+        { text: "Data parallelism", correct: true },
+        { text: "Task parallelism", correct: false },
+        { text: "Message passing", correct: false },
+        { text: "The actor model", correct: false },
+      ] },
+
+    { prompt: "Running several DIFFERENT independent jobs at the same time (e.g. a thread pool of heterogeneous work) is…",
+      options: [
+        { text: "Task parallelism", correct: true },
+        { text: "Data parallelism", correct: false },
+        { text: "SIMD", correct: false },
+        { text: "Fork–join", correct: false },
+      ] },
+
+    { prompt: "A GPU running thousands of cores, each executing the same kernel on a different slice of data, is a large-scale example of…",
+      options: [
+        { text: "data parallelism (SIMD-style)", correct: true },
+        { text: "task parallelism", correct: false },
+        { text: "message passing", correct: false },
+        { text: "the actor model", correct: false },
+      ] },
+
+    { prompt: "In the SHARED-MEMORY model, how do threads communicate?",
+      options: [
+        { text: "By reading and writing the same variables in one address space", correct: true },
+        { text: "By sending explicit messages to one another", correct: false },
+        { text: "Only through the operating system's file system", correct: false },
+        { text: "They cannot communicate at all", correct: false },
+      ] },
+
+    { prompt: "Why does shared memory need locks/mutexes while message passing does not?",
+      options: [
+        { text: "Shared memory has shared data that can be raced over; message passing has no shared data to race", correct: true },
+        { text: "Message passing is always single-threaded", correct: false },
+        { text: "Locks are only needed on GPUs", correct: false },
+        { text: "Message passing runs the serial fraction first", correct: false },
+      ] },
+
+    { prompt: "MPI (the Message Passing Interface) and most distributed systems use which communication model?",
+      options: [
+        { text: "Message passing — private state, explicit send/receive", correct: true },
+        { text: "Shared memory across all machines", correct: false },
+        { text: "Data parallelism only", correct: false },
+        { text: "A single global lock", correct: false },
+      ] },
+
+    { prompt: "Which is the chief DOWNSIDE of message passing compared with shared memory (within one machine)?",
+      options: [
+        { text: "Every exchange is explicit and carries communication latency", correct: true },
+        { text: "It can suffer data races", correct: false },
+        { text: "It cannot work across machines", correct: false },
+        { text: "It requires the GPU", correct: false },
+      ] },
+
+    { prompt: "In the ACTOR model, an actor communicates with other actors by…",
+      options: [
+        { text: "sending asynchronous messages to their mailboxes", correct: true },
+        { text: "directly modifying their private state", correct: false },
+        { text: "acquiring a shared lock", correct: false },
+        { text: "writing to a shared array", correct: false },
+      ] },
+
+    { prompt: "Why can an actor's private state never suffer a data race?",
+      options: [
+        { text: "Nothing else can touch it, and the actor processes its mailbox one message at a time", correct: true },
+        { text: "Actors run on a single core only", correct: false },
+        { text: "Actors never change their state", correct: false },
+        { text: "The runtime locks every actor for you", correct: false },
+      ] },
+
+    { prompt: "The actor model is most associated with which language/framework?",
+      options: [
+        { text: "Erlang / Akka", correct: true },
+        { text: "MPI / OpenMP", correct: false },
+        { text: "CUDA", correct: false },
+        { text: "POSIX threads", correct: false },
+      ] },
+
+    { prompt: "In the FORK–JOIN pattern, what does 'join' mean?",
+      options: [
+        { text: "Wait for all the forked subtasks to finish, then combine their results", correct: true },
+        { text: "Split a task into independent subtasks", correct: false },
+        { text: "Merge two threads into one address space", correct: false },
+        { text: "Acquire a lock before entering a critical section", correct: false },
+      ] },
+
+    { prompt: "Fork–join is the natural parallel form of which algorithmic strategy?",
+      options: [
+        { text: "Divide and conquer", correct: true },
+        { text: "Greedy selection", correct: false },
+        { text: "Dynamic programming tabulation", correct: false },
+        { text: "Linear search", correct: false },
+      ] },
+
+    { prompt: "In a fork–join sum tree, which parts can genuinely run in parallel, and which impose ordering?",
+      options: [
+        { text: "The leaf computations are independent; the joins impose ordering (a parent waits for its children)", correct: true },
+        { text: "The joins are independent; the leaves must run in order", correct: false },
+        { text: "Everything must run strictly left to right", correct: false },
+        { text: "Nothing can run in parallel", correct: false },
+      ] },
+
+    { prompt: "Amdahl's law says the speedup from parallelism is ultimately capped by…",
+      options: [
+        { text: "the fraction of work that stays serial", correct: true },
+        { text: "the clock speed of a single core", correct: false },
+        { text: "the amount of RAM installed", correct: false },
+        { text: "the number of message queues", correct: false },
+      ] },
+
+    { prompt: "By Amdahl's law, if 5% of the work is serial (p = 0.95), the maximum possible speedup with unlimited cores is about…",
+      options: [
+        { text: "20×", correct: true },
+        { text: "100×", correct: false },
+        { text: "Unlimited", correct: false },
+        { text: "5×", correct: false },
+      ] },
+
+    { prompt: "Amdahl's law: with parallel fraction p (as a decimal), the maximum speedup S∞ with infinitely many cores is 1/(1-p). Compute it for p = {p}.",
+      variables: "p=[0.5,0.75,0.8,0.9,0.95]",
+      answer: "1 / (1 - p)" },
+
+    { prompt: "Amdahl's law: with parallel fraction p = {p} and N = {n} processors, the speedup is 1 / ((1-p) + p/N). Compute S(N).",
+      variables: "p=[0.5,0.8,0.9] n=[2,4]",
+      answer: "1 / ((1 - p) + p / n)" },
+
+    { prompt: "Which single statement best captures why 'more cores' has diminishing returns?",
+      options: [
+        { text: "As N grows, the parallel term p/N shrinks toward 0, so speedup approaches the fixed ceiling 1/(1-p)", correct: true },
+        { text: "Cores get slower the more you add", correct: false },
+        { text: "Extra cores increase the serial fraction", correct: false },
+        { text: "Memory runs out after a few cores", correct: false },
+      ] },
+  ]);
+</script>

@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Synchronization Primitives</primer-title>
+
+    <primer-card>
+      <p>
+        Two ticket-booking threads look at the same seat. Both read "1 seat left." Both decide "great,
+        I'll take it." Both write "0 seats left." Two customers, one seat, and a very awkward flight. That
+        is a <strong>race condition</strong>: the answer depends on the exact order two
+        <primer-ref to="computer-science/operating-systems/threads-and-the-thread-model">threads</primer-ref>
+        happen to interleave — and the order is not something you control.
+      </p>
+      <p>
+        Here is the whole problem in one line of code. A shared counter starts at
+        <primer-math>0</primer-math>. Two threads each run <code>count = count + 1</code> once. You would
+        expect the counter to end at <primer-math>2</primer-math>. Alarmingly often, it ends at
+        <primer-math>1</primer-math>.
+      </p>
+      <primer-code lang="typescript">
+let count = 0;
+
+// Thread A            // Thread B
+count = count + 1;     count = count + 1;
+
+// You expect count === 2.  Sometimes count === 1.  Why?
+      </primer-code>
+      <p>
+        This page is about <em>why</em> that happens and the small set of tools — <strong>atomic
+        operations</strong>, <strong>mutexes</strong> and <strong>semaphores</strong> — that operating
+        systems give us to make it stop happening.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2><code>count = count + 1</code> is not one action — it is three</h2>
+      <p>
+        The trouble starts with a lie the source code tells you. A single innocent-looking assignment
+        <code>count = count + 1</code> is <strong>not</strong> performed in one indivisible step by the
+        hardware. The CPU actually does three separate things:
+      </p>
+      <ul>
+        <li><strong>Read</strong> the current value of <code>count</code> from memory into a register;</li>
+        <li><strong>Modify</strong> it — add one inside the register;</li>
+        <li><strong>Write</strong> the new value back to memory.</li>
+      </ul>
+      <p>
+        This <strong>read–modify–write</strong> trio is three moments in time, and the operating system's
+        scheduler is free to pause a thread <em>between</em> any of them and let another thread run. When
+        both threads read the old value before either writes the new one, one of the two increments simply
+        <strong>vanishes</strong> — the classic <strong>lost update</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A bad interleaving, step by step</h2>
+      <p>
+        Let's freeze the scheduler and watch it choose the worst possible order. Both threads want to add
+        <primer-math>1</primer-math> to a counter that starts at <primer-math>0</primer-math>. Read down
+        the table — each row is one CPU step, and the "reg" columns are each thread's private register.
+      </p>
+      <primer-geometry scene="raceInterleave"></primer-geometry>
+      <p>
+        The disaster is in the timing. Thread A reads <primer-math>0</primer-math>, and <em>before it can
+        write its result back</em>, thread B also reads <primer-math>0</primer-math>. Now both threads are
+        computing <primer-math>0 + 1 = 1</primer-math>. A writes <primer-math>1</primer-math>; B writes
+        <primer-math>1</primer-math> on top of it. Two increments happened, but <code>count</code> went up
+        by only one. The update A made was silently clobbered.
+      </p>
+      <p>
+        Change the interleaving — let A fully finish (read, modify, write) before B starts — and you get
+        the correct <primer-math>2</primer-math>. The <em>same code</em> gives a different answer depending
+        purely on scheduler timing. Code that misbehaves only for unlucky interleavings is a nightmare to
+        debug, because it usually works.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Run the race yourself</h2>
+      <p>
+        The sandbox below runs on a single thread, so it can't produce a <em>real</em> race — which is
+        actually perfect, because it means we can <strong>script the exact interleaving</strong> and make
+        the bug happen every single time instead of one run in a thousand. The program models each thread's
+        read/modify/write as explicit steps, then plays a bad schedule and a safe (locked) schedule so you
+        can compare the results. Press <strong>Run ▶</strong>:
+      </p>
+      <primer-code run>
+        // Each thread's increment is THREE steps on a shared counter.
+        // A "schedule" is just the order those steps actually execute in.
+        // reg[t] is thread t's private register (what it has "read" so far).
+
+        interface Machine { count: number; reg: number[]; }
+
+        function step(m: Machine, action: string): void {
+          const t = Number(action[1]);            // "A0" =&gt; thread 0, "A1" =&gt; thread 1
+          const kind = action[0];
+          if (kind === "R") {                     // READ shared count into my register
+            m.reg[t] = m.count;
+            console.log("  T" + t + " read   count(" + m.count + ") =&gt; reg=" + m.reg[t]);
+          } else if (kind === "M") {              // MODIFY my register
+            m.reg[t] = m.reg[t] + 1;
+            console.log("  T" + t + " modify reg =&gt; " + m.reg[t]);
+          } else if (kind === "W") {              // WRITE my register back to shared count
+            m.count = m.reg[t];
+            console.log("  T" + t + " write  count &lt;- " + m.reg[t]);
+          }
+        }
+
+        function run(schedule: string[]): number {
+          const m: Machine = { count: 0, reg: [0, 0] };
+          for (const a of schedule) step(m, a);
+          return m.count;
+        }
+
+        // BAD interleaving: both threads READ before either WRITES.
+        console.log("Unsynchronised (interleaved) schedule:");
+        const bad = run(["R0", "R1", "M0", "M1", "W0", "W1"]);
+        console.log("=&gt; final count = " + bad + "   (expected 2!)");
+        console.log("");
+
+        // SAFE: a lock forces thread 0 to finish its whole critical section
+        // before thread 1 may begin. The steps never interleave.
+        console.log("With a mutex (serialised) schedule:");
+        const good = run(["R0", "M0", "W0", "R1", "M1", "W1"]);
+        console.log("=&gt; final count = " + good + "   (correct)");
+      </primer-code>
+      <p>
+        Same three-step increment, same two threads — only the <em>order</em> differs. The lock's entire
+        job is to forbid the first schedule and guarantee the second.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The critical-section problem</h2>
+      <p>
+        The stretch of code that touches shared data — our read–modify–write on <code>count</code> — is
+        called a <strong>critical section</strong>. The fix has a name too: <strong>mutual
+        exclusion</strong>, meaning <em>at most one thread is inside the critical section at a time</em>.
+        If A is mid-increment, B must wait outside until A is done.
+      </p>
+      <p>
+        But "just block everyone else" is too blunt to be correct on its own. A good solution to the
+        critical-section problem must satisfy <strong>three</strong> requirements at once:
+      </p>
+      <primer-theorem name="Requirements for a critical-section solution">
+        <ul>
+          <li>
+            <strong>Mutual exclusion</strong> — if one thread is executing in its critical section, no
+            other thread may be in <em>its</em> critical section at the same time.
+          </li>
+          <li>
+            <strong>Progress</strong> — if no thread is in the critical section and some threads want to
+            enter, the choice of who goes next cannot be postponed forever; only threads actually competing
+            take part in the decision.
+          </li>
+          <li>
+            <strong>Bounded waiting</strong> — there is a limit on how many times other threads can jump
+            ahead of a waiting thread after it has asked to enter. No one is starved out indefinitely.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Mutual exclusion alone gives correctness; progress and bounded waiting give <em>fairness and
+        liveness</em>. A lock that guarantees exclusion but lets one unlucky thread wait forever has solved
+        half the problem and created another.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Atomic operations: the hardware foundation</h2>
+      <p>
+        Here is the chicken-and-egg twist. To protect the counter we want a lock. But a lock is itself just
+        a variable in shared memory — <code>locked = true</code> is its own read–modify–write, so it can
+        race exactly like the counter did. You cannot build mutual exclusion out of ordinary reads and
+        writes without help. That help comes from the <strong>CPU</strong>, in the form of
+        <strong>atomic</strong> instructions — operations the hardware guarantees happen as one
+        indivisible step, with <em>no</em> possible interleaving in the middle.
+      </p>
+      <p>
+        The two workhorses are <strong>test-and-set</strong> and <strong>compare-and-swap</strong>. Each
+        does a read <em>and</em> a write as a single unbreakable unit:
+      </p>
+      <primer-code lang="typescript">
+// TEST-AND-SET: atomically read the old value AND write true,
+// returning what was there before. The whole function is ONE hardware step.
+function testAndSet(lock: { held: boolean }): boolean {
+  const old = lock.held;   // read  ┐
+  lock.held = true;        // write ┴ these two happen atomically — indivisible
+  return old;
+}
+
+// A spin-lock built from it: keep trying until we were the one who
+// flipped it from false to true.
+function acquire(lock: { held: boolean }): void {
+  while (testAndSet(lock)) {
+    // it was already true -> someone else holds it -> spin and retry
+  }
+}
+function release(lock: { held: boolean }): void {
+  lock.held = false;
+}
+
+// COMPARE-AND-SWAP (CAS): atomically, "if the value equals `expected`,
+// replace it with `next`." Returns whether the swap happened.
+function compareAndSwap(cell: { v: number }, expected: number, next: number): boolean {
+  if (cell.v === expected) {   // compare ┐
+    cell.v = next;             // swap    ┴ atomic: no thread can sneak in between
+    return true;
+  }
+  return false;
+}
+      </primer-code>
+      <p>
+        Because the read-and-write is fused into one instruction, two threads calling
+        <code>testAndSet</code> can never both see <code>false</code> — exactly one wins, the other sees
+        <code>true</code> and spins. That single indivisible step is the bedrock every higher-level
+        primitive is built on. <strong>CAS</strong> is the more general of the two and underlies most
+        lock-free data structures and the atomic counters in modern languages.
+      </p>
+
+      <primer-vignette title="Why not just disable interrupts?">
+        <p>
+          On a single-core machine you could get mutual exclusion by telling the CPU "don't switch threads
+          right now" (disabling interrupts) around the critical section. It works — but it's a sledgehammer:
+          it stops <em>all</em> scheduling, it only protects one core (another core keeps running happily on
+          a multi-core chip), and you'd never hand that power to ordinary user programs. Atomic instructions
+          like CAS give you the exact, minimal guarantee you need — one memory location, one indivisible
+          step — and they work across every core.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>The primitives: mutex and semaphore</h2>
+      <p>
+        Spinning in a loop wastes the CPU. So the operating system wraps atomic instructions into two
+        friendlier tools that also <em>sleep</em> a waiting thread instead of burning cycles.
+      </p>
+      <p>
+        A <strong>mutex</strong> (short for <em>mut</em>ual <em>ex</em>clusion) is a lock with exactly two
+        operations, <strong><code>lock()</code></strong> and <strong><code>unlock()</code></strong>. At
+        most one thread can hold it. Anyone else calling <code>lock()</code> is put to sleep until the owner
+        calls <code>unlock()</code>. It is the natural guard for a critical section:
+      </p>
+      <primer-code lang="typescript">
+mutex.lock();          // enter — blocks if another thread holds the lock
+count = count + 1;     // critical section: now safely exclusive
+mutex.unlock();        // leave — wakes one waiter
+      </primer-code>
+      <p>
+        A <strong>semaphore</strong> is more general. It holds an integer count and has two operations,
+        historically <strong><code>wait()</code></strong> (also called <em>P</em> or <code>down</code>) and
+        <strong><code>signal()</code></strong> (also called <em>V</em> or <code>up</code>):
+      </p>
+      <ul>
+        <li>
+          <code>wait()</code> decrements the count; if the count would go negative, the thread
+          <strong>blocks</strong> until someone signals.
+        </li>
+        <li>
+          <code>signal()</code> increments the count, waking a blocked thread if one is waiting.
+        </li>
+      </ul>
+      <p>
+        Think of the count as <strong>the number of available permits</strong>. A semaphore initialised to
+        <primer-math>3</primer-math> lets up to three threads through at once — perfect for a resource pool
+        of, say, three database connections. Initialise it to <primer-math>1</primer-math> and it behaves
+        like a mutex (a "binary semaphore"), allowing just one thread in. That extra generality — counting
+        several permits, and being able to signal from a <em>different</em> thread than the one that waited
+        — is exactly what a plain mutex can't do.
+      </p>
+
+      <primer-theorem name="Mutex vs. semaphore, in one line">
+        <ul>
+          <li>
+            <strong>Mutex</strong> — a lock owned by one thread; <em>the same</em> thread that locks must
+            unlock. Use it to protect a critical section.
+          </li>
+          <li>
+            <strong>Semaphore</strong> — a counter of permits; <em>any</em> thread may <code>wait</code> or
+            <code>signal</code>. Use it to count a resource pool or to signal between threads.
+          </li>
+        </ul>
+      </primer-theorem>
+
+      <primer-vignette title="Watch out! — 'a mutex and a semaphore are the same thing'">
+        <p>
+          They feel similar because a semaphore initialised to <primer-math>1</primer-math> gives mutual
+          exclusion, just like a mutex. But two differences matter. First, a semaphore <strong>counts</strong>
+          — set it to <primer-math>N</primer-math> and it admits <primer-math>N</primer-math> threads, which
+          a mutex can never do. Second, a mutex has an <strong>owner</strong>: whoever locks it must be the
+          one to unlock it. A semaphore has no owner — one thread can <code>wait</code> and a completely
+          different thread can <code>signal</code>, which is precisely how you use it to <em>signal an
+          event</em> from producer to consumer. Reaching for a semaphore when you only wanted a lock is a
+          common way to end up with subtle, ownerless bugs.
+        </p>
+      </primer-vignette>
+
+      <primer-vignette title="If locks are the cure, what's the new disease?">
+        <p>
+          Locks introduce their own hazard: <strong>deadlock</strong>. Suppose thread A locks mutex 1 and
+          then tries to lock mutex 2, while thread B locks mutex 2 and then tries to lock mutex 1. Each holds
+          what the other needs, and each waits forever. Nothing is racing now — the program has simply frozen
+          solid. Deadlock needs four conditions to hold at once (mutual exclusion, hold-and-wait, no
+          preemption, and a circular wait), and avoiding it — for instance by always acquiring locks in a
+          fixed global order — is the next big chapter in concurrency. Synchronisation primitives cure the
+          race; using them carelessly invites the deadlock.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-quiz name="syncQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/operating-systems/threads-and-the-thread-model"],
+    "completedDate": "2026-07-04"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // A timeline table of the losing interleaving of two threads incrementing a
+  // shared counter. Each step reveals one more row (one CPU action). Columns:
+  //   time | thread A action | thread A reg | shared count | thread B reg | thread B action
+  registerGeometryScene("raceInterleave", ({ board, step, colors }) => {
+    // column x-centres
+    const colT   = 0.4;   // step number
+    const colA   = 2.2;   // thread A action
+    const colRA  = 4.1;   // A register
+    const colCnt = 5.6;   // shared count
+    const colRB  = 7.1;   // B register
+    const colB   = 9.0;   // thread B action
+    const top    = 6.4;
+    const rowH   = 1.0;
+
+    const text = (x, y, s, col, size = 15, bold = false) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: size,
+        fixed: true, highlight: false, strokeColor: col, color: col,
+        cssStyle: bold ? "font-weight:700" : "",
+      });
+
+    // header row
+    text(colT,  top, "step",      colors.ink, 14);
+    text(colA,  top, "Thread A",  colors.cat[0], 15, true);
+    text(colRA, top, "A.reg",     colors.cat[0], 14);
+    text(colCnt, top, "count",    colors.ink, 15, true);
+    text(colRB, top, "B.reg",     colors.cat[1], 14);
+    text(colB,  top, "Thread B",  colors.cat[1], 15, true);
+
+    // header underline
+    board.create("segment",
+      [[-0.3, top - 0.45], [9.9, top - 0.45]],
+      { strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false });
+
+    // draws one timeline row at a given y level.
+    // aAct/bAct: the action text for each thread ("" if idle that step)
+    // aReg/bReg/cnt: values to show; highlightCount marks the clobbering write.
+    const drawRow = (n, y, aAct, aReg, cnt, bReg, bAct, hot) => {
+      text(colT, y, String(n), colors.ink, 14);
+      if (aAct) text(colA, y, aAct, colors.cat[0], 14);
+      text(colRA, y, aReg, colors.cat[0], 14);
+      // highlight the shared count cell on the clobbering step
+      if (hot) {
+        board.create("polygon",
+          [[colCnt - 0.55, y - 0.34], [colCnt + 0.55, y - 0.34],
+           [colCnt + 0.55, y + 0.34], [colCnt - 0.55, y + 0.34]],
+          { fillColor: colors.cat[2], fillOpacity: 0.22,
+            vertices: { visible: false }, fixed: true, highlight: false,
+            borders: { strokeColor: colors.cat[2], strokeWidth: 1.2 } });
+      }
+      text(colCnt, y, cnt, hot ? colors.cat[2] : colors.ink, 15, true);
+      text(colRB, y, bReg, colors.cat[1], 14);
+      if (bAct) text(colB, y, bAct, colors.cat[1], 14);
+    };
+
+    // step 1: A reads count (0) into A.reg
+    step("A reads count (0) into its register.", () => {
+      drawRow(1, top - rowH, "read", "0", "0", "–", "", false);
+    });
+    // step 2: B reads count (still 0) into B.reg  <-- the fatal moment
+    step("B reads count — still 0! — before A has written anything back.", () => {
+      drawRow(2, top - 2 * rowH, "", "0", "0", "0", "read", false);
+    });
+    // step 3: A modifies its register 0 -> 1
+    step("A adds 1 in its own register: 0 + 1 = 1.", () => {
+      drawRow(3, top - 3 * rowH, "modify", "1", "0", "0", "", false);
+    });
+    // step 4: B modifies its register 0 -> 1
+    step("B adds 1 in its own register too: 0 + 1 = 1.", () => {
+      drawRow(4, top - 4 * rowH, "", "1", "0", "1", "modify", false);
+    });
+    // step 5: A writes 1 back
+    step("A writes its result: count = 1.", () => {
+      drawRow(5, top - 5 * rowH, "write", "1", "1", "1", "", false);
+    });
+    // step 6: B writes 1 back, clobbering A's update
+    step("B writes its result on top: count = 1 again. A's increment is LOST — count is 1, not 2.", () => {
+      drawRow(6, top - 6 * rowH, "", "1", "1", "1", "write", true);
+    });
+  }, {
+    boundingbox: [-0.6, 7.1, 10.2, -0.5],
+    keepAspect: false,
+    title: "A losing interleaving: two increments, but count ends at 1",
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("syncQuiz@1", () => [
+    { num_questions: 6, preamble: "Check your understanding of races, critical sections and the primitives." },
+
+    { prompt: "Two threads each run count = count + 1 on a shared counter starting at 0, with no synchronisation. What is the range of possible final values?",
+      options: [
+        { text: "1 or 2 — a lost update can leave it at 1", correct: true },
+        { text: "Always exactly 2", correct: false },
+        { text: "Always exactly 1", correct: false },
+        { text: "0, 1 or 2, chosen at random", correct: false },
+      ] },
+
+    { prompt: "Why is count = count + 1 unsafe when two threads run it at once?",
+      options: [
+        { text: "It is really three steps — read, modify, write — that can interleave", correct: true },
+        { text: "Addition is slow", correct: false },
+        { text: "The variable is too small to hold the result", correct: false },
+        { text: "Threads cannot share memory at all", correct: false },
+      ] },
+
+    { prompt: "A 'race condition' means…",
+      options: [
+        { text: "the result depends on the unpredictable order in which threads interleave", correct: true },
+        { text: "the program runs as fast as possible", correct: false },
+        { text: "two threads run on two different CPUs", correct: false },
+        { text: "a thread finishes before another starts", correct: false },
+      ] },
+
+    { prompt: "The stretch of code that accesses shared data and must be protected is called the…",
+      options: [
+        { text: "critical section", correct: true },
+        { text: "main loop", correct: false },
+        { text: "call stack", correct: false },
+        { text: "kernel", correct: false },
+      ] },
+
+    { prompt: "'Mutual exclusion' guarantees that…",
+      options: [
+        { text: "at most one thread is inside the critical section at a time", correct: true },
+        { text: "every thread runs at the same speed", correct: false },
+        { text: "threads never share any memory", correct: false },
+        { text: "the critical section always runs first", correct: false },
+      ] },
+
+    { prompt: "Which requirement ensures no waiting thread is starved out forever?",
+      options: [
+        { text: "Bounded waiting", correct: true },
+        { text: "Mutual exclusion", correct: false },
+        { text: "Atomicity", correct: false },
+        { text: "Deadlock", correct: false },
+      ] },
+
+    { prompt: "Which are the three requirements of a correct critical-section solution?",
+      options: [
+        { text: "Mutual exclusion, progress, and bounded waiting", correct: true },
+        { text: "Speed, memory, and correctness", correct: false },
+        { text: "Read, modify, and write", correct: false },
+        { text: "Lock, wait, and signal", correct: false },
+      ] },
+
+    { prompt: "What makes an operation 'atomic'?",
+      options: [
+        { text: "The hardware performs it as one indivisible step with no possible interleaving", correct: true },
+        { text: "It uses the smallest possible variable", correct: false },
+        { text: "It runs on a single atom of silicon", correct: false },
+        { text: "It cannot be undone", correct: false },
+      ] },
+
+    { prompt: "Compare-and-swap (CAS) does what, atomically?",
+      options: [
+        { text: "If the value equals an expected value, replace it with a new one", correct: true },
+        { text: "Adds two numbers and stores the result", correct: false },
+        { text: "Swaps two threads' priorities", correct: false },
+        { text: "Copies one variable to another with no check", correct: false },
+      ] },
+
+    { prompt: "Why do we need atomic instructions like test-and-set to build a lock, rather than ordinary reads and writes?",
+      options: [
+        { text: "A lock variable is itself read-modify-write, so it can race just like the data it protects", correct: true },
+        { text: "Ordinary reads and writes are too slow", correct: false },
+        { text: "Locks must be stored on disk", correct: false },
+        { text: "The compiler forbids writing to lock variables", correct: false },
+      ] },
+
+    { prompt: "A mutex offers which two operations?",
+      options: [
+        { text: "lock() and unlock()", correct: true },
+        { text: "wait() and signal()", correct: false },
+        { text: "read() and write()", correct: false },
+        { text: "push() and pop()", correct: false },
+      ] },
+
+    { prompt: "A counting semaphore is initialised to 3. How many threads can pass its wait() before others must block?",
+      options: [
+        { text: "3", correct: true },
+        { text: "1", correct: false },
+        { text: "Unlimited", correct: false },
+        { text: "0", correct: false },
+      ] },
+
+    { prompt: "A general counting semaphore initialised to {n}. In a resource pool, that number represents…",
+      variables: "n=[2:6]",
+      options: [
+        { text: "the number of available permits ({n} threads may proceed at once)", correct: true },
+        { text: "the number of CPUs required", correct: false },
+        { text: "how many times each thread may loop", correct: false },
+        { text: "the priority of the pool", correct: false },
+      ] },
+
+    { prompt: "What value initialises a semaphore so it behaves like a plain mutex (a 'binary semaphore')?",
+      options: [
+        { text: "1", correct: true },
+        { text: "0", correct: false },
+        { text: "2", correct: false },
+        { text: "The number of threads", correct: false },
+      ] },
+
+    { prompt: "A key difference between a mutex and a semaphore is that…",
+      options: [
+        { text: "a mutex has an owner (same thread locks and unlocks); a semaphore is ownerless and any thread may signal", correct: true },
+        { text: "a semaphore can only ever admit one thread", correct: false },
+        { text: "a mutex can count multiple permits", correct: false },
+        { text: "they are identical in every way", correct: false },
+      ] },
+
+    { prompt: "Two threads each hold one lock and each wait for the other's lock, forever. This is…",
+      options: [
+        { text: "deadlock", correct: true },
+        { text: "a race condition", correct: false },
+        { text: "mutual exclusion", correct: false },
+        { text: "bounded waiting", correct: false },
+      ] },
+
+    { prompt: "A common way to avoid deadlock among several mutexes is to…",
+      options: [
+        { text: "always acquire the locks in the same fixed global order", correct: true },
+        { text: "acquire locks in a random order each time", correct: false },
+        { text: "never release any lock", correct: false },
+        { text: "use more threads", correct: false },
+      ] },
+  ]);
+</script>

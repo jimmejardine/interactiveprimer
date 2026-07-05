@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Code Generation</primer-title>
+
+    <primer-card>
+      <p>
+        Every compiler is a translator with one final, unglamorous job: at the very end of the pipeline it
+        must produce <strong>the actual instructions a CPU fetches, decodes, and executes.</strong> All the
+        earlier phases — lexing, parsing, type-checking, and optimising the
+        <primer-ref to="computer-science/compilers/intermediate-representation">intermediate representation</primer-ref>
+        — build up an abstract, machine-independent description of what the program <em>means</em>.
+        <strong>Code generation</strong> is where that abstraction finally hits silicon: it lowers the IR into
+        real <primer-ref to="computer-science/computer-systems/assembly-language-and-instruction-sets">assembly
+        language</primer-ref>, the instructions your processor was built to run.
+      </p>
+      <p>
+        This is the <em>back end</em> of the compiler. Where the front end asked "is this program valid, and
+        what does it say?", the back end asks a blunter question: "given a chip with a handful of registers
+        and a big slab of memory, exactly which <code>LOAD</code>s, <code>ADD</code>s and <code>STORE</code>s
+        compute this?" Two problems dominate the answer — <strong>instruction selection</strong> (which
+        instructions?) and <strong>register allocation</strong> (which values live in which registers?) — and
+        this page is about both.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The machine model: registers, memory, instructions</h2>
+      <p>
+        To generate code you first need a picture of the target machine. A modern CPU offers two very
+        different places to keep numbers:
+      </p>
+      <ul>
+        <li><strong>Registers</strong> — a tiny, fixed set of ultra-fast slots right inside the processor,
+          named <code>R0</code>, <code>R1</code>, <code>R2</code>, … A real chip might have 16 or 32 of them.
+          The arithmetic units can read and write registers in a single clock cycle.</li>
+        <li><strong>Memory</strong> — a vast array of slots (gigabytes) reached by address. Roomy, but
+          <strong>far slower</strong>: a trip to memory can cost tens or hundreds of cycles.</li>
+      </ul>
+      <p>
+        Most instruction sets are <strong>load-store</strong>: arithmetic happens <em>only</em> between
+        registers, so to add two numbers sitting in memory you must first <code>LOAD</code> each into a
+        register, <code>ADD</code> the registers, and <code>STORE</code> the result back. That single fact —
+        <em>compute in registers, shuttle to and from memory with loads and stores</em> — shapes everything
+        the code generator does. Registers are the fast lane; you want your hot values living there.
+      </p>
+      <primer-vignette title="Why not just keep everything in memory and skip registers?">
+        <p>
+          You <em>could</em> — and the code would be correct — but it would crawl. Reading a value from a
+          register is roughly a single cycle; reading it from main memory can be <strong>100× slower</strong>.
+          A tight loop that touches memory on every operation spends nearly all its time waiting. Keeping the
+          values a computation is actively using in registers is one of the biggest wins a back end delivers,
+          which is exactly why register allocation (below) gets so much attention.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Instruction selection: one IR op → real instructions</h2>
+      <p>
+        The IR that reaches the back end is usually <strong>three-address code</strong> (TAC): a flat list of
+        simple statements, each doing one operation on at most two operands and naming the result. A temporary
+        like <code>t1</code> is just a name for an intermediate value — and crucially there can be
+        <em>unboundedly many</em> of them, because the front end invents a fresh temporary for every
+        subexpression.
+      </p>
+      <p>
+        Consider the expression <code>(a + b) * c</code>. After the earlier phases it might arrive as this
+        two-line TAC:
+      </p>
+      <primer-code lang="text">
+        t1 = a + b
+        t2 = t1 * c
+      </primer-code>
+      <p>
+        <strong>Instruction selection</strong> walks each TAC statement and picks a sequence of real machine
+        instructions that computes it. On a load-store machine, <code>t1 = a + b</code> can't be a single
+        instruction — the operands <code>a</code> and <code>b</code> live in memory — so it lowers to a
+        load-load-add, and the result is stored back:
+      </p>
+      <primer-code lang="text">
+        ; t1 = a + b
+        LOAD  R0, a          ; R0 &lt;- value of a from memory
+        LOAD  R1, b          ; R1 &lt;- value of b from memory
+        ADD   R0, R0, R1     ; R0 &lt;- R0 + R1
+        STORE t1, R0         ; write the result back to t1's slot
+
+        ; t2 = t1 * c
+        LOAD  R0, t1         ; reload t1
+        LOAD  R1, c
+        MUL   R0, R0, R1     ; R0 &lt;- R0 * R1
+        STORE t2, R0
+      </primer-code>
+      <p>
+        Every abstract <code>+</code> became a <code>LOAD/LOAD/ADD/STORE</code> quartet, and <code>*</code>
+        became the same pattern around a <code>MUL</code>. That mechanical mapping — <em>each IR op to a
+        template of instructions</em> — is the heart of instruction selection.
+      </p>
+      <primer-vignette title="Watch out!">
+        <ul>
+          <li>
+            <strong>There is no single "the assembly".</strong> Instruction selection has
+            <em>many</em> valid answers with different costs. The naive template above stores <code>t1</code>
+            to memory and immediately reloads it — a smarter selector notices <code>t1</code> is already
+            sitting in <code>R0</code> and skips the round trip entirely. Correct code is easy; <em>good</em>
+            code is the whole game.
+          </li>
+          <li>
+            <strong>Temporaries are not registers.</strong> <code>t1</code>, <code>t2</code>, … are abstract
+            names the front end created freely; <code>R0</code>, <code>R1</code>, … are the few physical slots
+            the chip actually has. Turning the first into the second is a separate problem — register
+            allocation — not something instruction selection solves on its own.
+          </li>
+        </ul>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>A tiny code generator you can run</h2>
+      <p>
+        The naive strategy above is simple enough to write in a dozen lines. Below is a real code generator:
+        it takes a list of three-address instructions — each an object <code>{ dst, op, a, b }</code> — and
+        emits assembly strings. For every instruction it loads both operands into <code>R0</code> and
+        <code>R1</code>, emits the matching arithmetic op, and stores the result. Press <strong>Run</strong>:
+      </p>
+      <primer-code run>
+        // A three-address instruction: dst = a op b
+        interface Tac {
+          dst: string;
+          op: "+" | "-" | "*" | "/";
+          a: string;
+          b: string;
+        }
+
+        // Map each IR operator to its machine mnemonic.
+        const MNEMONIC: Record&lt;string, string&gt; = {
+          "+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV",
+        };
+
+        // Lower ONE TAC statement to a burst of load-store machine instructions.
+        function lower(instr: Tac): string[] {
+          const mnemonic = MNEMONIC[instr.op];
+          return [
+            `LOAD  R0, ${instr.a}`,          // R0 &lt;- first operand
+            `LOAD  R1, ${instr.b}`,          // R1 &lt;- second operand
+            `${mnemonic.padEnd(5)} R0, R0, R1`,   // R0 &lt;- R0 op R1
+            `STORE ${instr.dst}, R0`,        // write the result back
+          ];
+        }
+
+        // The code generator: lower every statement, concatenating the assembly.
+        function generate(program: Tac[]): string[] {
+          const asm: string[] = [];
+          for (const instr of program) {
+            asm.push(`; ${instr.dst} = ${instr.a} ${instr.op} ${instr.b}`);
+            for (const line of lower(instr)) asm.push(line);
+          }
+          return asm;
+        }
+
+        // Sample TAC for  (a + b) * c :
+        const program: Tac[] = [
+          { dst: "t1", op: "+", a: "a",  b: "b" },
+          { dst: "t2", op: "*", a: "t1", b: "c" },
+        ];
+
+        for (const line of generate(program)) console.log(line);
+      </primer-code>
+      <p>
+        That is a working (if unoptimised) back end for straight-line arithmetic. Notice it happily reuses
+        <code>R0</code> and <code>R1</code> for every statement — it never runs out of registers, because it
+        immediately spills every result to memory with a <code>STORE</code>. Real allocators try to keep
+        values in registers <em>across</em> statements, and that is where the interesting problem begins.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Register allocation: many temporaries, few registers</h2>
+      <p>
+        Here is the tension at the core of the back end. The IR names an <strong>unbounded</strong> number of
+        temporaries — <code>t1</code>, <code>t2</code>, … <code>t500</code> — but the CPU has only
+        <strong>k</strong> physical registers, maybe 16. <strong>Register allocation</strong> is the job of
+        assigning each temporary to one of those k registers so that the program still computes the right
+        answer.
+      </p>
+      <p>
+        The saving grace is that not every temporary is needed at once. A value is <strong>live</strong> from
+        the moment it is computed until its last use; two temporaries whose lifetimes don't overlap can safely
+        share a register. So the real question is: <em>how many values are live at the same time?</em> If at
+        most k values are ever simultaneously live, everything fits in registers and no memory traffic is
+        needed. If more than k are live at some point, something has to give.
+      </p>
+      <primer-theorem name="Register allocation">
+        <ul>
+          <li>The IR uses arbitrarily many <strong>temporaries</strong>; the machine has a fixed
+            <strong>k</strong> physical registers.</li>
+          <li>Allocation maps each temporary to a register such that temporaries <strong>live at the same
+            time</strong> never share one.</li>
+          <li>When more than k values are live at once, one is <strong>spilled</strong> to memory (the stack)
+            and reloaded when next needed.</li>
+          <li>The goal is a valid assignment with as <strong>few spills</strong> as possible, because every
+            spill is slow memory traffic.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        This maps onto a classic piece of theory. Build an <strong>interference graph</strong>: one node per
+        temporary, with an edge between any two temporaries that are live simultaneously (they "interfere",
+        so they may not share a register). Assigning k registers so that no two adjacent nodes get the same
+        register is exactly <strong>graph colouring</strong> with k colours. If the graph is k-colourable,
+        every temporary fits; if not, you must spill.
+      </p>
+      <primer-vignette title="Why is register allocation NP-hard?">
+        <p>
+          Because graph colouring is. Deciding whether an arbitrary graph can be coloured with k colours is a
+          classic NP-complete problem, and register allocation inherits that difficulty through the
+          interference graph. So compilers don't search for a provably optimal answer — they use fast
+          <strong>heuristics</strong>. <strong>Chaitin's algorithm</strong> repeatedly removes low-degree
+          nodes (which are always colourable) and pushes them on a stack, colouring them on the way back;
+          when it gets stuck it picks a victim to spill. <strong>Linear-scan</strong> allocation is even
+          simpler and faster — it sweeps the live ranges in order and is popular in just-in-time compilers
+          where compile time itself matters. Neither is optimal, but both are fast and good enough that the
+          spills they introduce rarely hurt.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Spilling — and the stack</h2>
+      <p>
+        What happens when a function genuinely needs more simultaneously-live values than there are registers?
+        <strong>It does not fail to compile.</strong> The allocator picks a value to <strong>spill</strong>:
+        it stores that value to a slot in memory (on the <strong>stack</strong>) and reloads it just before
+        its next use, freeing the register in the meantime. The program is still correct — it is simply a
+        little slower, paying for extra <code>LOAD</code>/<code>STORE</code> traffic. Spilling is the
+        pressure-release valve that lets a machine with 16 registers run functions that mention thousands of
+        temporaries.
+      </p>
+      <p>
+        The <strong>stack</strong> also underpins the <strong>calling convention</strong>: an agreed protocol
+        for how functions pass arguments, return values, and preserve registers across calls — typically by
+        pushing arguments and saved registers onto the stack so a callee can reuse those registers and restore
+        them before returning. That is a whole topic of its own; for now, just know the stack is where spilled
+        values and call bookkeeping both live.
+      </p>
+      <primer-vignette title="Is running out of registers a compile error?">
+        <p>
+          No — and this trips people up. Having more live temporaries than registers is the <em>normal</em>
+          case for any non-trivial function, not an error condition. The allocator simply spills the excess to
+          the stack and carries on. The only thing you lose is a bit of speed; correctness is never in
+          question. So "16 registers" is never a hard ceiling on how complex your code can be — it's just a
+          budget the allocator manages, borrowing from memory whenever it overspends.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "codegenQuiz@1": {
+          "intro": "Code generation is the compiler's final phase — from IR to real instructions. Numbers change each time.",
+          "produceQ": "What does code generation PRODUCE?",
+          "produceA": "target assembly / machine instructions the CPU can execute",
+          "produceB": "an abstract syntax tree from the source text",
+          "produceC": "a stream of tokens from the lexer",
+          "produceD": "the program's type annotations",
+          "inputQ": "What does the code generator take as its INPUT?",
+          "inputA": "the intermediate representation, typically three-address code",
+          "inputB": "the raw source characters, un-parsed",
+          "inputC": "the final executable binary",
+          "inputD": "the user's keyboard input at runtime",
+          "selQ": "What is INSTRUCTION SELECTION?",
+          "selA": "mapping each IR operation to a sequence of real machine instructions",
+          "selB": "sorting the registers by number",
+          "selC": "choosing which source file to compile first",
+          "selD": "deleting unused variables from the AST",
+          "loadstoreQ": "On a load-store machine, how is  t = a + b  (with a, b in memory) computed?",
+          "loadstoreA": "LOAD both operands into registers, ADD the registers, STORE the result",
+          "loadstoreB": "a single ADD instruction reads and writes memory directly",
+          "loadstoreC": "it cannot be computed without a second CPU",
+          "loadstoreD": "the values are added while still in the source text",
+          "regfastQ": "Why does a code generator try to keep hot values in REGISTERS?",
+          "regfastA": "registers are far faster to access than main memory",
+          "regfastB": "registers can hold more data than memory",
+          "regfastC": "memory cannot store numbers, only text",
+          "regfastD": "the CPU has no way to read memory at all",
+          "allocQ": "What makes register allocation NECESSARY?",
+          "allocA": "the IR has unboundedly many temporaries but the CPU has only k physical registers",
+          "allocB": "registers must all hold the same value",
+          "allocC": "memory is faster than registers, so values must move out",
+          "allocD": "every temporary needs its own dedicated chip",
+          "spillQ": "What happens when more values are live than there are registers?",
+          "spillA": "a value is spilled to memory (the stack) and reloaded when next needed",
+          "spillB": "compilation fails with an out-of-registers error",
+          "spillC": "the extra values are silently discarded",
+          "spillD": "the CPU grows more registers at runtime",
+          "colourQ": "Register allocation is equivalent to which classic problem?",
+          "colourA": "graph colouring on the interference graph",
+          "colourB": "sorting a list of numbers",
+          "colourC": "finding the shortest path in a maze",
+          "colourD": "balancing a binary search tree",
+          "interfereQ": "In the interference graph, an EDGE between two temporaries means they...",
+          "interfereA": "are live at the same time, so may not share a register",
+          "interfereB": "have the same numeric value",
+          "interfereC": "appear in the same source line",
+          "interfereD": "must be spilled to memory together",
+          "spillNum": "A function has ${a}$ simultaneously-live values but the CPU has ${b}$ registers. How many values must be spilled to memory?",
+          "fitNum": "A block computes ${a}$ temporaries but at most ${b}$ are ever live at once, and the machine has enough registers. How many of those temporaries need spilling?"
+        }
+      }
+    </script>
+    <primer-quiz name="codegenQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compilers/intermediate-representation",
+      "computer-science/computer-systems/assembly-language-and-instruction-sets"
+    ],
+    "completedDate": "2026-07-04"
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("codegenQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+
+    // --- concept multiple choice ---
+    { prompt: () => sceneStrings("produceQ"),
+      options: [
+        { text: () => sceneStrings("produceA"), correct: true },
+        { text: () => sceneStrings("produceB"), correct: false },
+        { text: () => sceneStrings("produceC"), correct: false },
+        { text: () => sceneStrings("produceD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("inputQ"),
+      options: [
+        { text: () => sceneStrings("inputA"), correct: true },
+        { text: () => sceneStrings("inputB"), correct: false },
+        { text: () => sceneStrings("inputC"), correct: false },
+        { text: () => sceneStrings("inputD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("selQ"),
+      options: [
+        { text: () => sceneStrings("selA"), correct: true },
+        { text: () => sceneStrings("selB"), correct: false },
+        { text: () => sceneStrings("selC"), correct: false },
+        { text: () => sceneStrings("selD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("loadstoreQ"),
+      options: [
+        { text: () => sceneStrings("loadstoreA"), correct: true },
+        { text: () => sceneStrings("loadstoreB"), correct: false },
+        { text: () => sceneStrings("loadstoreC"), correct: false },
+        { text: () => sceneStrings("loadstoreD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("regfastQ"),
+      options: [
+        { text: () => sceneStrings("regfastA"), correct: true },
+        { text: () => sceneStrings("regfastB"), correct: false },
+        { text: () => sceneStrings("regfastC"), correct: false },
+        { text: () => sceneStrings("regfastD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("allocQ"),
+      options: [
+        { text: () => sceneStrings("allocA"), correct: true },
+        { text: () => sceneStrings("allocB"), correct: false },
+        { text: () => sceneStrings("allocC"), correct: false },
+        { text: () => sceneStrings("allocD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("spillQ"),
+      options: [
+        { text: () => sceneStrings("spillA"), correct: true },
+        { text: () => sceneStrings("spillB"), correct: false },
+        { text: () => sceneStrings("spillC"), correct: false },
+        { text: () => sceneStrings("spillD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("colourQ"),
+      options: [
+        { text: () => sceneStrings("colourA"), correct: true },
+        { text: () => sceneStrings("colourB"), correct: false },
+        { text: () => sceneStrings("colourC"), correct: false },
+        { text: () => sceneStrings("colourD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("interfereQ"),
+      options: [
+        { text: () => sceneStrings("interfereA"), correct: true },
+        { text: () => sceneStrings("interfereB"), correct: false },
+        { text: () => sceneStrings("interfereC"), correct: false },
+        { text: () => sceneStrings("interfereD"), correct: false },
+      ] },
+
+    // --- variable-driven: how many spills? answer = max(a - b, 0) via a function ---
+    { prompt: (v) => sceneStrings("spillNum", { a: v.a, b: v.b }),
+      variables: "a=[3:12] b=[2:6]",
+      constraints: "a > b",
+      answer: (v) => Math.max(v.a - v.b, 0) },
+    { prompt: (v) => sceneStrings("fitNum", { a: v.a, b: v.b }),
+      variables: "a=[6:14] b=[2:5]",
+      constraints: "a > b",
+      answer: () => 0 },
+  ]);
+</script>

@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Memory Management and Garbage Collection</primer-title>
+
+    <primer-card>
+      <p>
+        Every time you write <code>new Thing()</code> in Java, <code>[1, 2, 3]</code> in JavaScript, or
+        <code>malloc(sizeof(struct))</code> in C, a lump of memory is set aside somewhere to hold that
+        value. But <em>where</em>, exactly, does your object live — and once you stop using it, who tidies
+        it away? Get this wrong and your program either forgets to give memory back (a <strong>leak</strong>
+        that grows until it dies) or hands the same memory to two owners at once (a
+        <strong>crash</strong> waiting to happen).
+      </p>
+      <p>
+        This page is about the two great regions a running program carves its memory into — the
+        <strong>stack</strong> and the <strong>heap</strong> — and the strategies, from hand-written
+        <code>free()</code> to automatic <strong>garbage collection</strong>, that decide when heap memory
+        can be reclaimed. The key idea underneath it all: the heap is really an
+        <primer-ref to="computer-science/data-structures/graphs">graph</primer-ref> of objects pointing at
+        one another, and "garbage" is simply the part of that graph you can no longer reach.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two regions: the stack and the heap</h2>
+      <p>
+        When a program runs, the operating system gives it a block of memory. Two ends of that block get
+        special treatment.
+      </p>
+      <ul>
+        <li>
+          <strong>The stack</strong> is fast, ordered, and automatic. Every time you call a function, a
+          <strong>stack frame</strong> is pushed on top holding that call's local variables, arguments and
+          return address. When the function returns, its frame is popped — instantly, no bookkeeping. It is
+          strictly <strong>LIFO</strong> (last in, first out), exactly like a stack of plates. You never
+          free stack memory yourself; leaving the function does it for you.
+        </li>
+        <li>
+          <strong>The heap</strong> is the big, unordered pool for things that must <em>outlive</em> the
+          function that made them, or whose size isn't known until runtime — the object you return, the list
+          that keeps growing, the tree you build. Heap memory is handed out on request and, crucially,
+          <strong>stays allocated until something decides to release it</strong>.
+        </li>
+      </ul>
+      <p>
+        A quick rule of thumb: small, short-lived, known-size values (a loop counter, a pointer) sit on the
+        stack; anything created with <code>new</code>/<code>malloc</code> that lives on after the current
+        call lives on the heap. The stack cleans itself; the heap is the hard part — and the rest of this
+        page is about it.
+      </p>
+
+      <primer-vignette title="If the stack is so easy, why not put everything on it?">
+        <p>
+          Because a stack frame dies the instant its function returns. If you returned a pointer to a local
+          variable, it would point at memory that has already been popped and reused — a
+          <strong>dangling pointer</strong> to garbage. Anything that must survive the call has to go on the
+          heap. Also, the stack is small (often a megabyte or two): recurse too deep and you get the famous
+          <strong>stack overflow</strong>. The heap is where the room is.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "heapGraph": {
+          "title": "The heap is a graph; garbage is what the roots can't reach",
+          "caption": "Roots (the stack and globals) point into the heap. Mark everything reachable from the roots — the two objects left over form a cycle no root can reach, so they are garbage.",
+          "mark": "Mark phase: follow every arrow out of the roots. A, B and C are reachable.",
+          "sweep": "Sweep phase: X and Y point only at each other — a cycle no root reaches — so both are unreachable garbage and get collected."
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Reachability: the heap as an object graph</h2>
+      <p>
+        Here is the mental model that makes garbage collection click. Draw every heap object as a node and
+        every reference (pointer) as a directed <strong>arrow</strong>. Add the <strong>roots</strong> — the
+        variables the program can touch <em>directly</em>: things on the stack and in globals. An object is
+        <strong>live</strong> if you can reach it by following arrows from a root; if you can't, it is
+        <strong>garbage</strong>, no matter how many other objects still point at it.
+      </p>
+      <primer-geometry scene="heapGraph"></primer-geometry>
+      <p>
+        Watch the two-phase sweep in the figure. First we <strong>mark</strong> everything reachable from
+        the roots. Then whatever is left unmarked — here a little island of two objects pointing only at
+        <em>each other</em> — is swept away. That self-referential pair is the classic trap we'll meet in a
+        moment.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Doing it by hand: <code>malloc</code> and <code>free</code></h2>
+      <p>
+        In a language like C, <em>you</em> are the memory manager. You ask for heap memory with
+        <code>malloc</code> and you must give it back with <code>free</code> when you're done. It's simple,
+        fast, and unforgiving — three mistakes lie in wait:
+      </p>
+      <ul>
+        <li><strong>Memory leak</strong> — you forget to <code>free</code>. The memory is never reclaimed;
+          do it in a loop and the program bloats until it's killed.</li>
+        <li><strong>Dangling pointer (use-after-free)</strong> — you <code>free</code> a block but keep a
+          pointer to it and read through it later. That memory may already belong to something else.</li>
+        <li><strong>Double free</strong> — you <code>free</code> the same block twice, corrupting the
+          allocator's own bookkeeping.</li>
+      </ul>
+      <p>
+        Because these bugs are so easy to make and so hard to find, most modern languages take the job away
+        from you and reclaim heap memory <strong>automatically</strong>. That automatic janitor is the
+        <strong>garbage collector</strong>, and it comes in a few flavours.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Strategy 1 — reference counting</h2>
+      <p>
+        The simplest automatic scheme. Give every object a counter of how many references point <em>at</em>
+        it. Every time you make a new reference, bump the count up; every time a reference goes away, drop it
+        down. The instant a count hits <strong>zero</strong>, nothing can reach the object, so free it
+        immediately.
+      </p>
+      <p>
+        Reference counting is wonderfully <em>prompt</em> — memory is reclaimed the moment it becomes
+        unused, with no big pauses — and it's used by Python (alongside a cycle collector) and by C++'s
+        <code>shared_ptr</code>. But it has a famous blind spot, which the "Watch out!" box below spells out:
+        it cannot free a <strong>cycle</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Strategy 2 — mark and sweep</h2>
+      <p>
+        Instead of tracking counts as you go, a <strong>tracing</strong> collector figures out reachability
+        directly, exactly like the figure above. It runs in two phases:
+      </p>
+      <primer-theorem name="Mark-and-sweep">
+        <ul>
+          <li><strong>Mark.</strong> Start at the roots (stack + globals) and traverse the object graph,
+            marking every object you can reach.</li>
+          <li><strong>Sweep.</strong> Walk the whole heap; anything <em>not</em> marked is unreachable, so
+            free it. Clear the marks and repeat next time.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Because it works from reachability rather than counts, mark-and-sweep <strong>reclaims
+        cycles</strong> that reference counting leaks: two objects pointing at each other are still garbage
+        if no root can reach them, and the mark phase simply never visits them. The cost is that a full
+        collection may pause the program while it traces the heap. Let's watch both strategies decide the
+        fate of the same little graph — including a cycle:
+      </p>
+      <primer-code run>
+        // A tiny heap: each object has an id and a list of ids it references.
+        interface Obj { id: number; refs: number[]; }
+
+        const heap: Obj[] = [
+          { id: 0, refs: [1] },      // reachable from a root
+          { id: 1, refs: [2] },      // reached via 0
+          { id: 2, refs: [] },       // reached via 1  (a leaf)
+          { id: 3, refs: [4] },      // NOT rooted -- part of a cycle
+          { id: 4, refs: [3] },      // NOT rooted -- points back to 3
+        ];
+        const roots: number[] = [0];   // the only thing the program can touch directly
+
+        const byId = (id: number) =&gt; heap.find((o) =&gt; o.id === id)!;
+
+        // --- Mark &amp; sweep: mark everything reachable from the roots, sweep the rest ---
+        function markSweep(): { live: number[]; collected: number[] } {
+          const marked = new Set&lt;number&gt;();
+          const stack = [...roots];
+          while (stack.length &gt; 0) {
+            const id = stack.pop()!;
+            if (marked.has(id)) continue;   // already visited -- this is what tames cycles
+            marked.add(id);
+            for (const r of byId(id).refs) stack.push(r);
+          }
+          const live = heap.map((o) =&gt; o.id).filter((id) =&gt; marked.has(id));
+          const collected = heap.map((o) =&gt; o.id).filter((id) =&gt; !marked.has(id));
+          return { live, collected };
+        }
+
+        // --- Reference counting: count incoming refs from ALL objects (ignoring reachability) ---
+        function refCounts(): Map&lt;number, number&gt; {
+          const count = new Map&lt;number, number&gt;();
+          for (const o of heap) count.set(o.id, 0);
+          for (const r of roots) count.set(r, count.get(r)! + 1);         // held by a root
+          for (const o of heap) for (const r of o.refs) count.set(r, count.get(r)! + 1);
+          return count;
+        }
+
+        const { live, collected } = markSweep();
+        console.log("mark-sweep LIVE     :", live);        // [0, 1, 2]
+        console.log("mark-sweep COLLECTED:", collected);   // [3, 4]  -- the cycle is reclaimed
+
+        const counts = refCounts();
+        const leaked = [...counts].filter(([, c]) =&gt; c &gt; 0).map(([id]) =&gt; id);
+        console.log("ref-count NON-ZERO  :", leaked);      // [0,1,2,3,4] -- 3 and 4 keep each other alive!
+        console.log("=> ref counting LEAKS the 3<->4 cycle that mark-sweep frees");
+      </primer-code>
+      <p>
+        Objects <code>3</code> and <code>4</code> reference each other, so each keeps the other's count at
+        one — reference counting never frees them. Mark-and-sweep starts from the root, never reaches them,
+        and collects both.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Strategy 3 — generational garbage collection</h2>
+      <p>
+        Tracing the <em>entire</em> heap on every collection is expensive. Real collectors lean on a
+        striking empirical fact, the <strong>generational hypothesis</strong>:
+      </p>
+      <primer-theorem name="The generational hypothesis">
+        <ul>
+          <li><strong>Most objects die young.</strong> The overwhelming majority of allocations become
+            garbage almost immediately — temporaries, loop bodies, intermediate results.</li>
+          <li>The few that survive their first few collections tend to live a <em>long</em> time.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        So split the heap by age. New objects go in a small <strong>young generation (the nursery)</strong>,
+        which is collected <em>often</em> and quickly — since almost everything there is already dead, each
+        pass throws away a lot and traces very little. An object that survives a few collections is
+        <strong>promoted</strong> to the <strong>old generation</strong>, which is large and collected only
+        rarely. You spend your effort where the garbage actually is, and touch the long-lived survivors
+        hardly at all. This is how the JVM, .NET and modern JavaScript engines keep GC pauses small.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <primer-vignette title="Watch out!">
+        <ul>
+          <li>
+            <strong>Reference counting leaks cycles.</strong> If object <code>A</code> points to
+            <code>B</code> and <code>B</code> points back to <code>A</code>, each holds the other's count at
+            one — even after the program has dropped every reference to <em>both</em>. Neither ever hits
+            zero, so a pure reference counter never frees them. Reachability (mark-and-sweep) is the fix.
+          </li>
+          <li>
+            <strong>"Zero references" is not the same as "reachable".</strong> An object can have a positive
+            reference count and still be garbage (the cycle above); an object can be reachable through a long
+            chain from a single root. Tracing collectors ask "can a root reach it?", not "how many arrows
+            point at it?".
+          </li>
+          <li>
+            <strong>Garbage collection does <em>not</em> mean "no memory leaks".</strong> A GC only frees
+            what is <em>unreachable</em>. If you accidentally keep a reference alive — a growing global cache,
+            a listener you never remove, a static list you keep appending to — the objects stay reachable and
+            are never collected. That is a genuine leak in a managed language.
+          </li>
+          <li>
+            <strong>Manual <code>free</code> has its own trio of traps:</strong> forgetting to free (leak),
+            using a pointer after freeing (dangling / use-after-free), and freeing the same block twice
+            (double free). These are precisely the bugs a garbage collector exists to prevent.
+          </li>
+        </ul>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "gcQuiz@1": {
+          "intro": "Stack vs heap, reachability, and the three collectors. Numbers change each time.",
+          "lifoQ": "Which memory region is fast, strictly LIFO, and freed automatically when a function returns?",
+          "lifoA": "the stack",
+          "lifoB": "the heap",
+          "lifoC": "the CPU registers only",
+          "lifoD": "the hard disk",
+          "framesQ": "Where are a function call's frame — its locals, arguments and return address — stored?",
+          "framesA": "on the stack, in a stack frame",
+          "framesB": "on the heap, freed by the GC",
+          "framesC": "in a global reference-count table",
+          "framesD": "nowhere; locals are not stored",
+          "heapQ": "An object made with new / malloc that must outlive the current function call lives on the:",
+          "heapA": "heap",
+          "heapB": "stack",
+          "heapC": "return-address register",
+          "heapD": "instruction cache",
+          "rcQ": "What does REFERENCE COUNTING do?",
+          "rcA": "counts references to each object and frees it when the count reaches zero",
+          "rcB": "traces the whole heap from the roots on every allocation",
+          "rcC": "moves every object to a young generation",
+          "rcD": "never frees anything until the program exits",
+          "cycleQ": "What is reference counting's famous weakness?",
+          "cycleA": "it cannot reclaim a cycle of objects that reference each other",
+          "cycleB": "it pauses the program for seconds at a time",
+          "cycleC": "it needs the source code at runtime",
+          "cycleD": "it only works on the stack",
+          "phasesQ": "The two phases of mark-and-sweep, in order, are:",
+          "phasesA": "mark reachable objects from the roots, then sweep (free) the unmarked ones",
+          "phasesB": "sweep everything, then mark the survivors",
+          "phasesC": "count references, then decrement them",
+          "phasesD": "promote young objects, then compact the heap",
+          "rootsQ": "The MARK phase of a tracing collector starts from the:",
+          "rootsA": "roots — the stack and global variables",
+          "rootsB": "object with the highest reference count",
+          "rootsC": "most recently allocated object",
+          "rootsD": "largest object on the heap",
+          "genHypQ": "The GENERATIONAL HYPOTHESIS states that:",
+          "genHypA": "most objects die young, so collect the young generation often",
+          "genHypB": "objects never become garbage",
+          "genHypC": "old objects die faster than new ones",
+          "genHypD": "every object must be freed by hand",
+          "genActQ": "How does a generational collector exploit that hypothesis?",
+          "genActA": "collect a small young generation frequently, and promote survivors to an old generation collected rarely",
+          "genActB": "trace the entire heap on every single allocation",
+          "genActC": "free objects strictly in the order they were created",
+          "genActD": "keep every object alive until the program exits",
+          "reachQ": "An object is 'garbage' precisely when it is:",
+          "reachA": "unreachable from any root by following references",
+          "reachB": "referenced by at least one other object",
+          "reachC": "larger than the stack frame",
+          "reachD": "older than the young generation",
+          "gcLeakQ": "In a garbage-collected language you can STILL leak memory by:",
+          "gcLeakA": "keeping objects reachable (e.g. an ever-growing global cache)",
+          "gcLeakB": "calling new too quickly",
+          "gcLeakC": "using recursion",
+          "gcLeakD": "you cannot ever leak with a GC",
+          "manualQ": "Freeing the same heap block twice in C is a bug called a:",
+          "manualA": "double free",
+          "manualB": "stack overflow",
+          "manualC": "generational promotion",
+          "manualD": "mark phase",
+          "countQ": "A heap has ${N}$ objects; ${M}$ of them are reachable from the roots. How many does mark-and-sweep collect?",
+          "danglingQ": "Reading through a pointer to memory you have already freed is called a:",
+          "danglingA": "dangling pointer (use-after-free)",
+          "danglingB": "cache hit",
+          "danglingC": "young-generation promotion",
+          "danglingD": "reference increment"
+        }
+      }
+    </script>
+
+    <primer-quiz name="gcQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/data-structures/graphs"],
+    "completedDate": "2026-07-04"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // The heap as a directed object graph. Roots (stack/globals) point into live objects A,B,C;
+  // X and Y form a cycle that no root reaches (garbage). A mark step rings the reachable set;
+  // a sweep step labels the unreachable cycle.
+  registerGeometryScene(
+    "heapGraph",
+    ({ board, colors, step, sceneStrings }) => {
+      const P = {
+        R: [-4, 0.6],   // the roots (stack + globals)
+        A: [-1.4, 2.1],
+        B: [1.3, 2.1],
+        C: [1.3, -0.2],
+        X: [-1.4, -2.0], // garbage cycle
+        Y: [1.3, -2.0],
+      };
+      // directed edges (arrows) as [from, to]
+      const arrows = [["R", "A"], ["A", "B"], ["B", "C"], ["X", "Y"], ["Y", "X"]];
+      for (const [p, q] of arrows) {
+        board.create("arrow", [P[p], P[q]], {
+          strokeColor: colors.line, strokeWidth: 2, lastArrow: { type: 2, size: 6 },
+          fixed: true, highlight: false,
+        });
+      }
+      const nodes = [
+        { name: "R", label: "roots", col: colors.cat[0] },
+        { name: "A", label: "A", col: colors.cat[1] },
+        { name: "B", label: "B", col: colors.cat[1] },
+        { name: "C", label: "C", col: colors.cat[1] },
+        { name: "X", label: "X", col: colors.cat[3] },
+        { name: "Y", label: "Y", col: colors.cat[3] },
+      ];
+      for (const n of nodes) {
+        board.create("point", P[n.name], {
+          size: 6, strokeColor: n.col, fillColor: n.col,
+          name: n.label, label: { offset: [10, 12], fontSize: 15, strokeColor: colors.ink },
+          fixed: true, highlight: false,
+        });
+      }
+
+      // Mark phase: ring the reachable set (roots + A, B, C).
+      step(sceneStrings("mark"), () => {
+        for (const name of ["R", "A", "B", "C"]) {
+          board.create("circle", [P[name], 0.42], {
+            strokeColor: colors.cat[2], strokeWidth: 2.5, fillOpacity: 0,
+            dash: 0, fixed: true, highlight: false,
+          });
+        }
+      });
+
+      // Sweep phase: call out the unreachable cycle.
+      step(sceneStrings("sweep"), () => {
+        board.create("polygon", [[-2.5, -1.1], [2.4, -1.1], [2.4, -2.9], [-2.5, -2.9]], {
+          borders: { strokeColor: colors.cat[3], strokeWidth: 2, dash: 2 },
+          fillColor: colors.cat[3], fillOpacity: 0.08,
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [-0.05, -1.35, "garbage — collected"], {
+          strokeColor: colors.cat[3], fontSize: 13, anchorX: "middle", fixed: true, highlight: false,
+        });
+      });
+    },
+    {
+      boundingbox: [-5.2, 3.2, 2.8, -3.4],
+      keepAspect: true,
+      title: () => makeStrings("heapGraph")("title"),
+      caption: () => makeStrings("heapGraph")("caption"),
+    },
+  );
+
+  registerQuiz("gcQuiz@1", ({ sceneStrings }) => {
+    const mc = (q, a, b, c, d) => ({
+      prompt: () => sceneStrings(q),
+      options: [
+        { text: () => sceneStrings(a), correct: true },
+        { text: () => sceneStrings(b), correct: false },
+        { text: () => sceneStrings(c), correct: false },
+        { text: () => sceneStrings(d), correct: false },
+      ],
+    });
+    return [
+      { num_questions: 6, preamble: () => sceneStrings("intro") },
+
+      mc("lifoQ", "lifoA", "lifoB", "lifoC", "lifoD"),
+      mc("framesQ", "framesA", "framesB", "framesC", "framesD"),
+      mc("heapQ", "heapA", "heapB", "heapC", "heapD"),
+      mc("rcQ", "rcA", "rcB", "rcC", "rcD"),
+      mc("cycleQ", "cycleA", "cycleB", "cycleC", "cycleD"),
+      mc("phasesQ", "phasesA", "phasesB", "phasesC", "phasesD"),
+      mc("rootsQ", "rootsA", "rootsB", "rootsC", "rootsD"),
+      mc("genHypQ", "genHypA", "genHypB", "genHypC", "genHypD"),
+      mc("genActQ", "genActA", "genActB", "genActC", "genActD"),
+      mc("reachQ", "reachA", "reachB", "reachC", "reachD"),
+      mc("gcLeakQ", "gcLeakA", "gcLeakB", "gcLeakC", "gcLeakD"),
+      mc("manualQ", "manualA", "manualB", "manualC", "manualD"),
+      mc("danglingQ", "danglingA", "danglingB", "danglingC", "danglingD"),
+
+      // variable-driven counting: reachable M of N objects; the rest are collected.
+      {
+        prompt: (v) => sceneStrings("countQ", { N: v.N, M: v.M }),
+        variables: "N=[6:20] M=[1:5]",
+        constraints: "M < N",
+        answer: (v) => v.N - v.M,
+        keyboard: "geometry-lengths",
+      },
+    ];
+  });
+</script>

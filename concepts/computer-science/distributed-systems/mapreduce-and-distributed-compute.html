@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>MapReduce and Distributed Compute</primer-title>
+
+    <primer-card>
+      <p>
+        Suppose someone hands you a copy of the <em>entire web</em> — every page ever crawled, tens of
+        billions of documents, hundreds of terabytes of text — and asks a childishly simple question:
+        <strong>how many times does each word appear?</strong> The counting itself is trivial; a first-year
+        could write the loop. The trouble is that the data will not fit on one machine. It will not fit in
+        one machine's memory, it will barely fit on one machine's disks, and reading it end to end on a
+        single computer would take days. The <em>algorithm</em> is easy. The <em>scale</em> is the whole
+        problem.
+      </p>
+      <p>
+        The obvious escape is to buy a thousand machines and split the work. But now you own a new set of
+        headaches: which machine gets which slice of the data? How do the partial answers get combined? What
+        happens when — not <em>if</em> — one of those thousand machines dies halfway through? Coordinating a
+        cluster by hand is miserable, error-prone work, and you would have to redo it for every new question.
+      </p>
+      <p>
+        <strong>MapReduce</strong> is a programming model that makes this whole class of problem routine. You
+        write two small, ordinary functions — a <strong>map</strong> and a <strong>reduce</strong> — and a
+        framework takes care of everything hard: splitting the data across the cluster, scheduling the work,
+        moving intermediate results around the network, and quietly recovering from the machines that fail
+        along the way. This page is about that model: what map and reduce actually do, why the shape of the
+        computation lets it scale to thousands of machines, and how re-running work makes the whole thing
+        shrug off hardware failure.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Three phases: map, shuffle, reduce</h2>
+      <p>
+        A MapReduce job flows through three stages. The programmer writes only the first and the last; the
+        framework owns the one in the middle.
+      </p>
+      <ul>
+        <li>
+          <strong>Map</strong> — the input dataset is chopped into many <strong>shards</strong> (splits),
+          and a copy of your <code>map</code> function runs on each shard independently. For every input
+          record, <code>map</code> emits zero or more <strong>key → value</strong> pairs. Because no map
+          task needs to talk to any other, this phase is <strong>embarrassingly parallel</strong>: a thousand
+          shards can be processed by a thousand workers at the same time, with no coordination.
+        </li>
+        <li>
+          <strong>Shuffle</strong> — the framework gathers every emitted pair and <strong>groups all values
+          that share a key</strong>, so that all the values for <code>"the"</code>, wherever in the cluster
+          they were produced, end up together. This is the one phase that moves data <em>across the
+          network</em>, and it is where the real distributed-systems machinery lives.
+        </li>
+        <li>
+          <strong>Reduce</strong> — for each key, your <code>reduce</code> function receives the key and the
+          whole collection of its values, and combines them into a final result. Different keys are
+          independent, so reduces run in parallel too, one bucket at a time.
+        </li>
+      </ul>
+
+      <p>
+        The canonical example — the "hello world" of the whole model — is <strong>word count</strong>.
+        Watch a single line of text flow through all three phases:
+      </p>
+      <ul>
+        <li>
+          <strong>Map</strong> reads the line <code>"the cat sat on the mat"</code> and emits one pair per
+          word, each with a count of one:
+          <primer-math display>(\text{the},1)\;(\text{cat},1)\;(\text{sat},1)\;(\text{on},1)\;(\text{the},1)\;(\text{mat},1)</primer-math>
+          Notice map does <em>not</em> try to count — it does the cheap, local, parallel-friendly thing and
+          emits a <primer-math>1</primer-math> for every occurrence.
+        </li>
+        <li>
+          <strong>Shuffle</strong> groups those pairs (and pairs from every other line, on every other
+          machine) by word:
+          <primer-math display>\text{the}\to[1,1]\quad \text{cat}\to[1]\quad \text{sat}\to[1]\quad \text{on}\to[1]\quad \text{mat}\to[1]</primer-math>
+        </li>
+        <li>
+          <strong>Reduce</strong> sums each list into the final tally:
+          <primer-math display>\text{the}\to 2\quad \text{cat}\to 1\quad \text{sat}\to 1\quad \text{on}\to 1\quad \text{mat}\to 1</primer-math>
+        </li>
+      </ul>
+      <p>
+        That is the entire program. You wrote "emit <primer-math>(word, 1)</primer-math>" and "add the
+        values up". The framework turned those two lines into something that runs on ten thousand machines
+        against the whole web.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "mrDataflow": {
+            "title": "Word count as map → shuffle → reduce",
+            "input": "Input is split into shards, one per line here.",
+            "map": "Map runs on each shard in parallel, emitting (word, 1) pairs.",
+            "shuffle": "Shuffle moves pairs across the network, grouping all values by key.",
+            "reduce": "Reduce sums each key's values into one final count.",
+            "output": "Output: the final word → count table."
+          }
+        }
+      </script>
+      <primer-geometry scene="mrDataflow" caption="A dataflow diagram: two input shards feed two map workers that emit (word, 1) pairs; the shuffle stage groups those pairs by word across the network; two reduce workers sum each word's values into the final counts."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Run a whole MapReduce, in your browser</h2>
+      <p>
+        Nothing about the model requires a cluster — a cluster is just an <em>optimisation</em> for size.
+        The code below is a complete, single-machine MapReduce for word count: a <code>map</code> that emits
+        <primer-math>(word, 1)</primer-math> pairs, a <code>shuffle</code> that groups those pairs by key,
+        and a <code>reduce</code> that sums each group. The driver runs <code>map</code> over several lines
+        (pretend each line is a shard on its own machine), shuffles, then reduces. Press <strong>Run ▶</strong>
+        and read the phases in the output:
+      </p>
+      <primer-code run>
+        // A complete in-memory MapReduce for WORD COUNT.
+        // In a real cluster, map runs on many machines and shuffle moves data
+        // across the network -- but the shape of the computation is exactly this.
+
+        type Pair = [string, number];        // an emitted key -&gt; value pair
+
+        // MAP: for one input record (a line), emit (word, 1) for each word.
+        // Embarrassingly parallel: it looks at ONLY its own line.
+        function map(line: string): Pair[] {
+          const out: Pair[] = [];
+          for (const word of line.toLowerCase().split(/\s+/)) {
+            if (word.length &gt; 0) out.push([word, 1]);
+          }
+          return out;
+        }
+
+        // SHUFFLE: gather all pairs and group the values by key.
+        // This is the phase that, on a cluster, moves data over the network.
+        function shuffle(pairs: Pair[]): Map&lt;string, number[]&gt; {
+          const grouped = new Map&lt;string, number[]&gt;();
+          for (const [key, value] of pairs) {
+            if (!grouped.has(key)) grouped.set(key, []);
+            grouped.get(key)!.push(value);
+          }
+          return grouped;
+        }
+
+        // REDUCE: for one key, combine its list of values into a result.
+        // Here: sum them. (Sum is associative + commutative -- see the page.)
+        function reduce(key: string, values: number[]): number {
+          let total = 0;
+          for (const v of values) total += v;
+          return total;
+        }
+
+        // ---- the driver: map every shard, shuffle, then reduce every key ----
+        const shards: string[] = [
+          "the cat sat on the mat",
+          "the dog sat on the log",
+          "the cat and the dog",
+        ];
+
+        // MAP phase: each shard mapped independently (could be parallel machines).
+        let emitted: Pair[] = [];
+        for (const shard of shards) {
+          emitted = emitted.concat(map(shard));
+        }
+        console.log("MAP emitted " + emitted.length + " (word, 1) pairs.");
+
+        // SHUFFLE phase: group all values by key.
+        const grouped = shuffle(emitted);
+        console.log("SHUFFLE produced " + grouped.size + " groups (distinct words).");
+        console.log("  the -&gt; [" + grouped.get("the")!.join(", ") + "]");
+
+        // REDUCE phase: one final count per key.
+        console.log("");
+        console.log("REDUCE (final word counts):");
+        const words = Array.from(grouped.keys()).sort();
+        for (const w of words) {
+          console.log("  " + w.padEnd(6) + reduce(w, grouped.get(w)!));
+        }
+      </primer-code>
+      <p>
+        Change the sentences, add a shard, press Run again. The <em>same</em> two user functions handle it —
+        that reusability, across every dataset and every counting-shaped question, is exactly the point.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why it scales — and why it survives failure</h2>
+      <p>
+        Two design choices give MapReduce its power, and they are worth stating precisely.
+      </p>
+      <p>
+        <strong>Move the computation to the data.</strong> The input shards already live spread across the
+        cluster's disks. Rather than haul terabytes over the network to some central CPU, the scheduler ships
+        your tiny <code>map</code> function <em>to the machine that already holds the shard</em> and runs it
+        there — this is <strong>data locality</strong>. Code is kilobytes; data is terabytes. Sending the
+        small thing to the big thing, instead of the reverse, is what keeps the network from becoming the
+        bottleneck, and it is why map throughput grows almost linearly as you add machines.
+      </p>
+      <p>
+        <strong>Fault tolerance by simply re-running.</strong> Across a thousand machines running for hours,
+        something <em>will</em> break — a disk, a power supply, a whole rack. MapReduce's answer is
+        beautifully blunt: if a task's machine dies, the framework just <strong>runs that task again</strong>
+        on another machine, from the original input shard. It can do this because map and reduce are required
+        to be <strong>deterministic</strong> and <strong>side-effect-free</strong> — the same input always
+        yields the same output, and running a task twice does no harm because it touches nothing but its own
+        inputs and outputs. Re-running a failed task gives exactly the answer the dead task would have
+        produced, so a handful of failures cost a little time, not correctness. The learner never writes a
+        line of recovery code; determinism buys it for free.
+      </p>
+      <primer-theorem name="The contract that makes retry safe">
+        <ul>
+          <li><strong>Deterministic</strong> — a map or reduce task on given input always produces the same output.</li>
+          <li><strong>Side-effect-free</strong> — a task reads only its inputs and writes only its outputs; it does not mutate shared external state.</li>
+          <li>Therefore a failed task can be <strong>re-run anywhere</strong>, and a slow task can be run a <em>second</em> time in parallel, with no risk to the result.</li>
+        </ul>
+      </primer-theorem>
+      <primer-vignette title="One machine is dawdling and holding up the whole job — what does the framework do?">
+        <p>
+          Near the end of a job, a single sluggish machine — a "<strong>straggler</strong>", limping along
+          with a failing disk or an overloaded CPU — can hold up the entire result while thousands of others
+          sit idle. Because tasks are deterministic and side-effect-free, the framework can play a neat
+          trick: <strong>speculative execution</strong>. It launches a <em>duplicate</em> copy of the
+          straggling task on a fresh machine, and whichever copy finishes first wins; the other is simply
+          discarded. The same property that lets MapReduce re-run <em>failed</em> tasks also lets it race
+          <em>slow</em> ones — tail latency, tamed by redundancy.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>It's divide-and-conquer at cluster scale</h2>
+      <p>
+        If the shape of MapReduce feels familiar, it should. It is exactly the pattern of
+        <primer-ref to="computer-science/algorithms/divide-and-conquer">divide and conquer</primer-ref>,
+        lifted from a single recursive function onto a whole datacentre. You
+        <strong>divide</strong> the dataset into shards; you <strong>conquer</strong> each shard
+        independently with <code>map</code> (the sub-problems don't talk to each other); and you
+        <strong>combine</strong> the partial results with <code>reduce</code>. Merge sort splits an array,
+        sorts the halves, and merges; MapReduce splits the web, maps the shards, and reduces the groups. Same
+        idea, different scale — one runs in a call stack, the other across ten thousand machines.
+      </p>
+      <p>
+        The <strong>reduce</strong> step, seen from a functional angle, is precisely a <strong>fold</strong>
+        (an aggregate): it collapses a list of values down to one, the way
+        <code>[1, 1, 1, 1]</code> folds under addition to <code>4</code>. And that framing exposes a lovely
+        optimisation. If the reduce operation is <strong>associative and commutative</strong> — like sum,
+        max, or count, where the order and grouping of the combining doesn't change the answer — then a
+        <strong>combiner</strong> can run a "mini-reduce" <em>on each map machine, before the shuffle</em>.
+        Instead of shipping a thousand separate <primer-math>(\text{the}, 1)</primer-math> pairs across the
+        network, a mapper first folds them locally into a single <primer-math>(\text{the}, 1000)</primer-math>,
+        slashing the amount of data the shuffle has to move. The combiner is only correct <em>because</em> of
+        associativity and commutativity — which is why the reduce contract cares so much about them.
+      </p>
+      <p>
+        This model is a natural fit for a whole family of computations; it is one point in the wider space of
+        <primer-ref soft to="computer-science/concurrency/parallel-programming-models">parallel programming models</primer-ref>,
+        chosen deliberately for <em>batch</em> processing of enormous datasets.
+      </p>
+      <primer-vignette title="Watch out! — MapReduce is not a database, and reduce values are unordered">
+        <p>
+          Two tempting assumptions, both wrong. First: MapReduce is a <strong>batch</strong> model — it
+          grinds through a whole dataset and produces a whole result, taking minutes to hours. It is
+          <em>not</em> built for low-latency, interactive queries; asking it "what's the count of
+          <code>cat</code> right now?" and expecting a millisecond answer is a category error. Use it to
+          <em>build</em> an index overnight, not to <em>serve</em> one live.
+        </p>
+        <p>
+          Second: your <code>reduce</code> function must <strong>not assume the values arrive in any
+          particular order</strong>. The shuffle gathers values for a key from machines all over the cluster,
+          in whatever order they happen to turn up — so a reducer that expects, say, timestamps in ascending
+          order is silently broken. This is also why a good reducer is associative and commutative: it must
+          give the right answer no matter how its inputs are ordered or grouped. "Any function can be a
+          reducer" is false — a <em>combiner</em>-safe reducer needs those algebraic properties.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>A short lineage</h2>
+      <p>
+        MapReduce was introduced by <strong>Google</strong> in a 2004 paper, describing the system it used
+        internally to rebuild its search index over the whole web. The idea was too good to keep proprietary:
+        an open-source clone, <strong>Hadoop</strong>, put MapReduce (and its companion distributed file
+        system) into everyone's hands and effectively launched the "big data" era. Hadoop's weakness — it
+        wrote every intermediate result to disk — was answered by <strong>Apache Spark</strong>, which keeps
+        data in memory between steps and generalises map/reduce into a richer set of operations, running the
+        same jobs orders of magnitude faster. The programming model you learned on this page is the through
+        line connecting all three.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "mapreduceQuiz@1": { "instructions": "Check your understanding of the map, shuffle, and reduce phases, why the model scales, and how it tolerates failure." } }
+    </script>
+    <primer-quiz name="mapreduceQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/distributed-systems/remote-procedure-call", "computer-science/algorithms/divide-and-conquer"],
+    "completedDate": "2026-07-04"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // Dataflow diagram: input shards -> map workers -> grouped keys (shuffle) ->
+  // reduce workers -> output. Revealed left-to-right as steps.
+  registerGeometryScene("mrDataflow", ({ board, step, colors, sceneStrings }) => {
+    const box = (x, y, w, h, fill, stroke) =>
+      board.create("polygon",
+        [[x - w / 2, y - h / 2], [x + w / 2, y - h / 2],
+         [x + w / 2, y + h / 2], [x - w / 2, y + h / 2]],
+        { fillColor: fill, fillOpacity: 0.16, borders: { strokeColor: stroke, strokeWidth: 1.5 },
+          vertices: { visible: false }, fixed: true, highlight: false });
+
+    const text = (x, y, s, col, size = 13, bold = false) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: size, fixed: true,
+        highlight: false, strokeColor: col, color: col,
+        cssStyle: bold ? "font-weight:700" : "" });
+
+    const arrow = (x1, y1, x2, y2, col) =>
+      board.create("arrow", [[x1, y1], [x2, y2]],
+        { strokeColor: col, strokeWidth: 1.6, fixed: true, highlight: false, lastArrow: { size: 5 } });
+
+    // column x-positions
+    const xIn = 0.8, xMap = 3.2, xShuf = 5.9, xRed = 8.6, xOut = 10.9;
+    const yTop = 3.4, yBot = 1.0;
+
+    // column headers (always visible base content)
+    text(xIn,  4.5, "shards",  colors.ink, 13, true);
+    text(xMap, 4.5, "map",     colors.ink, 13, true);
+    text(xShuf,4.5, "shuffle", colors.ink, 13, true);
+    text(xRed, 4.5, "reduce",  colors.ink, 13, true);
+    text(xOut, 4.5, "output",  colors.ink, 13, true);
+
+    step(sceneStrings("input"), () => {
+      box(xIn, yTop, 1.5, 0.9, colors.cat[0], colors.cat[0]);
+      text(xIn, yTop + 0.16, "the cat", colors.ink, 11);
+      text(xIn, yTop - 0.16, "sat...",  colors.ink, 11);
+      box(xIn, yBot, 1.5, 0.9, colors.cat[0], colors.cat[0]);
+      text(xIn, yBot + 0.16, "the dog", colors.ink, 11);
+      text(xIn, yBot - 0.16, "sat...",  colors.ink, 11);
+    });
+
+    step(sceneStrings("map"), () => {
+      box(xMap, yTop, 1.5, 0.9, colors.cat[1], colors.cat[1]);
+      text(xMap, yTop, "(the,1)...", colors.ink, 11);
+      box(xMap, yBot, 1.5, 0.9, colors.cat[1], colors.cat[1]);
+      text(xMap, yBot, "(the,1)...", colors.ink, 11);
+      arrow(xIn + 0.8, yTop, xMap - 0.8, yTop, colors.line);
+      arrow(xIn + 0.8, yBot, xMap - 0.8, yBot, colors.line);
+    });
+
+    step(sceneStrings("shuffle"), () => {
+      box(xShuf, yTop, 1.6, 0.9, colors.cat[2], colors.cat[2]);
+      text(xShuf, yTop, "the → [1,1,1,1]", colors.ink, 10);
+      box(xShuf, yBot, 1.6, 0.9, colors.cat[2], colors.cat[2]);
+      text(xShuf, yBot, "cat → [1,1]", colors.ink, 10);
+      // crossing arrows: both map outputs feed both shuffle groups
+      arrow(xMap + 0.8, yTop, xShuf - 0.85, yTop, colors.line);
+      arrow(xMap + 0.8, yBot, xShuf - 0.85, yBot, colors.line);
+      arrow(xMap + 0.8, yTop, xShuf - 0.85, yBot, colors.line);
+      arrow(xMap + 0.8, yBot, xShuf - 0.85, yTop, colors.line);
+    });
+
+    step(sceneStrings("reduce"), () => {
+      box(xRed, yTop, 1.4, 0.9, colors.cat[3], colors.cat[3]);
+      text(xRed, yTop, "the → 4", colors.ink, 12, true);
+      box(xRed, yBot, 1.4, 0.9, colors.cat[3], colors.cat[3]);
+      text(xRed, yBot, "cat → 2", colors.ink, 12, true);
+      arrow(xShuf + 0.85, yTop, xRed - 0.75, yTop, colors.line);
+      arrow(xShuf + 0.85, yBot, xRed - 0.75, yBot, colors.line);
+    });
+
+    step(sceneStrings("output"), () => {
+      arrow(xRed + 0.75, yTop, xOut - 0.05, yTop, colors.line);
+      arrow(xRed + 0.75, yBot, xOut - 0.05, yBot, colors.line);
+      text(xOut, yTop, "the: 4", colors.ink, 12);
+      text(xOut, yBot, "cat: 2", colors.ink, 12);
+    });
+  }, {
+    boundingbox: [-0.4, 5.2, 12.2, 0.0],
+    keepAspect: false,
+    title: () => makeStrings("mrDataflow")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("mapreduceQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "What core problem is MapReduce designed to solve?",
+      options: [
+        { text: "Processing a dataset too big for one machine by spreading it across a cluster", correct: true },
+        { text: "Making a single CPU run individual instructions faster", correct: false },
+        { text: "Compressing files so they fit on one disk", correct: false },
+        { text: "Serving millisecond-latency responses to live user queries", correct: false },
+      ] },
+
+    { prompt: "In the map phase, what does the map function produce for each input record?",
+      options: [
+        { text: "Zero or more key → value pairs", correct: true },
+        { text: "A single final answer for the whole dataset", correct: false },
+        { text: "A sorted copy of the entire input", correct: false },
+        { text: "A lock protecting the shared counter", correct: false },
+      ] },
+
+    { prompt: "Which phase groups together all the values that share the same key, moving data across the network?",
+      options: [
+        { text: "Shuffle", correct: true },
+        { text: "Map", correct: false },
+        { text: "Reduce", correct: false },
+        { text: "Speculation", correct: false },
+      ] },
+
+    { prompt: "In word count, what does the map function emit for the line \"the cat the\"?",
+      options: [
+        { text: "(the,1) (cat,1) (the,1)", correct: true },
+        { text: "(the,2) (cat,1)", correct: false },
+        { text: "(the cat the, 1)", correct: false },
+        { text: "(cat,1) only, ignoring repeats", correct: false },
+      ] },
+
+    { prompt: "After shuffle, the reduce function for word count receives (the, [1,1,1,1]). What should it return?",
+      options: [
+        { text: "4", correct: true },
+        { text: "1", correct: false },
+        { text: "[1,1,1,1]", correct: false },
+        { text: "the", correct: false },
+      ] },
+
+    { prompt: "Why is the map phase called 'embarrassingly parallel'?",
+      options: [
+        { text: "Each map task processes its own shard independently, with no coordination between tasks", correct: true },
+        { text: "The tasks must run in a strict sequential order", correct: false },
+        { text: "Every map task needs to lock a shared counter first", correct: false },
+        { text: "All map tasks must run on the same single machine", correct: false },
+      ] },
+
+    { prompt: "What does 'move the computation to the data' (data locality) mean?",
+      options: [
+        { text: "Ship the small map function to the machine that already holds the data shard, instead of hauling the data to a central CPU", correct: true },
+        { text: "Copy the entire dataset to one powerful central machine before starting", correct: false },
+        { text: "Store all data in a single global variable", correct: false },
+        { text: "Move data to the fastest disk before every read", correct: false },
+      ] },
+
+    { prompt: "How does MapReduce tolerate a machine failing partway through a job?",
+      options: [
+        { text: "It re-runs the failed task on another machine from the original input shard", correct: true },
+        { text: "It aborts the entire job and starts from scratch", correct: false },
+        { text: "It ignores the missing results and returns a partial answer", correct: false },
+        { text: "It asks the programmer to write custom recovery code", correct: false },
+      ] },
+
+    { prompt: "Re-running a failed task is safe because map and reduce functions are required to be…",
+      options: [
+        { text: "Deterministic and side-effect-free", correct: true },
+        { text: "Random and stateful", correct: false },
+        { text: "Written in a specific programming language", correct: false },
+        { text: "Slower than the network", correct: false },
+      ] },
+
+    { prompt: "A single slow machine ('straggler') is holding up the end of a job. What does speculative execution do?",
+      options: [
+        { text: "Launches a duplicate copy of the task elsewhere and keeps whichever finishes first", correct: true },
+        { text: "Deletes the slow machine's shard from the dataset", correct: false },
+        { text: "Skips the reduce phase entirely", correct: false },
+        { text: "Permanently blacklists that machine from the cluster", correct: false },
+      ] },
+
+    { prompt: "MapReduce mirrors which classic algorithmic strategy?",
+      options: [
+        { text: "Divide and conquer — split the data, solve parts independently (map), combine (reduce)", correct: true },
+        { text: "Greedy selection of the single best record", correct: false },
+        { text: "Dynamic programming over overlapping subproblems", correct: false },
+        { text: "Backtracking search with pruning", correct: false },
+      ] },
+
+    { prompt: "Viewed functionally, the reduce step is essentially a…",
+      options: [
+        { text: "Fold (aggregate) that collapses a list of values into one", correct: true },
+        { text: "Map that transforms each element one-to-one", correct: false },
+        { text: "Filter that removes some elements", correct: false },
+        { text: "Sort that orders the elements", correct: false },
+      ] },
+
+    { prompt: "A 'combiner' can run a mini-reduce on each map machine before the shuffle. What property must the reduce operation have for this to be correct?",
+      options: [
+        { text: "It must be associative and commutative", correct: true },
+        { text: "It must be recursive", correct: false },
+        { text: "It must always return a string", correct: false },
+        { text: "It must run on exactly one machine", correct: false },
+      ] },
+
+    { prompt: "Why does a combiner reduce the cost of the shuffle?",
+      options: [
+        { text: "It folds many local pairs into fewer, so less data crosses the network", correct: true },
+        { text: "It compresses the source code of the map function", correct: false },
+        { text: "It removes the reduce phase completely", correct: false },
+        { text: "It forces all keys onto a single reducer", correct: false },
+      ] },
+
+    { prompt: "Which assumption about a reduce function is WRONG?",
+      options: [
+        { text: "That its values always arrive in a particular sorted order", correct: true },
+        { text: "That it receives all values for its key", correct: false },
+        { text: "That different keys can be reduced independently", correct: false },
+        { text: "That it should combine the values into a result", correct: false },
+      ] },
+
+    { prompt: "What kind of processing model is MapReduce best suited to?",
+      options: [
+        { text: "Batch processing of large datasets, not low-latency interactive queries", correct: true },
+        { text: "Millisecond-latency lookups for live web requests", correct: false },
+        { text: "Real-time streaming of individual events with instant replies", correct: false },
+        { text: "Interactive editing of a single small file", correct: false },
+      ] },
+
+    { prompt: "Which lineage correctly orders three systems in the MapReduce family?",
+      options: [
+        { text: "Google MapReduce → Hadoop → Spark", correct: true },
+        { text: "Spark → Hadoop → Google MapReduce", correct: false },
+        { text: "Hadoop → Google MapReduce → Spark", correct: false },
+        { text: "Google MapReduce → Spark → Hadoop", correct: false },
+      ] },
+
+    { prompt: "In the three-phase pipeline, which phase does the framework handle rather than the programmer?",
+      options: [
+        { text: "Shuffle — grouping values by key across the cluster", correct: true },
+        { text: "Map — the programmer never writes it", correct: false },
+        { text: "Reduce — the framework always sums for you", correct: false },
+        { text: "None; the programmer writes all three phases by hand", correct: false },
+      ] },
+  ]);
+</script>

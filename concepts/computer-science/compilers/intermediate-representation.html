@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Intermediate Representation</primer-title>
+
+    <primer-card>
+      <p>
+        A compiler has a hard job: it must accept many <em>source languages</em> and produce code for many
+        <em>target machines</em>. C, Rust, Swift and Fortran on the front; x86, ARM, RISC-V and WebAssembly on
+        the back. If every front end talked directly to every back end, you would need one translator for every
+        <strong>pairing</strong>. Instead, real compilers pass everything through a single shared middle
+        language — the <strong>intermediate representation</strong>, or <strong>IR</strong>.
+      </p>
+      <p>
+        The IR is the compiler's <em>lingua franca</em>: the "waist of the hourglass" where many front ends
+        pour in and many back ends flow out. Once <primer-ref to="computer-science/compilers/semantic-analysis-and-symbol-tables">semantic
+        analysis</primer-ref> has checked the <primer-ref to="computer-science/compilers/abstract-syntax-trees">abstract
+        syntax tree</primer-ref> and confirmed the program is meaningful, the compiler <strong>lowers</strong>
+        that tree into a flat, simple, machine-independent form. This page is about the most classic IR of all:
+        <strong>three-address code</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why an IR at all? The m×n → m+n argument</h2>
+      <p>
+        Suppose you support <strong>m</strong> source languages and <strong>n</strong> target machines. Wiring
+        each front end straight to each back end costs <strong>m × n</strong> translators — and adding one new
+        CPU means writing <em>m</em> brand-new back ends, one per language. That does not scale.
+      </p>
+      <p>
+        Route everything through a shared IR and the arithmetic changes completely. Each front end lowers to the
+        IR (that is <strong>m</strong> pieces) and each back end lowers from the IR (that is <strong>n</strong>
+        pieces): <strong>m + n</strong> in total. Add a new CPU and you write <em>one</em> back end — every
+        existing language retargets to it for free. This is exactly why the IR exists, and it is called
+        <strong>retargetability</strong>.
+      </p>
+      <primer-theorem name="The three jobs of an IR">
+        <ul>
+          <li><strong>Decouple the ends.</strong> The front end need not know the target CPU; the back end need
+            not know the source language. They meet only at the IR.</li>
+          <li><strong>Retargetability (m + n, not m × n).</strong> m front ends plus n back ends share one
+            middle language, so each new language or machine is one new piece, not a whole row or column.</li>
+          <li><strong>A good altitude for optimisation.</strong> The IR sits <em>below</em> the source (no
+            nested expressions, no syntactic sugar) but <em>above</em> the machine (no registers, no stack
+            layout). At that height, optimisations like constant folding and dead-code elimination are written
+            <strong>once</strong> and benefit every language and every target.</li>
+        </ul>
+      </primer-theorem>
+      <primer-vignette title="Why not just compile the AST straight to assembly?">
+        <p>
+          You can — tiny compilers do exactly that. But you pay for it. Every optimisation you want (removing a
+          redundant computation, folding <code>2 + 3</code> into <code>5</code>, deleting unreachable code) has
+          to be re-implemented for every source language and re-tuned for every instruction set. An IR gives you
+          <strong>one</strong> place to write those passes. The famous modern example is
+          <strong>LLVM IR</strong>: Clang (C/C++), Rust, Swift and dozens of other languages all lower to it,
+          the same optimiser runs on all of them, and back ends emit x86, ARM, RISC-V and WebAssembly from that
+          single representation. That is the m + n dream made real.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Three-address code</h2>
+      <p>
+        The defining feature of three-address code (TAC) is right there in the name. Each instruction has
+        <strong>at most one operator</strong> and refers to <strong>at most three addresses</strong>: typically
+        two source operands and one destination. The canonical shape is:
+      </p>
+      <primer-math display>x = y \;\;\text{op}\;\; z</primer-math>
+      <p>
+        where <code>x</code>, <code>y</code> and <code>z</code> are <em>addresses</em> — a program variable, a
+        constant, or a compiler-generated <strong>temporary</strong>. Temporaries (written <code>t1</code>,
+        <code>t2</code>, <code>t3</code>, …) are fresh names the compiler invents to hold the result of one
+        small step. They are the glue that lets a big expression be chopped into single-operator pieces.
+      </p>
+      <p>
+        Because every instruction does only one thing, a rich, deeply nested source expression must be
+        <strong>flattened</strong> (linearised) into a straight-line <em>sequence</em> of these tiny
+        instructions. That flattening is the heart of IR generation.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: flattening <code>a = b * c + d</code></h2>
+      <p>
+        Take the assignment <code>a = b * c + d</code>. In the source it is a single expression, but its AST has
+        two internal operator nodes: a multiply feeding an add. Following the usual precedence,
+        <code>b * c</code> happens first, then the sum. We walk the tree, and <strong>every internal node
+        gets its own temporary</strong>:
+      </p>
+      <primer-code lang="text">
+        Source:   a = b * c + d
+
+        Step 1 — compute the multiply into a temp:
+            t1 = b * c
+
+        Step 2 — add d, into a second temp:
+            t2 = t1 + d
+
+        Step 3 — store the result into a:
+            a  = t2
+      </primer-code>
+      <p>
+        Notice how each line has at most one operator, and the temporaries carry results forward: <code>t1</code>
+        holds <code>b * c</code>, then <code>t2</code> holds <code>t1 + d</code>. Read top to bottom, it is a
+        recipe a machine can follow one step at a time. A bigger expression such as
+        <code>x = (a + b) * (c - d)</code> flattens the same way — one temp for <code>a + b</code>, one for
+        <code>c - d</code>, one for the product:
+      </p>
+      <primer-code lang="text">
+        Source:   x = (a + b) * (c - d)
+
+            t1 = a + b
+            t2 = c - d
+            t3 = t1 * t2
+            x  = t3
+      </primer-code>
+      <p>
+        The rule is simple and mechanical: <strong>one temporary per internal (operator) node of the tree.</strong>
+        Leaves — plain variables and constants — need no temp; they are already addresses.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Building an IR generator</h2>
+      <p>
+        Flattening is easy to automate. Model the expression as a tiny AST — a number, a variable, or a binary
+        operation with a left and right child — and write <code>emit</code>, a recursive function that
+        <strong>lowers</strong> a node to TAC. For a leaf it just returns the address (the number or variable
+        name). For an operation it lowers <em>both</em> children first (post-order, just like an evaluator),
+        allocates a <strong>fresh temporary</strong>, appends one instruction, and returns that temp as the
+        address holding its result. Press <strong>Run</strong>:
+      </p>
+      <primer-code run>
+        // A tiny expression AST: a number, a variable, or a binary operation.
+        type Expr =
+          | { kind: "num"; value: number }                                  // a constant leaf
+          | { kind: "var"; name: string }                                   // a variable leaf
+          | { kind: "op";  op: "+" | "-" | "*" | "/"; left: Expr; right: Expr };  // an operation
+
+        const code: string[] = [];   // the emitted three-address instructions, in order
+        let tempCount = 0;           // counter for fresh temporaries t1, t2, t3, ...
+
+        function newTemp(): string {
+          tempCount += 1;
+          return "t" + tempCount;
+        }
+
+        // emit: lower an Expr to TAC and RETURN the address holding its value.
+        function emit(node: Expr): string {
+          switch (node.kind) {
+            case "num":                       // a leaf: the constant IS its own address
+              return String(node.value);
+
+            case "var":                       // a leaf: the variable name IS its own address
+              return node.name;
+
+            case "op": {                      // lower BOTH children first, then this operator
+              const left  = emit(node.left);
+              const right = emit(node.right);
+              const t = newTemp();                          // one fresh temp per operator node
+              code.push(t + " = " + left + " " + node.op + " " + right);
+              return t;                                     // the temp now holds the result
+            }
+          }
+        }
+
+        // Build the AST for  (a + b) * (c - d)
+        const expr: Expr = {
+          kind: "op", op: "*",
+          left:  { kind: "op", op: "+",
+                   left: { kind: "var", name: "a" }, right: { kind: "var", name: "b" } },
+          right: { kind: "op", op: "-",
+                   left: { kind: "var", name: "c" }, right: { kind: "var", name: "d" } },
+        };
+
+        const result = emit(expr);            // flatten the tree into `code`
+        code.push("x = " + result);           // store into the destination variable x
+
+        console.log("Three-address code for  x = (a + b) * (c - d):");
+        for (const line of code) console.log("    " + line);
+        // t1 = a + b
+        // t2 = c - d
+        // t3 = t1 * t2
+        // x = t3
+      </primer-code>
+      <p>
+        That short function is a real IR generator. The recursion mirrors the tree, and because children are
+        lowered before their parent, the temporaries are produced in exactly the order a machine must execute
+        them. Change the AST and re-run: any expression, however nested, comes out as flat three-address code.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Control flow: labels and jumps</h2>
+      <p>
+        Straight-line TAC handles arithmetic, but real programs branch and loop. The IR expresses control flow
+        the way the machine does — with <strong>labels</strong> (named positions in the code) and
+        <strong>jumps</strong>. There are two kinds of jump: an <strong>unconditional</strong> one
+        (<code>goto L</code>, always taken) and a <strong>conditional</strong> one
+        (<code>if t goto L</code>, taken only when the temporary <code>t</code> is true).
+      </p>
+      <p>
+        So a source-level <code>if</code> lowers into a test, a conditional jump, and some labels. Here is
+        <code>if (a &lt; b) max = b; else max = a;</code> as three-address code:
+      </p>
+      <primer-code lang="text">
+        Source:   if (a &lt; b) max = b; else max = a;
+
+              t1 = a &lt; b          // compare into a temporary (1 = true, 0 = false)
+              if t1 goto L1       // conditional jump to the "then" part
+              max = a             // the else branch falls through to here
+              goto L2             // skip over the then branch
+          L1: max = b             // the then branch
+          L2:                     // both branches rejoin here
+      </primer-code>
+      <p>
+        Every high-level construct — <code>while</code>, <code>for</code>, <code>switch</code>, short-circuit
+        <code>&amp;&amp;</code> — reduces to this same vocabulary of comparisons, labels and (conditional or
+        unconditional) jumps. The nested, indented shape of the source melts into a flat list, which is exactly
+        what a CPU wants: it has no <code>if</code> statement, only "compare, then maybe jump".
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Other flavours of IR</h2>
+      <p>
+        Three-address code is the classic, but it is not the only IR. Compilers pick a form that suits the work
+        at hand, and often use several in sequence:
+      </p>
+      <ul>
+        <li><strong>SSA (static single assignment).</strong> A refined TAC where every variable is assigned
+          <em>exactly once</em>. Reusing a name means making a new version (<code>x1</code>, <code>x2</code>),
+          which makes it far easier to track where each value came from. LLVM IR is in SSA form, and modern
+          optimisers love it.</li>
+        <li><strong>Stack / bytecode IR.</strong> Instead of naming temporaries, operands live on a stack:
+          <code>push a; push b; mul</code>. The JVM and Python's bytecode work this way — compact and easy to
+          interpret, at the cost of being a little further from register machines.</li>
+        <li><strong>Tree / high-level IR.</strong> Some compilers keep an intermediate <em>tree</em> that is
+          lower than the AST but still hierarchical, useful for pattern-matched instruction selection before
+          the final flattening.</li>
+      </ul>
+      <p>
+        They all serve the same purpose: a stable, machine-independent middle ground where the front end can put
+        the program down and the back end (and the optimiser) can pick it up.
+      </p>
+
+      <primer-vignette title="Watch out!">
+        <ul>
+          <li>
+            <strong>"Three-address" means AT MOST three addresses — and at most one operator.</strong> It is not
+            a rule that every instruction has exactly three. A copy like <code>a = t2</code> uses two addresses
+            and no operator; a plain <code>goto L1</code> uses none. The point is the <em>ceiling</em>: one
+            operator, up to three addresses, so nothing is nested.
+          </li>
+          <li>
+            <strong>The IR is machine-independent — it is not the bytecode you ship.</strong> It has no notion of
+            physical registers, stack slots, or a specific instruction set. It is an <em>internal</em>,
+            in-between form the compiler uses; the back end lowers it further into real machine code (or a
+            portable bytecode) afterwards. Do not confuse the compiler's private IR with a distributable
+            artifact.
+          </li>
+          <li>
+            <strong>Temporaries are not source variables.</strong> <code>t1</code>, <code>t2</code>, … are
+            invented by the compiler to hold intermediate results. They do not appear in the programmer's code
+            and are, at this level, unbounded — the register allocator later maps them onto the machine's finite
+            registers.
+          </li>
+        </ul>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "irQuiz@1": {
+          "intro": "You have flattened an expression into three-address code — now check the ideas behind the IR. Numbers change each time.",
+          "purpQ": "What is the main purpose of an intermediate representation?",
+          "purpA": "a shared, machine-independent middle language that decouples front ends from back ends",
+          "purpB": "to make the source code run faster without any translation",
+          "purpC": "to store the program's comments and formatting",
+          "purpD": "to replace the need for a parser",
+          "shapeQ": "Which best describes a three-address code instruction?",
+          "shapeA": "at most one operator and up to three addresses, e.g. t1 = a + b",
+          "shapeB": "always exactly three operators chained together",
+          "shapeC": "a whole nested expression on one line",
+          "shapeD": "a line of assembly for a specific CPU",
+          "tempQ": "What is a TEMPORARY (like t1, t2) in three-address code?",
+          "tempA": "a fresh compiler-generated name holding the result of one small step",
+          "tempB": "a variable the programmer must declare in the source",
+          "tempC": "a physical CPU register chosen by the front end",
+          "tempD": "a comment describing the instruction",
+          "retQ": "Why does routing every language through one IR help retargetability?",
+          "retA": "m front ends plus n back ends is m + n pieces, instead of m × n direct translators",
+          "retB": "it removes the need to optimise the code at all",
+          "retC": "it lets the CPU read source text directly",
+          "retD": "it makes every language use identical syntax",
+          "optQ": "Why is the IR a good level at which to run optimisations?",
+          "optA": "it is below the source but above the machine, so a pass is written once for all languages and targets",
+          "optB": "because it is written in the original source language",
+          "optC": "because it already contains the final register assignments",
+          "optD": "because optimisation is impossible on an AST",
+          "flatQ": "How is a nested expression turned into three-address code?",
+          "flatA": "walk the AST and emit one temporary per internal operator node",
+          "flatB": "print the source expression unchanged on a single line",
+          "flatC": "delete all the operators and keep only the variables",
+          "flatD": "sort the operands alphabetically",
+          "cfQ": "How does three-address code express an if-statement?",
+          "cfA": "with a comparison into a temp, then conditional and unconditional jumps to labels",
+          "cfB": "by keeping the nested if-else exactly as written in the source",
+          "cfC": "it cannot represent control flow at all",
+          "cfD": "by evaluating both branches and adding them",
+          "indQ": "The intermediate representation is...",
+          "indA": "machine-independent — it has no physical registers or specific instruction set",
+          "indB": "tied to one specific CPU chosen up front",
+          "indC": "the same thing as the shippable bytecode artifact",
+          "indD": "just the raw source text with whitespace removed",
+          "ssaQ": "In SSA (static single assignment) form, each variable is...",
+          "ssaA": "assigned exactly once; reusing a name creates a new version",
+          "ssaB": "assigned as many times as the programmer likes",
+          "ssaC": "stored only on an operand stack",
+          "ssaD": "forbidden from ever holding a value",
+          "tempCntQ": "How many temporaries does a fully-flattened  $ {a} \\times {b} + {c} \\times {d} $  need (one per operator)?",
+          "prodQ": "Flattening  $ ({a} + {b}) \\times ({c} - {d}) $  into three-address code, how many temporaries are created?",
+          "retCalcQ": "With {a} source languages and {b} target machines, how many pieces does the m + n IR approach need?",
+          "mnQ": "With {a} source languages and {b} target machines, how many direct translators would the m × n approach need?"
+        }
+      }
+    </script>
+    <primer-quiz name="irQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  { "prerequisites": ["computer-science/compilers/semantic-analysis-and-symbol-tables"], "completedDate": "2026-07-04" }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("irQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+
+    // --- concept multiple choice ---
+    { prompt: () => sceneStrings("purpQ"),
+      options: [
+        { text: () => sceneStrings("purpA"), correct: true },
+        { text: () => sceneStrings("purpB"), correct: false },
+        { text: () => sceneStrings("purpC"), correct: false },
+        { text: () => sceneStrings("purpD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("shapeQ"),
+      options: [
+        { text: () => sceneStrings("shapeA"), correct: true },
+        { text: () => sceneStrings("shapeB"), correct: false },
+        { text: () => sceneStrings("shapeC"), correct: false },
+        { text: () => sceneStrings("shapeD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("tempQ"),
+      options: [
+        { text: () => sceneStrings("tempA"), correct: true },
+        { text: () => sceneStrings("tempB"), correct: false },
+        { text: () => sceneStrings("tempC"), correct: false },
+        { text: () => sceneStrings("tempD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("retQ"),
+      options: [
+        { text: () => sceneStrings("retA"), correct: true },
+        { text: () => sceneStrings("retB"), correct: false },
+        { text: () => sceneStrings("retC"), correct: false },
+        { text: () => sceneStrings("retD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("optQ"),
+      options: [
+        { text: () => sceneStrings("optA"), correct: true },
+        { text: () => sceneStrings("optB"), correct: false },
+        { text: () => sceneStrings("optC"), correct: false },
+        { text: () => sceneStrings("optD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("flatQ"),
+      options: [
+        { text: () => sceneStrings("flatA"), correct: true },
+        { text: () => sceneStrings("flatB"), correct: false },
+        { text: () => sceneStrings("flatC"), correct: false },
+        { text: () => sceneStrings("flatD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("cfQ"),
+      options: [
+        { text: () => sceneStrings("cfA"), correct: true },
+        { text: () => sceneStrings("cfB"), correct: false },
+        { text: () => sceneStrings("cfC"), correct: false },
+        { text: () => sceneStrings("cfD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("indQ"),
+      options: [
+        { text: () => sceneStrings("indA"), correct: true },
+        { text: () => sceneStrings("indB"), correct: false },
+        { text: () => sceneStrings("indC"), correct: false },
+        { text: () => sceneStrings("indD"), correct: false },
+      ] },
+    { prompt: () => sceneStrings("ssaQ"),
+      options: [
+        { text: () => sceneStrings("ssaA"), correct: true },
+        { text: () => sceneStrings("ssaB"), correct: false },
+        { text: () => sceneStrings("ssaC"), correct: false },
+        { text: () => sceneStrings("ssaD"), correct: false },
+      ] },
+
+    // --- variable-driven (function answers, plain arithmetic) ---
+    // a*b + c*d has three operators (two products + one sum) => 3 temporaries, independent of the numbers.
+    { prompt: (v) => sceneStrings("tempCntQ", { a: v.a, b: v.b, c: v.c, d: v.d }),
+      variables: "a=[2:9] b=[2:9] c=[2:9] d=[2:9]",
+      answer: () => 3 },
+    // (a+b) * (c-d) has three operators => 3 temporaries.
+    { prompt: (v) => sceneStrings("prodQ", { a: v.a, b: v.b, c: v.c, d: v.d }),
+      variables: "a=[2:9] b=[2:9] c=[5:9] d=[1:4]",
+      answer: () => 3 },
+    // Retargetability: m + n pieces.
+    { prompt: (v) => sceneStrings("retCalcQ", { a: v.a, b: v.b }),
+      variables: "a=[2:8] b=[2:8]",
+      answer: (v) => v.a + v.b },
+    // Direct approach: m × n translators.
+    { prompt: (v) => sceneStrings("mnQ", { a: v.a, b: v.b }),
+      variables: "a=[2:8] b=[2:8]",
+      answer: (v) => v.a * v.b },
+  ]);
+</script>

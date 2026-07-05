@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Race Conditions</primer-title>
+
+    <primer-card>
+      <p>
+        It is payday, and your bank balance is <primer-math>\$100</primer-math>. At the very same instant,
+        you tap your card at an ATM downtown and your flatmate — who shares the account — taps theirs across
+        town. Both machines read the balance: <strong>$100</strong>. Both check "is there enough for a
+        $100 withdrawal?" — yes on both. Both dispense five crisp twenties. Both write the new balance back:
+        <strong>$0</strong>. Two hundred dollars just walked out of the building, and the bank's ledger
+        insists you only spent one hundred. Nobody wrote a bug. The <em>timing</em> was the bug.
+      </p>
+      <p>
+        That is a <strong>race condition</strong>: the outcome depends on the exact, unpredictable order in
+        which two
+        <primer-ref to="computer-science/concurrency/threads-vs-processes">threads</primer-ref>
+        happen to interleave while touching the same <strong>shared state</strong> — and that order is not
+        something your program controls. This page is about <em>why</em> races happen, the vocabulary to
+        talk about them precisely, and why they are so uniquely horrible to debug. The <em>cure</em> —
+        making operations mutually exclusive or atomic — we only preview here; locks earn a page of their
+        own.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The root cause: shared mutable state</h2>
+      <p>
+        A race needs exactly two ingredients, and both must be present:
+      </p>
+      <ul>
+        <li><strong>Shared</strong> — two or more threads can reach the same piece of memory; and</li>
+        <li><strong>Mutable</strong> — at least one of them <em>writes</em> to it.</li>
+      </ul>
+      <p>
+        Take either ingredient away and the race evaporates. If the data is <strong>never shared</strong> —
+        each thread has its own private copy — there is nothing to fight over. If the data is shared but
+        <strong>never modified</strong> — everyone only reads — then it doesn't matter who reads first,
+        because a read never changes what the next reader sees. Immutable data and thread-local data are
+        both perfectly safe under concurrency. It is the collision of <em>shared</em> and <em>writeable</em>
+        that opens the door.
+      </p>
+      <p>
+        Here is the entire problem in one line. A shared counter starts at <primer-math>0</primer-math>. Two
+        threads each run <code>count = count + 1</code> once. You would bet your lunch the counter ends at
+        <primer-math>2</primer-math>. Distressingly often, it ends at <primer-math>1</primer-math>.
+      </p>
+      <primer-code lang="typescript">
+let count = 0;   // shared, mutable — both conditions met
+
+// Thread A            // Thread B
+count = count + 1;     count = count + 1;
+
+// You expect count === 2.  Sometimes count === 1.  How?
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2><code>count = count + 1</code> is not one action — it is three</h2>
+      <p>
+        The trouble starts with a lie the source code tells you. That single, innocent-looking assignment is
+        <strong>not</strong> carried out by the hardware in one indivisible step. Underneath, the CPU does
+        three separate things:
+      </p>
+      <ul>
+        <li><strong>Read</strong> the current value of <code>count</code> from memory into a register;</li>
+        <li><strong>Modify</strong> it — add one inside the register;</li>
+        <li><strong>Write</strong> the new value back to memory.</li>
+      </ul>
+      <p>
+        This <strong>read–modify–write</strong> trio is three distinct moments in time, and the operating
+        system's scheduler is free to pause a thread <em>between</em> any two of them and let another thread
+        run for a while. The gap between reading a value and writing back the result is where the whole
+        family of concurrency bugs lives. When both threads read the old value before either has written the
+        new one, one of the two increments simply <strong>vanishes</strong> — the classic
+        <strong>lost update</strong>.
+      </p>
+      <primer-vignette title="Watch out! — a data race and a race condition are not quite the same thing">
+        <p>
+          People use the terms interchangeably, but they name slightly different sins. A <strong>data
+          race</strong> is the narrow, mechanical event of two threads accessing the same memory location at
+          the same time with at least one write and no synchronisation between them — a property a tool or
+          the language memory model can detect. A <strong>race condition</strong> is the broader, logical
+          problem: your program's <em>correctness</em> depends on timing. You can have a race condition with
+          <em>no</em> data race at all — for example two threads that each take a lock correctly but in an
+          order that produces the wrong answer (a bank transfer that checks the balance, releases the lock,
+          then withdraws). Fixing every data race does not automatically fix every race condition. Data race
+          ⊂ race condition, roughly — but neither strictly contains the other.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Interleavings and schedules</h2>
+      <p>
+        We need two precise words. An <strong>interleaving</strong> is one particular merge of the
+        individual steps of several threads into a single sequence — as if a dealer shuffled two decks
+        together, keeping each deck's own order but mixing them against each other. A <strong>schedule</strong>
+        is the specific interleaving the scheduler actually chose on a given run.
+      </p>
+      <p>
+        Because each thread's steps must stay in order but can be separated by the other thread's steps, the
+        number of possible interleavings explodes fast. Two threads of three steps each already admit
+        <primer-math>\binom{6}{3} = 20</primer-math> distinct interleavings. Your program is <em>correct</em>
+        only if <strong>every single one</strong> of those orderings gives the right answer. A race condition
+        is precisely the situation where <em>some</em> interleavings are fine and <em>some</em> are wrong —
+        and you don't get to pick which one runs.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A losing interleaving, step by step</h2>
+      <p>
+        Let's freeze the scheduler and make it choose the worst possible order. Both threads want to add
+        <primer-math>1</primer-math> to a counter starting at <primer-math>0</primer-math>. Read down the
+        table — each row is one CPU step, and the "reg" columns are each thread's private register. Watch the
+        moment the two reads overlap.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "raceInterleave": {
+            "title": "A losing interleaving: two increments, but count ends at 1",
+            "s1": "A reads count (0) into its register.",
+            "s2": "B reads count — still 0! — before A has written anything back.",
+            "s3": "A adds 1 in its own register: 0 + 1 = 1.",
+            "s4": "B adds 1 in its own register too: 0 + 1 = 1.",
+            "s5": "A writes its result: count = 1.",
+            "s6": "B writes its result on top: count = 1 again. A's increment is LOST — count is 1, not 2."
+          }
+        }
+      </script>
+      <primer-geometry scene="raceInterleave"></primer-geometry>
+
+      <p>
+        The disaster is pure timing. Thread A reads <primer-math>0</primer-math>, and <em>before it can write
+        its result back</em>, thread B also reads <primer-math>0</primer-math>. Now both are computing
+        <primer-math>0 + 1 = 1</primer-math>. A writes <primer-math>1</primer-math>; B writes
+        <primer-math>1</primer-math> on top of it. Two increments happened, yet <code>count</code> rose by
+        only one. A's update was silently <strong>clobbered</strong> — a lost update.
+      </p>
+      <p>
+        Change the interleaving — let A fully finish read-modify-write before B starts — and you get the
+        correct <primer-math>2</primer-math>. The <em>same code</em> yields a different answer depending
+        purely on scheduler timing. Code that misbehaves only on unlucky interleavings is a nightmare,
+        precisely because it usually works.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Run the race yourself</h2>
+      <p>
+        The sandbox below runs on a single thread, so it cannot produce a <em>real</em> race — which is
+        exactly what makes it useful. Because we control the timeline, we can <strong>script the precise
+        interleaving</strong> and make the bug happen every time instead of one run in a thousand. The
+        program models each thread's read/modify/write as explicit steps, then plays several
+        <em>different</em> schedules of the same two increments and prints the final value for each. Press
+        <strong>Run ▶</strong>:
+      </p>
+      <primer-code run>
+        // Each thread's increment is THREE steps on a shared counter.
+        // A "schedule" is just the order those steps actually execute in.
+        // reg[t] is thread t's private register (what it has "read" so far).
+
+        interface Machine { count: number; reg: number[]; }
+
+        function step(m: Machine, action: string): void {
+          const t = Number(action[1]);        // "R0" =&gt; thread 0, "R1" =&gt; thread 1
+          const kind = action[0];
+          if (kind === "R") m.reg[t] = m.count;              // READ  shared -&gt; my register
+          else if (kind === "M") m.reg[t] = m.reg[t] + 1;    // MODIFY my register
+          else if (kind === "W") m.count = m.reg[t];         // WRITE my register -&gt; shared
+        }
+
+        function run(label: string, schedule: string[]): void {
+          const m: Machine = { count: 0, reg: [0, 0] };
+          for (const a of schedule) step(m, a);
+          console.log(label.padEnd(26) + schedule.join(" ") + "   =&gt; count = " + m.count);
+        }
+
+        console.log("Two threads, each doing count = count + 1, starting from 0:");
+        console.log("");
+
+        // Serial: thread 0 finishes entirely before thread 1 begins.
+        run("serial (0 then 1):", ["R0", "M0", "W0", "R1", "M1", "W1"]);   // 2
+        run("serial (1 then 0):", ["R1", "M1", "W1", "R0", "M0", "W0"]);   // 2
+
+        // Interleaved: both READ before either WRITES -> a lost update.
+        run("both read first:",   ["R0", "R1", "M0", "M1", "W0", "W1"]);   // 1
+        run("ping-pong:",         ["R0", "R1", "M1", "W1", "M0", "W0"]);   // 1
+
+        // Interleaved but harmless: 0 fully commits before 1 reads.
+        run("0 commits, then 1:", ["R0", "M0", "W0", "R1", "M1", "W1"]);   // 2
+
+        console.log("");
+        console.log("Same code, same two increments. Only the ORDER changed —");
+        console.log("and the answer swings between 1 and 2.");
+      </primer-code>
+      <p>
+        Nothing in the increments changed between runs; only the order did. Yet the final value swings across
+        the range <primer-math>\{1, 2\}</primer-math>. Order alone decides correctness — that is the whole
+        essence of a race.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Nondeterminism: the Heisenbug</h2>
+      <p>
+        On a real multi-core machine you do not get to script the schedule — the hardware and OS pick one for
+        you, differently on every run, depending on cache state, interrupts, what else the machine is doing,
+        and plain luck. A racy program is therefore <strong>nondeterministic</strong>: the same input can
+        give different outputs on different runs. Very often the bad interleaving is rare, so the program
+        appears to work — passing your tests 999 times out of 1000, then failing in production at 3 a.m.
+      </p>
+      <p>
+        Worse still, races are famously <strong>shy</strong>. The moment you try to observe one — add a
+        <code>print</code>, attach a debugger, single-step — you change the timing, the rare interleaving
+        stops happening, and the bug "disappears." A bug that vanishes when you look at it is nicknamed a
+        <strong>Heisenbug</strong>, after the uncertainty principle: measurement disturbs the thing measured.
+      </p>
+      <primer-vignette title="Watch out! — adding a print statement 'fixed it'">
+        <p>
+          You add a <code>console.log</code> inside the loop, the crash stops, you ship it. You have fixed
+          <em>nothing</em>. The extra I/O merely slowed one thread by a few microseconds and nudged the
+          scheduler away from the unlucky interleaving — this time, on this machine, under this load. The
+          race is still there, waiting for a faster CPU, a different core count, or a heavier server to line
+          the steps up again. Changing timing is not the same as enforcing correctness. The only real fix is
+          to make the shared access <strong>atomic</strong> or <strong>mutually exclusive</strong>, so the
+          bad interleaving becomes <em>impossible</em> rather than merely unlikely.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Check-then-act and TOCTOU</h2>
+      <p>
+        Lost updates are one flavour of race. Another huge family is <strong>check-then-act</strong>: a
+        thread inspects some shared state, decides what to do based on what it saw, and then acts — but
+        between the <em>check</em> and the <em>act</em>, another thread changes the state, so the decision is
+        now based on stale information. Our ATM story was exactly this: <em>check</em> "is the balance ≥
+        $100?", then <em>act</em> "withdraw $100" — with a fatal gap in between.
+      </p>
+      <primer-code lang="typescript">
+// CHECK-THEN-ACT: classic and broken under concurrency.
+if (balance &gt;= 100) {        // CHECK  — true for BOTH threads...
+  // ...scheduler may switch threads right here...
+  balance = balance - 100;    // ACT    — BOTH subtract; balance goes negative
+}
+      </primer-code>
+      <p>
+        When the shared thing being checked is a resource — a file, a lock file, a network port — this
+        pattern has a specific name: a <strong>TOCTOU</strong> race, for <em>Time Of Check To Time Of
+        Use</em>. A program checks "does this file exist / am I allowed to open it?" and then, a beat later,
+        opens it. In that beat an attacker can swap the file for a symbolic link to <code>/etc/passwd</code>,
+        and the program dutifully writes where it was checked <em>not</em> to. TOCTOU bugs are a whole
+        category of real-world <strong>security vulnerabilities</strong>, not just wrong-answer bugs — the
+        window between check and use is an attacker's playground.
+      </p>
+      <p>
+        Notice the shape shared by every example: a value is observed, a decision hinges on it, and the value
+        can change before the decision is carried out. The cure, again, is to fuse check-and-act into one
+        indivisible step so nothing can slip into the gap — the subject of
+        <primer-ref soft to="computer-science/operating-systems/synchronization-primitives">synchronization primitives</primer-ref>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The fix, previewed</h2>
+      <p>
+        Every race we have met has the same root and the same remedy. The root is that a sequence of steps
+        that <em>should</em> be one indivisible action can be interrupted partway. The remedy is to restore
+        indivisibility — to make sure that while one thread is in the middle of touching shared state, no
+        other thread can observe or modify it.
+      </p>
+      <primer-theorem name="Two ways to close the gap">
+        <ul>
+          <li>
+            <strong>Atomicity</strong> — make the whole read-modify-write happen as a single, unbreakable
+            hardware step, so there is no "middle" to interrupt (e.g. an atomic increment, or
+            compare-and-swap).
+          </li>
+          <li>
+            <strong>Mutual exclusion</strong> — wrap the shared access in a lock so that at most one thread
+            is inside the <em>critical section</em> at a time; everyone else waits their turn.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Both make the dangerous interleavings <em>impossible</em> rather than merely improbable — which is
+        the only kind of fix that survives a faster CPU and a heavier load. How locks, mutexes and semaphores
+        actually deliver that guarantee is the next page.
+      </p>
+
+      <primer-vignette title="Has a race condition ever actually killed someone?">
+        <p>
+          Yes — and it is one of the most sobering stories in computing. The <strong>Therac-25</strong>, a
+          radiation-therapy machine from the mid-1980s, had a race condition in its control software. If an
+          operator typed the treatment settings <em>unusually fast</em>, a background thread setting up the
+          machine's hardware could interleave badly with the thread reading the console, leaving the machine
+          in an inconsistent state — firing a high-power electron beam without the protective target in
+          place. Because it only triggered on a fast, specific keystroke timing, it passed testing and worked
+          almost every time. Between 1985 and 1987 it delivered massive radiation overdoses to at least six
+          patients, several fatally. It is now the canonical case study in software-safety courses: proof
+          that "it works 999 times out of 1000" is not good enough when the thousandth time matters, and that
+          nondeterministic timing bugs must be <em>designed out</em>, not tested away.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "raceQuiz@1": { "instructions": "Check your understanding of race conditions, interleavings, and why they are so hard to catch." } }
+    </script>
+    <primer-quiz name="raceQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/concurrency/threads-vs-processes"],
+    "completedDate": "2026-07-04"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // A timeline table of the losing interleaving of two threads incrementing a
+  // shared counter. Each step reveals one more row (one CPU action). Columns:
+  //   step | Thread A | A.reg | count | B.reg | Thread B
+  registerGeometryScene("raceInterleave", ({ board, step, colors, sceneStrings }) => {
+    const colT   = 0.4;   // step number
+    const colA   = 2.2;   // thread A action
+    const colRA  = 4.1;   // A register
+    const colCnt = 5.6;   // shared count
+    const colRB  = 7.1;   // B register
+    const colB   = 9.0;   // thread B action
+    const top    = 6.4;
+    const rowH   = 1.0;
+
+    const text = (x, y, s, col, size = 15, bold = false) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: size,
+        fixed: true, highlight: false, strokeColor: col, color: col,
+        cssStyle: bold ? "font-weight:700" : "",
+      });
+
+    // header row
+    text(colT,   top, "step",     colors.ink,    14);
+    text(colA,   top, "Thread A", colors.cat[0], 15, true);
+    text(colRA,  top, "A.reg",    colors.cat[0], 14);
+    text(colCnt, top, "count",    colors.ink,    15, true);
+    text(colRB,  top, "B.reg",    colors.cat[1], 14);
+    text(colB,   top, "Thread B", colors.cat[1], 15, true);
+
+    // header underline
+    board.create("segment",
+      [[-0.3, top - 0.45], [9.9, top - 0.45]],
+      { strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false });
+
+    // draws one timeline row. aAct/bAct: the action text ("" if idle that step).
+    // hot marks the clobbering write on the shared-count cell.
+    const drawRow = (n, y, aAct, aReg, cnt, bReg, bAct, hot) => {
+      text(colT, y, String(n), colors.ink, 14);
+      if (aAct) text(colA, y, aAct, colors.cat[0], 14);
+      text(colRA, y, aReg, colors.cat[0], 14);
+      if (hot) {
+        board.create("polygon",
+          [[colCnt - 0.55, y - 0.34], [colCnt + 0.55, y - 0.34],
+           [colCnt + 0.55, y + 0.34], [colCnt - 0.55, y + 0.34]],
+          { fillColor: colors.cat[2], fillOpacity: 0.22,
+            vertices: { visible: false }, fixed: true, highlight: false,
+            borders: { strokeColor: colors.cat[2], strokeWidth: 1.2 } });
+      }
+      text(colCnt, y, cnt, hot ? colors.cat[2] : colors.ink, 15, true);
+      text(colRB, y, bReg, colors.cat[1], 14);
+      if (bAct) text(colB, y, bAct, colors.cat[1], 14);
+    };
+
+    step(sceneStrings("s1"), () => {
+      drawRow(1, top - rowH, "read", "0", "0", "–", "", false);
+    });
+    step(sceneStrings("s2"), () => {
+      drawRow(2, top - 2 * rowH, "", "0", "0", "0", "read", false);
+    });
+    step(sceneStrings("s3"), () => {
+      drawRow(3, top - 3 * rowH, "modify", "1", "0", "0", "", false);
+    });
+    step(sceneStrings("s4"), () => {
+      drawRow(4, top - 4 * rowH, "", "1", "0", "1", "modify", false);
+    });
+    step(sceneStrings("s5"), () => {
+      drawRow(5, top - 5 * rowH, "write", "1", "1", "1", "", false);
+    });
+    step(sceneStrings("s6"), () => {
+      drawRow(6, top - 6 * rowH, "", "1", "1", "1", "write", true);
+    });
+  }, {
+    boundingbox: [-0.6, 7.1, 10.2, -0.5],
+    keepAspect: false,
+    title: () => makeStrings("raceInterleave")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("raceQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "A race condition is best defined as…",
+      options: [
+        { text: "the result depends on the unpredictable order in which threads interleave over shared state", correct: true },
+        { text: "the program runs as fast as the hardware allows", correct: false },
+        { text: "two threads run on two separate CPU cores", correct: false },
+        { text: "one thread always finishes before another starts", correct: false },
+      ] },
+
+    { prompt: "Two threads each run count = count + 1 on a shared counter starting at 0, with no synchronisation. What is the range of possible final values?",
+      options: [
+        { text: "1 or 2 — a lost update can leave it at 1", correct: true },
+        { text: "Always exactly 2", correct: false },
+        { text: "Always exactly 1", correct: false },
+        { text: "0, 1, or 2, chosen at random", correct: false },
+      ] },
+
+    { prompt: "Why is count = count + 1 unsafe when two threads run it at once?",
+      options: [
+        { text: "It is really three steps — read, modify, write — that can interleave", correct: true },
+        { text: "Addition is a slow operation", correct: false },
+        { text: "The variable is too small to hold the result", correct: false },
+        { text: "Threads are not allowed to share memory at all", correct: false },
+      ] },
+
+    { prompt: "A race condition requires which two properties of the data involved?",
+      options: [
+        { text: "It is shared between threads AND at least one thread writes to it", correct: true },
+        { text: "It is large AND stored on disk", correct: false },
+        { text: "It is private to one thread AND read-only", correct: false },
+        { text: "It is encrypted AND compressed", correct: false },
+      ] },
+
+    { prompt: "Which change to the shared data would make the race impossible on its own?",
+      options: [
+        { text: "Making it immutable, so every thread only ever reads it", correct: true },
+        { text: "Making it a larger integer type", correct: false },
+        { text: "Storing it in a faster region of memory", correct: false },
+        { text: "Giving it a longer variable name", correct: false },
+      ] },
+
+    { prompt: "When both threads read the old counter value before either writes back, one increment disappears. This is called a…",
+      options: [
+        { text: "lost update", correct: true },
+        { text: "buffer overflow", correct: false },
+        { text: "stack overflow", correct: false },
+        { text: "memory leak", correct: false },
+      ] },
+
+    { prompt: "What is an 'interleaving' of two threads?",
+      options: [
+        { text: "one particular merge of their steps into a single sequence, each thread's own order preserved", correct: true },
+        { text: "the total number of threads running", correct: false },
+        { text: "the speed at which each thread executes", correct: false },
+        { text: "the amount of memory the threads share", correct: false },
+      ] },
+
+    { prompt: "A racy program passes its tests 999 runs out of 1000, then fails in production. What property does this illustrate?",
+      options: [
+        { text: "Nondeterminism — the same input can give different outputs depending on timing", correct: true },
+        { text: "Determinism — the output is fully fixed by the input", correct: false },
+        { text: "The tests are simply too slow", correct: false },
+        { text: "The production server has less memory", correct: false },
+      ] },
+
+    { prompt: "A concurrency bug that disappears the moment you add a print statement or attach a debugger is nicknamed a…",
+      options: [
+        { text: "Heisenbug", correct: true },
+        { text: "syntax error", correct: false },
+        { text: "regression", correct: false },
+        { text: "off-by-one error", correct: false },
+      ] },
+
+    { prompt: "Adding a console.log inside a racy loop and finding the crash stops means…",
+      options: [
+        { text: "nothing is truly fixed — you only changed the timing so the bad interleaving got rarer", correct: true },
+        { text: "the race condition has been correctly eliminated", correct: false },
+        { text: "the shared data is now atomic", correct: false },
+        { text: "the threads now run on one core", correct: false },
+      ] },
+
+    { prompt: "The pattern 'inspect shared state, decide, then act on the decision' — where the state can change in between — is called…",
+      options: [
+        { text: "check-then-act", correct: true },
+        { text: "read-only access", correct: false },
+        { text: "busy-waiting", correct: false },
+        { text: "context switching", correct: false },
+      ] },
+
+    { prompt: "TOCTOU stands for which race, often a security vulnerability?",
+      options: [
+        { text: "Time Of Check To Time Of Use", correct: true },
+        { text: "Total Order Concurrency Timing Of Use", correct: false },
+        { text: "Thread Ordering, Cache Timing Or Underflow", correct: false },
+        { text: "Type Of Check, Type Of Update", correct: false },
+      ] },
+
+    { prompt: "How does a data race differ from a race condition?",
+      options: [
+        { text: "A data race is the mechanical event of unsynchronised concurrent access with a write; a race condition is the broader logical bug where correctness depends on timing", correct: true },
+        { text: "They are exactly the same thing with two names", correct: false },
+        { text: "A data race can only happen on a single core", correct: false },
+        { text: "A race condition only involves reads, never writes", correct: false },
+      ] },
+
+    { prompt: "The two general strategies to prevent races both work by…",
+      options: [
+        { text: "making the dangerous interleavings impossible — via atomicity or mutual exclusion", correct: true },
+        { text: "making the threads run faster so they finish sooner", correct: false },
+        { text: "adding more threads to share the work", correct: false },
+        { text: "printing debug output to slow the threads down", correct: false },
+      ] },
+
+    { prompt: "Two threads of 3 steps each, keeping each thread's steps in order, admit how many distinct interleavings?",
+      options: [
+        { text: "20", correct: true },
+        { text: "6", correct: false },
+        { text: "9", correct: false },
+        { text: "720", correct: false },
+      ] },
+
+    { prompt: "Why can a single-threaded sandbox still teach us about races convincingly?",
+      options: [
+        { text: "Because we can script an exact interleaving and force the bug to happen every time", correct: true },
+        { text: "Because single-threaded code races just as often as multi-threaded code", correct: false },
+        { text: "Because it uses more CPU cores than a real machine", correct: false },
+        { text: "It cannot — races need real hardware to demonstrate at all", correct: false },
+      ] },
+
+    { prompt: "The bank-account overdraw (two ATMs both read $100, both withdraw, balance ends wrong) is an instance of which race?",
+      options: [
+        { text: "check-then-act on shared mutable state (the balance)", correct: true },
+        { text: "a deadlock between two locks", correct: false },
+        { text: "a memory leak in the ATM software", correct: false },
+        { text: "an immutable-data race, which is impossible", correct: false },
+      ] },
+  ]);
+</script>

@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Fault Tolerance</primer-title>
+
+    <primer-card>
+      <p>
+        It is the busiest shopping hour of the year, and a hundred thousand people are trying to check out at
+        once. Somewhere in a data centre a hard drive dies. A few racks over, a power supply hiccups. A
+        network switch drops offline for eight seconds. On any single machine, each of these is a small
+        catastrophe — and yet the checkout page never so much as flickers. Orders keep flowing, money keeps
+        moving, and nobody outside the building ever knows anything broke.
+      </p>
+      <p>
+        That is <strong>fault tolerance</strong>: the art of building a <em>reliable whole out of
+        unreliable parts</em>. Every physical component — disk, wire, fan, chip — will eventually fail; that
+        is not a possibility to be engineered away but a certainty to be planned around. A fault-tolerant
+        system is one that keeps giving correct answers and staying available <em>despite</em> the failure of
+        some of its pieces. This page is about the one big idea that makes that possible — <strong>redundancy</strong>
+        — and the machinery that turns it into working systems: replication and voting, checkpoints and
+        recovery, and the surprisingly deep problem of even <em>noticing</em> that something has died. It
+        builds directly on the
+        <primer-ref to="computer-science/distributed-systems/models-and-failure">system and failure models</primer-ref>
+        and on how nodes reach
+        <primer-ref to="computer-science/distributed-systems/consensus-paxos-and-raft">agreement under failure</primer-ref>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Fault, error, failure — three words, not one</h2>
+      <p>
+        Careless talk lumps everything under "it broke." Engineers who build reliable systems keep three
+        stages carefully apart, because you can intervene at each one:
+      </p>
+      <ul>
+        <li>
+          <strong>Fault</strong> — the underlying <em>defect or flaw</em>: a cosmic ray flips a bit, a solder
+          joint cracks, a line of code has an off-by-one. A fault is a cause, and it may sit dormant for
+          years.
+        </li>
+        <li>
+          <strong>Error</strong> — the fault becomes <em>active</em> and puts the system into a wrong internal
+          state: the flipped bit is now read as data, the cracked joint drops a signal. An error is a wrong
+          state that has not yet been noticed from outside.
+        </li>
+        <li>
+          <strong>Failure</strong> — the error <em>escapes</em> and the system's visible behaviour deviates
+          from what it promised: the wrong answer reaches the user, the service goes down.
+        </li>
+      </ul>
+      <p>
+        The chain runs <strong>fault → error → failure</strong>, and the whole discipline of fault tolerance
+        is about <em>breaking the chain before the last arrow</em> — catching and masking an error so it never
+        becomes a failure the outside world can see. A fault that never activates, or an error that is caught
+        and corrected, causes no failure at all. That is the win.
+      </p>
+      <primer-theorem name="The reliability vocabulary">
+        <ul>
+          <li>
+            <strong>Reliability</strong> — the probability the system runs correctly across a whole interval
+            (often summarised as <em>mean time to failure</em>, MTTF).
+          </li>
+          <li>
+            <strong>Availability</strong> — the fraction of time the system is up and usable right now,
+            <primer-math>\frac{\text{MTTF}}{\text{MTTF} + \text{MTTR}}</primer-math>, where MTTR is the mean
+            time to <em>repair</em>. This is where the famous "number of nines" (99.999% ≈ five minutes of
+            downtime a year) comes from.
+          </li>
+          <li>
+            <strong>Fault tolerance</strong> — the property of continuing to meet those goals even while some
+            components are faulty.
+          </li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Redundancy: the master tool</h2>
+      <p>
+        There is really only one fundamental weapon against component failure, and everything else is a
+        variation on it: <strong>redundancy</strong> — deliberately keeping <em>more than you strictly
+        need</em>, so that a survivor can carry on when a copy dies. It comes in three flavours, distinguished
+        by <em>what</em> you duplicate:
+      </p>
+      <ul>
+        <li>
+          <strong>Space redundancy</strong> — replicate the <em>components</em>. Run three servers where one
+          would do; keep the same file on five disks. If a copy fails, another copy already holds the answer.
+        </li>
+        <li>
+          <strong>Time redundancy</strong> — replicate the <em>execution</em>. Retry the request, or
+          re-run the computation. This is cheap (no extra hardware) and beats <em>transient</em> faults — a
+          glitch that is gone by the second attempt — but does nothing for a permanently dead component.
+        </li>
+        <li>
+          <strong>Information redundancy</strong> — replicate the <em>bits</em>. Add extra, carefully chosen
+          bits so the data can detect and even repair its own corruption: parity, checksums, error-correcting
+          codes (ECC memory), RAID. A few redundant bits let you notice — and often fix — a flipped one.
+        </li>
+      </ul>
+      <p>
+        For replicated <em>components</em> there are two organising styles, and the difference is what the
+        backups do while all is well:
+      </p>
+      <ul>
+        <li>
+          <strong>Active replication</strong> — every replica processes <em>every</em> request in lock-step,
+          all the time. Failover is instant (the survivors were already computing the answer) but you pay full
+          cost on every node continuously.
+        </li>
+        <li>
+          <strong>Passive replication (primary–backup)</strong> — one <em>primary</em> does the work and
+          ships its state to idle <em>backups</em>. Cheaper, but when the primary dies there is a recovery gap
+          while a backup is promoted and catches up.
+        </li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>N-modular redundancy and majority voting</h2>
+      <p>
+        Replication alone raises a sharp question: if you have three copies and they <em>disagree</em>, which
+        one do you believe? The classic answer is <strong>N-modular redundancy (NMR)</strong>: run
+        <primer-math>N</primer-math> identical units on the same input and put a <strong>voter</strong> in
+        front of the output that returns the <strong>majority</strong> answer. The famous case is
+        <primer-math>N = 3</primer-math> — <strong>Triple Modular Redundancy (TMR)</strong>:
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "tmrVote": {
+            "title": "Triple Modular Redundancy: three modules feed one voter",
+            "in": "The same input goes to all three modules.",
+            "mods": "Three identical modules each compute an answer independently.",
+            "fault": "Module 2 suffers a fault and outputs a wrong value (7 instead of 4).",
+            "vote": "The voter takes the MAJORITY: two say 4, one says 7 — output is 4. The fault is masked."
+          }
+        }
+      </script>
+      <primer-geometry scene="tmrVote"></primer-geometry>
+
+      <p>
+        Because two of the three modules still agree on the right answer, the voter's majority rule
+        <strong>masks</strong> the single fault entirely — the wrong value never leaves the box. In general an
+        NMR system with <primer-math>N = 2f + 1</primer-math> modules survives up to <primer-math>f</primer-math>
+        simultaneous faulty modules: TMR (<primer-math>N=3</primer-math>) tolerates <primer-math>f = 1</primer-math>,
+        five-way redundancy tolerates <primer-math>f = 2</primer-math>, and so on. This is exactly how flight
+        computers, spacecraft, and safety-critical controllers keep flying with a chip on fire.
+      </p>
+      <primer-vignette title="But what if the voter itself fails?">
+        <p>
+          Sharp question — and it exposes the catch in every redundancy scheme: you have not <em>removed</em>
+          the single point of failure, you have <em>moved</em> it to the voter. If the one voter dies, the
+          whole gloriously-redundant triplet is useless. Real safety-critical systems answer this by
+          replicating the voter too (and sometimes voting on the voters), pushing the single point of failure
+          down to a tiny, exhaustively-verified, ultra-simple circuit whose failure probability is orders of
+          magnitude below everything it guards. You can never reach <em>zero</em> — you can only keep chasing
+          the weakest remaining link until it is negligibly small.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Checkpointing and recovery</h2>
+      <p>
+        Voting masks a fault at the instant it happens, but many systems face a different problem: a node
+        <em>crashes and restarts</em>, losing everything in volatile memory. Re-running a computation that has
+        been chugging for six hours from scratch is agony. The cure is <strong>checkpointing</strong>:
+        periodically save a snapshot of the system's state to <strong>stable storage</strong> — durable
+        storage (disk, replicated storage) that survives a crash. On restart, the node does not begin from
+        zero; it <strong>rolls back</strong> to its most recent checkpoint and resumes from there.
+      </p>
+      <p>
+        A checkpoint alone loses everything since the last snapshot, so it is paired with a <strong>log</strong>.
+        In a <strong>write-ahead log (WAL)</strong>, every change is appended to a durable log <em>before</em>
+        it is applied; in a <strong>message log</strong>, incoming messages are recorded. After a crash the
+        recovery procedure is: load the last checkpoint, then <strong>replay the log</strong> forward to
+        reconstruct everything that happened afterwards. Checkpoint plus log = you never lose committed work,
+        and you never have to redo the hours before the checkpoint.
+      </p>
+      <p>
+        The design knob is <strong>how often to checkpoint</strong>, and it is a genuine trade-off:
+      </p>
+      <ul>
+        <li>
+          <strong>Frequent checkpoints</strong> → little log to replay after a crash, so <em>fast recovery</em>
+          — but each snapshot costs time and I/O, so <em>high steady-state overhead</em> when nothing is even
+          failing.
+        </li>
+        <li>
+          <strong>Rare checkpoints</strong> → cheap during normal running, but a crash means replaying a long
+          log, so <em>slow recovery</em>.
+        </li>
+      </ul>
+      <p>
+        The sweet spot depends on how often you expect to crash and how much a slow recovery costs you — you
+        pay a small tax constantly to buy a shorter outage occasionally. Databases live and die by exactly
+        this WAL-plus-checkpoint machinery.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Detecting failure: heartbeats and the fundamental limit</h2>
+      <p>
+        None of this helps if the system cannot <em>tell</em> that a component has died. The workhorse
+        mechanism is the <strong>heartbeat</strong>: each node periodically sends "I'm alive" to a monitor (or
+        to its peers). If no heartbeat arrives within a <strong>timeout</strong>, the monitor declares the
+        node dead and triggers <strong>failover</strong> — promoting a backup, rerouting traffic, kicking off
+        recovery.
+      </p>
+      <p>
+        And here we hit one of the deepest truths in distributed systems, straight from the
+        <primer-ref to="computer-science/distributed-systems/models-and-failure">failure models</primer-ref>:
+        in an <em>asynchronous</em> network you <strong>cannot distinguish a slow node from a dead one</strong>.
+        A missing heartbeat might mean the node crashed — or it might mean the node is perfectly healthy but
+        its message is stuck behind a garbage-collection pause, a congested switch, or a briefly-partitioned
+        network. The timeout is a <em>guess</em>, and you are forced to trade two kinds of mistake:
+      </p>
+      <ul>
+        <li>
+          A <strong>short timeout</strong> detects real crashes quickly but <em>falsely accuses</em> healthy-but-slow
+          nodes — triggering needless failovers, and in the worst case two nodes both acting as primary
+          ("split brain").
+        </li>
+        <li>
+          A <strong>long timeout</strong> avoids false alarms but leaves the system limping on a dead node for
+          longer before it reacts.
+        </li>
+      </ul>
+      <primer-vignette title="Watch out! — a heartbeat timeout does NOT reliably mean the node is dead">
+        <p>
+          It is tempting to treat "the heartbeat timed out" as a fact: the node is gone, promote the backup,
+          move on. It is not a fact — it is an <em>inference under uncertainty</em>, and it is sometimes
+          wrong. The classic disaster is <strong>split brain</strong>: a network partition, not a crash,
+          separates a still-running primary from its monitor; the monitor times out, declares it dead, and
+          promotes a backup to primary. Now <em>two</em> primaries are both accepting writes on opposite sides
+          of the partition, silently corrupting each other's data. This is exactly why serious systems don't
+          rely on a lone timeout to make the call — they route the "who is alive" decision through
+          <primer-ref to="computer-science/distributed-systems/consensus-paxos-and-raft">consensus</primer-ref>
+          and fencing (majority quorums, leases) so that at most one node can win, even when the network is
+          lying to everyone. A timeout tells you a node is <em>unreachable</em>, never that it is
+          <em>dead</em>.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>The reliability maths: why replicas win so fast</h2>
+      <p>
+        Here is the quantitative heart of why redundancy is so powerful. Suppose one node fails
+        <em>independently</em> with probability <primer-math>p</primer-math>. If you keep
+        <primer-math>k</primer-math> replicas and the system fails only when <strong>all</strong> of them are
+        down at once, then — because independent probabilities multiply —
+      </p>
+      <primer-math display>P(\text{all } k \text{ fail}) = p^{\,k}, \qquad \text{availability} = 1 - p^{\,k}.</primer-math>
+      <p>
+        The exponent is the magic. Because <primer-math>p &lt; 1</primer-math>, raising it to a power drives it
+        toward zero <em>fast</em>. Work a concrete example with <primer-math>p = 0.1</primer-math> (each node
+        is down 10% of the time — a fairly flaky node):
+      </p>
+      <ul>
+        <li><primer-math>k = 1</primer-math>: fail prob <primer-math>0.1</primer-math> → availability <strong>90%</strong>.</li>
+        <li><primer-math>k = 2</primer-math>: fail prob <primer-math>0.1^2 = 0.01</primer-math> → availability <strong>99%</strong>.</li>
+        <li><primer-math>k = 3</primer-math>: fail prob <primer-math>0.1^3 = 0.001</primer-math> → availability <strong>99.9%</strong>.</li>
+        <li><primer-math>k = 4</primer-math>: fail prob <primer-math>0.0001</primer-math> → availability <strong>99.99%</strong>.</li>
+      </ul>
+      <p>
+        Each replica you add tacks another <em>nine</em> onto the availability. Three flaky 90%-nodes combine
+        into a 99.9% service — better than any one of them could ever be. Drag the slider below to feel how the
+        curve climbs, and how a smaller per-node failure probability lifts the whole thing:
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        { "relChart": { "title": "System availability 1 − pᵏ rises with the number of replicas k", "pLabel": "Per-node failure probability (p)" } }
+      </script>
+      <primer-chart scene="avail" caption="A curve of system availability 1 minus p to the power k against the number of replicas k. As k grows the availability climbs rapidly toward 1; a slider sets the per-node failure probability p, and a smaller p lifts the whole curve."></primer-chart>
+      <primer-chart-sliders name="rel"></primer-chart-sliders>
+
+      <primer-vignette title="Watch out! — adding replicas does NOT always multiply reliability">
+        <p>
+          The whole <primer-math>p^k</primer-math> argument rests on one quietly enormous assumption: the
+          replicas fail <strong>independently</strong>. In the real world they often don't. Put all three
+          replicas in the <em>same rack</em> and one power supply takes out all three at once. Run the
+          <em>same buggy code</em> on every replica and one poisoned input crashes all of them
+          simultaneously. Depend on the <em>same certificate</em> and they all go dark the minute it expires.
+          These are <strong>correlated failures</strong> (a shared root cause), and they shred the
+          independence assumption: if the replicas really fail together with probability
+          <primer-math>c</primer-math>, your true failure probability is roughly
+          <primer-math>c</primer-math>, not the beautiful <primer-math>p^k</primer-math> — no matter how many
+          copies you add. This is why real fault tolerance means diversity, not just quantity: spread replicas
+          across racks, power domains, availability zones, and sometimes even <em>different implementations</em>,
+          so there is no single fault that can fell them all together.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Compute it yourself</h2>
+      <p>
+        The program below does two things at once. First it prints the availability table for
+        <primer-math>k = 1 \dots 5</primer-math> given a per-node failure probability, so you can watch the
+        nines pile up. Then it implements a tiny <strong>majority voter</strong> over three replica outputs —
+        the beating heart of TMR — and shows it masking a single wrong answer. Press <strong>Run ▶</strong>,
+        then try changing <code>p</code> or corrupting a second replica and see what the voter does:
+      </p>
+      <primer-code run>
+        // ---- 1) Availability = 1 - p^k for k = 1..5 -------------------------
+        const p = 0.1;   // per-node failure probability (each node down 10% of the time)
+
+        console.log("Per-node failure probability p = " + p);
+        console.log("k   P(all k fail) = p^k     availability = 1 - p^k");
+        for (let k = 1; k &lt;= 5; k++) {
+          const allFail = Math.pow(p, k);
+          const avail = 1 - allFail;
+          console.log(
+            String(k).padEnd(4) +
+            allFail.toExponential(3).padEnd(24) +
+            (avail * 100).toFixed(4) + "%",
+          );
+        }
+
+        // ---- 2) Majority voter over 3 replica outputs (TMR) ----------------
+        // Returns the value that appears most often; masks a single wrong one.
+        function majority(outputs: number[]): number {
+          const counts = new Map&lt;number, number&gt;();
+          for (const v of outputs) counts.set(v, (counts.get(v) ?? 0) + 1);
+          let best = outputs[0];
+          let bestCount = 0;
+          for (const [value, count] of counts) {
+            if (count &gt; bestCount) { best = value; bestCount = count; }
+          }
+          return best;
+        }
+
+        console.log("");
+        console.log("TMR voter (three replicas, correct answer is 4):");
+        console.log("  all agree      [4, 4, 4] -> " + majority([4, 4, 4]));
+        console.log("  one faulty     [4, 7, 4] -> " + majority([4, 7, 4]) + "   (7 outvoted, masked)");
+        console.log("  two faulty     [7, 7, 4] -> " + majority([7, 7, 4]) + "   (majority wrong -> TMR fails!)");
+      </primer-code>
+      <p>
+        The last line is the honest limit: TMR masks <em>one</em> fault, but if <em>two</em> of the three go
+        wrong the majority itself is wrong, and the voter faithfully outputs garbage. Tolerating more faults
+        costs more modules — there is no free lunch, only a purchase you can choose to make.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "faultToleranceQuiz@1": { "instructions": "Check your understanding of faults vs failures, redundancy and voting, checkpointing, failure detection, and the p^k reliability maths." } }
+    </script>
+    <primer-quiz name="faultToleranceQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/distributed-systems/models-and-failure", "computer-science/distributed-systems/consensus-paxos-and-raft"],
+    "completedDate": "2026-07-04"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // Triple Modular Redundancy: one input fans out to three modules; each feeds a
+  // voter; the voter emits the majority. Revealed step by step, then a fault on
+  // module 2 is masked by the majority.
+  registerGeometryScene("tmrVote", ({ board, step, colors, sceneStrings, label }) => {
+    const box = (x, y, w, h, stroke, fill) =>
+      board.create("polygon",
+        [[x - w / 2, y - h / 2], [x + w / 2, y - h / 2],
+         [x + w / 2, y + h / 2], [x - w / 2, y + h / 2]],
+        { fillColor: fill, fillOpacity: 0.14, borders: { strokeColor: stroke, strokeWidth: 2 },
+          vertices: { visible: false }, fixed: true, highlight: false });
+
+    const arrow = (from, to) =>
+      board.create("arrow", [from, to],
+        { strokeColor: colors.line, strokeWidth: 1.6, fixed: true, highlight: false, lastArrow: { size: 5 } });
+
+    // Input node (always-visible base content)
+    box(-0.2, 4, 2.0, 0.9, colors.line, colors.bg);
+    label([-0.2, 4], "input", { strokeColor: colors.ink });
+
+    const modY = [6.4, 4, 1.6];  // three module rows
+
+    step(sceneStrings("in"), () => {
+      for (const y of modY) arrow([0.8, 4], [3.4, y]);
+    });
+
+    step(sceneStrings("mods"), () => {
+      box(4.4, modY[0], 2.0, 0.9, colors.cat[0], colors.cat[0]);
+      label([4.4, modY[0]], "module 1", { strokeColor: colors.ink });
+      label([5.9, modY[0]], "4", { strokeColor: colors.cat[0] });
+
+      box(4.4, modY[1], 2.0, 0.9, colors.cat[0], colors.cat[0]);
+      label([4.4, modY[1]], "module 2", { strokeColor: colors.ink });
+
+      box(4.4, modY[2], 2.0, 0.9, colors.cat[0], colors.cat[0]);
+      label([4.4, modY[2]], "module 3", { strokeColor: colors.ink });
+      label([5.9, modY[2]], "4", { strokeColor: colors.cat[0] });
+    });
+
+    step(sceneStrings("fault"), () => {
+      // recolour module 2 as faulty and give it the wrong output
+      box(4.4, modY[1], 2.0, 0.9, colors.cat[2], colors.cat[2]);
+      label([4.4, modY[1]], "module 2", { strokeColor: colors.ink });
+      label([5.9, modY[1]], "7", { strokeColor: colors.cat[2] });
+      label([4.4, modY[0] + 0.75], "4", { strokeColor: colors.cat[0] });
+    });
+
+    step(sceneStrings("vote"), () => {
+      for (const y of modY) arrow([5.4, y], [8.0, 4]);
+      box(9.0, 4, 1.8, 1.2, colors.cat[1], colors.cat[1]);
+      label([9.0, 4.25], "voter", { strokeColor: colors.ink });
+      label([9.0, 3.7], "majority", { strokeColor: colors.cat[1] });
+      arrow([9.9, 4], [11.4, 4]);
+      label([11.9, 4], "4", { strokeColor: colors.cat[1] });
+    });
+  }, {
+    boundingbox: [-1.5, 7.6, 12.6, 0.4],
+    keepAspect: false,
+    title: () => makeStrings("tmrVote")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerCharts, registerChartSliders, makeStrings } from "primer";
+
+  const relStr = makeStrings("relChart");
+
+  registerChartSliders("rel", [
+    { name: "p", label: () => relStr("pLabel"), min: 0.02, max: 0.5, step: 0.01, value: 0.1 },
+  ]);
+
+  registerCharts(
+    [{
+      name: "avail",
+      f: (x, s) => 1 - Math.pow(s.p, x),
+      line: (colors) => ({ strokeColor: colors.cat[0], strokeWidth: 4 }),
+    }],
+    { xmin: 1, xmax: 6, ymin: 0, ymax: 1, xaxisname: "replicas k", yaxisname: "availability",
+      title: () => relStr("title") },
+    "rel",
+  );
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("faultToleranceQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "In the chain fault → error → failure, which term names the ORIGINAL underlying defect (e.g. a flipped bit or a bug in the code)?",
+      options: [
+        { text: "Fault", correct: true },
+        { text: "Error", correct: false },
+        { text: "Failure", correct: false },
+        { text: "Outage", correct: false },
+      ] },
+
+    { prompt: "A 'failure' in the reliability vocabulary specifically means…",
+      options: [
+        { text: "the system's visible, externally-observed behaviour deviates from what it promised", correct: true },
+        { text: "a dormant defect that has not yet activated", correct: false },
+        { text: "a wrong internal state that has not yet been noticed outside", correct: false },
+        { text: "any moment the CPU usage goes above 90%", correct: false },
+      ] },
+
+    { prompt: "What is the single master tool underlying essentially all fault tolerance?",
+      options: [
+        { text: "Redundancy — deliberately keeping more than you strictly need", correct: true },
+        { text: "Compiling the code with more optimisations", correct: false },
+        { text: "Using faster hardware so failures happen less often", correct: false },
+        { text: "Writing more unit tests", correct: false },
+      ] },
+
+    { prompt: "Retrying or re-executing a computation to survive a transient glitch is which kind of redundancy?",
+      options: [
+        { text: "Time redundancy", correct: true },
+        { text: "Space redundancy", correct: false },
+        { text: "Information redundancy", correct: false },
+        { text: "Geographic redundancy", correct: false },
+      ] },
+
+    { prompt: "Adding parity bits, checksums, or ECC so data can detect and repair its own corruption is which kind of redundancy?",
+      options: [
+        { text: "Information redundancy", correct: true },
+        { text: "Time redundancy", correct: false },
+        { text: "Space redundancy", correct: false },
+        { text: "Passive replication", correct: false },
+      ] },
+
+    { prompt: "In passive (primary–backup) replication, what do the backups normally do while everything is healthy?",
+      options: [
+        { text: "Sit idle receiving state updates, ready to be promoted if the primary dies", correct: true },
+        { text: "Process every request in lock-step alongside the primary", correct: false },
+        { text: "Vote on every output before it is returned", correct: false },
+        { text: "Nothing — they are powered off until a crash", correct: false },
+      ] },
+
+    { prompt: "Triple Modular Redundancy (TMR) uses three modules and a majority voter. How many simultaneously faulty modules can it tolerate?",
+      options: [
+        { text: "1", correct: true },
+        { text: "2", correct: false },
+        { text: "3", correct: false },
+        { text: "0", correct: false },
+      ] },
+
+    { prompt: "An N-modular redundancy system with N = 2f + 1 modules survives up to f faults. How many modules are needed to tolerate f = 2 faulty modules?",
+      options: [
+        { text: "5", correct: true },
+        { text: "3", correct: false },
+        { text: "4", correct: false },
+        { text: "2", correct: false },
+      ] },
+
+    { prompt: "What is the point of checkpointing to stable storage?",
+      options: [
+        { text: "So a crashed node can roll back to a saved snapshot instead of restarting from scratch", correct: true },
+        { text: "To make the code run faster during normal operation", correct: false },
+        { text: "To vote among replica outputs", correct: false },
+        { text: "To encrypt the data at rest", correct: false },
+      ] },
+
+    { prompt: "After a crash, a node loads its last checkpoint and then does what to recover the work done since?",
+      options: [
+        { text: "Replays the write-ahead / message log forward", correct: true },
+        { text: "Waits for a human to re-enter the data", correct: false },
+        { text: "Discards everything after the checkpoint permanently", correct: false },
+        { text: "Copies state from a random other node", correct: false },
+      ] },
+
+    { prompt: "You increase how OFTEN you checkpoint. What is the trade-off?",
+      options: [
+        { text: "Faster recovery after a crash, but higher steady-state overhead when nothing is failing", correct: true },
+        { text: "Slower recovery, but lower overhead", correct: false },
+        { text: "Both faster recovery and lower overhead — a free win", correct: false },
+        { text: "No effect on either recovery or overhead", correct: false },
+      ] },
+
+    { prompt: "A monitor stops receiving heartbeats from a node and its timeout expires. What can it correctly conclude?",
+      options: [
+        { text: "Only that the node is unreachable — it cannot distinguish a slow/partitioned node from a truly dead one", correct: true },
+        { text: "That the node has definitely crashed and its state is lost", correct: false },
+        { text: "That the network is definitely healthy", correct: false },
+        { text: "That the node's data has been corrupted", correct: false },
+      ] },
+
+    { prompt: "Two nodes both believe they are the primary after a network partition and both accept writes, corrupting each other's data. This is called…",
+      options: [
+        { text: "Split brain", correct: true },
+        { text: "A memory leak", correct: false },
+        { text: "A checksum error", correct: false },
+        { text: "Time redundancy", correct: false },
+      ] },
+
+    { prompt: "For k independent replicas each failing with probability p, where the system fails only if ALL fail, the system failure probability is…",
+      options: [
+        { text: "p raised to the power k (pᵏ)", correct: true },
+        { text: "k times p", correct: false },
+        { text: "p divided by k", correct: false },
+        { text: "1 minus p", correct: false },
+      ] },
+
+    { prompt: "With per-node failure probability p = 0.1, what is the probability that ALL of k = {k} independent replicas fail at once?",
+      variables: "k=[2:4]",
+      answer: "pow(0.1, k)" },
+
+    { prompt: "With per-node failure probability p = 0.1 and k = {k} independent replicas, the system availability 1 − pᵏ is (as a probability between 0 and 1)…",
+      variables: "k=[2:4]",
+      answer: "1 - pow(0.1, k)" },
+
+    { prompt: "The clean pᵏ reliability formula relies on which crucial assumption about the replicas?",
+      options: [
+        { text: "That they fail independently — no shared root cause", correct: true },
+        { text: "That they are physically in the same rack", correct: false },
+        { text: "That they all run the identical binary", correct: false },
+        { text: "That they never checkpoint", correct: false },
+      ] },
+
+    { prompt: "Why can putting all three replicas in the same rack ruin the pᵏ availability gain?",
+      options: [
+        { text: "A single shared fault (e.g. one power supply) can cause correlated failures, so they no longer fail independently", correct: true },
+        { text: "Racks physically slow down the CPUs inside them", correct: false },
+        { text: "Being close together makes the network faster, which causes bugs", correct: false },
+        { text: "Three replicas is always too few regardless of location", correct: false },
+      ] },
+
+    { prompt: "A TMR voter receives replica outputs [4, 7, 4] where the correct answer is 4. What does it output, and why?",
+      options: [
+        { text: "4 — the majority (two of three) agree, masking the single fault", correct: true },
+        { text: "7 — it trusts the outlier", correct: false },
+        { text: "It errors out because the replicas disagree", correct: false },
+        { text: "The average, 5", correct: false },
+      ] },
+
+    { prompt: "If TWO of the three modules in a TMR system produce the same wrong answer, what happens?",
+      options: [
+        { text: "The voter outputs the wrong value — TMR only masks a single fault", correct: true },
+        { text: "The voter still recovers the correct answer", correct: false },
+        { text: "The system automatically adds a fourth module", correct: false },
+        { text: "Nothing can go wrong; voting is always safe", correct: false },
+      ] },
+  ]);
+</script>

@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Consensus: Paxos and Raft</primer-title>
+
+    <primer-card>
+      <p>
+        Picture five computers in five different data centres, wired together over a flaky network. Their one
+        job sounds almost insultingly simple: <strong>agree on a single value</strong> — say, "the next
+        command to run is <em>withdraw \$50</em>." Not a hard sum, not a clever algorithm. Just <em>agree</em>.
+        And yet this is one of the deepest problems in all of computing, because the machines are unreliable
+        (any of them can crash at the worst possible moment) and the network is unreliable (messages arrive
+        late, out of order, duplicated, or never at all). No node can even tell the difference between "that
+        server crashed" and "that server is fine but its reply is stuck in traffic."
+      </p>
+      <p>
+        This is the <strong>consensus problem</strong>, and it is the beating heart of every serious
+        distributed system — the thing that lets a cluster of ordinary, failure-prone machines behave, from
+        the outside, like one flawless machine that never forgets and never contradicts itself. Databases that
+        stay consistent across continents, systems that elect a coordinator, locks that work across a whole
+        cluster — all of them run a consensus protocol underneath. This page is about <em>what</em> consensus
+        demands, <em>why</em> a simple majority is the trick that makes it possible, and how the two famous
+        protocols — the venerable, brain-bending <strong>Paxos</strong> and its deliberately friendlier cousin
+        <strong>Raft</strong> — actually reach agreement.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What "agreement" has to mean</h2>
+      <p>
+        Before we can solve consensus we have to pin down exactly what a correct solution owes us. A group of
+        nodes, each starting with some proposed value, must all <em>decide</em> on one value, and the protocol
+        must guarantee three properties:
+      </p>
+      <primer-theorem name="The three consensus properties">
+        <ul>
+          <li>
+            <strong>Agreement (safety)</strong> — no two nodes ever decide on <em>different</em> values. This
+            is the promise you can never break: two replicas that disagree about what happened are worse than
+            useless.
+          </li>
+          <li>
+            <strong>Validity (integrity)</strong> — the value decided upon must be one that some node actually
+            <em>proposed</em>. The system can't invent a command out of thin air.
+          </li>
+          <li>
+            <strong>Termination (liveness)</strong> — every non-crashed node eventually decides. It isn't
+            enough to <em>never be wrong</em>; a protocol that stays silent forever is no use either.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The tension between the first and the last of these is the whole story. <strong>Agreement</strong>
+        says "never, ever be inconsistent," and <strong>termination</strong> says "always make progress." In a
+        world where machines crash and messages vanish, keeping both at once — and keeping them while nodes
+        are dropping — is exactly what makes consensus a genuinely hard problem, not a homework exercise.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The trick: majority quorums</h2>
+      <p>
+        Here is the single most important idea on this page. Whenever the cluster needs to commit to
+        something, it does not wait for <em>everyone</em> to agree — that would grind to a halt the instant one
+        machine crashed. Instead a decision is made by a <strong>majority</strong>: strictly more than half of
+        the nodes. Such a group is called a <strong>quorum</strong>.
+      </p>
+      <p>
+        Why a majority, of all things? Because of one small, beautiful fact of arithmetic:
+      </p>
+      <primer-theorem name="Quorum intersection">
+        <ul>
+          <li>
+            Any two majorities of the same set <strong>must overlap</strong> — they share at least one node.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The proof is a one-liner. Take <primer-math>N</primer-math> nodes. A majority is more than
+        <primer-math>N/2</primer-math> of them. If you had two majorities that shared <em>no</em> node, their
+        sizes would add up to more than <primer-math>N/2 + N/2 = N</primer-math> distinct nodes — but there
+        are only <primer-math>N</primer-math> nodes in total. Contradiction. So <strong>every pair of
+        majorities has a node in common</strong>.
+      </p>
+      <p>
+        That overlapping node is the hero of the whole story. Because any decision requires a majority, and any
+        two majorities share a member, that shared member <em>remembers</em> the earlier decision and refuses
+        to help ratify a conflicting one. No two majorities can ever independently commit to contradictory
+        values — which is precisely the <strong>Agreement</strong> property, handed to us for free by
+        counting. Every consensus protocol, Paxos and Raft included, is at its core an elaborate way of making
+        sure each committed step passes through a majority.
+      </p>
+      <p>
+        A happy consequence: with <primer-math>N</primer-math> nodes, a majority still forms as long as fewer
+        than half have failed, so the cluster keeps working after
+        <primer-math display>f = \left\lfloor \tfrac{N-1}{2} \right\rfloor</primer-math>
+        failures. Five nodes tolerate two crashes; seven tolerate three. Notice the numbers: going from 3 nodes
+        to 4 does <em>not</em> improve fault tolerance (both survive one failure) — it's why real clusters use
+        an <strong>odd</strong> count. This is the same kind of shared-state coordination that
+        <primer-ref soft to="computer-science/concurrency/parallel-programming-models">parallel programming models</primer-ref>
+        wrestle with inside a single machine, now stretched across a whole network.
+      </p>
+
+      <primer-vignette title="Is it really impossible to guarantee agreement AND progress?">
+        <p>
+          Astonishingly, yes — and it's a theorem. The <strong>FLP impossibility result</strong> (Fischer,
+          Lynch and Paterson, 1985) proves that in a <em>fully asynchronous</em> system — one with no bound at
+          all on how long a message can take — <strong>no deterministic protocol can guarantee it will always
+          reach consensus if even a single node may crash</strong>. The reason is that shared-timeline
+          argument again: with no clock you can trust, a node genuinely cannot tell a crashed peer from a
+          merely slow one, and an adversarial scheduler can keep any protocol dithering forever at exactly the
+          wrong moment.
+        </p>
+        <p>
+          So how do real systems exist at all? They quietly weaken the assumption. Paxos and Raft never
+          sacrifice <strong>safety</strong> (they will never decide two different values, ever), but they only
+          guarantee <strong>progress</strong> when the network behaves reasonably for a while — using
+          <strong>timeouts</strong> and a <strong>leader</strong> to break symmetry and keep moving. FLP
+          doesn't say consensus is hopeless; it says you can't get it for free, and the price is a dash of
+          timing you have to assume goes right often enough.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Paxos: correct, and famously baffling</h2>
+      <p>
+        The first protocol to solve this properly — and prove it — was <strong>Paxos</strong>, described by
+        Leslie Lamport in 1998. Paxos is correct, elegant, and <em>notoriously</em> hard to understand;
+        Lamport's own follow-up paper was cheekily titled <em>"Paxos Made Simple,"</em> and it still leaves
+        most readers dizzy. The mechanism, stripped to its bones, hands out three roles (one node often plays
+        all three): <strong>proposers</strong> suggest values, <strong>acceptors</strong> vote on them, and
+        <strong>learners</strong> find out the result.
+      </p>
+      <p>
+        A value gets chosen in <strong>two phases</strong>, and every proposal carries a unique, ever-increasing
+        <strong>proposal number</strong> that acts like a ticket for who goes next:
+      </p>
+      <ul>
+        <li>
+          <strong>Phase 1 — Prepare / Promise.</strong> A proposer picks a proposal number
+          <primer-math>n</primer-math> and asks a majority of acceptors: "will you promise not to consider
+          anything numbered below <primer-math>n</primer-math>?" Each acceptor, if <primer-math>n</primer-math>
+          is the highest it has seen, <em>promises</em> — and, crucially, reports back any value it has already
+          accepted, so a new proposer can never trample a decision already in flight.
+        </li>
+        <li>
+          <strong>Phase 2 — Accept / Accepted.</strong> If a majority promised, the proposer sends them an
+          <em>accept</em> request for a value (its own, unless an acceptor's report forced it to reuse an
+          older, possibly-chosen value). Once a majority <em>accepts</em>, the value is chosen — and the quorum
+          overlap from before guarantees no competing proposal can choose anything different.
+        </li>
+      </ul>
+      <p>
+        It works, and the majority-overlap argument is why. But the two-phase dance, the rule about adopting
+        the highest-numbered previously-accepted value, and the ways proposals can duel and stall are subtle
+        enough that engineers kept getting real implementations wrong. That pain is exactly what motivated the
+        next protocol.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Raft: consensus you can actually explain</h2>
+      <p>
+        In 2014, Diego Ongaro and John Ousterhout published <strong>Raft</strong> with an unusual explicit
+        goal baked into its design: <strong>understandability</strong>. Their thesis was that Paxos was so hard
+        to grasp that it was hard to build correctly, so they engineered a protocol that solves the same
+        problem but that a student can actually hold in their head. The core simplification: instead of many
+        proposers duelling, Raft elects <strong>one leader</strong>, and <em>all</em> agreement flows through
+        that single leader for as long as it lives.
+      </p>
+      <p>Raft slices time into numbered <strong>terms</strong>, and a node is always in one of three states:</p>
+      <ul>
+        <li><strong>Follower</strong> — the passive default; it just answers the leader and votes when asked.</li>
+        <li><strong>Candidate</strong> — a follower that suspected the leader died and is now running for office.</li>
+        <li><strong>Leader</strong> — the single elected coordinator that handles all client requests and drives replication.</li>
+      </ul>
+
+      <h3>Leader election</h3>
+      <p>
+        Every follower runs an <strong>election timeout</strong> — a countdown that resets each time it hears
+        from the leader (a periodic <strong>heartbeat</strong>). If a follower's timer ever fires without a
+        peep from the leader, it assumes the leader is gone and springs into action: it becomes a
+        <strong>candidate</strong>, bumps the term number, <strong>votes for itself</strong>, and sends
+        <em>RequestVote</em> messages to everyone else. Each node grants at most one vote per term, so if the
+        candidate collects votes from a <strong>majority</strong>, it wins and becomes leader — then
+        immediately starts sending heartbeats to shut down everyone else's timers. Step through the whole
+        sequence below:
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "raftElection": {
+            "title": "Raft leader election: one candidate wins a majority",
+            "s1": "Term 1: all five nodes are followers, listening for the leader's heartbeat.",
+            "s2": "N1's election timeout fires first (its timer ran out). It becomes a CANDIDATE, bumps to term 2, and votes for itself — 1 vote.",
+            "s3": "The candidate broadcasts RequestVote(term 2) to every other node.",
+            "s4": "N2 and N3 grant their votes. With its own vote that's 3 of 5 — a majority!",
+            "s5": "Reaching a majority, N1 becomes LEADER and sends heartbeats to reset everyone's timers.",
+            "follower": "follower",
+            "candidate": "candidate · term 2",
+            "leader": "LEADER",
+            "self": "votes for self",
+            "req": "RequestVote",
+            "grant": "vote ✓",
+            "majority": "3 / 5 = majority",
+            "heartbeat": "heartbeat"
+          }
+        }
+      </script>
+      <primer-geometry scene="raftElection" caption="Five nodes in a ring. Step 1: all followers. Step 2: node N1's timeout fires, so it becomes a candidate in a new term and votes for itself. Step 3: it broadcasts RequestVote to the others. Step 4: N2 and N3 grant votes, giving N1 three of five — a majority. Step 5: N1 becomes leader and sends heartbeats."></primer-geometry>
+
+      <p>
+        Two details make elections actually terminate. First, each election timeout is chosen
+        <strong>randomly</strong> from a range, so it's unlikely that two followers time out at the exact same
+        instant and split the vote; whoever fires first usually wins uncontested. Second, if a vote <em>does</em>
+        split (nobody gets a majority), that term simply ends with no leader, everyone waits out another random
+        timeout, and a fresh election runs — and thanks to the randomness, it almost always resolves quickly.
+      </p>
+
+      <h3>Log replication</h3>
+      <p>
+        Once elected, the leader is the sole point of contact for client commands. Each command is appended to
+        the leader's <strong>log</strong> and shipped to the followers via <em>AppendEntries</em> messages. Here
+        is where the majority returns, one last time: the leader considers an entry <strong>committed</strong> —
+        safe, permanent, applied to the state machine — only once a <strong>majority</strong> of nodes have
+        stored it. Overlapping quorums guarantee that any future leader must already have every committed entry,
+        so committed history can never be lost or rewritten. A crashed leader just triggers a new election; the
+        term number rises, and the cluster carries on.
+      </p>
+
+      <primer-vignette title="Watch out! — 'a leader is a single point of failure', and 'consensus means everyone agrees'">
+        <p>
+          Two tempting misconceptions, both wrong, both about the same core idea.
+        </p>
+        <p>
+          <strong>"A single leader is a single point of failure."</strong> It feels like one, but it isn't. The
+          leader holds <em>no</em> unique, unrecoverable state — every committed entry lives on a majority of
+          followers. If the leader crashes, the followers' timers fire, an election runs, and a new leader is
+          in charge within a fraction of a second, carrying the full committed log with it. The leadership
+          <em>role</em> is a single point of coordination, but it is <em>replaceable</em>, which is the whole
+          point.
+        </p>
+        <p>
+          <strong>"Consensus needs all the nodes to agree."</strong> No — and requiring unanimity would be a
+          disaster. If every node had to vote yes, a <em>single</em> crashed or unreachable machine would freeze
+          the entire cluster, destroying availability. Consensus deliberately needs only a
+          <strong>majority</strong>, and that is not a compromise — it is the essential feature. The majority is
+          what lets the system keep deciding <em>while nodes are down</em>, and quorum overlap is what keeps it
+          safe anyway. "Everyone agrees" is not stronger than "a majority agrees"; it is strictly more fragile.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Count the votes yourself</h2>
+      <p>
+        A leader election comes down to one bit of arithmetic: did the candidate collect strictly
+        <em>more than half</em> the votes? The little simulation below tallies votes across a cluster and
+        declares the candidate elected only when its count clears the majority line
+        <primer-math>\lfloor N/2 \rfloor + 1</primer-math>. Watch the split case, where nobody reaches a
+        majority and the term produces <em>no</em> leader at all. Press <strong>Run ▶</strong>:
+      </p>
+      <primer-code run>
+        // A tiny model of a Raft election tally.
+        // A candidate is ELECTED iff it wins strictly MORE THAN half the nodes.
+
+        function majorityNeeded(n: number): number {
+          return Math.floor(n / 2) + 1;   // strictly more than half
+        }
+
+        function report(nodes: number, votesForCandidate: number): void {
+          const need = majorityNeeded(nodes);
+          const elected = votesForCandidate &gt; nodes / 2;   // equivalently: votes &gt;= need
+          const verdict = elected ? "ELECTED  ✓" : "no majority — split vote, retry";
+          console.log(
+            "N=" + nodes +
+            "  votes=" + votesForCandidate +
+            "  (need " + need + ")".padEnd(6) +
+            "  =&gt; " + verdict,
+          );
+        }
+
+        console.log("Cluster of 5 (tolerates " + Math.floor((5 - 1) / 2) + " failures):");
+        report(5, 5);   // unanimous            -> elected
+        report(5, 3);   // exactly a majority   -> elected
+        report(5, 2);   // minority             -> split, no leader
+
+        console.log("");
+        console.log("Cluster of 3 (tolerates " + Math.floor((3 - 1) / 2) + " failures):");
+        report(3, 2);   // majority             -> elected
+        report(3, 1);   // split down the middle-> no leader
+
+        console.log("");
+        console.log("An election only succeeds when one candidate clears the majority line.");
+      </primer-code>
+      <p>
+        Notice how a tie or a minority yields <em>no</em> leader — the term ends leaderless and Raft simply
+        runs another election after a fresh random timeout. Safety is never in danger: at worst the cluster
+        pauses. It never decides two different things.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "consensusQuiz@1": { "instructions": "Check your understanding of consensus, majority quorums, and how Paxos and Raft reach agreement." } }
+    </script>
+    <primer-quiz name="consensusQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/distributed-systems/replication-and-consistency"],
+    "completedDate": "2026-07-04"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // Raft leader election, revealed step by step. Five nodes sit on a ring.
+  // Base content: the five node dots. Each step layers on the next moment of
+  // the election (candidate ring, RequestVote arrows, returned votes, leader
+  // + heartbeats).
+  registerGeometryScene("raftElection", ({ board, step, colors, sceneStrings }) => {
+    const R = 3;
+    const DEG = Math.PI / 180;
+    const angs = [90, 162, 234, 306, 18];                 // N1 sits at the top
+    const P = angs.map((a) => [R * Math.cos(a * DEG), R * Math.sin(a * DEG)]);
+    const CAND = 0;                                        // N1 is the candidate
+
+    const followerCol = colors.cat[0];
+    const candCol     = colors.cat[1];
+    const voteCol     = colors.cat[2];
+    const leaderCol   = colors.cat[3] || colors.line;
+
+    // the five nodes — always-visible base content
+    P.forEach((p, i) =>
+      board.create("point", [p[0], p[1]], {
+        name: "N" + (i + 1), fixed: true, size: 6,
+        strokeColor: colors.ink, fillColor: followerCol,
+        highlight: false,
+        label: { fontSize: 15, strokeColor: colors.ink, offset: [0, 20] },
+      }),
+    );
+
+    const text = (x, y, s, col, size = 13, bold = false) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: size,
+        fixed: true, highlight: false, strokeColor: col, color: col,
+        cssStyle: bold ? "font-weight:700" : "",
+      });
+
+    // outward direction from centre through node i (unit vector)
+    const out = (i) => {
+      const [x, y] = P[i];
+      const m = Math.hypot(x, y) || 1;
+      return [x / m, y / m];
+    };
+
+    const lerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    const perp = (a, b) => {
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const m = Math.hypot(dx, dy) || 1;
+      return [-dy / m, dx / m];
+    };
+
+    // arrow between two nodes, trimmed off the dots, optionally offset/dashed
+    const link = (i, j, col, { off = 0, dash = false } = {}) => {
+      const a0 = P[i], b0 = P[j];
+      const pv = perp(a0, b0);
+      const a = lerp(a0, b0, 0.14);
+      const b = lerp(a0, b0, 0.86);
+      const shift = (p) => [p[0] + pv[0] * off, p[1] + pv[1] * off];
+      return board.create("arrow", [shift(a), shift(b)], {
+        strokeColor: col, strokeWidth: 2.5, dash: dash ? 2 : 0,
+        lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+      });
+    };
+
+    // a themed ring drawn around a node to recolour its role
+    const ring = (i, col) =>
+      board.create("circle", [P[i], 0.42], {
+        strokeColor: col, strokeWidth: 3, fillColor: "none",
+        highlight: false, fixed: true,
+      });
+
+    // small tag placed just outside a node
+    const tag = (i, s, col, extra = 0.95) => {
+      const u = out(i);
+      return text(P[i][0] + u[0] * extra, P[i][1] + u[1] * extra, s, col, 12);
+    };
+
+    // 1) all followers
+    step(sceneStrings("s1"), () => {
+      P.forEach((_, i) => tag(i, sceneStrings("follower"), followerCol));
+    });
+
+    // 2) N1 times out -> candidate, term 2, votes for itself
+    step(sceneStrings("s2"), () => {
+      ring(CAND, candCol);
+      tag(CAND, sceneStrings("candidate"), candCol, 1.15);
+      text(0, 0.35, sceneStrings("self"), candCol, 12);
+    });
+
+    // 3) broadcast RequestVote to the other four
+    step(sceneStrings("s3"), () => {
+      for (let j = 1; j < P.length; j++) link(CAND, j, candCol);
+      text(-2.6, 0.9, sceneStrings("req"), candCol, 12);
+    });
+
+    // 4) two nodes grant votes -> 3 of 5, a majority
+    step(sceneStrings("s4"), () => {
+      [1, 2].forEach((j) => {
+        link(j, CAND, voteCol, { off: 0.22 });
+        tag(j, sceneStrings("grant"), voteCol);
+      });
+      text(0, -0.35, sceneStrings("majority"), voteCol, 13, true);
+    });
+
+    // 5) becomes leader, sends heartbeats
+    step(sceneStrings("s5"), () => {
+      ring(CAND, leaderCol);
+      text(0, 3.95, sceneStrings("leader"), leaderCol, 14, true);
+      for (let j = 1; j < P.length; j++) link(CAND, j, leaderCol, { off: -0.22, dash: true });
+      text(2.7, 0.9, sceneStrings("heartbeat"), leaderCol, 12);
+    });
+  }, {
+    boundingbox: [-5, 4.6, 5, -4.2],
+    title: () => makeStrings("raftElection")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("consensusQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "In the consensus problem, what must the nodes accomplish?",
+      options: [
+        { text: "Agree on a single value despite crashes and unreliable messaging", correct: true },
+        { text: "Run as fast as possible on independent inputs", correct: false },
+        { text: "Store as much data as possible per node", correct: false },
+        { text: "Encrypt every message between nodes", correct: false },
+      ] },
+
+    { prompt: "The property 'no two nodes ever decide on different values' is called…",
+      options: [
+        { text: "Agreement (safety)", correct: true },
+        { text: "Validity", correct: false },
+        { text: "Termination", correct: false },
+        { text: "Latency", correct: false },
+      ] },
+
+    { prompt: "The property 'every non-crashed node eventually decides' is called…",
+      options: [
+        { text: "Termination (liveness)", correct: true },
+        { text: "Agreement", correct: false },
+        { text: "Validity", correct: false },
+        { text: "Durability", correct: false },
+      ] },
+
+    { prompt: "Validity, in the consensus properties, requires that…",
+      options: [
+        { text: "the decided value was actually proposed by some node", correct: true },
+        { text: "the fastest node always wins", correct: false },
+        { text: "the value is a prime number", correct: false },
+        { text: "all nodes decide within one millisecond", correct: false },
+      ] },
+
+    { prompt: "Why does a majority quorum guarantee that two decisions can't contradict each other?",
+      options: [
+        { text: "Any two majorities must share at least one node, which remembers the earlier decision", correct: true },
+        { text: "Majorities are always the same set of nodes every time", correct: false },
+        { text: "The network never drops messages sent to a majority", correct: false },
+        { text: "A majority is always exactly one node", correct: false },
+      ] },
+
+    { prompt: "For a cluster of ${N}$ nodes, how many nodes form a majority (a quorum)?",
+      variables: "N=[3,5,7,9]",
+      answer: "floor(N/2) + 1" },
+
+    { prompt: "A cluster of ${N}$ nodes can keep working after how many node failures?",
+      variables: "N=[3,5,7,9]",
+      answer: "floor((N - 1) / 2)" },
+
+    { prompt: "How many crash failures can a 5-node consensus cluster tolerate while still forming a majority?",
+      options: [
+        { text: "2", correct: true },
+        { text: "4", correct: false },
+        { text: "3", correct: false },
+        { text: "5", correct: false },
+      ] },
+
+    { prompt: "Why do real clusters prefer an ODD number of nodes?",
+      options: [
+        { text: "Adding one node to an even count doesn't raise the number of failures tolerated, so it's wasted", correct: true },
+        { text: "Odd numbers make messages travel faster", correct: false },
+        { text: "Even-sized clusters cannot form any majority at all", correct: false },
+        { text: "An odd count removes the need for a leader", correct: false },
+      ] },
+
+    { prompt: "What does the FLP impossibility result state?",
+      options: [
+        { text: "No deterministic protocol can guarantee consensus in a fully asynchronous system if even one node may crash", correct: true },
+        { text: "Consensus is impossible on any network, ever", correct: false },
+        { text: "A leader can never be elected", correct: false },
+        { text: "Majorities never overlap", correct: false },
+      ] },
+
+    { prompt: "Given FLP, how do Paxos and Raft still make progress in practice?",
+      options: [
+        { text: "They rely on timeouts and a leader, giving up guaranteed liveness while never sacrificing safety", correct: true },
+        { text: "They abandon the agreement property when the network is slow", correct: false },
+        { text: "They require perfectly synchronised atomic clocks", correct: false },
+        { text: "They ask every node to vote before deciding anything", correct: false },
+      ] },
+
+    { prompt: "In Paxos, which two phases lead to a value being chosen?",
+      options: [
+        { text: "Prepare/Promise, then Accept/Accepted", correct: true },
+        { text: "Elect/Heartbeat, then Commit/Reply", correct: false },
+        { text: "Read/Modify, then Write/Flush", correct: false },
+        { text: "Connect/Handshake, then Close/Teardown", correct: false },
+      ] },
+
+    { prompt: "What role do Paxos proposal numbers play?",
+      options: [
+        { text: "They are unique increasing tickets that order proposals so later ones supersede earlier ones", correct: true },
+        { text: "They count how many bytes a value takes", correct: false },
+        { text: "They are the value being decided", correct: false },
+        { text: "They measure network latency", correct: false },
+      ] },
+
+    { prompt: "Raft was explicitly designed to improve on Paxos in which way?",
+      options: [
+        { text: "Understandability — it is easier to learn and implement correctly", correct: true },
+        { text: "It removes the need for any majority", correct: false },
+        { text: "It tolerates far more failures for the same node count", correct: false },
+        { text: "It eliminates all network messages", correct: false },
+      ] },
+
+    { prompt: "In Raft, how is agreement coordinated most of the time?",
+      options: [
+        { text: "Through a single elected leader that all requests flow through", correct: true },
+        { text: "Through many equal proposers duelling simultaneously", correct: false },
+        { text: "Through a fixed node chosen once at install time", correct: false },
+        { text: "Through a random node picked freshly for every message", correct: false },
+      ] },
+
+    { prompt: "What triggers a Raft follower to become a candidate and start an election?",
+      options: [
+        { text: "Its election timeout fires without hearing a heartbeat from the leader", correct: true },
+        { text: "It receives a client request", correct: false },
+        { text: "Its log grows past a fixed size", correct: false },
+        { text: "Another follower tells it to", correct: false },
+      ] },
+
+    { prompt: "Why does Raft use RANDOMISED election timeouts?",
+      options: [
+        { text: "So followers rarely time out together, avoiding split votes and letting one candidate win quickly", correct: true },
+        { text: "To make the leader unpredictable to attackers", correct: false },
+        { text: "To slow the whole cluster down deliberately", correct: false },
+        { text: "Because timers cannot be set to a fixed value", correct: false },
+      ] },
+
+    { prompt: "When does a Raft candidate become leader?",
+      options: [
+        { text: "When it collects votes from a majority of the nodes (including its own)", correct: true },
+        { text: "When it collects even a single vote", correct: false },
+        { text: "When every node without exception votes for it", correct: false },
+        { text: "When its term number is the smallest", correct: false },
+      ] },
+
+    { prompt: "In Raft, a log entry is considered COMMITTED once…",
+      options: [
+        { text: "a majority of nodes have stored it", correct: true },
+        { text: "the leader alone has written it", correct: false },
+        { text: "any single follower has acknowledged it", correct: false },
+        { text: "all nodes without exception have stored it", correct: false },
+      ] },
+
+    { prompt: "Consensus needs ALL nodes to agree before deciding. True or false?",
+      options: [
+        { text: "False — only a majority is required, which is what preserves availability when nodes fail", correct: true },
+        { text: "True — unanimity is required for safety", correct: false },
+        { text: "True — otherwise majorities could contradict", correct: false },
+        { text: "False — only a single node is ever needed", correct: false },
+      ] },
+
+    { prompt: "Is a Raft leader a fatal single point of failure?",
+      options: [
+        { text: "No — it holds no unrecoverable state, so if it crashes a new leader is elected with the full committed log", correct: true },
+        { text: "Yes — losing the leader loses all data", correct: false },
+        { text: "Yes — no new leader can ever be elected", correct: false },
+        { text: "No — because there are always several leaders at once", correct: false },
+      ] },
+  ]);
+</script>

@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>I/O and Interrupts</primer-title>
+
+    <primer-card>
+      <p>
+        Right now your <primer-ref soft to="computer-science/computer-systems/the-cpu">CPU</primer-ref> is
+        executing something like <strong>a few billion instructions every second</strong>. Now press a key
+        on your keyboard. From the CPU's point of view, the gap between two keystrokes — even a fast
+        typist's — is an <em>eternity</em>: tens of millions of instructions could run in the time it takes
+        your finger to come back down. A spinning disk, a network card, a printer: to the processor they are
+        all impossibly, painfully <strong>slow</strong>.
+      </p>
+      <p>
+        This is the central problem of input/output. The CPU is a sprinter; the devices it talks to move
+        like glaciers. If the fast thing has to <em>wait around</em> for the slow thing, you have thrown
+        away billions of instructions' worth of work. The whole art of I/O is: <strong>how does a fast CPU
+        deal with slow devices without wasting all its time waiting?</strong> That one question is what this
+        page is about, and the answer — <strong>interrupts</strong> — is one of the most important ideas in
+        how a computer actually works.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>How the CPU touches a device</h2>
+      <p>
+        The CPU never wires straight into a keyboard or a disk platter. Between them sits a
+        <strong>device controller</strong> — a little piece of dedicated hardware that speaks the device's
+        language on one side and the CPU's language on the other. The controller exposes a handful of
+        <strong>device registers</strong>: tiny storage slots that the CPU can read and write to give
+        commands and check on progress. Typically there are three kinds:
+      </p>
+      <ul>
+        <li>a <strong>data register</strong> — the byte(s) going in or out;</li>
+        <li>a <strong>status register</strong> — flags like <em>"ready"</em>, <em>"busy"</em>, or
+          <em>"error"</em>;</li>
+        <li>a <strong>control/command register</strong> — where the CPU writes <em>"start reading"</em> or
+          <em>"start writing"</em>.</li>
+      </ul>
+      <p>
+        How does the CPU reach those registers? On almost all modern machines the trick is
+        <strong>memory-mapped I/O</strong>: each device register is assigned an ordinary
+        <em>memory address</em>. To send a command, the CPU just does a normal store to that address; to
+        read the status, a normal load. The device controller watches the address bus and answers when
+        <em>its</em> addresses appear. So talking to a printer looks, in the instruction stream, exactly
+        like writing to memory — no special I/O instructions needed.
+      </p>
+      <primer-theorem name="Memory-mapped I/O">
+        <ul>
+          <li>Device registers are given <strong>memory addresses</strong>, so ordinary load/store
+            instructions read and write them.</li>
+          <li>A range of the address space belongs to <strong>devices, not RAM</strong> — the hardware
+            routes those addresses to the right controller.</li>
+          <li>This is why a program can control real hardware using nothing but reads and writes.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two ways to wait: polling vs interrupts</h2>
+      <p>
+        Suppose the CPU has asked the disk for a block of data. The data will arrive — but not for a while.
+        There are two fundamentally different strategies for finding out when it is ready.
+      </p>
+      <p>
+        <strong>Polling (busy-waiting).</strong> The CPU sits in a tight loop, reading the status register
+        over and over, asking <em>"ready yet? ready yet? ready yet?"</em> until the flag flips:
+      </p>
+      <primer-code lang="text">
+while (status_register.busy) {
+    // do nothing — just ask again
+}
+// finally! now read the data
+      </primer-code>
+      <p>
+        It works, and it is simple, but look at the cost: while the device is idle the CPU burns
+        <strong>every single cycle</strong> asking a question whose answer is "no". Millions of instructions
+        spent achieving nothing. It is like standing at the toaster refusing to do anything else until the
+        toast pops.
+      </p>
+      <p>
+        <strong>Interrupt-driven I/O.</strong> Instead, the CPU says <em>"start the read, and tap me on the
+        shoulder when you're done"</em> — then goes off and runs other programs. When the data is ready, the
+        device raises an <strong>interrupt</strong>: an electrical signal (an <strong>IRQ</strong>, interrupt
+        request) that yanks the CPU's attention away, just long enough to deal with the device, after which
+        the CPU carries on exactly where it left off. The toast now shouts "I'm done!" and you spend the
+        waiting time doing the dishes.
+      </p>
+      <p>
+        The efficiency argument is decisive. If a device takes <primer-math>N</primer-math> units of time to
+        become ready, polling wastes work proportional to <primer-math>N</primer-math> — all of it. Interrupts
+        cost a small, fixed amount of overhead <em>once</em>, and the CPU does <em>useful</em> work for the
+        rest of the wait. On a multitasking operating system, that reclaimed time isn't idle — it runs other
+        <primer-ref to="computer-science/operating-systems/processes-and-the-process-model">processes</primer-ref>.
+      </p>
+
+      <primer-vignette title="Watch out!">
+        <p>
+          A very natural mistake: <em>"interrupts must be slower than polling — there's all that saving and
+          restoring and jumping around."</em> Per event, an interrupt genuinely <em>does</em> cost more than
+          a single status check. But that misses the point entirely. Polling doesn't do <em>one</em> check —
+          it does <strong>millions</strong>, back to back, the whole time the device is idle, and every one
+          of them is wasted. The interrupt pays its overhead <strong>once</strong> and leaves the CPU free
+          the rest of the time.
+        </p>
+        <p>
+          The honest exception: if a device is <strong>almost always ready instantly</strong> (very fast,
+          very high throughput), the interrupt overhead can dominate, and a short spin of polling wins. Real
+          systems sometimes do both — spin briefly, then fall back to interrupts. But for the slow devices
+          that dominate everyday computing, <strong>interrupt-driven I/O is the clear winner.</strong>
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>The interrupt cycle, step by step</h2>
+      <p>
+        When an interrupt fires, the CPU performs a precise little dance. The key insight is that the
+        interrupt arrives at an unpredictable moment, in the <em>middle</em> of some other program — so the
+        hardware must be able to duck out, handle the device, and return so seamlessly that the interrupted
+        program never even notices. Step through the cycle:
+      </p>
+      <primer-geometry scene="interruptCycle"></primer-geometry>
+      <p>
+        The heart of it is <strong>save context → run the handler → restore context</strong>. The
+        <strong>context</strong> is the CPU's registers and program counter — the exact "where was I".
+        Because it is saved and restored perfectly, the interrupted program resumes as if nothing happened,
+        blissfully unaware it was ever paused. The code that actually deals with the device is the
+        <strong>Interrupt Service Routine (ISR)</strong>, also called the interrupt handler.
+      </p>
+      <p>
+        How does the CPU know <em>which</em> handler to run? Each interrupt type has a number, and the CPU
+        looks that number up in the <strong>interrupt vector table</strong> — an array in memory holding the
+        address of each device's ISR. Keyboard interrupt? Look up entry, say, 1; find the address of the
+        keyboard handler; jump there. It is exactly a lookup table from "which device shouted" to "which code
+        handles it".
+      </p>
+      <primer-theorem name="The interrupt vector table">
+        <ul>
+          <li>It maps each <strong>interrupt number</strong> to the <strong>memory address of its
+            ISR</strong>.</li>
+          <li>The CPU uses it to jump to the right handler <strong>without knowing in advance</strong> which
+            device will interrupt.</li>
+          <li>Adding support for a new device is largely a matter of installing its handler's address in the
+            table.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The trouble with big transfers — and how DMA fixes it</h2>
+      <p>
+        Interrupts solve the <em>waiting</em> problem, but there's a second problem hiding underneath. So
+        far, whenever a byte is ready, the <strong>CPU itself</strong> copies it from the device register
+        into memory. That's called <strong>programmed I/O</strong>, and for a single keystroke it's fine.
+        But imagine reading a <strong>4 KB disk block</strong>, one word at a time: the device signals,
+        the CPU copies a word, the device signals, the CPU copies a word… thousands of times. Even with
+        interrupts, the CPU is now a glorified <strong>bucket brigade</strong>, doing nothing but shovelling
+        bytes between two places. That's a colossal waste of a fast processor.
+      </p>
+      <p>
+        <strong>Direct Memory Access (DMA)</strong> is the fix. There is a dedicated
+        <strong>DMA controller</strong> whose entire job is to move blocks of data between a device and
+        memory <em>on its own</em>. The CPU sets up the transfer once — "read 4 KB from the disk into memory
+        starting at address <primer-math>X</primer-math>" — and then <strong>walks away</strong> to do other
+        work. The DMA controller does all the byte-by-byte copying itself, directly to memory, without
+        bothering the CPU. Only when the <em>whole block</em> is done does it raise <strong>one</strong>
+        interrupt to say "finished".
+      </p>
+      <p>
+        Count the interrupts. Copying <primer-math>n</primer-math> words with programmed I/O costs on the
+        order of <primer-math>n</primer-math> interrupts (or <primer-math>n</primer-math> busy CPU copies);
+        with DMA it costs <strong>exactly one</strong>, no matter how big the block. That is why every real
+        disk, network card, and GPU uses DMA for bulk transfers — the CPU is freed to compute while data
+        streams into memory beside it.
+      </p>
+
+      <primer-vignette title="Watch out!">
+        <p>
+          The name "Direct Memory Access" trips people up. It does <strong>not</strong> mean the CPU reaches
+          into memory more directly, and it does <strong>not</strong> mean the CPU does the copy. It's the
+          opposite: the <strong>DMA controller</strong> — a separate device — accesses memory
+          <em>directly</em>, <strong>instead of</strong> the CPU. The whole point is to take the copying job
+          <em>off</em> the CPU. During a DMA transfer the CPU can run ordinary program code; it is notified
+          just once, at the end.
+        </p>
+      </primer-vignette>
+
+      <primer-vignette title="If the CPU and DMA both want memory at once, who wins?">
+        <p>
+          They share the same memory bus, so they can't both use it at the exact same instant. The DMA
+          controller "steals" bus cycles when it needs them — a technique literally called <strong>cycle
+          stealing</strong>. Each steal delays the CPU by a whisker, but the CPU keeps running between
+          steals. The net effect is still an enormous win: a tiny, occasional slowdown instead of the CPU
+          being fully occupied copying every single word by hand.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Putting it together</h2>
+      <p>
+        Here is the whole story in one breath. A device is slow, so the CPU doesn't wait for it
+        (<strong>interrupts</strong> instead of <strong>polling</strong>). A transfer is big, so the CPU
+        doesn't copy it (<strong>DMA</strong> instead of <strong>programmed I/O</strong>). In both cases the
+        design principle is identical: <em>don't make the fast, expensive CPU wait on or babysit the slow,
+        cheap device.</em> Set the work in motion, walk away, and get one tap on the shoulder when it's done.
+      </p>
+      <p>
+        A modern disk read is all three ideas at once: the CPU issues the command through
+        <strong>memory-mapped registers</strong>, a <strong>DMA controller</strong> streams the block
+        straight into RAM, and a single <strong>interrupt</strong> signals completion — all while the CPU
+        happily runs other programs.
+      </p>
+    </primer-card>
+
+    <primer-quiz name="ioInterruptQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/operating-systems/processes-and-the-process-model"],
+    "completedDate": "2026-07-04"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Flow diagram of the interrupt cycle: a running program is interrupted by an IRQ,
+  // the CPU saves context, runs the ISR, restores context, and resumes.
+  // Each step reveals one more node + the arrow leading into it.
+  registerGeometryScene("interruptCycle", ({ board, step, colors }) => {
+    // helper: a rounded label box centred at (x,y)
+    const nodeBox = (x, y, label, col, w = 3.1, h = 0.95) => {
+      board.create("polygon",
+        [[x - w / 2, y - h / 2], [x + w / 2, y - h / 2],
+         [x + w / 2, y + h / 2], [x - w / 2, y + h / 2]], {
+          fillColor: col, fillOpacity: 0.16,
+          vertices: { visible: false }, fixed: true, highlight: false,
+          borders: { strokeColor: col, strokeWidth: 2 },
+        });
+      board.create("text", [x, y, label], {
+        anchorX: "middle", anchorY: "middle", fontSize: 15,
+        fixed: true, highlight: false, cssStyle: "text-align:center;",
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+
+    // helper: an arrow between two points
+    const arrow = (from, to) =>
+      board.create("arrow", [from, to], {
+        strokeColor: colors.line, strokeWidth: 2, lastArrow: { size: 6 },
+        fixed: true, highlight: false,
+      });
+
+    // vertical column of stages
+    const X = 0;
+    const ys = [6, 4.6, 3.2, 1.8, 0.4, -1.0];
+
+    // Stage 0 — always visible base content: the program running normally.
+    nodeBox(X, ys[0], "Program running\n(user process executing)", colors.cat[0]);
+
+    step("A device finishes its work and raises an interrupt request (IRQ) — an electrical signal to the CPU.", () => {
+      arrow([X, ys[0] - 0.48], [X, ys[1] + 0.48]);
+      nodeBox(X, ys[1], "Device raises IRQ\nCPU finishes current instruction", colors.cat[1]);
+    });
+
+    step("The CPU saves its context — the program counter and registers — so it can return exactly here later.", () => {
+      arrow([X, ys[1] - 0.48], [X, ys[2] + 0.48]);
+      nodeBox(X, ys[2], "Save context\n(push PC + registers)", colors.cat[2]);
+    });
+
+    step("The CPU looks up the interrupt number in the vector table and jumps to that device's handler.", () => {
+      arrow([X, ys[2] - 0.48], [X, ys[3] + 0.48]);
+      nodeBox(X, ys[3], "Run the ISR\n(via interrupt vector table)", colors.cat[3]);
+    });
+
+    step("With the device serviced, the CPU restores the saved context — putting the registers and PC back.", () => {
+      arrow([X, ys[3] - 0.48], [X, ys[4] + 0.48]);
+      nodeBox(X, ys[4], "Restore context\n(pop PC + registers)", colors.cat[2]);
+    });
+
+    step("The interrupted program resumes exactly where it left off — as if nothing ever happened.", () => {
+      arrow([X, ys[4] - 0.48], [X, ys[5] + 0.48]);
+      nodeBox(X, ys[5], "Program resumes\n(carries on as before)", colors.cat[0]);
+    });
+  }, {
+    boundingbox: [-3.0, 6.9, 3.0, -1.9],
+    keepAspect: false,
+    title: "The interrupt cycle",
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("ioInterruptQuiz@1", () => [
+    { num_questions: 6, preamble: "Check your understanding of I/O and interrupts." },
+
+    { prompt: "Why is I/O with slow devices a problem for a fast CPU?",
+      options: [
+        { text: "The CPU can run billions of instructions in the time a slow device takes to respond, so waiting wastes enormous work", correct: true },
+        { text: "Slow devices corrupt the CPU's registers", correct: false },
+        { text: "The CPU cannot physically connect to slow devices", correct: false },
+        { text: "Slow devices use a different number system", correct: false },
+      ] },
+
+    { prompt: "What is memory-mapped I/O?",
+      options: [
+        { text: "Device registers are assigned memory addresses, so ordinary load/store instructions control them", correct: true },
+        { text: "The device copies memory into itself automatically", correct: false },
+        { text: "Memory is stored inside the device controller", correct: false },
+        { text: "A map of which programs are using which memory", correct: false },
+      ] },
+
+    { prompt: "What is the main drawback of polling (busy-waiting)?",
+      options: [
+        { text: "The CPU burns cycles repeatedly checking a status register while the device is idle, doing no useful work", correct: true },
+        { text: "It can never detect when the device is ready", correct: false },
+        { text: "It requires a DMA controller", correct: false },
+        { text: "It corrupts the data being read", correct: false },
+      ] },
+
+    { prompt: "In interrupt-driven I/O, what does the device do when it is ready?",
+      options: [
+        { text: "It raises an interrupt (IRQ) to grab the CPU's attention", correct: true },
+        { text: "It waits for the CPU to poll it again", correct: false },
+        { text: "It writes directly to the screen", correct: false },
+        { text: "It restarts the CPU", correct: false },
+      ] },
+
+    { prompt: "Immediately after an interrupt is raised, before running the handler, the CPU must…",
+      options: [
+        { text: "save its context — the program counter and registers", correct: true },
+        { text: "erase its registers", correct: false },
+        { text: "poll every other device", correct: false },
+        { text: "shut down the interrupted program", correct: false },
+      ] },
+
+    { prompt: "What is the interrupt vector table used for?",
+      options: [
+        { text: "Mapping each interrupt number to the memory address of its service routine", correct: true },
+        { text: "Storing the data being transferred", correct: false },
+        { text: "Listing which processes are running", correct: false },
+        { text: "Holding the CPU's saved registers", correct: false },
+      ] },
+
+    { prompt: "What is the Interrupt Service Routine (ISR)?",
+      options: [
+        { text: "The code that actually handles the interrupting device", correct: true },
+        { text: "The signal the device sends to the CPU", correct: false },
+        { text: "The register that stores the device's status", correct: false },
+        { text: "The part of memory reserved for devices", correct: false },
+      ] },
+
+    { prompt: "After the ISR finishes, how does the interrupted program continue correctly?",
+      options: [
+        { text: "The CPU restores the saved context, so the program resumes exactly where it left off", correct: true },
+        { text: "The program restarts from the beginning", correct: false },
+        { text: "The operating system rewrites the program", correct: false },
+        { text: "The device tells the program where it was", correct: false },
+      ] },
+
+    { prompt: "What does a DMA controller do?",
+      options: [
+        { text: "Transfers a whole block of data between a device and memory on its own, freeing the CPU", correct: true },
+        { text: "Speeds up the CPU's clock during transfers", correct: false },
+        { text: "Replaces the interrupt vector table", correct: false },
+        { text: "Polls the device faster than the CPU can", correct: false },
+      ] },
+
+    { prompt: "During a DMA transfer, does the CPU do the copying?",
+      options: [
+        { text: "No — the DMA controller copies the data directly to memory; the CPU is free to run other work", correct: true },
+        { text: "Yes — DMA means the CPU accesses memory more directly", correct: false },
+        { text: "Yes — the CPU copies each word but faster", correct: false },
+        { text: "Only the first and last word", correct: false },
+      ] },
+
+    { prompt: "With DMA, how many interrupts does a whole block transfer typically cause?",
+      options: [
+        { text: "One — a single interrupt at the end signalling completion", correct: true },
+        { text: "One per word transferred", correct: false },
+        { text: "None — DMA never interrupts", correct: false },
+        { text: "Two per byte", correct: false },
+      ] },
+
+    { prompt: "Why is interrupt-driven I/O usually better than polling for slow devices?",
+      options: [
+        { text: "Polling wastes all the idle time; interrupts cost overhead just once and free the CPU to do other work meanwhile", correct: true },
+        { text: "Interrupts read data more accurately", correct: false },
+        { text: "Polling cannot be used with memory-mapped I/O", correct: false },
+        { text: "Interrupts use less memory", correct: false },
+      ] },
+
+    { prompt: "A device controller's status register typically reports…",
+      options: [
+        { text: "flags such as ready, busy, or error", correct: true },
+        { text: "the full contents of memory", correct: false },
+        { text: "the address of the ISR", correct: false },
+        { text: "the CPU's clock speed", correct: false },
+      ] },
+
+    // variable-driven: interrupt count, DMA (1) vs programmed I/O (n words)
+    { prompt: "A block of {n} words is transferred. With programmed I/O the CPU is involved once per word, and with DMA just once at the end. How many CPU interrupts/copies does programmed I/O incur that DMA avoids? (Give the difference.)",
+      variables: "n=[64:512]",
+      answer: (v) => v.n - 1 },
+
+    { prompt: "Transferring {n} words: programmed I/O costs about {n} CPU copies, DMA costs 1. Roughly how many times fewer CPU interventions does DMA need? (Give n.)",
+      variables: "n=[100:1000]",
+      answer: (v) => v.n },
+  ]);
+</script>

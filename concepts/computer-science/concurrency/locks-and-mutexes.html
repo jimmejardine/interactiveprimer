@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Locks &amp; Mutexes</primer-title>
+
+    <primer-card>
+      <p>
+        Picture a single-occupancy café toilet with one door and one latch. Anyone can walk up, but the
+        moment someone steps in and slides the latch, the little sign flips to <strong>OCCUPIED</strong>.
+        The next person tries the handle, sees it's taken, and <em>waits</em>. When the occupant slides the
+        latch back to <strong>FREE</strong> and leaves, exactly one waiting person goes in. One door, one
+        latch, one occupant at a time — nobody ever collides inside.
+      </p>
+      <p>
+        That latch is a <strong>mutex</strong> (short for <em>mut</em>ual <em>ex</em>clusion), and it is the
+        primary cure for the
+        <primer-ref to="computer-science/concurrency/race-conditions">race conditions</primer-ref>
+        that plague shared data. A mutex is a <strong>lock</strong>: a tiny object with two operations —
+        <strong><code>acquire()</code></strong> (also called <code>lock()</code>) and
+        <strong><code>release()</code></strong> (also called <code>unlock()</code>) — that guarantees only
+        one thread at a time may run the dangerous stretch of code in between.
+      </p>
+      <primer-code lang="typescript">
+mutex.acquire();       // slide the latch to OCCUPIED — waits here if someone's inside
+count = count + 1;     // the critical section — now safely ours alone
+mutex.release();       // slide it back to FREE — let one waiter in
+      </primer-code>
+      <p>
+        This page is about that one idea — <strong>a lock enforcing mutual exclusion over a critical
+        section</strong> — explored from the door-latch down to the atomic instruction that makes it real.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Mutual exclusion and the critical section</h2>
+      <p>
+        The stretch of code that touches shared data — reading and writing <code>count</code>, pushing to a
+        shared list, updating a bank balance — is the <strong>critical section</strong>. The whole danger of
+        concurrency lives there: if two threads are inside it at the same time, their read–modify–write steps
+        can interleave and one update vanishes. A lock's single job is to make that impossible.
+      </p>
+      <p>
+        <strong>Mutual exclusion</strong> is the guarantee: <em>at most one thread is inside the critical
+        section at a time.</em> The lock is the mechanism that delivers it. To enter the critical section a
+        thread must first hold the lock; while it holds the lock, every other thread that tries to
+        <code>acquire()</code> is made to wait. When the holder <code>release()</code>s, one waiter is let
+        through. Enter with the key, do your work, hand the key back.
+      </p>
+      <primer-theorem name="What a lock promises">
+        <ul>
+          <li>
+            <strong>Acquire before you touch shared state</strong> — the critical section runs only while you
+            hold the lock.
+          </li>
+          <li>
+            <strong>At most one holder</strong> — a second <code>acquire()</code> cannot succeed until the
+            current holder releases.
+          </li>
+          <li>
+            <strong>Release lets exactly one waiter in</strong> — the lock hands off to a single next thread,
+            never two.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Below is the whole life of a lock as a state machine. There are only two states —
+        <strong>FREE</strong> and <strong>HELD</strong> — joined by two transitions: <code>acquire()</code>
+        flips FREE → HELD, and <code>release()</code> flips HELD → FREE. Press play to watch one thread take
+        the lock, a second thread block and join the wait queue, and the release wake it.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "lockStates": {
+            "title": "A mutex is a two-state machine: FREE ⇄ HELD",
+            "unlocked": "FREE",
+            "free": "no owner",
+            "locked": "HELD",
+            "held": "owned by one thread",
+            "acquire": "acquire()  →  becomes HELD",
+            "release": "release()  →  becomes FREE",
+            "queueLabel": "blocked waiters queue",
+            "s1": "Thread T1 calls acquire() on the FREE lock — it succeeds and T1 becomes the owner.",
+            "s2": "Thread T2 calls acquire() while T1 holds it — T2 can't get in, so it blocks and joins the wait queue.",
+            "s3": "T1 finishes its critical section and calls release() — the lock goes back to FREE and one waiter is woken.",
+            "s4": "The woken T2 now acquires the lock and becomes the new owner. The queue empties.",
+            "ownerA": "owner = T1",
+            "waiter": "T2 — blocked",
+            "freed": "freed → T2 woken",
+            "ownerB": "owner = T2"
+          }
+        }
+      </script>
+      <primer-geometry scene="lockStates" caption="State diagram of a mutex: two states FREE and HELD, with acquire() and release() transitions between them and a queue of blocked waiting threads."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>A mutex has an owner</h2>
+      <p>
+        This is the feature that makes a mutex a <em>mutex</em> and not just any counter: it has an
+        <strong>owner</strong>. The thread that calls <code>acquire()</code> is recorded as the holder, and
+        <strong>only that same thread is allowed to call <code>release()</code></strong>. You can't lock a
+        door for someone else to unlock — the person who slid the latch is the one who slides it back.
+      </p>
+      <p>
+        Ownership buys two things. It catches bugs — releasing a lock you never acquired is a programming
+        error the runtime can detect and reject. And it enables <strong>reentrancy</strong> (below): because
+        the lock knows <em>who</em> holds it, it can tell "the owner is asking again" apart from "a different
+        thread is asking". This is exactly what a <em>semaphore</em> does <strong>not</strong> have — a
+        semaphore is ownerless, and any thread may signal it. If you only want a lock, reach for a mutex, not
+        a semaphore.
+      </p>
+      <primer-vignette title="Reentrant (recursive) locks — locking twice without deadlocking yourself">
+        <p>
+          What if a function that holds the lock calls another function that <em>also</em> tries to acquire
+          the same lock? With a plain mutex, the thread would block waiting for… itself. Frozen forever. A
+          <strong>reentrant</strong> (or <strong>recursive</strong>) mutex fixes this by keeping a
+          <em>hold count</em> alongside the owner: when the owning thread acquires again, the count just goes
+          up (1 → 2 → 3), and it only truly frees the lock when the count returns to zero. So the golden rule
+          becomes: <strong>a reentrant lock must be released exactly as many times as it was acquired.</strong>
+          Handy for recursive code, but many experts avoid reentrant locks precisely because that "it's fine
+          to re-lock" habit hides sloppy design.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>How a lock is actually built: one atomic step</h2>
+      <p>
+        A lock is itself just a variable in shared memory — <code>held = true</code>. But setting that flag
+        is its own read–modify–write, so it can race exactly like the data it's meant to protect. You cannot
+        build mutual exclusion out of ordinary reads and writes. The hardware rescues us with
+        <strong>atomic</strong> instructions — <primer-ref to="computer-science/concurrency/race-conditions">test-and-set</primer-ref>
+        and <strong>compare-and-swap</strong> — that fuse a read and a write into a single indivisible step
+        that no thread can interrupt. That is the whole trick; a <code>acquire()</code> is a loop around one
+        atomic operation.
+      </p>
+      <primer-code lang="typescript">
+// TEST-AND-SET: atomically read the old value AND write true, returning
+// the old value. The read+write is ONE unbreakable hardware step.
+function testAndSet(lock: { held: boolean }): boolean {
+  const old = lock.held;   // read  ┐  these two are fused —
+  lock.held = true;        // write ┴  no thread can slip between them
+  return old;
+}
+
+// A SPINLOCK: keep hammering test-and-set until WE were the one who
+// flipped it from false to true. Two threads can never both see false.
+function acquire(lock: { held: boolean }): void {
+  while (testAndSet(lock)) {
+    // it was already true =&gt; someone else holds it =&gt; spin and retry
+  }
+}
+function release(lock: { held: boolean }): void {
+  lock.held = false;       // a single plain write is enough to let a spinner win
+}
+      </primer-code>
+      <p>
+        Because exactly one thread can win the atomic <code>testAndSet</code>, exactly one thread gets past
+        the <code>while</code> loop — everyone else keeps looping. That is mutual exclusion, bootstrapped from
+        a single instruction the CPU promises is indivisible.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Spinlocks vs blocking mutexes: to wait, spin or sleep?</h2>
+      <p>
+        The <code>acquire()</code> above <strong>busy-waits</strong>: it spins in a tight loop, burning CPU
+        cycles doing nothing but checking again. That is a <strong>spinlock</strong>. It sounds wasteful — and
+        it is, if the wait is long — but it is exactly right when the critical section is <em>very</em> short:
+        spinning for a few hundred nanoseconds is far cheaper than the thousands of cycles it costs to put a
+        thread to sleep and wake it again. Spinlocks are also the only option in places where you
+        <strong>can't</strong> sleep at all — inside an operating-system interrupt handler, for instance.
+      </p>
+      <p>
+        A <strong>blocking mutex</strong> takes the opposite bet. When it can't get the lock, instead of
+        spinning it asks the scheduler to <strong>put the thread to sleep</strong> and hand the CPU to
+        someone useful; when the owner releases, the scheduler <strong>wakes</strong> one sleeper. That wake-up
+        costs real time, but the CPU wasn't wasted meanwhile. This is the right default when a critical
+        section might be held for a while.
+      </p>
+      <primer-theorem name="Spin or block?">
+        <ul>
+          <li>
+            <strong>Spinlock</strong> — busy-wait in a loop. Best for <em>very short</em> holds and contexts
+            that can't sleep. Wastes a core while waiting.
+          </li>
+          <li>
+            <strong>Blocking mutex</strong> — sleep the waiter, wake it on release. Best for holds that may be
+            long. Frees the core but pays a sleep/wake cost.
+          </li>
+          <li>
+            <strong>Hybrid</strong> — real-world mutexes often spin for a few microseconds first (in case the
+            lock frees up immediately), then fall back to sleeping. Best of both.
+          </li>
+        </ul>
+      </primer-theorem>
+
+      <primer-vignette title="Watch out! — a spinlock that sleeps, or a lock held too long">
+        <p>
+          Two matching mistakes. First, <strong>spinning while holding a lock for a long time</strong> is a
+          double crime: you waste your own core doing work slowly <em>and</em> every waiter wastes its core
+          spinning behind you. Second, calling anything that might <strong>block or sleep</strong> — I/O, a
+          network read, another blocking lock — <em>while inside a spinlock</em> defeats the entire point:
+          the whole idea of a spinlock is "I'll be done in a flash," so a spinner that naps starves every
+          other core waiting on it. Keep spinlock critical sections tiny and non-blocking.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Run it yourself: with the lock, always 2; without it, a lost update</h2>
+      <p>
+        The sandbox runs on one thread, so it can't produce a <em>real</em> race — which is perfect, because
+        we can <strong>script the exact interleaving</strong> and make the bug happen every time. A tiny
+        <code>Mutex</code> class (a <code>held</code> flag plus an <code>owner</code>) guards a shared counter.
+        We run the worst interleaving both without the lock and with it, and print the results. Press
+        <strong>Run ▶</strong>:
+      </p>
+      <primer-code run>
+        // A minimal mutex: a held flag plus the OWNER that acquired it.
+        class Mutex {
+          private held = false;
+          private owner = "";
+          // one atomic test-and-set attempt: succeeds only if free
+          tryAcquire(who: string): boolean {
+            if (this.held) return false;    // someone owns it =&gt; caller must wait
+            this.held = true;
+            this.owner = who;
+            return true;
+          }
+          release(who: string): void {
+            if (this.owner !== who) throw new Error(who + " does not own the lock!");
+            this.held = false;
+            this.owner = "";
+          }
+        }
+
+        let count = 0;
+
+        // NO LOCK: script the losing interleave — both threads READ before
+        // either WRITES, so one increment is clobbered.
+        function withoutLock(): number {
+          count = 0;
+          const regA = count;   // A reads 0
+          const regB = count;   // B reads 0   (both saw 0!)
+          count = regA + 1;     // A writes 1
+          count = regB + 1;     // B writes 1  (clobbers A's update)
+          return count;
+        }
+
+        // WITH LOCK: B's acquire fails while A holds it, so B must wait until
+        // A releases. The two critical sections can no longer overlap.
+        function withLock(): number {
+          count = 0;
+          const m = new Mutex();
+          console.log("  A tryAcquire -&gt; " + m.tryAcquire("A"));
+          console.log("  B tryAcquire -&gt; " + m.tryAcquire("B") + "   (A owns it, B blocks)");
+          let reg = count; reg = reg + 1; count = reg;   // A's critical section
+          m.release("A");
+          console.log("  A release, then B is woken:");
+          console.log("  B tryAcquire -&gt; " + m.tryAcquire("B"));
+          reg = count; reg = reg + 1; count = reg;       // B's critical section
+          m.release("B");
+          return count;
+        }
+
+        console.log("No lock  =&gt; count = " + withoutLock() + "   (LOST UPDATE — expected 2!)");
+        console.log("");
+        console.log("With lock:");
+        console.log("Final    =&gt; count = " + withLock() + "   (correct)");
+      </primer-code>
+      <p>
+        Same two increments, same shared counter — the only difference is that the lock forbids the
+        overlapping schedule. The unsynchronised run loses an update and ends at <primer-math>1</primer-math>;
+        the locked run serializes the two critical sections and reliably reaches <primer-math>2</primer-math>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Contention: the cost of everyone fighting for one lock</h2>
+      <p>
+        A lock's guarantee has a price. If a critical section can hold only one thread, then while one thread
+        is inside, all the others are <strong>waiting</strong> — the work is <strong>serialized</strong>. When
+        many threads pile up on the same lock, that's <strong>contention</strong>, and it can quietly erase the
+        speed-up you bought eight cores for: eight threads sharing one hot lock spend most of their time queued
+        behind it, not computing.
+      </p>
+      <p>
+        The tuning knob is <strong>granularity</strong>:
+      </p>
+      <ul>
+        <li>
+          <strong>Coarse-grained locking</strong> — one big lock protecting a whole data structure. Simple and
+          easy to reason about, but a bottleneck under contention: unrelated operations block each other.
+        </li>
+        <li>
+          <strong>Fine-grained locking</strong> — many small locks, each protecting one small piece (say, one
+          bucket of a hash table). Threads touching different pieces proceed in parallel, so throughput scales.
+          But more locks means more complexity and more chances to <em>deadlock</em>.
+        </li>
+      </ul>
+      <p>
+        The engineering trade-off is real: coarse locking is correct and slow; fine-grained locking is fast and
+        fiddly. The best lock is one held so <strong>briefly</strong> that contention rarely arises in the first
+        place — which brings us to the golden rules.
+      </p>
+
+      <primer-theorem name="Golden rules for using a lock">
+        <ul>
+          <li>
+            <strong>Hold it as briefly as possible</strong> — do slow work (I/O, big computations) <em>outside</em>
+            the critical section. Shorter holds mean less contention.
+          </li>
+          <li>
+            <strong>Always release it</strong> — on every path out, including errors and early returns. Use
+            <code>try … finally</code> (or a scope-guard / <code>with</code> block) so the release cannot be
+            skipped.
+          </li>
+          <li>
+            <strong>Lock the same data with the same lock</strong> — and, when you need several, always acquire
+            them in one fixed global order.
+          </li>
+        </ul>
+      </primer-theorem>
+
+      <primer-vignette title="Watch out! — the lock you forgot to release">
+        <p>
+          The most common lock bug isn't exotic: it's an early <code>return</code> or a thrown exception in the
+          middle of a critical section that skips right past the <code>release()</code>. The lock is now held
+          <strong>forever</strong>, and every other thread that ever wants it blocks permanently — a frozen
+          program with no crash to point at. The cure is to bind the release to the scope, not to a line you
+          hope executes:
+        </p>
+        <primer-code lang="typescript">
+mutex.acquire();
+try {
+  doWorkThatMightThrowOrReturnEarly();   // whatever happens in here…
+} finally {
+  mutex.release();                       // …this ALWAYS runs
+}
+        </primer-code>
+        <p>
+          Never write a bare <code>acquire()</code> … <code>release()</code> pair with real logic between them
+          unless nothing in that logic can throw or return early. When in doubt, use <code>finally</code>.
+        </p>
+      </primer-vignette>
+
+      <primer-vignette title="If a lock is so expensive, can we skip it entirely?">
+        <p>
+          Sometimes — with <strong>lock-free</strong> (optimistic) concurrency. Instead of locking, a thread
+          reads a value, computes its new version, and uses a single <em>compare-and-swap</em> to install it
+          <em>only if nobody changed it meanwhile</em>. If someone did, the CAS fails and the thread simply
+          retries. No thread ever blocks another, so there's no contention bottleneck and no deadlock — at the
+          cost of trickier code and wasted retries under heavy contention. Beware its evil twin, the
+          <strong>double-checked locking</strong> pattern (check a flag, then lock, then check again): it looks
+          clever for lazy initialisation but is subtly broken without the right memory barriers, and has burned
+          generations of programmers. Lock-free code is powerful and famously hard to get right — a whole field
+          of its own.
+        </p>
+      </primer-vignette>
+
+      <primer-vignette title="If locks cure races, what's the new disease?">
+        <p>
+          <strong>Deadlock.</strong> Thread A locks mutex 1 then waits for mutex 2; thread B locks mutex 2 then
+          waits for mutex 1. Each holds what the other needs, and both wait forever. Nothing is racing now — the
+          program has simply frozen solid. The cure (acquire locks in a fixed global order, and a few related
+          tricks) is a big enough topic to earn its own page. Locks are the primary cure for race conditions;
+          using them carelessly invites the deadlock.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-quiz name="lockQuiz@1"></primer-quiz>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "lockQuiz@1": {
+          "preamble": "Check your understanding of locks, mutexes, ownership, spinlocks and contention.",
+          "qMutex": "A mutex enforces which guarantee over a critical section?",
+          "qOwner": "Who is allowed to call release() on a mutex?",
+          "qOps": "A mutex offers which two operations?",
+          "qBuild": "Why can't a lock be built from ordinary reads and writes alone?",
+          "qSpin": "A spinlock waiting for a busy lock does what?",
+          "qSpinWhen": "When is a spinlock the better choice than a blocking mutex?",
+          "qBlock": "When it can't get the lock, a blocking mutex…",
+          "qCrit": "The stretch of code that touches shared data and must be protected is the…",
+          "qContend": "'Contention' on a lock means…",
+          "qGrain": "Compared with coarse-grained locking, fine-grained locking…",
+          "qFinally": "Why wrap a critical section in try … finally?",
+          "qReentrant": "A reentrant (recursive) lock acquired {k} times by its owner must be released…",
+          "qSerial": "{n} threads each need a lock for {t} ms of critical-section work. With one lock, the total serialized time in the critical section is…",
+          "qForget": "A thread returns early from inside a critical section and skips release(). What happens?",
+          "qLockFree": "Lock-free (optimistic) concurrency typically uses which instruction to install an update only if nobody changed it?",
+          "qNext": "Two threads each hold one lock and each wait for the other's lock, forever. This is…"
+        }
+      }
+    </script>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/concurrency/race-conditions"],
+    "completedDate": "2026-07-04"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // A lock as a two-state machine: FREE <-> HELD, with acquire()/release()
+  // transitions and a queue of blocked waiters. Steps animate one thread
+  // taking the lock, a second blocking, then release waking it.
+  registerGeometryScene("lockStates", ({ board, step, colors, sceneStrings }) => {
+    const text = (x, y, s, col, size = 15, bold = false) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: size,
+        fixed: true, highlight: false, strokeColor: col, color: col,
+        cssStyle: bold ? "font-weight:700" : "",
+      });
+
+    const box = (cx, cy, w, h, col) =>
+      board.create("polygon",
+        [[cx - w / 2, cy - h / 2], [cx + w / 2, cy - h / 2],
+         [cx + w / 2, cy + h / 2], [cx - w / 2, cy + h / 2]],
+        { fillColor: col, fillOpacity: 0.12, vertices: { visible: false },
+          fixed: true, highlight: false,
+          borders: { strokeColor: col, strokeWidth: 2 } });
+
+    // --- base content: the two states ---
+    // FREE (left)
+    box(2, 3.2, 3, 1.3, colors.cat[0]);
+    text(2, 3.45, sceneStrings("unlocked"), colors.cat[0], 17, true);
+    text(2, 3.0, sceneStrings("free"), colors.ink, 12);
+    // HELD (right)
+    box(9, 3.2, 3, 1.3, colors.cat[1]);
+    text(9, 3.45, sceneStrings("locked"), colors.cat[1], 17, true);
+    text(9, 3.0, sceneStrings("held"), colors.ink, 12);
+
+    // transitions
+    board.create("arrow", [[3.6, 3.6], [7.4, 3.6]],
+      { strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false });
+    text(5.5, 4.05, sceneStrings("acquire"), colors.ink, 13);
+    board.create("arrow", [[7.4, 2.8], [3.6, 2.8]],
+      { strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false });
+    text(5.5, 2.45, sceneStrings("release"), colors.ink, 13);
+
+    // waiters queue heading
+    text(9, 1.6, sceneStrings("queueLabel"), colors.ink, 13, true);
+
+    // --- animated scenario ---
+    step(sceneStrings("s1"), () => {
+      text(9, 2.35, sceneStrings("ownerA"), colors.cat[1], 13, true);
+    });
+    step(sceneStrings("s2"), () => {
+      box(9, 0.9, 2.4, 0.62, colors.cat[2]);
+      text(9, 0.9, sceneStrings("waiter"), colors.cat[2], 13);
+    });
+    step(sceneStrings("s3"), () => {
+      text(2, 2.35, sceneStrings("freed"), colors.cat[0], 13, true);
+    });
+    step(sceneStrings("s4"), () => {
+      text(9, -0.05, sceneStrings("ownerB"), colors.cat[1], 13, true);
+    });
+  }, {
+    boundingbox: [-0.5, 5, 11.5, -1],
+    keepAspect: false,
+    playOverlay: true,
+    title: () => makeStrings("lockStates")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("lockQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("preamble") },
+
+    { prompt: () => sceneStrings("qMutex"),
+      options: [
+        { text: "Mutual exclusion — at most one thread inside the critical section at a time", correct: true },
+        { text: "That the critical section runs as fast as possible", correct: false },
+        { text: "That threads never share memory", correct: false },
+        { text: "That the critical section always runs first", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qOwner"),
+      options: [
+        { text: "Only the same thread that acquired it — a mutex has an owner", correct: true },
+        { text: "Any thread at all", correct: false },
+        { text: "Only the operating-system scheduler", correct: false },
+        { text: "The thread with the highest priority", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qOps"),
+      options: [
+        { text: "acquire()/lock() and release()/unlock()", correct: true },
+        { text: "wait() and signal()", correct: false },
+        { text: "read() and write()", correct: false },
+        { text: "push() and pop()", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qBuild"),
+      options: [
+        { text: "The lock variable is itself read-modify-write, so it can race just like the data it protects", correct: true },
+        { text: "Ordinary reads and writes are too slow", correct: false },
+        { text: "Lock variables must live on disk", correct: false },
+        { text: "The compiler forbids writing to boolean variables", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qSpin"),
+      options: [
+        { text: "Busy-waits — loops and re-checks, burning CPU cycles until the lock is free", correct: true },
+        { text: "Immediately sleeps and gives up the CPU", correct: false },
+        { text: "Raises an exception", correct: false },
+        { text: "Silently skips the critical section", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qSpinWhen"),
+      options: [
+        { text: "When holds are very short, or in contexts (like interrupt handlers) where you cannot sleep", correct: true },
+        { text: "When the critical section does long, slow I/O", correct: false },
+        { text: "When there is only one thread in the whole program", correct: false },
+        { text: "When you want the waiter to give up the CPU", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qBlock"),
+      options: [
+        { text: "Sleeps the waiting thread and is woken by the scheduler when the lock is released", correct: true },
+        { text: "Spins in a tight loop rechecking the lock", correct: false },
+        { text: "Steals the lock from the current owner", correct: false },
+        { text: "Returns an error code immediately", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qCrit"),
+      options: [
+        { text: "critical section", correct: true },
+        { text: "main loop", correct: false },
+        { text: "call stack", correct: false },
+        { text: "kernel", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qContend"),
+      options: [
+        { text: "Many threads competing for the same lock, so they serialize and wait behind one another", correct: true },
+        { text: "Two locks protecting the same data", correct: false },
+        { text: "A lock that has been released twice", correct: false },
+        { text: "A thread running on the wrong CPU core", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qGrain"),
+      options: [
+        { text: "Uses many small locks so unrelated operations run in parallel — faster, but more complex and deadlock-prone", correct: true },
+        { text: "Uses one big lock for everything and is always simpler and faster", correct: false },
+        { text: "Removes the need for atomic instructions", correct: false },
+        { text: "Guarantees no deadlock can ever occur", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qFinally"),
+      options: [
+        { text: "So release() runs on every exit path, including early returns and exceptions", correct: true },
+        { text: "To make the critical section run faster", correct: false },
+        { text: "To acquire the lock twice for safety", correct: false },
+        { text: "To disable the scheduler while inside", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qReentrant"),
+      variables: "k=[2:5]",
+      options: [
+        { text: "exactly {k} times — release must balance acquire", correct: true },
+        { text: "just once, no matter how many times it was acquired", correct: false },
+        { text: "{k} + 1 times", correct: false },
+        { text: "it never needs releasing", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qSerial"),
+      variables: "n=[2:6] t=[2:9]",
+      answer: "n * t" },
+
+    { prompt: () => sceneStrings("qForget"),
+      options: [
+        { text: "The lock is held forever, so every thread that later wants it blocks permanently", correct: true },
+        { text: "The lock releases itself after a short timeout", correct: false },
+        { text: "Nothing — the runtime always releases locks at return", correct: false },
+        { text: "The counter is reset to zero", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qLockFree"),
+      options: [
+        { text: "compare-and-swap (CAS)", correct: true },
+        { text: "a plain assignment", correct: false },
+        { text: "disabling interrupts", correct: false },
+        { text: "sleep()", correct: false },
+      ] },
+
+    { prompt: () => sceneStrings("qNext"),
+      options: [
+        { text: "deadlock", correct: true },
+        { text: "a race condition", correct: false },
+        { text: "mutual exclusion", correct: false },
+        { text: "contention", correct: false },
+      ] },
+  ]);
+</script>
