@@ -21,11 +21,37 @@
   s.setAttribute("data-cf-beacon", JSON.stringify({ token: TOKEN }));
   document.head.appendChild(s);
 
-  // GoatCounter — same idea: count.js auto-counts the pageview, reading its endpoint from the
-  // data-goatcounter attribute on its own tag (so dynamic injection works). https-pinned.
+  // GoatCounter — reads its endpoint from the data-goatcounter attribute on its own tag (so dynamic
+  // injection works); https-pinned. We DISABLE its automatic on-load pageview (no_onload) and count
+  // manually once the title is set: concept-page titles are built at runtime by render.js, so a plain
+  // auto-count races render and logs a blank title. count.js augments this settings object with count().
+  /** @type {any} */ (window).goatcounter = { no_onload: true };
   var gc = document.createElement("script");
   gc.async = true;
   gc.src = "https://gc.zgo.at/count.js";
   gc.setAttribute("data-goatcounter", "https://interactiveprimer.goatcounter.com/count");
   document.head.appendChild(gc);
+
+  // Count once, after the page title is in place. count() with no args reads the (now-correct)
+  // document.title + location.pathname; retry while count.js is still loading.
+  var counted = false;
+  function fireCount() {
+    if (counted) return;
+    var g = /** @type {any} */ (window).goatcounter;
+    if (!g || typeof g.count !== "function") {
+      setTimeout(fireCount, 50);
+      return;
+    }
+    counted = true;
+    g.count();
+  }
+  if (document.querySelector("primer-title")) {
+    // A render.js page: its <primer-title> becomes document.title during render, then this fires.
+    document.addEventListener("primer:rendered", fireCount);
+  } else if (document.readyState === "loading") {
+    // A static page (index.html / concepts.html): the title is already in the HTML <head>.
+    document.addEventListener("DOMContentLoaded", fireCount);
+  } else {
+    fireCount();
+  }
 })();
