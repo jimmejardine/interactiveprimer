@@ -24,7 +24,6 @@ import { getCurrentCourse, setCurrentCourse, clearCourse } from "../course.js";
 import { loadGraph } from "../graph-data.js";
 import { confirmDialog } from "../confirm-dialog.js";
 import { trapFocus } from "../focus-trap.js";
-import { CLOUD_ENABLED } from "../cloud-config.js";
 import {
   getUser,
   initAccount,
@@ -209,9 +208,7 @@ export class PrimerMenu extends HTMLElement {
           </div>
           <p class="status" role="status" aria-live="polite" hidden></p>
           <input type="file" class="file-input" accept=".gz,.json,application/gzip,application/json" />
-          ${
-            CLOUD_ENABLED
-              ? `<div class="cloud-section">
+          <div class="cloud-section">
             <p class="section-label">${t("progress.cloud")}</p>
             <div class="choices cloud-out">
               <button type="button" class="login">${t("account.login")}</button>
@@ -233,9 +230,7 @@ export class PrimerMenu extends HTMLElement {
               <button type="button" class="forget-me danger">${t("account.forgetMe")}</button>
             </div>
             <p class="cloud-status" role="status" aria-live="polite" hidden></p>
-          </div>`
-              : ""
-          }
+          </div>
         </div>
         <div class="menu-view view-course" hidden>
           <button type="button" class="back"><span aria-hidden="true">‹ </span>${t("menu.course")}</button>
@@ -475,67 +470,65 @@ export class PrimerMenu extends HTMLElement {
       location.reload();
     });
 
-    // --- Cloud sign-in (Cloud section) — only present when the feature is enabled --------
-    if (CLOUD_ENABLED) {
-      initAccount(); // start (throttled) syncing if a session is already active on this device
-      const q = (/** @type {string} */ sel) => /** @type {HTMLElement} */ (root.querySelector(sel));
-      const cloudOut = q(".cloud-out"), cloudIn = q(".cloud-in");
-      const loginForm = q(".login-form"), codeForm = q(".code-form");
-      const emailInput = /** @type {HTMLInputElement} */ (q(".email-input"));
-      const codeInput = /** @type {HTMLInputElement} */ (q(".code-input"));
-      const cloudStatus = q(".cloud-status");
-      const loggedInAs = q(".logged-in-as");
+    // --- Cloud sign-in (Cloud section) -------------------------------------------------
+    initAccount(); // start (throttled) syncing if a session is already active on this device
+    const q = (/** @type {string} */ sel) => /** @type {HTMLElement} */ (root.querySelector(sel));
+    const cloudOut = q(".cloud-out"), cloudIn = q(".cloud-in");
+    const loginForm = q(".login-form"), codeForm = q(".code-form");
+    const emailInput = /** @type {HTMLInputElement} */ (q(".email-input"));
+    const codeInput = /** @type {HTMLInputElement} */ (q(".code-input"));
+    const cloudStatus = q(".cloud-status");
+    const loggedInAs = q(".logged-in-as");
 
-      /** @param {string} msg @param {boolean} [isError] */
-      const cloudMsg = (msg, isError = false) => {
-        cloudStatus.textContent = msg;
-        cloudStatus.classList.toggle("error", isError);
-        cloudStatus.hidden = !msg;
-      };
-      const renderCloud = () => {
-        const user = getUser();
-        cloudIn.hidden = !user;
-        cloudOut.hidden = !!user;
-        if (user) loggedInAs.textContent = t("account.loggedInAs", { email: user.email });
-        else { loginForm.hidden = true; codeForm.hidden = true; }
-        cloudMsg("");
-      };
+    /** @param {string} msg @param {boolean} [isError] */
+    const cloudMsg = (msg, isError = false) => {
+      cloudStatus.textContent = msg;
+      cloudStatus.classList.toggle("error", isError);
+      cloudStatus.hidden = !msg;
+    };
+    const renderCloud = () => {
+      const user = getUser();
+      cloudIn.hidden = !user;
+      cloudOut.hidden = !!user;
+      if (user) loggedInAs.textContent = t("account.loggedInAs", { email: user.email });
+      else { loginForm.hidden = true; codeForm.hidden = true; }
+      cloudMsg("");
+    };
+    renderCloud();
+
+    q(".login").addEventListener("click", () => { loginForm.hidden = false; emailInput.focus(); });
+    q(".send-code").addEventListener("click", async () => {
+      const r = await requestCode(emailInput.value);
+      if (!r.ok) { cloudMsg(t(r.error === "email" ? "account.badEmail" : "account.error"), true); return; }
+      codeForm.hidden = false;
+      cloudMsg(t("account.codeSent"));
+      codeInput.focus();
+    });
+    q(".resend-code").addEventListener("click", async () => {
+      const r = await requestCode(emailInput.value);
+      cloudMsg(t(r.ok ? "account.codeSent" : "account.error"), !r.ok);
+    });
+    q(".verify-code").addEventListener("click", async () => {
+      const r = await submitCode(codeInput.value);
+      if (!r.ok) { cloudMsg(t("account.badCode"), true); return; }
+      codeInput.value = "";
       renderCloud();
+    });
+    q(".sync-now").addEventListener("click", async () => {
+      cloudMsg(t("account.syncing"));
+      await syncNow();
+      cloudMsg(t("account.synced"));
+    });
+    q(".logout").addEventListener("click", () => void signOutAccount());
+    q(".logout-all").addEventListener("click", async () => {
+      if (await confirmDialog({ message: t("account.logoutAllConfirm"), confirm: t("account.logoutAll"), cancel: t("progress.cancel") })) await logoutAllDevices();
+    });
+    q(".forget-me").addEventListener("click", async () => {
+      if (await confirmDialog({ message: t("account.forgetConfirm"), confirm: t("account.forgetMe"), cancel: t("progress.cancel") })) await deleteCloudData();
+    });
 
-      q(".login").addEventListener("click", () => { loginForm.hidden = false; emailInput.focus(); });
-      q(".send-code").addEventListener("click", async () => {
-        const r = await requestCode(emailInput.value);
-        if (!r.ok) { cloudMsg(t(r.error === "email" ? "account.badEmail" : "account.error"), true); return; }
-        codeForm.hidden = false;
-        cloudMsg(t("account.codeSent"));
-        codeInput.focus();
-      });
-      q(".resend-code").addEventListener("click", async () => {
-        const r = await requestCode(emailInput.value);
-        cloudMsg(t(r.ok ? "account.codeSent" : "account.error"), !r.ok);
-      });
-      q(".verify-code").addEventListener("click", async () => {
-        const r = await submitCode(codeInput.value);
-        if (!r.ok) { cloudMsg(t("account.badCode"), true); return; }
-        codeInput.value = "";
-        renderCloud();
-      });
-      q(".sync-now").addEventListener("click", async () => {
-        cloudMsg(t("account.syncing"));
-        await syncNow();
-        cloudMsg(t("account.synced"));
-      });
-      q(".logout").addEventListener("click", () => void signOutAccount());
-      q(".logout-all").addEventListener("click", async () => {
-        if (await confirmDialog({ message: t("account.logoutAllConfirm"), confirm: t("account.logoutAll"), cancel: t("progress.cancel") })) await logoutAllDevices();
-      });
-      q(".forget-me").addEventListener("click", async () => {
-        if (await confirmDialog({ message: t("account.forgetConfirm"), confirm: t("account.forgetMe"), cancel: t("progress.cancel") })) await deleteCloudData();
-      });
-
-      this.#onAuthChange = () => renderCloud();
-      document.addEventListener("auth-change", this.#onAuthChange);
-    }
+    this.#onAuthChange = () => renderCloud();
+    document.addEventListener("auth-change", this.#onAuthChange);
 
     // Keep the pressed state in sync if the theme changes elsewhere.
     this.#onThemeChange = () => reflect();

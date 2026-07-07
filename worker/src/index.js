@@ -305,49 +305,13 @@ async function bump(env, key) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Email the 6-char sign-in code via Resend.
- *
- * TODO(confirm Resend template API): Resend's transactional-template send shape has shifted over
- * time and isn't fully pinned here. This sends the user's `login_code` template (variable
- * {{{LOGIN_CODE}}}) as the PRIMARY attempt, and — if that response is not ok — falls back to an
- * inline-HTML email so sign-in works either way. Confirm the exact field names against
- * https://resend.com/docs and delete whichever branch you don't need.
- *
+ * Email the 6-char sign-in code via Resend as a simple inline-HTML message.
  * @param {any} env
  * @param {string} email  normalized recipient
  * @param {string} code   the 6-char code
  */
 async function sendCode(env, email, code) {
-  const from = env.EMAIL_FROM || "Interactive Primer <login@interactiveprimer.com>";
-  const auth = { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" };
-
-  // --- PRIMARY: send the hosted `login_code` template with the LOGIN_CODE variable. ---
-  // Field names below are the best-guess for Resend's current template send. If your account uses
-  // different keys (e.g. `template_id` instead of `template`, or `variables` instead of `data`),
-  // adjust here.
-  const templateBody = {
-    from,
-    to: [email],
-    template: "login_code", // some accounts use `template_id`
-    // Resend template variables — provide under several plausible keys so whichever the API reads
-    // is populated. Extra keys are ignored by the API.
-    data: { LOGIN_CODE: code },
-    variables: { LOGIN_CODE: code },
-  };
-
-  try {
-    const res = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: auth,
-      body: JSON.stringify(templateBody),
-    });
-    if (res.ok) return;
-    console.error("Resend template send failed:", res.status, await safeText(res));
-  } catch (e) {
-    console.error("Resend template send threw:", e);
-  }
-
-  // --- FALLBACK: plain inline-HTML email (no template). Always works with a verified sender. ---
+  const from = env.EMAIL_FROM || "InteractivePrimer.com <login@interactiveprimer.com>";
   const html = `
     <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; font-size:16px; color:#111;">
       <p>Your Interactive Primer sign-in code is:</p>
@@ -356,16 +320,16 @@ async function sendCode(env, email, code) {
     </div>`;
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
-    headers: auth,
+    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       from,
       to: [email],
-      subject: "Your Interactive Primer sign-in code",
+      subject: `${code} is your InteractivePrimer.com sign-in code`,
       html,
       text: `Your Interactive Primer sign-in code is: ${code}\n\nIt expires in 10 minutes.`,
     }),
   });
-  if (!res.ok) throw new Error(`Resend fallback failed: ${res.status} ${await safeText(res)}`);
+  if (!res.ok) throw new Error(`Resend send failed: ${res.status} ${await safeText(res)}`);
 }
 
 // ---------------------------------------------------------------------------------------------

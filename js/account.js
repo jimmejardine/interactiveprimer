@@ -12,7 +12,7 @@
  * @module
  */
 
-import { CLOUD_ENABLED, CLOUD_API, CLOUD_FLAG, CLOUD_EMAIL } from "./cloud-config.js";
+import { CLOUD_API, CLOUD_FLAG, CLOUD_EMAIL } from "./cloud-config.js";
 import { initSync, onSignIn, stopSync } from "./cloud-sync.js";
 
 /** @param {string} path @param {RequestInit} [opts] */
@@ -46,7 +46,7 @@ const store = {
 
 /** The signed-in user, or null. Only the email (shown as "Logged in as …") — no other identity. */
 export function getUser() {
-  if (!CLOUD_ENABLED || store.get(CLOUD_FLAG) !== "1") return null;
+  if (store.get(CLOUD_FLAG) !== "1") return null;
   return { email: store.get(CLOUD_EMAIL) || "" };
 }
 
@@ -136,7 +136,7 @@ export async function deleteCloudData() {
 
 /** Wire up on page load: if a session is active, start (throttled) syncing. Idempotent. */
 export function initAccount() {
-  if (!CLOUD_ENABLED || /** @type {any} */ (window).__primerAccountInit) return;
+  if (/** @type {any} */ (window).__primerAccountInit) return;
   /** @type {any} */ (window).__primerAccountInit = true;
   if (getUser()) initSync();
 }

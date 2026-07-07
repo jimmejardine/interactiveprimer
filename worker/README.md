@@ -59,13 +59,8 @@ browser does. `wrangler`/esbuild bundles that relative import; do not copy the f
    - `EMAIL_FROM` — verified Resend sender, e.g. `Interactive Primer <login@interactiveprimer.com>`.
    - `SITE_ORIGIN` — **dev only**, the site origin to reflect for CORS, e.g. `http://localhost:8080`.
 
-4. **Resend** — verify your sender domain and confirm the transactional template:
-   - Verify the domain used in `EMAIL_FROM` (DNS records in the Resend dashboard).
-   - Confirm a template named **`login_code`** exists with variable **`{{{LOGIN_CODE}}}`**.
-   - See the `TODO(confirm Resend template API)` note in `src/index.js`: the exact template-send
-     request shape isn't fully pinned, so `sendCode()` tries the `login_code` template first and
-     **falls back to an inline-HTML email** if that call isn't accepted. Sign-in works either way;
-     once you confirm the field names against the Resend docs, delete the branch you don't need.
+4. **Resend** — verify the sender domain used in `EMAIL_FROM` (add its DNS records in the Resend
+   dashboard). `sendCode()` sends a plain inline-HTML email containing the 6-character code.
 
 5. **Route** — serve the API from the site's origin so it's same-origin in production (no CORS):
    set `interactiveprimer.com/api/*` → this Worker. Do it in the Cloudflare dashboard
@@ -76,9 +71,6 @@ browser does. `wrangler`/esbuild bundles that relative import; do not copy the f
    ```bash
    wrangler deploy
    ```
-
-7. **Enable it in the site** — flip `CLOUD_ENABLED = true` in `js/cloud-config.js` (create that file
-   if it doesn't exist yet) so the front-end starts calling `/api/*`.
 
 ## Local development
 

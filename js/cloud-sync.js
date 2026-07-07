@@ -17,7 +17,7 @@
  * @module
  */
 
-import { CLOUD_ENABLED, CLOUD_API, CLOUD_FLAG } from "./cloud-config.js";
+import { CLOUD_API, CLOUD_FLAG } from "./cloud-config.js";
 import { allEntries } from "./confidence-store.js";
 import { applyProgress, hasExistingProgress } from "./progress.js";
 import { getCurrentCourse, setCurrentCourse } from "./course.js";
@@ -85,7 +85,7 @@ const dirtyCount = (/** @type {{ids:string[],course:boolean}} */ d) => d.ids.len
 
 const signedIn = () => {
   try {
-    return CLOUD_ENABLED && localStorage.getItem(CLOUD_FLAG) === "1";
+    return localStorage.getItem(CLOUD_FLAG) === "1";
   } catch {
     return false;
   }

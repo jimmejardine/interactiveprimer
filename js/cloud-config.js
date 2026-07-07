@@ -1,16 +1,11 @@
 // @ts-check
 /**
- * Feature flag + constants for the OPTIONAL cloud-sync backend (a Cloudflare Worker at `CLOUD_API`).
- * While `CLOUD_ENABLED` is false the whole feature is inert — the Cloud section of the Progress menu
- * is hidden and no `/api` request is ever made — so the site behaves exactly as it does today. Flip
- * it to `true` once the Worker is deployed (see worker/README.md).
+ * Constants for the cloud-sync backend (a Cloudflare Worker at `CLOUD_API`). The client talks to it
+ * with plain `fetch` — no SDK.
  * @module
  */
 
-/** Master switch. Keep false until the sync Worker + Cloudflare KV + Resend are set up. */
-export const CLOUD_ENABLED = true;
-
-/** Base path of the sync Worker. "/api" is same-origin in production; a local dev URL works too. */
+/** Base path of the sync Worker. "/api" is same-origin in production. */
 export const CLOUD_API = "/api";
 
 /** localStorage flag: "1" while a cloud session is active on this device (the httpOnly cookie is the
