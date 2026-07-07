@@ -1,116 +1,26 @@
 // @ts-check
 /**
- * Save / restore learner progress. The Primer has no server, so a learner's confidence
+ * Save / restore learner progress. The base Primer has no server, so a learner's confidence
  * scores live only in this browser's localStorage. This module turns that into a portable
  * file: **save** downloads a gzip-compressed JSON snapshot of every `{ id, stars, first, last }`
  * score, and **restore** reads one back — either **merging** it into the local scores
  * (per concept, the more-recently-updated score wins) or **overwriting** them wholesale.
  *
- * The merge/validate core is pure (DOM-free) so it's unit-tested directly; the save/restore
- * IO goes through js/confidence-store.js for all localStorage access.
+ * The merge/validate core is pure (DOM-free) and now lives in js/progress-core.js — shared with the
+ * optional cloud-sync Worker so both reconcile snapshots identically — and is re-exported here for
+ * existing importers. The save/restore/clear IO goes through js/confidence-store.js and js/course.js.
  * @module
  */
 
-import {
-  allEntries,
-  writeEntry,
-  clearAll,
-  todayISO,
-  MAX_STARS,
-} from "./confidence-store.js";
-import { getCurrentCourse } from "./course.js";
+import { allEntries, writeEntry, clearAll, todayISO } from "./confidence-store.js";
+import { getCurrentCourse, clearCourse } from "./course.js";
+import { mergeProgress, validateImport, FILE_TYPE, FILE_VERSION } from "./progress-core.js";
 
-/** @typedef {{ id: string, stars: number, first: string, last: string }} ProgressEntry */
+// Re-export the pure core so existing importers (tests, the menu, cloud-sync) keep getting these
+// from js/progress.js.
+export { mergeProgress, validateImport, FILE_TYPE, FILE_VERSION };
 
-/** Marker + version stamped into an exported file, so restore can sanity-check it. */
-export const FILE_TYPE = "primer-progress";
-export const FILE_VERSION = 1;
-
-// ---- pure core (DOM-free, unit-tested) -------------------------------------------------
-
-/**
- * Combine two progress snapshots.
- * - `overwrite` → `incoming` replaces everything (the caller wipes local scores first).
- * - `merge` → union by id; for an id in both, the score (`stars`) comes from whichever side has
- *   the later `last` date (an empty date is oldest; on a tie, `incoming` wins as the deliberate
- *   import), while the dates span both: `first` = the earliest first-rated date and `last` =
- *   the latest updated date of the two.
- * @param {ProgressEntry[]} existing
- * @param {ProgressEntry[]} incoming
- * @param {"merge" | "overwrite"} mode
- * @returns {ProgressEntry[]}
- */
-export function mergeProgress(existing, incoming, mode) {
-  if (mode === "overwrite") return incoming.slice();
-  /** @type {Map<string, ProgressEntry>} */
-  const byId = new Map();
-  for (const e of existing) byId.set(e.id, e);
-  for (const inc of incoming) {
-    const cur = byId.get(inc.id);
-    if (!cur) {
-      byId.set(inc.id, inc);
-      continue;
-    }
-    const winner = inc.last >= cur.last ? inc : cur; // later `last` wins its stars; tie → incoming
-    byId.set(inc.id, {
-      id: inc.id,
-      stars: winner.stars,
-      first: minDate(cur.first, inc.first), // earliest first-rated date across both
-      last: maxDate(cur.last, inc.last), // latest updated date across both
-    });
-  }
-  return [...byId.values()];
-}
-
-/**
- * The earliest of two ISO dates, ignoring empty strings. Returns "" only if both are empty.
- * @param {string} a
- * @param {string} b
- */
-function minDate(a, b) {
-  if (!a) return b;
-  if (!b) return a;
-  return a <= b ? a : b;
-}
-
-/**
- * The latest of two ISO dates, ignoring empty strings. Returns "" only if both are empty.
- * @param {string} a
- * @param {string} b
- */
-function maxDate(a, b) {
-  if (!a) return b;
-  if (!b) return a;
-  return a >= b ? a : b;
-}
-
-/**
- * Validate a parsed import object and return its clean entries, or throw on a bad shape.
- * Tolerates missing dates (→ ""); rejects a wrong type/version or malformed entries.
- * @param {any} obj
- * @returns {ProgressEntry[]}
- */
-export function validateImport(obj) {
-  if (!obj || typeof obj !== "object" || obj.type !== FILE_TYPE) {
-    throw new Error("Not a Primer progress file.");
-  }
-  if (!Array.isArray(obj.entries)) throw new Error("Progress file has no entries.");
-  return obj.entries.map((/** @type {any} */ e, /** @type {number} */ i) => {
-    if (!e || typeof e.id !== "string" || !e.id) {
-      throw new Error(`Entry ${i} has no id.`);
-    }
-    const stars = Number(e.stars);
-    if (!Number.isFinite(stars) || stars < 0 || stars > MAX_STARS) {
-      throw new Error(`Entry "${e.id}" has an invalid score.`);
-    }
-    return {
-      id: e.id,
-      stars: Math.round(stars),
-      first: typeof e.first === "string" ? e.first : "",
-      last: typeof e.last === "string" ? e.last : "",
-    };
-  });
-}
+/** @typedef {import("./progress-core.js").ProgressEntry} ProgressEntry */
 
 // ---- browser IO ------------------------------------------------------------------------
 
@@ -191,7 +101,7 @@ export async function readProgressFile(file) {
 /**
  * Apply imported entries to localStorage. `overwrite` clears all local scores first; both
  * modes then merge per the rules in `mergeProgress` and write each resulting tuple verbatim
- * (preserving its first/last dates).
+ * (preserving its first/last stamps).
  * @param {ProgressEntry[]} entries
  * @param {"merge" | "overwrite"} mode
  */
@@ -199,4 +109,13 @@ export function applyProgress(entries, mode) {
   const merged = mergeProgress(allEntries(), entries, mode);
   if (mode === "overwrite") clearAll();
   for (const e of merged) writeEntry(e.id, e.stars, e.first, e.last);
+}
+
+/**
+ * Wipe this browser's learner progress: every confidence score and the current course. Local only —
+ * a cloud copy (if signed in) is untouched (use "Forget me" to erase that). The caller repaints.
+ */
+export function clearLocalProgress() {
+  clearAll();
+  clearCourse();
 }

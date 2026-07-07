@@ -107,6 +107,8 @@ export class PrimerConcept extends HTMLElement {
   #onQuizGraded = null;
   /** @type {(() => void) | null} */
   #onCourse = null;
+  /** @type {((e: Event) => void) | null} */
+  #onConfidence = null;
 
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
@@ -226,6 +228,18 @@ export class PrimerConcept extends HTMLElement {
     };
     document.addEventListener("quiz-graded", this.#onQuizGraded);
 
+    // A cloud-sync pull can change THIS concept's rating underfoot — reflect it in the star row
+    // live. Guarded so the control's own click / quiz dispatches (which have already set `rating`)
+    // are ignored, so there is no feedback loop.
+    this.#onConfidence = (e) => {
+      const d = /** @type {any} */ (e).detail;
+      if (!d || d.conceptId !== id || d.value === rating) return;
+      rating = d.value;
+      paint(starEls, rating);
+      reflectRating(starEls, statusEl, rating);
+    };
+    document.addEventListener("confidence-change", this.#onConfidence);
+
     // "Focus on this course" — only on a course page (`course: true`). Focusing sets the learner's
     // current course (id = this course's page id); switching from another course asks first; once
     // focused the button flips to an "exit" affordance.
@@ -259,7 +273,8 @@ export class PrimerConcept extends HTMLElement {
   disconnectedCallback() {
     if (this.#onQuizGraded) document.removeEventListener("quiz-graded", this.#onQuizGraded);
     if (this.#onCourse) document.removeEventListener("course-change", this.#onCourse);
-    this.#onQuizGraded = this.#onCourse = null;
+    if (this.#onConfidence) document.removeEventListener("confidence-change", this.#onConfidence);
+    this.#onQuizGraded = this.#onCourse = this.#onConfidence = null;
   }
 
   /**

@@ -18,11 +18,23 @@ import {
   readProgressFile,
   applyProgress,
   hasExistingProgress,
+  clearLocalProgress,
 } from "../progress.js";
 import { getCurrentCourse, setCurrentCourse, clearCourse } from "../course.js";
 import { loadGraph } from "../graph-data.js";
 import { confirmDialog } from "../confirm-dialog.js";
 import { trapFocus } from "../focus-trap.js";
+import { CLOUD_ENABLED } from "../cloud-config.js";
+import {
+  getUser,
+  initAccount,
+  requestCode,
+  submitCode,
+  signOutAccount,
+  logoutAllDevices,
+  deleteCloudData,
+} from "../account.js";
+import { syncNow } from "../cloud-sync.js";
 
 /** @typedef {import("../theme.js").ThemeId} ThemeId */
 /** @typedef {import("../i18n.js").LocaleId} LocaleId */
@@ -114,6 +126,26 @@ const STYLE = `
     background: var(--primer-danger, #c0392b);
     color: #fff; border-color: transparent;
   }
+
+  /* Progress sub-view: section labels (Local / Cloud) + the cloud sign-in form. */
+  .section-label {
+    margin: 0.65rem 0 0.35rem; font-size: 0.72rem; text-transform: uppercase;
+    letter-spacing: 0.04em; color: var(--primer-ink-soft, #667);
+  }
+  .choices button.danger { color: var(--primer-danger, #c0392b); }
+  .cloud-section[hidden], .login-form[hidden], .code-form[hidden],
+  .cloud-in[hidden], .cloud-out[hidden] { display: none; }
+  .login-form, .code-form { display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.35rem; }
+  .email-input, .code-input {
+    width: 100%; box-sizing: border-box; padding: 0.4rem 0.5rem; font: inherit;
+    border: 1px solid var(--primer-border, #ccc); border-radius: 0.4rem;
+    background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
+  }
+  .code-input { text-transform: uppercase; letter-spacing: 0.25em; text-align: center; }
+  .logged-in-as { margin: 0 0 0.4rem; font-size: 0.85rem; color: var(--primer-ink, #111); word-break: break-all; }
+  .cloud-status { margin: 0.4rem 0 0; font-size: 0.8rem; color: var(--primer-ink-soft, #667); }
+  .cloud-status[hidden] { display: none; }
+  .cloud-status.error { color: var(--primer-danger, #c0392b); }
 `;
 
 export class PrimerMenu extends HTMLElement {
@@ -125,6 +157,8 @@ export class PrimerMenu extends HTMLElement {
   #onKeydown = null;
   /** @type {(() => void) | null} */
   #onCourseChange = null;
+  /** @type {(() => void) | null} */
+  #onAuthChange = null;
 
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
@@ -167,12 +201,41 @@ export class PrimerMenu extends HTMLElement {
         </div>
         <div class="menu-view view-progress" hidden>
           <button type="button" class="back"><span aria-hidden="true">‹ </span>${t("menu.progress")}</button>
-          <div class="choices" role="group" aria-label="${t("menu.progress")}">
+          <p class="section-label">${t("progress.local")}</p>
+          <div class="choices" role="group" aria-label="${t("progress.local")}">
             <button type="button" class="save">${t("menu.save")}</button>
             <button type="button" class="restore">${t("menu.restore")}</button>
+            <button type="button" class="clear-local danger">${t("progress.clear")}</button>
           </div>
           <p class="status" role="status" aria-live="polite" hidden></p>
           <input type="file" class="file-input" accept=".gz,.json,application/gzip,application/json" />
+          ${
+            CLOUD_ENABLED
+              ? `<div class="cloud-section">
+            <p class="section-label">${t("progress.cloud")}</p>
+            <div class="choices cloud-out">
+              <button type="button" class="login">${t("account.login")}</button>
+              <div class="login-form" hidden>
+                <input type="email" class="email-input" autocomplete="email" inputmode="email" placeholder="you@example.com" aria-label="${t("account.login")}" />
+                <button type="button" class="send-code">${t("account.sendCode")}</button>
+                <div class="code-form" hidden>
+                  <input type="text" class="code-input" maxlength="6" autocomplete="one-time-code" placeholder="ABCDEF" aria-label="${t("account.enterCode")}" />
+                  <button type="button" class="verify-code">${t("account.verify")}</button>
+                  <button type="button" class="resend-code">${t("account.resendCode")}</button>
+                </div>
+              </div>
+            </div>
+            <div class="choices cloud-in" hidden>
+              <p class="logged-in-as"></p>
+              <button type="button" class="sync-now">${t("account.syncNow")}</button>
+              <button type="button" class="logout">${t("account.logout")}</button>
+              <button type="button" class="logout-all">${t("account.logoutAll")}</button>
+              <button type="button" class="forget-me danger">${t("account.forgetMe")}</button>
+            </div>
+            <p class="cloud-status" role="status" aria-live="polite" hidden></p>
+          </div>`
+              : ""
+          }
         </div>
         <div class="menu-view view-course" hidden>
           <button type="button" class="back"><span aria-hidden="true">‹ </span>${t("menu.course")}</button>
@@ -404,6 +467,76 @@ export class PrimerMenu extends HTMLElement {
       c.addEventListener("click", closeDialog);
     }
 
+    // --- Clear local progress (Local section) ------------------------------------------
+    /** @type {HTMLButtonElement} */ (root.querySelector(".clear-local")).addEventListener("click", async () => {
+      const msg = getUser() ? t("progress.clearConfirmSignedIn") : t("progress.clearConfirm");
+      if (!(await confirmDialog({ message: msg, confirm: t("progress.clear"), cancel: t("progress.cancel") }))) return;
+      clearLocalProgress();
+      location.reload();
+    });
+
+    // --- Cloud sign-in (Cloud section) — only present when the feature is enabled --------
+    if (CLOUD_ENABLED) {
+      initAccount(); // start (throttled) syncing if a session is already active on this device
+      const q = (/** @type {string} */ sel) => /** @type {HTMLElement} */ (root.querySelector(sel));
+      const cloudOut = q(".cloud-out"), cloudIn = q(".cloud-in");
+      const loginForm = q(".login-form"), codeForm = q(".code-form");
+      const emailInput = /** @type {HTMLInputElement} */ (q(".email-input"));
+      const codeInput = /** @type {HTMLInputElement} */ (q(".code-input"));
+      const cloudStatus = q(".cloud-status");
+      const loggedInAs = q(".logged-in-as");
+
+      /** @param {string} msg @param {boolean} [isError] */
+      const cloudMsg = (msg, isError = false) => {
+        cloudStatus.textContent = msg;
+        cloudStatus.classList.toggle("error", isError);
+        cloudStatus.hidden = !msg;
+      };
+      const renderCloud = () => {
+        const user = getUser();
+        cloudIn.hidden = !user;
+        cloudOut.hidden = !!user;
+        if (user) loggedInAs.textContent = t("account.loggedInAs", { email: user.email });
+        else { loginForm.hidden = true; codeForm.hidden = true; }
+        cloudMsg("");
+      };
+      renderCloud();
+
+      q(".login").addEventListener("click", () => { loginForm.hidden = false; emailInput.focus(); });
+      q(".send-code").addEventListener("click", async () => {
+        const r = await requestCode(emailInput.value);
+        if (!r.ok) { cloudMsg(t(r.error === "email" ? "account.badEmail" : "account.error"), true); return; }
+        codeForm.hidden = false;
+        cloudMsg(t("account.codeSent"));
+        codeInput.focus();
+      });
+      q(".resend-code").addEventListener("click", async () => {
+        const r = await requestCode(emailInput.value);
+        cloudMsg(t(r.ok ? "account.codeSent" : "account.error"), !r.ok);
+      });
+      q(".verify-code").addEventListener("click", async () => {
+        const r = await submitCode(codeInput.value);
+        if (!r.ok) { cloudMsg(t("account.badCode"), true); return; }
+        codeInput.value = "";
+        renderCloud();
+      });
+      q(".sync-now").addEventListener("click", async () => {
+        cloudMsg(t("account.syncing"));
+        await syncNow();
+        cloudMsg(t("account.synced"));
+      });
+      q(".logout").addEventListener("click", () => void signOutAccount());
+      q(".logout-all").addEventListener("click", async () => {
+        if (await confirmDialog({ message: t("account.logoutAllConfirm"), confirm: t("account.logoutAll"), cancel: t("progress.cancel") })) await logoutAllDevices();
+      });
+      q(".forget-me").addEventListener("click", async () => {
+        if (await confirmDialog({ message: t("account.forgetConfirm"), confirm: t("account.forgetMe"), cancel: t("progress.cancel") })) await deleteCloudData();
+      });
+
+      this.#onAuthChange = () => renderCloud();
+      document.addEventListener("auth-change", this.#onAuthChange);
+    }
+
     // Keep the pressed state in sync if the theme changes elsewhere.
     this.#onThemeChange = () => reflect();
     document.addEventListener("theme-change", this.#onThemeChange);
@@ -435,7 +568,8 @@ export class PrimerMenu extends HTMLElement {
     if (this.#onKeydown) document.removeEventListener("keydown", this.#onKeydown);
     if (this.#onDocClick) document.removeEventListener("click", this.#onDocClick);
     if (this.#onCourseChange) document.removeEventListener("course-change", this.#onCourseChange);
-    this.#onThemeChange = this.#onKeydown = this.#onDocClick = this.#onCourseChange = null;
+    if (this.#onAuthChange) document.removeEventListener("auth-change", this.#onAuthChange);
+    this.#onThemeChange = this.#onKeydown = this.#onDocClick = this.#onCourseChange = this.#onAuthChange = null;
   }
 }
 

@@ -16,17 +16,30 @@
  * @module
  */
 
+import { MAX_STARS } from "./progress-core.js";
+
 /** Confidence storage key prefix. */
 export const CONFIDENCE_PREFIX = "primer:confidence:";
 
-/** Stars at full mastery — must match js/components/primer-concept.js. */
-export const MAX_STARS = 10;
+// `MAX_STARS` lives in the shared pure core (js/progress-core.js); re-export it here so existing
+// `import { MAX_STARS } from "./confidence-store.js"` call-sites keep working unchanged.
+export { MAX_STARS };
 
 /** @typedef {{ stars: number, first: string, last: string }} ConfidenceEntry */
 
-/** Today as an ISO `YYYY-MM-DD` string (the date stamped onto a score when it's set). */
+/** Today as an ISO `YYYY-MM-DD` string (the `first`-rated date stamped onto a new score). */
 export function todayISO() {
   return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * The current instant as a full millisecond ISO string, e.g. `2026-07-07T09:15:03.123Z`. Stamped as
+ * a score's `last`, so two edits to the same concept on the same day still order correctly when
+ * merging across devices — a date-only `last` sorts before any same-day instant, so the precise one
+ * wins the tie. Compared as an opaque string by mergeProgress (js/progress-core.js).
+ */
+export function nowISO() {
+  return new Date().toISOString();
 }
 
 /**
@@ -71,18 +84,18 @@ export function readEntry(id) {
 }
 
 /**
- * Persist a concept's score as a `[stars, first, last]` tuple. By default `last` is today and
- * `first` is preserved from any existing score (or set to today on the first rating) — so a
- * normal star change keeps the original "first rated" date. Pass `first`/`last` explicitly
- * (e.g. when restoring a backup) to set both verbatim.
+ * Persist a concept's score as a `[stars, first, last]` tuple. By default `last` is the current
+ * instant (millisecond ISO) and `first` is preserved from any existing score (or set to today's
+ * date on the first rating) — so a normal star change keeps the original "first rated" date. Pass
+ * `first`/`last` explicitly (e.g. when restoring a backup or a cloud pull) to set both verbatim.
  * @param {string} id
  * @param {number} stars
  * @param {string} [first]
  * @param {string} [last]
  */
-export function writeEntry(id, stars, first, last = todayISO()) {
+export function writeEntry(id, stars, first, last = nowISO()) {
   const clamped = Math.min(MAX_STARS, Math.max(0, Math.round(stars)));
-  const firstDate = first ?? (readEntry(id)?.first || last);
+  const firstDate = first ?? (readEntry(id)?.first || todayISO());
   try {
     localStorage.setItem(CONFIDENCE_PREFIX + id, JSON.stringify([clamped, firstDate, last]));
   } catch {
