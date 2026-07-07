@@ -142,11 +142,8 @@ export default {
   "progress.clearConfirmSignedIn":
     "Erase all your progress on this device? Your cloud copy stays — use “Forget me” to erase that too.",
   "account.login": "Log in",
-  "account.sendCode": "Send code",
   "account.enterCode": "Enter the 6-letter code",
   "account.codeSent": "Check your email for a 6-letter code.",
-  "account.verify": "Verify",
-  "account.resendCode": "Resend code",
   "account.badCode": "That code is wrong or expired.",
   "account.badEmail": "Please enter a valid email address.",
   "account.error": "Something went wrong. Please try again.",

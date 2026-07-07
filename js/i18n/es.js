@@ -107,11 +107,8 @@ export default {
   "progress.clearConfirmSignedIn":
     "¿Borrar todo tu progreso en este dispositivo? Tu copia en la nube se conserva — usa «Olvidarme» para borrarla también.",
   "account.login": "Iniciar sesión",
-  "account.sendCode": "Enviar código",
   "account.enterCode": "Escribe el código de 6 letras",
   "account.codeSent": "Revisa tu correo para ver un código de 6 letras.",
-  "account.verify": "Verificar",
-  "account.resendCode": "Reenviar código",
   "account.badCode": "Ese código es incorrecto o ha caducado.",
   "account.badEmail": "Introduce una dirección de correo válida.",
   "account.error": "Algo salió mal. Inténtalo de nuevo.",

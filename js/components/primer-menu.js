@@ -132,9 +132,9 @@ const STYLE = `
     letter-spacing: 0.04em; color: var(--primer-ink-soft, #667);
   }
   .choices button.danger { color: var(--primer-danger, #c0392b); }
-  .cloud-section[hidden], .login-form[hidden], .code-form[hidden],
+  .cloud-section[hidden], .email-form[hidden], .code-form[hidden],
   .cloud-in[hidden], .cloud-out[hidden] { display: none; }
-  .login-form, .code-form { display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.35rem; }
+  .email-form, .code-form { display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.35rem; }
   .email-input, .code-input {
     width: 100%; box-sizing: border-box; padding: 0.4rem 0.5rem; font: inherit;
     border: 1px solid var(--primer-border, #ccc); border-radius: 0.4rem;
@@ -142,9 +142,8 @@ const STYLE = `
   }
   .code-input { text-transform: uppercase; letter-spacing: 0.25em; text-align: center; }
   .logged-in-as { margin: 0 0 0.4rem; font-size: 0.85rem; color: var(--primer-ink, #111); word-break: break-all; }
-  .cloud-status { margin: 0.4rem 0 0; font-size: 0.8rem; color: var(--primer-ink-soft, #667); }
+  .cloud-status { margin: 0.4rem 0 0; font-size: 0.8rem; text-align: center; color: var(--primer-danger, #c0392b); }
   .cloud-status[hidden] { display: none; }
-  .cloud-status.error { color: var(--primer-danger, #c0392b); }
 `;
 
 export class PrimerMenu extends HTMLElement {
@@ -212,15 +211,12 @@ export class PrimerMenu extends HTMLElement {
             <p class="section-label">${t("progress.cloud")}</p>
             <div class="choices cloud-out">
               <button type="button" class="login">${t("account.login")}</button>
-              <div class="login-form" hidden>
-                <input type="email" class="email-input" autocomplete="email" inputmode="email" placeholder="you@example.com" aria-label="${t("account.login")}" />
-                <button type="button" class="send-code">${t("account.sendCode")}</button>
-                <div class="code-form" hidden>
-                  <input type="text" class="code-input" maxlength="6" autocomplete="one-time-code" placeholder="ABCDEF" aria-label="${t("account.enterCode")}" />
-                  <button type="button" class="verify-code">${t("account.verify")}</button>
-                  <button type="button" class="resend-code">${t("account.resendCode")}</button>
-                </div>
-              </div>
+              <form class="email-form" hidden>
+                <input type="email" class="email-input" autocomplete="email" inputmode="email" enterkeyhint="send" placeholder="you@example.com" aria-label="${t("account.login")}" />
+              </form>
+              <form class="code-form" hidden>
+                <input type="text" class="code-input" maxlength="6" autocomplete="one-time-code" enterkeyhint="done" autocapitalize="characters" placeholder="ABCDEF" aria-label="${t("account.enterCode")}" />
+              </form>
             </div>
             <div class="choices cloud-in" hidden>
               <p class="logged-in-as"></p>
@@ -474,43 +470,45 @@ export class PrimerMenu extends HTMLElement {
     initAccount(); // start (throttled) syncing if a session is already active on this device
     const q = (/** @type {string} */ sel) => /** @type {HTMLElement} */ (root.querySelector(sel));
     const cloudOut = q(".cloud-out"), cloudIn = q(".cloud-in");
-    const loginForm = q(".login-form"), codeForm = q(".code-form");
+    const emailForm = q(".email-form"), codeForm = q(".code-form");
     const emailInput = /** @type {HTMLInputElement} */ (q(".email-input"));
     const codeInput = /** @type {HTMLInputElement} */ (q(".code-input"));
     const cloudStatus = q(".cloud-status");
     const loggedInAs = q(".logged-in-as");
 
-    /** @param {string} msg @param {boolean} [isError] */
-    const cloudMsg = (msg, isError = false) => {
+    // A status line, shown centred + red (CSS) for a few seconds then cleared. Empty clears at once.
+    let statusTimer = 0;
+    const cloudMsg = (/** @type {string} */ msg) => {
       cloudStatus.textContent = msg;
-      cloudStatus.classList.toggle("error", isError);
       cloudStatus.hidden = !msg;
+      clearTimeout(statusTimer);
+      if (msg) statusTimer = window.setTimeout(() => { cloudStatus.textContent = ""; cloudStatus.hidden = true; }, 3000);
     };
     const renderCloud = () => {
       const user = getUser();
       cloudIn.hidden = !user;
       cloudOut.hidden = !!user;
       if (user) loggedInAs.textContent = t("account.loggedInAs", { email: user.email });
-      else { loginForm.hidden = true; codeForm.hidden = true; }
+      else { emailForm.hidden = true; codeForm.hidden = true; }
       cloudMsg("");
     };
     renderCloud();
 
-    q(".login").addEventListener("click", () => { loginForm.hidden = false; emailInput.focus(); });
-    q(".send-code").addEventListener("click", async () => {
+    q(".login").addEventListener("click", () => { emailForm.hidden = false; emailInput.focus(); });
+    // Enter in the email field sends a code; submitting it again just re-sends (the built-in "resend").
+    emailForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
       const r = await requestCode(emailInput.value);
-      if (!r.ok) { cloudMsg(t(r.error === "email" ? "account.badEmail" : "account.error"), true); return; }
+      if (!r.ok) { cloudMsg(t(r.error === "email" ? "account.badEmail" : "account.error")); return; }
       codeForm.hidden = false;
       cloudMsg(t("account.codeSent"));
       codeInput.focus();
     });
-    q(".resend-code").addEventListener("click", async () => {
-      const r = await requestCode(emailInput.value);
-      cloudMsg(t(r.ok ? "account.codeSent" : "account.error"), !r.ok);
-    });
-    q(".verify-code").addEventListener("click", async () => {
+    // Enter in the code field verifies it.
+    codeForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
       const r = await submitCode(codeInput.value);
-      if (!r.ok) { cloudMsg(t("account.badCode"), true); return; }
+      if (!r.ok) { cloudMsg(t("account.badCode")); return; }
       codeInput.value = "";
       renderCloud();
     });
