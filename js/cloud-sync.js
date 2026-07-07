@@ -231,9 +231,11 @@ export function initSync() {
   if (dirtyCount(readDirty()) > 0) schedulePush();
 }
 
-/** Force an immediate pull ("Sync now" button). */
-export function syncNow() {
-  return pullMerge({ force: true });
+/** "Sync now": flush this device's progress UP (bypassing the 15-min write debounce), then pull +
+ *  merge everything down (bypassing the 6-h read throttle). This is the immediate-sync escape hatch. */
+export async function syncNow() {
+  await pushNow();
+  await pullMerge({ force: true });
 }
 
 /**
