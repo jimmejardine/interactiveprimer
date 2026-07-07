@@ -94,11 +94,14 @@ async function authRequest(request, env, ctx) {
     return json({ ok: true }, 200);
   }
 
-  const code = genCode();
-  const codeHash = await sha256Hex(code + uid);
-  await env.PROGRESS.put(`otp:${uid}`, JSON.stringify({ codeHash, attempts: 0 }), {
-    expirationTtl: OTP_TTL,
-  });
+  // Reuse an existing, still-valid code so a delayed email never carries a stale one — every request in
+  // the window mails the SAME code. (Plaintext storage is fine for a 10-min, single-use code.)
+  const existing = safeParse(await env.PROGRESS.get(`otp:${uid}`));
+  let code = existing && typeof existing.code === "string" ? existing.code : "";
+  if (!code) {
+    code = genCode();
+    await env.PROGRESS.put(`otp:${uid}`, JSON.stringify({ code, attempts: 0 }), { expirationTtl: OTP_TTL });
+  }
 
   // Send in the background so the response isn't blocked on Resend; failures are logged, not leaked.
   ctx.waitUntil(sendCode(env, email, code).catch((e) => console.error("sendCode failed:", e)));
@@ -120,10 +123,9 @@ async function authVerify(request, env) {
   const otpRaw = await env.PROGRESS.get(`otp:${uid}`);
   if (!otpRaw) return json({ ok: false, error: "invalid_code" }, 401);
 
-  const otp = safeParse(otpRaw) || { codeHash: "", attempts: 0 };
-  const candidate = await sha256Hex(code + uid);
+  const otp = safeParse(otpRaw) || { code: "", attempts: 0 };
 
-  if (!timingSafeEqual(candidate, otp.codeHash || "")) {
+  if (!timingSafeEqual(code, otp.code || "")) {
     const attempts = (otp.attempts || 0) + 1;
     if (attempts >= OTP_MAX_ATTEMPTS) {
       await env.PROGRESS.delete(`otp:${uid}`); // burn after too many tries
@@ -410,12 +412,6 @@ async function hmacSha256(msg, key) {
   );
   const sig = await crypto.subtle.sign("HMAC", ck, utf8Encode(msg));
   return new Uint8Array(sig);
-}
-
-/** SHA-256 of a string, hex. */
-async function sha256Hex(msg) {
-  const buf = await crypto.subtle.digest("SHA-256", utf8Encode(msg));
-  return toHex(new Uint8Array(buf));
 }
 
 /** Constant-time string compare. Compares over the full length, accumulating any difference. */
