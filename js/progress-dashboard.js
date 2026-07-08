@@ -49,9 +49,9 @@ export function mountProgressDashboard(root, { byId }) {
   exitBtn.className = "exit-course-btn";
   exitBtn.textContent = "Exit course";
   exitBtn.addEventListener("click", () => clearCourse()); // → course-change → rebuild to the empty state
-  head.append(exitBtn);
-  // One horizontal row: a fixed search box on the left, then the course chips in their own sideways-
-  // scrolling strip. The search box must sit OUTSIDE the overflow strip, or its results popup gets clipped.
+  courseCap.after(exitBtn); // in the header, in flow immediately after the course name
+  // One horizontal row: a fixed search box, then the course chips in their own sideways-scrolling strip.
+  // The search box must sit OUTSIDE the overflow strip, or its results popup gets clipped.
   const switcher = el("section", "switcher");
   const switcherRow = el("div", "switcher-row");
   const searchHost = el("div", "search-host");
