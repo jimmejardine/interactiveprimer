@@ -19,6 +19,7 @@ import { loadGraph } from "./graph-data.js";
 import { readEntry } from "./confidence-store.js";
 import { pickNextConcept } from "./progress-stats.js";
 import { getLocale, t } from "./i18n.js";
+import "./components/primer-ref.js"; // defines <primer-ref> so the banner can use the standard concept link
 
 /** @typedef {import("./types/domain.js").ResolvedConcept} ResolvedConcept */
 
@@ -91,6 +92,7 @@ export async function maybeShowWelcomeBack() {
     showBanner({
       done,
       total,
+      courseId,
       nextId,
       courseTitle: localizedTitle(course, locale),
       nextTitle: next ? localizedTitle(next, locale) : nextId,
@@ -118,7 +120,9 @@ function injectStyles() {
     .wb-rocket { flex: none; width: 88px; height: auto; }
     @media (max-width: 36rem) { .wb-rocket { width: 60px; } }
     .wb-tile { cursor: default; }
-    .wb-tile .wb-em { font-weight: 700; color: var(--primer-ink, #111); }
+    /* The two references are our standard concept links (a.concept-ref: accent colour + dotted underline),
+       just bold here. Don't override their colour. */
+    .wb-tile .wb-em { font-weight: 700; }
     /* Two action buttons: primary → next concept (filled gold), secondary → progress (outline). */
     .wb-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.7rem; }
     .wb-btn { display: inline-block; padding: 0.4rem 0.9rem; border-radius: 999px; font-weight: 600; font-size: 0.9rem;
@@ -136,28 +140,38 @@ function injectStyles() {
 }
 
 /**
- * Append a chrome-string template into `parent`, splitting on a `{placeholder}` token and inserting
- * the emphasised (bold) value in its place. Robust to any text around it.
+ * Append a chrome-string template into `parent`, splitting on a `{placeholder}` token and inserting the
+ * emphasised value in its place — as a **bold `<primer-ref>`** (our standard concept link, with its
+ * confidence dot / course crest) when a concept `refId` is given, else a bold span.
  * @param {HTMLElement} parent
  * @param {string} template  the chrome string with the placeholder still literal (e.g. "{course}")
  * @param {string} token  the placeholder to split on, e.g. "{course}"
- * @param {string} emphasis  the bold value to insert
+ * @param {string} emphasis  the value to insert (bold)
+ * @param {string} [refId]  when set, render the value as a `<primer-ref to="refId">`
  */
-function appendEmphasised(parent, template, token, emphasis) {
+function appendEmphasised(parent, template, token, emphasis, refId) {
   const [before, after = ""] = template.split(token);
-  const em = document.createElement("span");
-  em.className = "wb-em";
-  em.textContent = emphasis;
-  parent.append(document.createTextNode(before), em, document.createTextNode(after));
+  let node;
+  if (refId) {
+    node = document.createElement("primer-ref");
+    node.setAttribute("to", refId);
+    node.className = "wb-em";
+    node.textContent = emphasis; // primer-ref keeps this text and moves it into its <a class="concept-ref">
+  } else {
+    node = document.createElement("span");
+    node.className = "wb-em";
+    node.textContent = emphasis;
+  }
+  parent.append(document.createTextNode(before), node, document.createTextNode(after));
 }
 
 /**
  * Build the resume call-to-action and drop it into the landing page's `#welcome-back` placeholder. It
  * reuses the landing's `.tile` shape (full width, spanning both tile columns) with the golden course
  * border, and the whole tile is a link to the next concept (no buttons).
- * @param {{ done: number, total: number, nextId: string, courseTitle: string, nextTitle: string }} info
+ * @param {{ done: number, total: number, courseId: string, nextId: string, courseTitle: string, nextTitle: string }} info
  */
-function showBanner({ done, total, nextId, courseTitle, nextTitle }) {
+function showBanner({ done, total, courseId, nextId, courseTitle, nextTitle }) {
   const slot = document.getElementById("welcome-back");
   if (!slot) return;
   injectStyles();
@@ -165,12 +179,13 @@ function showBanner({ done, total, nextId, courseTitle, nextTitle }) {
   const tile = document.createElement("div");
   tile.className = "tile wb-tile";
 
-  // One description line: the progress sentence (course bold) + the resume question (next concept bold).
+  // One description line: the progress sentence (course as a bold link) + the resume line (next concept
+  // as a bold link) — both are our standard concept links (a.concept-ref).
   const desc = document.createElement("p");
   desc.className = "t-desc";
-  appendEmphasised(desc, t("welcome.progress", { done, total }), "{course}", courseTitle);
+  appendEmphasised(desc, t("welcome.progress", { done, total }), "{course}", courseTitle, courseId);
   desc.appendChild(document.createTextNode(" "));
-  appendEmphasised(desc, t("welcome.resume"), "{concept}", nextTitle);
+  appendEmphasised(desc, t("welcome.resume"), "{concept}", nextTitle, nextId);
 
   const bar = document.createElement("div");
   bar.className = "wb-bar";
