@@ -27,10 +27,27 @@ export const SLIDER_PANEL_CSS = `
     background: var(--primer-control-bg, #f1ede4);
     border: 1px solid var(--primer-control-border, #ccc);
     box-shadow: inset 0 1px 0 var(--primer-ring, rgba(70,90,230,0.25));
+    container-type: inline-size; /* so controls restack by the PANEL's own width, not the viewport */
   }
   .controls:empty { display: none; padding: 0; border: 0; box-shadow: none; }
 
   .control { display: grid; grid-template-columns: minmax(6rem, auto) 1fr minmax(3.5rem, auto); gap: 0.6rem; align-items: center; }
+
+  /* Narrow panel: stack the control — name on top, full-width slider below, value box to the right of both. */
+  @container (max-width: 26rem) {
+    .control {
+      grid-template-columns: 1fr auto;
+      grid-template-areas: "name value" "slider value";
+      gap: 0.15rem 0.6rem;
+    }
+    .control > label { grid-area: name; }
+    .control .slider { grid-area: slider; }
+    .control > input[type="number"] { grid-area: value; align-self: center; }
+    /* Choice controls: label on its own line, segmented chips below. */
+    .control.choice { grid-template-columns: 1fr; grid-template-areas: "name" "seg"; }
+    .control.choice > label { grid-area: name; }
+    .control.choice .segmented { grid-area: seg; }
+  }
   .control > label {
     font-family: var(--primer-font-ui, sans-serif); font-size: 0.72rem;
     text-transform: uppercase; letter-spacing: 0.06em; color: var(--primer-ink-soft, #667);
