@@ -14,11 +14,11 @@ import { searchConcepts } from "./concept-search.js";
 
 /** Stylesheet for the box — themed; the caller injects it where the box lives. */
 export const SEARCH_BOX_CSS = `
-  .cg-search { position: relative; width: min(20rem, 70vw); font-family: var(--primer-font-ui, sans-serif); }
+  .cg-search { position: relative; width: min(10rem, 35vw); font-family: var(--primer-font-ui, sans-serif); }
   /* Placement variants: "overlay" pins it over the explorer's canvas; "fixed" pins it to the
      viewport's top-left (mirroring the top-right hamburger); default flows in-place. */
   .cg-search--overlay { position: absolute; top: 0.7rem; left: 0.7rem; z-index: 5; }
-  .cg-search--fixed { position: fixed; top: 0.75rem; left: 0.75rem; z-index: 1000; width: min(17rem, 58vw); }
+  .cg-search--fixed { position: fixed; top: 0.75rem; left: 0.75rem; z-index: 1000; width: min(8.5rem, 29vw); }
   .cg-search-input {
     width: 100%; box-sizing: border-box; font: inherit; font-size: 0.92rem;
     padding: 0.5rem 0.7rem; border-radius: var(--primer-radius, 0.6rem);

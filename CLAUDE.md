@@ -127,6 +127,9 @@ commas OK).
   - **`todo`** (`<primer-ref todo to="…">`) — a concept you intend to write but haven't; **no edge, never
     validated** (the `to` is just a label), renders as a muted "todo" chip. It's the **`todo` attribute**
     that does this — a plain `<primer-ref to="todo/foo">` is an ordinary backward ref and fails as dangling.
+- **`<primer-table>`** — wrap a plain `<table>` for consistent, themed presentation (centered cells,
+  hairline borders, a shaded header row, horizontal scroll on overflow). Author
+  `<primer-table><table>…</table></primer-table>`; use it for any data table instead of a bare `<table>`.
 - **Other elements** (see `docs/authoring-reference.md`): `<primer-manim>` (animations), `<primer-video>`,
   `<primer-chart-3d>`, `<primer-geometry-problem>` (interactive theorem practice), `<primer-program>`
   (write-a-program exercises).

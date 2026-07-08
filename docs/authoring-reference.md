@@ -25,6 +25,15 @@ keep). While a course is active: the top/bottom mini-explorer tints the course p
 of the current concept; the big `/concepts.html` graph collapses to the course members + their
 recursive prerequisite ancestors, with members tinted in the course colour (`--primer-course`).
 
+## `<primer-table>`
+
+`<primer-table><table>…</table></primer-table>` — a light-DOM wrapper that gives a plain `<table>`
+consistent, themed presentation: **centered cells, hairline borders (via `--primer-border`), a shaded
+header row, and horizontal scroll on overflow**. Author a normal semantic `<table>` (with `<thead>`/`<th>`
+for headers, optional `<caption>`) inside it — no classes or inline styles. Styling lives in `css/primer.css`
+(`primer-table > table`) and follows the light/dark/fun themes. Prefer this over a bare `<table>` for any
+data table. (There is no `class="primer-table"` — the styling only applies inside the element.)
+
 ## `<primer-video>`
 
 `<primer-video src="…" caption="…">` — an inline YouTube video. `src` is a YouTube URL

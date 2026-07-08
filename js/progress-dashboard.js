@@ -15,7 +15,7 @@ import { getLocale } from "./i18n.js";
 import { getCurrentCourse, setCurrentCourse } from "./course.js";
 import { allEntries } from "./confidence-store.js";
 import { confidenceColor } from "./confidence-color.js";
-import { mountCourseSearch } from "./concept-search-box.js";
+import { mountCourseSearch, SEARCH_BOX_CSS } from "./concept-search-box.js";
 import { mountConceptGraph } from "./concept-graph.js";
 import { glitter, glitterIntensity } from "./glitter.js";
 import { courseProgress, daysAgo, MASTERED_AT } from "./progress-stats.js";
@@ -34,18 +34,30 @@ export function mountProgressDashboard(root, { byId }) {
 
   // ---- static shell (built once; dynamic regions are refilled by paint()) -----------------------
   root.innerHTML = "";
-  const head = el("header", "dash-head", `<h1 class="dash-title">My Progress</h1>`);
+  // The search box's styles live in the shared SEARCH_BOX_CSS (normally injected by the concept graph);
+  // inject once here so the box is styled even in the empty state, before any constellation mounts.
+  if (!document.getElementById("primer-search-css")) {
+    const s = document.createElement("style");
+    s.id = "primer-search-css";
+    s.textContent = SEARCH_BOX_CSS;
+    document.head.appendChild(s);
+  }
+  const head = el("header", "dash-head", `<h1 class="dash-title">My Progress<span class="dash-course"></span></h1>`);
+  const courseCap = /** @type {HTMLElement} */ (head.querySelector(".dash-course"));
+  // One horizontal row: a fixed search box on the left, then the course chips in their own sideways-
+  // scrolling strip. The search box must sit OUTSIDE the overflow strip, or its results popup gets clipped.
   const switcher = el("section", "switcher");
-  const chips = el("div", "course-chips");
+  const switcherRow = el("div", "switcher-row");
   const searchHost = el("div", "search-host");
-  switcher.append(chips, searchHost);
+  const chipsRow = el("div", "course-chips-row");
+  switcherRow.append(searchHost, chipsRow);
+  switcher.append(switcherRow);
 
   const constellationWrap = el("section", "constellation-wrap");
-  const cap = el("p", "constellation-cap");
   const graphHost = el("div", "constellation");
   graphHost.id = "constellation";
   const legend = el("div", "legend", legendHtml());
-  constellationWrap.append(cap, graphHost, legend);
+  constellationWrap.append(graphHost, legend);
 
   const tiles = el("section", "tiles");
   const heat = el("section", "card heatmap");
@@ -53,7 +65,8 @@ export function mountProgressDashboard(root, { byId }) {
   const list = el("section", "card concept-list");
   const empty = el("section", "card empty-state");
 
-  root.append(head, switcher, empty, constellationWrap, tiles, heat, panels, list);
+  // The constellation (explorer graph) sits at the very bottom, after the concept list.
+  root.append(head, switcher, empty, tiles, heat, panels, list, constellationWrap);
 
   // course picker (mounted once — course-independent)
   const searchHandle = mountCourseSearch(searchHost, {
@@ -84,7 +97,7 @@ export function mountProgressDashboard(root, { byId }) {
   // ---- paint: recompute stats and fill every dynamic region (NOT the graph) ---------------------
   const paint = () => {
     const entriesById = new Map(allEntries().map((e) => [e.id, e]));
-    renderChips(chips, byId, entriesById, titleOf);
+    renderChips(chipsRow, byId, entriesById, titleOf);
 
     const course = activeCourse();
     const hasCourse = !!course;
@@ -93,6 +106,7 @@ export function mountProgressDashboard(root, { byId }) {
     show(empty, !hasCourse);
 
     if (!hasCourse) {
+      courseCap.innerHTML = "";
       empty.innerHTML = `<h2>Pick a course to begin</h2>
         <p>Choose a course above (or from any course page's “Focus on this course” button) and this
         dashboard will light up with your progress — mastery, streaks, what's ready to learn next, and
@@ -103,7 +117,7 @@ export function mountProgressDashboard(root, { byId }) {
     const members = (course.courseMembers ?? []).slice(1); // drop the hub at [0]
     const p = courseProgress(members, entriesById, byId, { masteredAt: MASTERED_AT });
 
-    cap.innerHTML = `<strong>${escapeHtml(titleOf(course.id))}</strong> — ${p.mastered} of ${p.total} concepts mastered`;
+    courseCap.innerHTML = `: ${escapeHtml(titleOf(course.id))}`;
     renderTiles(tiles, p);
     renderHeatmap(heat, p.buckets, p.streakDays);
     renderPanels(panels, p, titleOf);
@@ -162,20 +176,18 @@ function renderChips(host, byId, entriesById, titleOf) {
       }
       return { id: c.id, frac: members.length ? mastered / members.length : 0, touched, lastMs };
     })
-    .filter((c) => c.touched > 0 || c.id === active)
+    // Show a course if it's the active one, or if you've studied some of it but NOT yet finished it —
+    // a 100%-mastered course drops off the list (unless it's the one you're currently viewing).
+    .filter((c) => c.id === active || (c.touched > 0 && c.frac < 1))
     // Rank by what you're actually working on — active course first, then most-recently-studied, then
     // the course that owns the most of your starred concepts. (Sorting by % mastered buried big courses
-    // like Calculus beneath smaller ones that merely share a concept.)
+    // like Calculus beneath smaller ones that merely share a concept.) No cap — the row scrolls sideways.
     .sort(
       (a, b) =>
         (b.id === active ? 1 : 0) - (a.id === active ? 1 : 0) || b.lastMs - a.lastMs || b.touched - a.touched,
-    )
-    .slice(0, 10);
+    );
 
   host.innerHTML = "";
-  if (!withProgress.length) return;
-  const label = el("span", "chips-label", "Courses whose concepts you have recently studied:");
-  host.append(label);
   for (const c of withProgress) {
     const btn = document.createElement("button");
     btn.type = "button";

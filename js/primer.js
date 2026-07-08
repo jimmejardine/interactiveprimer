@@ -15,6 +15,7 @@ import "./components/primer-page.js";
 import "./components/primer-concept.js";
 import "./components/primer-title.js";
 import "./components/primer-card.js";
+import "./components/primer-table.js";
 import "./components/primer-theorem.js";
 import "./components/primer-vignette.js";
 import "./components/primer-ref.js";

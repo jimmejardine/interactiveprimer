@@ -1033,7 +1033,7 @@ function injectStyleOnce() {
     /* Two stacked search boxes (courses over concepts), pinned to the viewport top-left. */
     .cg-search-stack {
       position: fixed; top: 0.75rem; left: 0.75rem; z-index: 1000;
-      display: flex; flex-direction: column; gap: 0.5rem; width: min(17rem, 58vw);
+      display: flex; flex-direction: column; gap: 0.5rem; width: min(8.5rem, 29vw);
     }
     .cg-search-stack .cg-search { width: 100%; } /* override the inline default width to fill the stack */
     ${SEARCH_BOX_CSS}
