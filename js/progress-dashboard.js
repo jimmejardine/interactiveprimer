@@ -62,8 +62,7 @@ export function mountProgressDashboard(root, { byId }) {
   const constellationWrap = el("section", "constellation-wrap");
   const graphHost = el("div", "constellation");
   graphHost.id = "constellation";
-  const legend = el("div", "legend", legendHtml());
-  constellationWrap.append(graphHost, legend);
+  constellationWrap.append(graphHost);
 
   const tiles = el("section", "tiles");
   const heat = el("section", "card heatmap");
@@ -345,13 +344,6 @@ function starRow(stars, tint) {
 /** @param {keyof typeof MASTERY_LABEL} status @param {number} n */
 function countPill(status, n) {
   return `<span class="count-pill" data-status="${status}"><b>${n}</b> ${MASTERY_LABEL[status]}</span>`;
-}
-
-function legendHtml() {
-  return `<span class="legend-item"><i class="swatch" style="background:hsl(0,70%,55%)"></i>just started</span>
-    <span class="legend-item"><i class="swatch" style="background:hsl(60,70%,50%)"></i>learning</span>
-    <span class="legend-item"><i class="swatch" style="background:hsl(120,60%,45%)"></i>mastered</span>
-    <span class="legend-item"><i class="swatch swatch-dim"></i>not started</span>`;
 }
 
 /** @param {string} tag @param {string} cls @param {string} [html] */

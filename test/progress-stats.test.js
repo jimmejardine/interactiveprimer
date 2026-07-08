@@ -21,7 +21,7 @@ function fixture() {
     ["a", { prerequisites: [] }],
     ["b", { prerequisites: ["a"] }],
     ["c", { prerequisites: ["a", "b"] }],
-    ["d", { prerequisites: ["z"] }], // z never mastered
+    ["d", { prerequisites: ["b"] }], // in-course prereq b (5 stars) never mastered → stays locked
     ["e", { prerequisites: ["a"] }], // a is mastered → ready
     ["f", { prerequisites: [] }], // no prereqs → ready
   ]);
@@ -170,7 +170,7 @@ test("pickNextConcept: ready-first (course order), then learning, then null", ()
   assert.equal(pickNextConcept(members, byId, starsFrom({ a: 10, b: 8, c: 10 })), null); // all mastered
 });
 
-test("pickNextConcept: a ready concept beats an earlier learning one; locked concepts are skipped", () => {
+test("pickNextConcept: a ready concept beats an earlier learning one; in-course prereqs still lock", () => {
   const byId = new Map([
     ["x", { prerequisites: [] }],
     ["y", { prerequisites: [] }],
@@ -178,12 +178,22 @@ test("pickNextConcept: a ready concept beats an earlier learning one; locked con
   // x is mid-learning (earlier in order), y is unstarted & ready → ready wins.
   assert.equal(pickNextConcept(["x", "y"], byId, (id) => (id === "x" ? 4 : 0)), "y");
 
-  // Both unstarted but locked by an unmastered prereq → nothing ready, nothing learning → null.
-  const locked = new Map([
-    ["p", { prerequisites: ["z"] }],
-    ["q", { prerequisites: ["p"] }],
+  // In-course locking still applies: "advanced" stays locked until its in-course prereq "base" is mastered.
+  const chain = new Map([
+    ["base", { prerequisites: [] }],
+    ["advanced", { prerequisites: ["base"] }],
   ]);
-  assert.equal(pickNextConcept(["p", "q"], locked, () => 0), null);
+  // base mid-learning, advanced unstarted → advanced is locked (base not mastered), so we finish base.
+  assert.equal(pickNextConcept(["base", "advanced"], chain, (id) => (id === "base" ? 4 : 0)), "base");
+});
+
+test("pickNextConcept: external (out-of-course) prerequisites don't lock a fresh course", () => {
+  // Every member depends only on concepts OUTSIDE the course; with nothing started, the first is ready.
+  const byId = new Map([
+    ["m1", { prerequisites: ["ext-a", "ext-b"] }],
+    ["m2", { prerequisites: ["ext-c", "m1"] }],
+  ]);
+  assert.equal(pickNextConcept(["m1", "m2"], byId, () => 0), "m1");
 });
 
 test("daysAgo is floor of elapsed days, 0 for missing", () => {

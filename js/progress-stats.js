@@ -44,8 +44,8 @@ export function reviewInterval(stars, masteredAt = MASTERED_AT) {
 /**
  * The single "next concept to work on" in a course — shared by the `/` resume banner and the `/progress`
  * "Start here now" CTA so they always agree. **Ready → Finish (no reviews):** the first *ready* concept
- * (unstarted, with every prerequisite mastered) in course order; else the first *learning* concept
- * (1..masteredAt-1 stars) in course order; else `null` (everything mastered, or the rest is locked).
+ * (unstarted, with every *in-course* prerequisite mastered — prereqs outside the course don't lock it) in
+ * course order; else the first *learning* concept (1..masteredAt-1 stars) in course order; else `null`.
  * @param {string[]} members  the course's ordered member ids WITHOUT the hub (courseMembers.slice(1))
  * @param {Map<string, any>} byId  the graph index (nodes carry `prerequisites`)
  * @param {(id: string) => number} starsOf  a concept's star rating (0 = unrated)
@@ -55,7 +55,10 @@ export function reviewInterval(stars, masteredAt = MASTERED_AT) {
 export function pickNextConcept(members, byId, starsOf, opts = {}) {
   const masteredAt = opts.masteredAt ?? MASTERED_AT;
   const mastered = (/** @type {string} */ id) => starsOf(id) >= masteredAt;
-  const prereqsMastered = (/** @type {string} */ id) => (byId.get(id)?.prerequisites ?? []).every(mastered);
+  // Gate only on prerequisites that are members of THIS course; external prereqs don't lock a concept.
+  const memberSet = new Set(members);
+  const prereqsMastered = (/** @type {string} */ id) =>
+    (byId.get(id)?.prerequisites ?? []).every((/** @type {string} */ p) => !memberSet.has(p) || mastered(p));
   for (const id of members) if (starsOf(id) === 0 && prereqsMastered(id)) return id; // first ready-to-learn
   for (const id of members) {
     const s = starsOf(id);
@@ -140,7 +143,11 @@ export function courseProgress(members, entriesById, byId, opts = {}) {
   const nowMs = opts.now == null ? Date.now() : opts.now instanceof Date ? opts.now.getTime() : Number(opts.now);
 
   const isMastered = (/** @type {string} */ id) => (entriesById.get(id)?.stars ?? 0) >= masteredAt;
-  const prereqsMastered = (/** @type {string} */ id) => (byId.get(id)?.prerequisites ?? []).every(isMastered);
+  // A concept is gated only by prerequisites that are ALSO in this course — external prereqs (from other
+  // branches) are assumed satisfied, so a course you've just started isn't entirely "locked".
+  const memberSet = new Set(members);
+  const prereqsMastered = (/** @type {string} */ id) =>
+    (byId.get(id)?.prerequisites ?? []).every((/** @type {string} */ p) => !memberSet.has(p) || isMastered(p));
 
   /** @type {{ id: string, stars: number, first: string, last: string, status: Status, due: boolean, overdueDays: number }[]} */
   const perConcept = members.map((id) => {
