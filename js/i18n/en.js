@@ -116,6 +116,7 @@ export default {
   "menu.home": "Home",
   "menu.explore": "Explore",
   "menu.myProgress": "My Progress",
+  "menu.config": "Config",
   "menu.collapse": "Collapse",
   "menu.accessibility": "Accessibility",
   "menu.feedback": "Feedback",

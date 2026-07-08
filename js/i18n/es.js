@@ -81,6 +81,7 @@ export default {
   "menu.home": "Inicio",
   "menu.explore": "Explorar",
   "menu.myProgress": "Mi progreso",
+  "menu.config": "Configuración",
   "menu.collapse": "Contraer",
   "menu.accessibility": "Accesibilidad",
   "menu.feedback": "Comentarios",

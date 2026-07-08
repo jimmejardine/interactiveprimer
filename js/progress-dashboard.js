@@ -12,7 +12,7 @@
  */
 
 import { getLocale } from "./i18n.js";
-import { getCurrentCourse, setCurrentCourse } from "./course.js";
+import { getCurrentCourse, setCurrentCourse, clearCourse } from "./course.js";
 import { allEntries } from "./confidence-store.js";
 import { confidenceColor } from "./confidence-color.js";
 import { mountCourseSearch, SEARCH_BOX_CSS } from "./concept-search-box.js";
@@ -44,6 +44,12 @@ export function mountProgressDashboard(root, { byId }) {
   }
   const head = el("header", "dash-head", `<h1 class="dash-title">My Progress<span class="dash-course"></span></h1>`);
   const courseCap = /** @type {HTMLElement} */ (head.querySelector(".dash-course"));
+  const exitBtn = document.createElement("button");
+  exitBtn.type = "button";
+  exitBtn.className = "exit-course-btn";
+  exitBtn.textContent = "Exit course";
+  exitBtn.addEventListener("click", () => clearCourse()); // → course-change → rebuild to the empty state
+  head.append(exitBtn);
   // One horizontal row: a fixed search box on the left, then the course chips in their own sideways-
   // scrolling strip. The search box must sit OUTSIDE the overflow strip, or its results popup gets clipped.
   const switcher = el("section", "switcher");
@@ -102,7 +108,7 @@ export function mountProgressDashboard(root, { byId }) {
     const course = activeCourse();
     const hasCourse = !!course;
     const show = (/** @type {HTMLElement} */ n, /** @type {boolean} */ on) => (n.style.display = on ? "" : "none");
-    [constellationWrap, tiles, heat, panels, list].forEach((n) => show(n, hasCourse));
+    [constellationWrap, tiles, heat, panels, list, exitBtn].forEach((n) => show(n, hasCourse));
     show(empty, !hasCourse);
 
     if (!hasCourse) {
@@ -225,7 +231,7 @@ function renderTiles(host, p) {
 
 /** @param {HTMLElement} host @param {Map<string,number>} buckets @param {number} streak */
 function renderHeatmap(host, buckets, streak) {
-  const WEEKS = 26;
+  const WEEKS = 53; // a full year, so the grid fills desktop width with sensibly-sized cells
   const today = new Date();
   const todayMid = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
   // start on the Sunday WEEKS-1 weeks before this week's Sunday
@@ -247,7 +253,7 @@ function renderHeatmap(host, buckets, streak) {
   }
   host.innerHTML = `
     <div class="card-head"><h2>Activity</h2><span class="muted">🔥 ${streak}-day streak</span></div>
-    <div class="hm-grid">${cells}</div>
+    <div class="hm-grid" style="grid-template-columns: repeat(${WEEKS}, minmax(0, 1fr))">${cells}</div>
     <div class="hm-legend"><span class="muted">less</span>
       ${[0, 1, 2, 3, 4].map((l) => `<span class="hm-cell" data-level="${l}"></span>`).join("")}
       <span class="muted">more</span></div>`;

@@ -20,7 +20,7 @@ import {
   hasExistingProgress,
   clearLocalProgress,
 } from "../progress.js";
-import { getCurrentCourse, setCurrentCourse, clearCourse } from "../course.js";
+import { getCurrentCourse, setCurrentCourse } from "../course.js";
 import { loadGraph } from "../graph-data.js";
 import { confirmDialog } from "../confirm-dialog.js";
 import { trapFocus } from "../focus-trap.js";
@@ -87,14 +87,6 @@ const STYLE = `
 
   .choices { display: flex; flex-direction: column; gap: 0.35rem; }
   .choices button { text-align: left; }
-
-  /* The active course's name in the Course sub-view: a link to its page, tinted with the course colour. */
-  .course-name {
-    display: block; text-align: left; font-weight: 600;
-    color: var(--primer-ink, #111); text-decoration: none;
-    padding: 0.3rem 0.4rem; border-left: 3px solid var(--primer-course, #e3b15c);
-  }
-  .course-name:hover { text-decoration: underline; }
 
   .file-input { display: none; }
   .status { margin: 0.5rem 0 0; font-size: 0.8rem; color: var(--primer-ink-soft, #667); }
@@ -181,25 +173,27 @@ export class PrimerMenu extends HTMLElement {
       <div class="panel" role="menu">
         <div class="menu-view view-root">
           <button type="button" class="nav" data-href="/">${t("menu.home")}</button>
+          <button type="button" class="nav" data-href="/progress.html">${t("menu.course")}</button>
           <button type="button" class="nav" data-href="/concepts.html">${t("menu.explore")}</button>
-          <button type="button" class="nav" data-href="/progress.html">${t("menu.myProgress")}</button>
-          <button type="button" class="nav nav-course" data-target="course" hidden>${t("menu.course")}<span class="chev" aria-hidden="true">›</span></button>
+          <button type="button" class="nav" data-target="config">${t("menu.config")}<span class="chev" aria-hidden="true">›</span></button>
+          <button type="button" class="nav" data-extern="https://github.com/jimmejardine/interactiveprimer/discussions">${t("menu.feedback")}<span class="chev" aria-hidden="true">↗</span></button>
+        </div>
+        <div class="menu-view view-config" hidden>
+          <button type="button" class="back" data-back="root"><span aria-hidden="true">‹ </span>${t("menu.config")}</button>
           <button type="button" class="nav" data-target="progress">${t("menu.progress")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="theme">${t("menu.theme")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="lang">${t("menu.language")}<span class="chev" aria-hidden="true">›</span></button>
-          <button type="button" class="nav" data-href="/accessibility.html">${t("menu.accessibility")}</button>
-          <button type="button" class="nav" data-extern="https://github.com/jimmejardine/interactiveprimer/discussions">${t("menu.feedback")}<span class="chev" aria-hidden="true">↗</span></button>
         </div>
         <div class="menu-view view-theme" hidden>
-          <button type="button" class="back"><span aria-hidden="true">‹ </span>${t("menu.theme")}</button>
+          <button type="button" class="back" data-back="config"><span aria-hidden="true">‹ </span>${t("menu.theme")}</button>
           <div class="choices" role="group" aria-label="${t("menu.theme")}">${themeButtons}</div>
         </div>
         <div class="menu-view view-lang" hidden>
-          <button type="button" class="back"><span aria-hidden="true">‹ </span>${t("menu.language")}</button>
+          <button type="button" class="back" data-back="config"><span aria-hidden="true">‹ </span>${t("menu.language")}</button>
           <div class="choices" role="group" aria-label="${t("menu.language")}">${langButtons}</div>
         </div>
         <div class="menu-view view-progress" hidden>
-          <button type="button" class="back"><span aria-hidden="true">‹ </span>${t("menu.progress")}</button>
+          <button type="button" class="back" data-back="config"><span aria-hidden="true">‹ </span>${t("menu.progress")}</button>
           <p class="section-label">${t("progress.local")}</p>
           <div class="choices" role="group" aria-label="${t("progress.local")}">
             <button type="button" class="save">${t("menu.save")}</button>
@@ -227,13 +221,6 @@ export class PrimerMenu extends HTMLElement {
               <button type="button" class="forget-me danger">${t("account.forgetMe")}</button>
             </div>
             <p class="cloud-status" role="status" aria-live="polite" hidden></p>
-          </div>
-        </div>
-        <div class="menu-view view-course" hidden>
-          <button type="button" class="back"><span aria-hidden="true">‹ </span>${t("menu.course")}</button>
-          <div class="choices" role="group" aria-label="${t("menu.course")}">
-            <a class="course-name" href="#"></a>
-            <button type="button" class="exit-course">${t("course.exit")}</button>
           </div>
         </div>
       </div>
@@ -277,7 +264,7 @@ export class PrimerMenu extends HTMLElement {
       theme: /** @type {HTMLElement} */ (root.querySelector(".view-theme")),
       lang: /** @type {HTMLElement} */ (root.querySelector(".view-lang")),
       progress: /** @type {HTMLElement} */ (root.querySelector(".view-progress")),
-      course: /** @type {HTMLElement} */ (root.querySelector(".view-course")),
+      config: /** @type {HTMLElement} */ (root.querySelector(".view-config")),
     });
     /** @param {string} name */
     const showView = (name) => {
@@ -305,7 +292,7 @@ export class PrimerMenu extends HTMLElement {
       });
     }
     for (const b of /** @type {HTMLButtonElement[]} */ ([...root.querySelectorAll(".back")])) {
-      b.addEventListener("click", () => showView("root"));
+      b.addEventListener("click", () => showView(b.dataset.back || "root"));
     }
 
     for (const b of themeEls) {
@@ -323,32 +310,6 @@ export class PrimerMenu extends HTMLElement {
         applyLocale(/** @type {LocaleId} */ (b.dataset.localeId));
       });
     }
-
-    // --- Course: show the active course's name + an Exit; the root item only appears in a course.
-    const navCourse = /** @type {HTMLButtonElement} */ (root.querySelector(".nav-course"));
-    const courseNameEl = /** @type {HTMLAnchorElement} */ (root.querySelector(".course-name"));
-    const reflectCourse = async () => {
-      const course = getCurrentCourse();
-      navCourse.hidden = !course;
-      if (!course) return;
-      courseNameEl.href = `/concepts/${course}.html`;
-      courseNameEl.textContent = t("course.none"); // placeholder until the title resolves
-      try {
-        const { byId } = await loadGraph();
-        const c = byId.get(course);
-        courseNameEl.textContent = c ? (c.titles?.[getLocale()] ?? c.title) : (course.split("/").pop() ?? course);
-      } catch {
-        courseNameEl.textContent = course.split("/").pop() ?? course;
-      }
-    };
-    void reflectCourse();
-    /** @type {HTMLButtonElement} */ (root.querySelector(".exit-course")).addEventListener("click", () => {
-      clearCourse();
-      showView("root");
-      setOpen(false);
-    });
-    this.#onCourseChange = () => void reflectCourse();
-    document.addEventListener("course-change", this.#onCourseChange);
 
     // --- Save / restore progress -------------------------------------------------------
     const saveBtn = /** @type {HTMLButtonElement} */ (root.querySelector(".save"));
