@@ -19,7 +19,8 @@ import { loadGraph } from "./graph-data.js";
 import { readEntry } from "./confidence-store.js";
 import { pickNextConcept } from "./progress-stats.js";
 import { getLocale, t } from "./i18n.js";
-import "./components/primer-ref.js"; // defines <primer-ref> so the banner can use the standard concept link
+// <primer-ref> (the banner's concept links) is loaded lazily inside maybeShowWelcomeBack — a static import
+// would pull the custom-element class (extends HTMLElement) into Node unit tests that import this module.
 
 /** @typedef {import("./types/domain.js").ResolvedConcept} ResolvedConcept */
 
@@ -89,6 +90,7 @@ export async function maybeShowWelcomeBack() {
     const done = members.filter((id) => starsOf(id) >= 1).length;
     const total = members.length;
     const next = byId.get(nextId);
+    await import("./components/primer-ref.js"); // define <primer-ref> before the banner creates them
     showBanner({
       done,
       total,

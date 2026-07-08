@@ -326,7 +326,7 @@ export function evalExpr(src, bindings) {
     }
     return parsePrimary();
   }
-  /** primary: number | func '(' args ')' | id | '(' expr ')' @returns {number} */
+  /** primary: number | func '(' args ')' | id | '(' orExpr ')' @returns {number} */
   function parsePrimary() {
     const tk = peek();
     if (!tk) throw new Error(`unexpected end of "${src}"`);
@@ -336,7 +336,7 @@ export function evalExpr(src, bindings) {
     }
     if (tk.t === "op" && tk.v === "(") {
       eat("(");
-      const v = parseExpr();
+      const v = parseOr(); // re-enter at the top so a full boolean/comparison can be parenthesised
       eat(")");
       return v;
     }

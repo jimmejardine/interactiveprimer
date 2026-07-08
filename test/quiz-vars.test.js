@@ -36,6 +36,20 @@ test("evalExpr: comparisons and logic return 1/0 with correct precedence", () =>
   assert.equal(evalExpr("a > 9 || b > 9", b), 0);
 });
 
+test("evalExpr: a boolean/comparison can be parenthesised (grouped OR of ANDs)", () => {
+  // A parenthesised sub-expression must re-enter at the top of the grammar, so `(x == a && y == b)`
+  // is a valid group — the shape used by the "Pythagorean pair" quiz constraint.
+  const expr = "(bx == 3 && by == 4) || (bx == 6 && by == 8) || (bx == 5 && by == 12)";
+  assert.equal(evalExpr(expr, { bx: 3, by: 4 }), 1);
+  assert.equal(evalExpr(expr, { bx: 6, by: 8 }), 1);
+  assert.equal(evalExpr(expr, { bx: 5, by: 12 }), 1);
+  assert.equal(evalExpr(expr, { bx: 3, by: 8 }), 0); // mismatched pair
+  assert.equal(evalExpr(expr, { bx: 12, by: 5 }), 0); // not one of the listed pairs
+  // Grouping still overrides the natural && > || precedence.
+  assert.equal(evalExpr("(1 || 0) && 0", {}), 0);
+  assert.equal(evalExpr("1 || 0 && 0", {}), 1);
+});
+
 test("drawBindings: re-rolls until the constraint holds", () => {
   const vars = parseVariables("a=[1:6] b=[1:6]");
   for (let seed = 1; seed <= 20; seed++) {
