@@ -66,6 +66,7 @@ export function applyTheme(id) {
   // match the theme. Taken from the theme's own `scheme` (the source of truth).
   document.documentElement.style.colorScheme =
     THEMES.find((th) => th.id === id)?.scheme ?? "light";
+  setThemeColorMeta(id);
   try {
     localStorage.setItem(STORAGE_KEY, id);
   } catch {
@@ -154,4 +155,22 @@ function ensureFunFont(wanted) {
   } else if (!wanted && existing) {
     existing.remove();
   }
+}
+
+/**
+ * Keep the mobile browser chrome (`<meta name="theme-color">`) matching the active theme's background,
+ * so the address bar tints correctly and updates when the learner switches theme. Reads the live
+ * `--primer-bg`; falls back to the per-theme hex if CSS hasn't loaded yet.
+ * @param {ThemeId} id
+ */
+function setThemeColorMeta(id) {
+  let meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) {
+    meta = document.createElement("meta");
+    meta.setAttribute("name", "theme-color");
+    document.head.appendChild(meta);
+  }
+  const bg = getComputedStyle(document.documentElement).getPropertyValue("--primer-bg").trim();
+  const fallback = id === "dark" ? "#14171f" : id === "fun" ? "#fff7fb" : "#f8f4ec";
+  meta.setAttribute("content", bg || fallback);
 }

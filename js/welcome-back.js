@@ -107,6 +107,11 @@ function injectStyles() {
     /* Reuse the landing page's .tile shape; make it span the full width (both tile columns) and wear
        the golden course accent instead of the default border. */
     .wb-tile { width: 100%; box-sizing: border-box; margin: 0 0 1.6rem; border-color: var(--primer-course, #e3b15c); }
+    /* Override the base .tile column stack: sit the content and the rocket side by side. */
+    .wb-tile { display: flex; flex-direction: row; align-items: center; gap: 1rem; }
+    .wb-main { display: flex; flex-direction: column; gap: 0.35rem; flex: 1 1 auto; min-width: 0; }
+    .wb-rocket { flex: none; width: 88px; height: auto; }
+    @media (max-width: 36rem) { .wb-rocket { width: 60px; } }
     .wb-tile:hover, .wb-tile:focus-visible { border-color: var(--primer-course, #e3b15c); }
     .wb-tile:focus-visible { box-shadow: 0 0 0 3px var(--primer-course, #e3b15c); }
     .wb-tile .wb-em { font-weight: 700; color: var(--primer-ink, #111); }
@@ -151,21 +156,6 @@ function showBanner({ done, total, nextId, courseTitle, nextTitle }) {
   tile.href = `/concepts/${nextId}.html`;
   tile.setAttribute("aria-label", `${t("welcome.title")}: ${nextTitle}`);
 
-  const title = document.createElement("span");
-  title.className = "t-title";
-  const emoji = document.createElement("span");
-  emoji.className = "t-emoji";
-  emoji.setAttribute("aria-hidden", "true");
-  emoji.textContent = "🔖";
-  const text = document.createElement("span");
-  text.className = "t-text";
-  text.textContent = t("welcome.title");
-  const arrow = document.createElement("span");
-  arrow.className = "arrow";
-  arrow.setAttribute("aria-hidden", "true");
-  arrow.textContent = "→";
-  title.append(emoji, text, arrow);
-
   // One description line: the progress sentence (course bold) + the resume question (next concept bold).
   const desc = document.createElement("p");
   desc.className = "t-desc";
@@ -179,6 +169,17 @@ function showBanner({ done, total, nextId, courseTitle, nextTitle }) {
   fill.style.width = `${Math.round((done / total) * 100)}%`;
   bar.appendChild(fill);
 
-  tile.append(title, desc, bar);
+  // Rocket on the left; the progress sentence + bar on the right.
+  const main = document.createElement("div");
+  main.className = "wb-main";
+  main.append(desc, bar);
+
+  const rocket = document.createElement("img");
+  rocket.className = "wb-rocket";
+  rocket.src = "/images/rocket.gif";
+  rocket.alt = "";
+  rocket.setAttribute("aria-hidden", "true");
+
+  tile.append(rocket, main); // rocket on the left, text/progress on the right
   slot.replaceChildren(tile); // fill the placeholder above the search box
 }

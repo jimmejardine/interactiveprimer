@@ -185,15 +185,35 @@
     head.appendChild(vp);
   }
 
-  // The site favicon (a "tree of knowledge"), served from /images. Concept pages write no <head>,
-  // so inject an explicit link (browsers only auto-request /favicon.ico at the root, which we don't
-  // ship there — the icon lives at /images/favicon.ico).
+  // Icons + PWA / mobile meta. Concept pages write no <head>, so inject the full set here (guarded so
+  // a page that already declares them wins). The favicon/app icons live under /images/icons/; the
+  // manifest + apple/android tags make the site installable, and theme-color tints the mobile browser
+  // chrome to the current theme's --primer-bg (kept in sync on theme change by js/theme.js).
+  /** @param {string} html Append static <head> tags parsed from an HTML string. */
+  const injectHead = (html) => {
+    const tpl = document.createElement("template");
+    tpl.innerHTML = html;
+    head.appendChild(tpl.content);
+  };
   if (!document.querySelector('link[rel~="icon"]')) {
-    const icon = document.createElement("link");
-    icon.rel = "icon";
-    icon.href = "/images/favicon.ico";
-    icon.setAttribute("sizes", "any");
-    head.appendChild(icon);
+    injectHead(
+      '<link rel="icon" href="/images/icons/favicon.ico" sizes="any">' +
+        '<link rel="icon" type="image/png" sizes="32x32" href="/images/icons/favicon-32x32.png">' +
+        '<link rel="icon" type="image/png" sizes="16x16" href="/images/icons/favicon-16x16.png">' +
+        '<link rel="apple-touch-icon" href="/images/icons/apple-touch-icon.png">' +
+        '<link rel="apple-touch-startup-image" href="/images/banner-portrait.jpg">' +
+        '<link rel="manifest" href="/site.webmanifest">' +
+        '<meta name="apple-mobile-web-app-capable" content="yes">' +
+        '<meta name="mobile-web-app-capable" content="yes">' +
+        '<meta name="apple-mobile-web-app-status-bar-style" content="default">' +
+        '<meta name="apple-mobile-web-app-title" content="InteractivePrimer.com">',
+    );
+  }
+  if (!document.querySelector('meta[name="theme-color"]')) {
+    const tc = document.createElement("meta");
+    tc.name = "theme-color";
+    tc.content = theme === "dark" ? "#14171f" : theme === "fun" ? "#fff7fb" : "#f8f4ec";
+    head.appendChild(tc);
   }
 
   // 0b) The reading typeface: STIX Two Text, a modern serif co-designed with the STIX math
