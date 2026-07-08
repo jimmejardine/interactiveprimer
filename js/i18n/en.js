@@ -115,6 +115,7 @@ export default {
   "menu.label": "Menu",
   "menu.home": "Home",
   "menu.explore": "Explore",
+  "menu.myProgress": "My Progress",
   "menu.collapse": "Collapse",
   "menu.accessibility": "Accessibility",
   "menu.feedback": "Feedback",

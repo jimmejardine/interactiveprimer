@@ -80,6 +80,7 @@ export default {
   "menu.label": "Menú",
   "menu.home": "Inicio",
   "menu.explore": "Explorar",
+  "menu.myProgress": "Mi progreso",
   "menu.collapse": "Contraer",
   "menu.accessibility": "Accesibilidad",
   "menu.feedback": "Comentarios",
