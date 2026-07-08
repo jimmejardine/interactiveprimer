@@ -144,7 +144,9 @@ export default {
 
   "welcome.title": "Bienvenido de nuevo",
   "welcome.progress": "Llevas {done} / {total} conceptos del curso {course}.",
-  "welcome.resume": "Haz clic aquí para continuar con {concept}.",
+  "welcome.resume": "Continúa con {concept}.",
+  "welcome.next": "Concepto siguiente",
+  "welcome.seeProgress": "Ver progreso",
   "welcome.no": "No, gracias",
   "welcome.yes": "Sí, por favor",
 };

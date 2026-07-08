@@ -18,7 +18,7 @@ import { confidenceColor } from "./confidence-color.js";
 import { mountCourseSearch, SEARCH_BOX_CSS } from "./concept-search-box.js";
 import { mountConceptGraph } from "./concept-graph.js";
 import { glitter, glitterIntensity } from "./glitter.js";
-import { courseProgress, daysAgo, MASTERED_AT } from "./progress-stats.js";
+import { courseProgress, daysAgo, pickNextConcept, MASTERED_AT } from "./progress-stats.js";
 
 const MASTERY_LABEL = { locked: "Locked", ready: "Ready", learning: "Learning", mastered: "Mastered", "review-due": "Review due" };
 
@@ -122,11 +122,13 @@ export function mountProgressDashboard(root, { byId }) {
 
     const members = (course.courseMembers ?? []).slice(1); // drop the hub at [0]
     const p = courseProgress(members, entriesById, byId, { masteredAt: MASTERED_AT });
+    const starsOf = (/** @type {string} */ id) => entriesById.get(id)?.stars ?? 0;
+    const nextId = pickNextConcept(members, byId, starsOf); // shared with the "/" resume banner
 
     courseCap.innerHTML = `: ${escapeHtml(titleOf(course.id))}`;
     renderTiles(tiles, p);
     renderHeatmap(heat, p.buckets, p.streakDays);
-    renderPanels(panels, p, titleOf);
+    renderPanels(panels, p, titleOf, nextId, starsOf);
     renderList(list, p, titleOf, byId, locale);
 
     // one-shot celebration when the course is mostly mastered
@@ -259,8 +261,9 @@ function renderHeatmap(host, buckets, streak) {
       <span class="muted">more</span></div>`;
 }
 
-/** @param {HTMLElement} host @param {ReturnType<typeof courseProgress>} p @param {(id:string)=>string} titleOf */
-function renderPanels(host, p, titleOf) {
+/** @param {HTMLElement} host @param {ReturnType<typeof courseProgress>} p @param {(id:string)=>string} titleOf
+ * @param {string|null} nextId @param {(id:string)=>number} starsOf */
+function renderPanels(host, p, titleOf, nextId, starsOf) {
   const frontier = p.frontier.slice(0, 6);
   const reviews = p.reviews.slice(0, 6);
   const linkRow = (/** @type {any} */ c, /** @type {string} */ badge) =>
@@ -279,20 +282,16 @@ function renderPanels(host, p, titleOf) {
     </div>
     <div class="card panel panel-next">
       <div class="card-head"><h2>▶ Start here now</h2></div>
-      ${nextNudge(p, titleOf)}
+      ${nextNudge(nextId, starsOf, titleOf)}
     </div>`;
 }
 
-/** The single clearest next action: a freshly-unlocked concept, else the most-overdue review, else a
- * learning concept to finish. @param {ReturnType<typeof courseProgress>} p @param {(id:string)=>string} titleOf */
-function nextNudge(p, titleOf) {
-  let rec = null;
-  let kind = "";
-  if (p.frontier.length) { rec = p.frontier[0]; kind = "A new concept is unlocked — dive in:"; }
-  else if (p.reviews.length) { rec = p.reviews[0]; kind = "Due for review — keep it fresh:"; }
-  else { rec = p.perConcept.find((c) => c.status === "learning") ?? null; kind = "Push this one toward mastery:"; }
-  if (!rec) return `<p class="muted">You've mastered everything in this course. 🎉</p>`;
-  return `<p class="muted small">${kind}</p><a class="p-next-cta" href="/concepts/${rec.id}.html">${escapeHtml(titleOf(rec.id))} →</a>`;
+/** The single clearest next action — the shared `pickNextConcept` choice (ready-to-learn, else finish a
+ * learning concept). @param {string|null} nextId @param {(id:string)=>number} starsOf @param {(id:string)=>string} titleOf */
+function nextNudge(nextId, starsOf, titleOf) {
+  if (!nextId) return `<p class="muted">You've mastered everything in this course. 🎉</p>`;
+  const kind = starsOf(nextId) === 0 ? "Ready to learn — dive in:" : "Continue where you left off:";
+  return `<p class="muted small">${kind}</p><a class="p-next-cta" href="/concepts/${nextId}.html">${escapeHtml(titleOf(nextId))} →</a>`;
 }
 
 /** @param {HTMLElement} host @param {ReturnType<typeof courseProgress>} p @param {(id:string)=>string} titleOf @param {Map<string,any>} byId @param {string} locale */

@@ -41,6 +41,29 @@ export function reviewInterval(stars, masteredAt = MASTERED_AT) {
   return Math.min(240, Math.max(1, Math.round(days)));
 }
 
+/**
+ * The single "next concept to work on" in a course — shared by the `/` resume banner and the `/progress`
+ * "Start here now" CTA so they always agree. **Ready → Finish (no reviews):** the first *ready* concept
+ * (unstarted, with every prerequisite mastered) in course order; else the first *learning* concept
+ * (1..masteredAt-1 stars) in course order; else `null` (everything mastered, or the rest is locked).
+ * @param {string[]} members  the course's ordered member ids WITHOUT the hub (courseMembers.slice(1))
+ * @param {Map<string, any>} byId  the graph index (nodes carry `prerequisites`)
+ * @param {(id: string) => number} starsOf  a concept's star rating (0 = unrated)
+ * @param {{ masteredAt?: number }} [opts]
+ * @returns {string | null}
+ */
+export function pickNextConcept(members, byId, starsOf, opts = {}) {
+  const masteredAt = opts.masteredAt ?? MASTERED_AT;
+  const mastered = (/** @type {string} */ id) => starsOf(id) >= masteredAt;
+  const prereqsMastered = (/** @type {string} */ id) => (byId.get(id)?.prerequisites ?? []).every(mastered);
+  for (const id of members) if (starsOf(id) === 0 && prereqsMastered(id)) return id; // first ready-to-learn
+  for (const id of members) {
+    const s = starsOf(id);
+    if (s >= 1 && s < masteredAt) return id; // else first mid-learning concept to finish
+  }
+  return null;
+}
+
 /** The `YYYY-MM-DD` day of an ISO date/instant string (`""` if empty/invalid). @param {string} iso */
 export function dayOf(iso) {
   return typeof iso === "string" && iso.length >= 10 ? iso.slice(0, 10) : "";

@@ -178,7 +178,9 @@ export default {
 
   "welcome.title": "Welcome back",
   "welcome.progress": "You're {done} / {total} concepts through {course}.",
-  "welcome.resume": "Click here to continue with {concept}.",
+  "welcome.resume": "Pick up with {concept}.",
+  "welcome.next": "Next concept",
+  "welcome.seeProgress": "See Progress",
   "welcome.no": "No thanks",
   "welcome.yes": "Yes please",
 };

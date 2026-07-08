@@ -17,6 +17,7 @@
 import { getCurrentCourse } from "./course.js";
 import { loadGraph } from "./graph-data.js";
 import { readEntry } from "./confidence-store.js";
+import { pickNextConcept } from "./progress-stats.js";
 import { getLocale, t } from "./i18n.js";
 
 /** @typedef {import("./types/domain.js").ResolvedConcept} ResolvedConcept */
@@ -71,26 +72,30 @@ export async function maybeShowWelcomeBack() {
     const { byId } = await loadGraph();
     const course = byId.get(courseId);
     if (!course) return void why(`focused course not in graph: ${courseId}`);
-    const members = course.courseMembers;
-    if (!members || members.length === 0) return void why(`focused course has no members: ${courseId}`);
+    const members = /** @type {string[]} */ ((course.courseMembers ?? []).slice(1)); // exclude the hub, like /progress
+    if (!members.length) return void why(`focused course has no members: ${courseId}`);
 
-    const resume = computeResume(members, (id) => (readEntry(id)?.stars ?? 0) > 0);
-    if (!resume) return void why(`course already complete: ${courseId}`);
+    // The SAME "next concept" choice the /progress "Start here now" uses, so the two always agree.
+    const starsOf = (/** @type {string} */ id) => readEntry(id)?.stars ?? 0;
+    const nextId = pickNextConcept(members, byId, starsOf);
+    if (!nextId) return void why(`nothing to resume (all mastered / locked): ${courseId}`);
 
     if (!document.getElementById("welcome-back")) {
       return void why("no #welcome-back placeholder on this page (landing only)");
     }
 
     const locale = getLocale();
-    const next = byId.get(resume.nextId);
+    const done = members.filter((id) => starsOf(id) >= 1).length;
+    const total = members.length;
+    const next = byId.get(nextId);
     showBanner({
-      done: resume.done,
-      total: resume.total,
-      nextId: resume.nextId,
+      done,
+      total,
+      nextId,
       courseTitle: localizedTitle(course, locale),
-      nextTitle: next ? localizedTitle(next, locale) : resume.nextId,
+      nextTitle: next ? localizedTitle(next, locale) : nextId,
     });
-    why(`shown: ${resume.done}/${resume.total}, next = ${resume.nextId}`);
+    why(`shown: ${done}/${total}, next = ${nextId}`);
   } catch (err) {
     console.info("[welcome-back] error:", err);
   }
@@ -112,9 +117,15 @@ function injectStyles() {
     .wb-main { display: flex; flex-direction: column; gap: 0.35rem; flex: 1 1 auto; min-width: 0; }
     .wb-rocket { flex: none; width: 88px; height: auto; }
     @media (max-width: 36rem) { .wb-rocket { width: 60px; } }
-    .wb-tile:hover, .wb-tile:focus-visible { border-color: var(--primer-course, #e3b15c); }
-    .wb-tile:focus-visible { box-shadow: 0 0 0 3px var(--primer-course, #e3b15c); }
+    .wb-tile { cursor: default; }
     .wb-tile .wb-em { font-weight: 700; color: var(--primer-ink, #111); }
+    /* Two action buttons: primary → next concept (filled gold), secondary → progress (outline). */
+    .wb-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.7rem; }
+    .wb-btn { display: inline-block; padding: 0.4rem 0.9rem; border-radius: 999px; font-weight: 600; font-size: 0.9rem;
+      text-decoration: none; border: 1px solid var(--primer-course, #e3b15c); transition: filter 0.12s, box-shadow 0.12s; }
+    .wb-btn-primary { background: var(--primer-course, #e3b15c); color: #33280a; }
+    .wb-btn-secondary { background: transparent; color: var(--primer-ink, #111); }
+    .wb-btn:hover, .wb-btn:focus-visible { filter: brightness(1.05); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15); }
     .wb-bar {
       height: 5px; border-radius: 999px; overflow: hidden; margin: 0.5rem 0 0;
       background: color-mix(in srgb, var(--primer-ink, #111) 12%, transparent);
@@ -151,10 +162,8 @@ function showBanner({ done, total, nextId, courseTitle, nextTitle }) {
   if (!slot) return;
   injectStyles();
 
-  const tile = document.createElement("a");
+  const tile = document.createElement("div");
   tile.className = "tile wb-tile";
-  tile.href = `/concepts/${nextId}.html`;
-  tile.setAttribute("aria-label", `${t("welcome.title")}: ${nextTitle}`);
 
   // One description line: the progress sentence (course bold) + the resume question (next concept bold).
   const desc = document.createElement("p");
@@ -169,10 +178,23 @@ function showBanner({ done, total, nextId, courseTitle, nextTitle }) {
   fill.style.width = `${Math.round((done / total) * 100)}%`;
   bar.appendChild(fill);
 
-  // Rocket on the left; the progress sentence + bar on the right.
+  // Two buttons: primary → the next concept, secondary → the progress dashboard.
+  const actions = document.createElement("div");
+  actions.className = "wb-actions";
+  const nextBtn = document.createElement("a");
+  nextBtn.className = "wb-btn wb-btn-primary";
+  nextBtn.href = `/concepts/${nextId}.html`;
+  nextBtn.textContent = t("welcome.next");
+  const progBtn = document.createElement("a");
+  progBtn.className = "wb-btn wb-btn-secondary";
+  progBtn.href = "/progress.html";
+  progBtn.textContent = t("welcome.seeProgress");
+  actions.append(nextBtn, progBtn);
+
+  // Rocket on the left; the progress sentence + bar + buttons on the right.
   const main = document.createElement("div");
   main.className = "wb-main";
-  main.append(desc, bar);
+  main.append(desc, bar, actions);
 
   const rocket = document.createElement("img");
   rocket.className = "wb-rocket";

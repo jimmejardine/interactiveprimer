@@ -9,6 +9,7 @@ import {
   currentStreak,
   daysAgo,
   isGraduated,
+  pickNextConcept,
   MASTERED_AT,
 } from "../js/progress-stats.js";
 
@@ -151,6 +152,38 @@ test("a graduated 10/10 is never review-due even when stale; a same-day 10/10 st
     ["h"],
   );
   assert.equal(p.reviewDue, 1);
+});
+
+test("pickNextConcept: ready-first (course order), then learning, then null", () => {
+  const byId = new Map([
+    ["a", { prerequisites: [] }],
+    ["b", { prerequisites: ["a"] }],
+    ["c", { prerequisites: ["b"] }],
+  ]);
+  const members = ["a", "b", "c"];
+  const starsFrom = (/** @type {Record<string,number>} */ s) => (/** @type {string} */ id) => s[id] ?? 0;
+
+  assert.equal(pickNextConcept(members, byId, starsFrom({})), "a"); // fresh → first base concept
+  assert.equal(pickNextConcept(members, byId, starsFrom({ a: 10 })), "b"); // a mastered → b ready, c locked
+  assert.equal(pickNextConcept(members, byId, starsFrom({ a: 10, b: 9 })), "c"); // b mastered → c ready
+  assert.equal(pickNextConcept(members, byId, starsFrom({ a: 10, b: 4 })), "b"); // no ready → finish learning b
+  assert.equal(pickNextConcept(members, byId, starsFrom({ a: 10, b: 8, c: 10 })), null); // all mastered
+});
+
+test("pickNextConcept: a ready concept beats an earlier learning one; locked concepts are skipped", () => {
+  const byId = new Map([
+    ["x", { prerequisites: [] }],
+    ["y", { prerequisites: [] }],
+  ]);
+  // x is mid-learning (earlier in order), y is unstarted & ready → ready wins.
+  assert.equal(pickNextConcept(["x", "y"], byId, (id) => (id === "x" ? 4 : 0)), "y");
+
+  // Both unstarted but locked by an unmastered prereq → nothing ready, nothing learning → null.
+  const locked = new Map([
+    ["p", { prerequisites: ["z"] }],
+    ["q", { prerequisites: ["p"] }],
+  ]);
+  assert.equal(pickNextConcept(["p", "q"], locked, () => 0), null);
 });
 
 test("daysAgo is floor of elapsed days, 0 for missing", () => {
