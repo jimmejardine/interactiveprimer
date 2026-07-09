@@ -30,7 +30,7 @@
  * @module
  */
 
-import { attachShared, awaitRegistration } from "./shared.js";
+import { attachShared, awaitRegistration, PLAY_ICON_SVG, BIG_PLAY_CSS } from "./shared.js";
 import { getGeometryScene } from "../scenes.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
@@ -41,9 +41,6 @@ import { clampStep, createStepCollector, applyStepVisibility } from "../geometry
 import { makeGeometryTools } from "../geometry-tools.js";
 import { makeRng } from "../rng.js";
 import { reportError } from "../report-error.js";
-
-/** The play triangle as inline SVG (matches `<primer-manim>`'s big-play icon; recolours with the theme). */
-const ICON_PLAY = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
 
 /** Extra pause (ms) after a step's own animation before auto-advancing to the next during Play. */
 const AUTOPLAY_HOLD_MS = 750;
@@ -111,16 +108,10 @@ export class PrimerGeometry extends HTMLElement {
           box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
         .stage.jxgbox { background: var(--primer-viz-bg, #fff); }
         .stage svg { display: block; width: 100% !important; height: 100% !important; }
-        /* Big centred Play button overlaid on a "play overlay" figure: the figure opens fully
-           revealed, and this button rewinds + replays the build-up. Hidden while playing and on
-           non-overlay scenes. (Mirrors <primer-manim>'s big-play facade.) */
-        .big-play { position: absolute; inset: 0; display: grid; place-items: center; padding: 0; border: 0; background: transparent; cursor: pointer; }
-        .big-play .disc { width: 4.5rem; height: 4.5rem; border-radius: 50%; background: var(--primer-accent, #5b6ee1); display: grid; place-items: center;
-          box-shadow: 0 0 0 1px var(--primer-accent, #5b6ee1), 0 0 18px var(--primer-ring, rgba(70,90,230,0.7)), 0 2px 10px rgba(0, 0, 0, 0.25); }
-        .big-play svg { width: 2.4rem; height: 2.4rem; fill: var(--primer-accent-ink, #fff); margin-left: 0.25rem; /* optical-centre the triangle */ }
-        .big-play:hover .disc, .big-play:focus-visible .disc { filter: brightness(1.1); }
-        @keyframes primer-geo-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
-        @media (prefers-reduced-motion: no-preference) { .big-play .disc { animation: primer-geo-pulse 1.8s ease-in-out infinite; } }
+        /* Big centred Play button (shared BIG_PLAY_CSS) overlaid on a "play overlay" figure: the
+           figure opens fully revealed, and this button rewinds + replays the build-up. Hidden while
+           playing and on non-overlay scenes. */
+        ${BIG_PLAY_CSS}
         /* "Neon HUD" step bar: a recessed instrument strip of glowing chip buttons + a monospace
            step counter. Colours from --primer-* tokens (glow = the theme's accent/ring). */
         .bar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; justify-content: center;
@@ -167,7 +158,7 @@ export class PrimerGeometry extends HTMLElement {
         </div>
         <div class="stage" part="stage">
           <button class="big-play" type="button" hidden aria-label="${t("geometry.play")}" title="${t("geometry.play")}">
-            <span class="disc">${ICON_PLAY}</span>
+            <span class="disc">${PLAY_ICON_SVG}</span>
           </button>
         </div>
         <div class="expanded" part="expanded" hidden></div>

@@ -17,7 +17,8 @@ const version = (pkg) => JSON.parse(fs.readFileSync(nm(pkg, "package.json"), "ut
 const manifest = {};
 function record(rel) {
   const buf = fs.readFileSync(out(rel));
-  manifest[rel] = "sha256:" + crypto.createHash("sha256").update(buf).digest("hex").slice(0, 16);
+  // Normalize separators so regenerating on Windows/mac/linux produces identical manifest keys.
+  manifest[rel.split(path.sep).join("/")] = "sha256:" + crypto.createHash("sha256").update(buf).digest("hex").slice(0, 16);
 }
 function copy(from, toRel) {
   fs.mkdirSync(path.dirname(out(toRel)), { recursive: true });
@@ -98,7 +99,6 @@ fontCss("@fontsource/fredoka", "Fredoka",
   [{ w: 500, style: "normal" }, { w: 600, style: "normal" }, { w: 700, style: "normal" }], "fredoka");
 // rename outputs to the names boot.js/theme.js expect
 fs.renameSync(out("fonts/stix-two-text.css"), out("fonts/stix.css"));
-fs.renameSync(out("fonts/fredoka.css"), out("fonts/fredoka.css"));
 
 console.log("manim internal resources (MathJax / gif worker) + rewrite:");
 copy(nm("mathjax/es5/tex-svg-full.js"), "manim-web/lib/mathjax_3_es5_tex-svg-full.js");

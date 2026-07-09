@@ -16,7 +16,7 @@
  * @module
  */
 
-import { attachShared } from "./shared.js";
+import { attachShared, PLAY_ICON_SVG, BIG_PLAY_CSS } from "./shared.js";
 import { getManimScene } from "../scenes.js";
 import { makeStrings } from "../scene-strings.js";
 import { speak, cancelSpeech, pauseSpeech, resumeSpeech } from "../speech.js";
@@ -30,7 +30,7 @@ import { reportError } from "../report-error.js";
  * draws with its own font/emoji (often colour, inconsistent).
  */
 const ICON = {
-  play: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
+  play: PLAY_ICON_SVG,
   pause: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>',
   replay:
     '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg>',
@@ -88,15 +88,9 @@ export class PrimerManim extends HTMLElement {
         .play:focus-visible { outline: none; border-color: var(--primer-accent, #46e);
           box-shadow: 0 0 0 2px var(--primer-ring, rgba(70,90,230,0.5)), 0 0 8px var(--primer-ring, rgba(70,90,230,0.4)); }
         .play svg { width: 1.4rem; height: 1.4rem; display: block; }
-        /* Big centred play button, shown on the idle stage so it's obvious the animation plays.
-           Removed once it first starts (replay uses the small control). */
-        .big-play { position: absolute; inset: 0; display: grid; place-items: center; padding: 0; border: 0; background: transparent; cursor: pointer; }
-        .big-play .disc { width: 4.5rem; height: 4.5rem; border-radius: 50%; background: var(--primer-accent, #5b6ee1); display: grid; place-items: center;
-          box-shadow: 0 0 0 1px var(--primer-accent, #5b6ee1), 0 0 18px var(--primer-ring, rgba(70,90,230,0.7)), 0 2px 10px rgba(0, 0, 0, 0.25); }
-        .big-play svg { width: 2.4rem; height: 2.4rem; fill: var(--primer-accent-ink, #fff); margin-left: 0.25rem; /* optical-centre the triangle */ }
-        .big-play:hover .disc, .big-play:focus-visible .disc { filter: brightness(1.1); }
-        @keyframes primer-manim-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
-        @media (prefers-reduced-motion: no-preference) { .big-play .disc { animation: primer-manim-pulse 1.8s ease-in-out infinite; } }
+        /* Big centred play button (shared BIG_PLAY_CSS), shown on the idle stage so it's obvious the
+           animation plays. Removed once it first starts (replay uses the small control). */
+        ${BIG_PLAY_CSS}
       </style>
       <div class="card frame">
         <div class="stage" part="stage">
@@ -119,6 +113,14 @@ export class PrimerManim extends HTMLElement {
   disconnectedCallback() {
     if (this.#onTheme) document.removeEventListener("theme-change", this.#onTheme);
     this.#onTheme = null;
+    // Silence a mid-playback removal: stop the narration and (best-effort) halt the scene's
+    // render loop — otherwise both keep running against a detached stage.
+    cancelSpeech();
+    try {
+      this.#scene?.pause?.();
+    } catch {
+      /* best-effort */
+    }
   }
 
   /**

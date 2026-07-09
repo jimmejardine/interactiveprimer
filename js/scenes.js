@@ -10,8 +10,44 @@
  * `themeColors` helpers — so a scene's only `primer` import is `registerManimScene` and it
  * destructures what it wants. (The toolkit is assembled by `<primer-manim>`; see
  * js/components/primer-manim.js.)
+ *
+ * The other registries here (charts, 3D charts, geometry scenes/problems, programs, quizzes) follow
+ * the same register/get shape, built by the private {@link makeRegistry} factory. Each of those
+ * announces a registration via a `primer:<kind>-registered` CustomEvent (so a component that
+ * connected before the page's deferred module script ran can finish building); the manim registry
+ * deliberately does not — a manim scene is only built on click, so no announce is needed.
  * @module
  */
+
+/**
+ * A name→value registry: `register` stores (overwriting any same-named entry) and, when the
+ * registry has an announce event, dispatches it on `document` with `detail: { name }`; `get`
+ * looks a value up by name (undefined if not registered).
+ * @template T
+ * @typedef {{ register: (name: string, value: T) => void, get: (name: string) => T | undefined }} Registry
+ */
+
+/**
+ * Build a registry. Pass the `primer:<kind>-registered` event name to announce each registration
+ * on `document` (guarded for non-DOM environments, e.g. unit tests), or null for a silent
+ * registry (manim). Cast the result to `Registry<T>` at the call site to type the entries.
+ * @param {string | null} eventName
+ * @returns {Registry<any>}
+ */
+function makeRegistry(eventName) {
+  const map = new Map();
+  return {
+    register(name, value) {
+      map.set(name, value);
+      if (eventName && typeof document !== "undefined") {
+        document.dispatchEvent(new CustomEvent(eventName, { detail: { name } }));
+      }
+    },
+    get(name) {
+      return map.get(name);
+    },
+  };
+}
 
 /**
  * The single argument passed to a {@link ManimSceneBuilder}. Bundles a ready-built scene, the
@@ -37,8 +73,8 @@
  * @returns {void | Promise<void>}
  */
 
-/** @type {Map<string, ManimSceneBuilder>} */
-const scenes = new Map();
+/** @type {Registry<ManimSceneBuilder>} */
+const scenes = makeRegistry(null); // no announce — manim scenes build on click
 
 /**
  * Register a named manim scene. Re-registering a name overwrites it.
@@ -46,7 +82,7 @@ const scenes = new Map();
  * @param {ManimSceneBuilder} builder
  */
 export function registerManimScene(name, builder) {
-  scenes.set(name, builder);
+  scenes.register(name, builder);
 }
 
 /**
@@ -74,8 +110,8 @@ export function getManimScene(name) {
  * @returns {(params: Record<string, number>) => void}  Re-plot for the given param values.
  */
 
-/** @type {Map<string, ChartBuilder>} */
-const charts = new Map();
+/** @type {Registry<ChartBuilder>} */
+const charts = makeRegistry("primer:chart-registered");
 
 /**
  * Register a named chart builder. Re-registering a name overwrites it.
@@ -88,10 +124,7 @@ const charts = new Map();
  * @param {ChartBuilder} builder
  */
 export function registerChart(name, builder) {
-  charts.set(name, builder);
-  if (typeof document !== "undefined") {
-    document.dispatchEvent(new CustomEvent("primer:chart-registered", { detail: { name } }));
-  }
+  charts.register(name, builder);
 }
 
 /**
@@ -134,8 +167,8 @@ export function getChart(name) {
  * @property {Chart3dOptions} opts
  */
 
-/** @type {Map<string, Chart3dEntry>} */
-const charts3d = new Map();
+/** @type {Registry<Chart3dEntry>} */
+const charts3d = makeRegistry("primer:chart3d-registered");
 
 /**
  * Register a named 3D chart. Re-registering a name overwrites it. Announces the registration (like
@@ -146,10 +179,7 @@ const charts3d = new Map();
  * @param {Chart3dOptions} [opts]
  */
 export function register3dChart(name, builder, opts = {}) {
-  charts3d.set(name, { builder, opts });
-  if (typeof document !== "undefined") {
-    document.dispatchEvent(new CustomEvent("primer:chart3d-registered", { detail: { name } }));
-  }
+  charts3d.register(name, { builder, opts });
 }
 
 /**
@@ -203,8 +233,8 @@ export function get3dChart(name) {
  * @property {GeometryOptions} opts
  */
 
-/** @type {Map<string, GeometryEntry>} */
-const geometries = new Map();
+/** @type {Registry<GeometryEntry>} */
+const geometries = makeRegistry("primer:geometry-registered");
 
 /**
  * Register a named geometry scene. Re-registering a name overwrites it. Announces the registration
@@ -215,10 +245,7 @@ const geometries = new Map();
  * @param {GeometryOptions} [opts]
  */
 export function registerGeometryScene(name, builder, opts = {}) {
-  geometries.set(name, { builder, opts });
-  if (typeof document !== "undefined") {
-    document.dispatchEvent(new CustomEvent("primer:geometry-registered", { detail: { name } }));
-  }
+  geometries.register(name, { builder, opts });
 }
 
 /**
@@ -257,8 +284,8 @@ export function getGeometryScene(name) {
  * @typedef {{ config: GeometryProblemConfig }} GeometryProblemEntry
  */
 
-/** @type {Map<string, GeometryProblemConfig>} */
-const geometryProblems = new Map();
+/** @type {Registry<GeometryProblemConfig>} */
+const geometryProblems = makeRegistry("primer:geometry-problem-registered");
 
 /**
  * Register a named geometry problem. Re-registering overwrites. Announces the registration (like
@@ -268,10 +295,7 @@ const geometryProblems = new Map();
  * @param {GeometryProblemConfig} config
  */
 export function registerGeometryProblem(name, config) {
-  geometryProblems.set(name, config);
-  if (typeof document !== "undefined") {
-    document.dispatchEvent(new CustomEvent("primer:geometry-problem-registered", { detail: { name } }));
-  }
+  geometryProblems.register(name, config);
 }
 
 /**
@@ -303,8 +327,8 @@ export function getGeometryProblem(name) {
  * @property {string} [starter]   Starter TypeScript shown in the editor (language-neutral; keep inline).
  */
 
-/** @type {Map<string, ProgramConfig>} */
-const programs = new Map();
+/** @type {Registry<ProgramConfig>} */
+const programs = makeRegistry("primer:program-registered");
 
 /**
  * Register a named program exercise. Re-registering overwrites. Announces the registration (like
@@ -314,10 +338,7 @@ const programs = new Map();
  * @param {ProgramConfig} config
  */
 export function registerProgram(name, config) {
-  programs.set(name, config);
-  if (typeof document !== "undefined") {
-    document.dispatchEvent(new CustomEvent("primer:program-registered", { detail: { name } }));
-  }
+  programs.register(name, config);
 }
 
 /**
@@ -349,8 +370,8 @@ export function getProgram(name) {
  * @returns {Array<import("./types/domain.js").AuthoredQuestion | import("./types/domain.js").QuizConfig>}  The question bank (optional leading config).
  */
 
-/** @type {Map<string, QuizBuilder>} */
-const quizzes = new Map();
+/** @type {Registry<QuizBuilder>} */
+const quizzes = makeRegistry("primer:quiz-registered");
 
 /**
  * Register a named quiz builder. Re-registering a name overwrites it. Announces the registration
@@ -360,10 +381,7 @@ const quizzes = new Map();
  * @param {QuizBuilder} builder
  */
 export function registerQuiz(name, builder) {
-  quizzes.set(name, builder);
-  if (typeof document !== "undefined") {
-    document.dispatchEvent(new CustomEvent("primer:quiz-registered", { detail: { name } }));
-  }
+  quizzes.register(name, builder);
 }
 
 /**

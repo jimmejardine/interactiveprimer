@@ -14,40 +14,17 @@
 
 import { CLOUD_API, CLOUD_FLAG, CLOUD_EMAIL } from "./cloud-config.js";
 import { initSync, onSignIn, stopSync } from "./cloud-sync.js";
+import { safeGet, safeSet, safeRemove } from "./storage.js";
 
 /** @param {string} path @param {RequestInit} [opts] */
 async function api(path, opts) {
   return fetch(`${CLOUD_API}${path}`, { credentials: "include", ...opts });
 }
 
-const store = {
-  get: (/** @type {string} */ k) => {
-    try {
-      return localStorage.getItem(k);
-    } catch {
-      return null;
-    }
-  },
-  set: (/** @type {string} */ k, /** @type {string} */ v) => {
-    try {
-      localStorage.setItem(k, v);
-    } catch {
-      /* best-effort */
-    }
-  },
-  del: (/** @type {string} */ k) => {
-    try {
-      localStorage.removeItem(k);
-    } catch {
-      /* best-effort */
-    }
-  },
-};
-
 /** The signed-in user, or null. Only the email (shown as "Logged in as …") — no other identity. */
 export function getUser() {
-  if (store.get(CLOUD_FLAG) !== "1") return null;
-  return { email: store.get(CLOUD_EMAIL) || "" };
+  if (safeGet(CLOUD_FLAG) !== "1") return null;
+  return { email: safeGet(CLOUD_EMAIL) || "" };
 }
 
 function broadcast() {
@@ -55,8 +32,8 @@ function broadcast() {
 }
 
 function clearSession() {
-  store.del(CLOUD_FLAG);
-  store.del(CLOUD_EMAIL);
+  safeRemove(CLOUD_FLAG);
+  safeRemove(CLOUD_EMAIL);
   stopSync();
   broadcast();
 }
@@ -68,7 +45,7 @@ function clearSession() {
 export async function requestCode(email) {
   const addr = (email || "").trim();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) return { ok: false, error: "email" };
-  store.set(CLOUD_EMAIL, addr);
+  safeSet(CLOUD_EMAIL, addr);
   try {
     const res = await api("/auth/request", {
       method: "POST",
@@ -87,7 +64,7 @@ export async function requestCode(email) {
  * @param {string} code @returns {Promise<{ok:boolean, error?:string}>}
  */
 export async function submitCode(code) {
-  const email = store.get(CLOUD_EMAIL) || "";
+  const email = safeGet(CLOUD_EMAIL) || "";
   try {
     const res = await api("/auth/verify", {
       method: "POST",
@@ -95,7 +72,7 @@ export async function submitCode(code) {
       body: JSON.stringify({ email, code: (code || "").trim().toUpperCase() }),
     });
     if (!res.ok) return { ok: false, error: "code" };
-    store.set(CLOUD_FLAG, "1");
+    safeSet(CLOUD_FLAG, "1");
     broadcast();
     await onSignIn({ interactive: true });
     return { ok: true };

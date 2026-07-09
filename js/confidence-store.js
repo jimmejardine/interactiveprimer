@@ -17,6 +17,7 @@
  */
 
 import { MAX_STARS } from "./progress-core.js";
+import { safeGet, safeSet, safeRemove } from "./storage.js";
 
 /** Confidence storage key prefix. */
 export const CONFIDENCE_PREFIX = "primer:confidence:";
@@ -76,11 +77,8 @@ function parseEntry(raw) {
  * @returns {ConfidenceEntry | null}
  */
 export function readEntry(id) {
-  try {
-    return parseEntry(localStorage.getItem(CONFIDENCE_PREFIX + id));
-  } catch {
-    return null; // localStorage unavailable (private mode, file://)
-  }
+  // safeGet returns null when localStorage is unavailable, and parseEntry(null) → null.
+  return parseEntry(safeGet(CONFIDENCE_PREFIX + id));
 }
 
 /**
@@ -96,11 +94,7 @@ export function readEntry(id) {
 export function writeEntry(id, stars, first, last = nowISO()) {
   const clamped = Math.min(MAX_STARS, Math.max(0, Math.round(stars)));
   const firstDate = first ?? (readEntry(id)?.first || todayISO());
-  try {
-    localStorage.setItem(CONFIDENCE_PREFIX + id, JSON.stringify([clamped, firstDate, last]));
-  } catch {
-    /* best-effort persistence */
-  }
+  safeSet(CONFIDENCE_PREFIX + id, JSON.stringify([clamped, firstDate, last]));
 }
 
 /**
@@ -108,11 +102,7 @@ export function writeEntry(id, stars, first, last = nowISO()) {
  * @param {string} id
  */
 export function removeEntry(id) {
-  try {
-    localStorage.removeItem(CONFIDENCE_PREFIX + id);
-  } catch {
-    /* best-effort */
-  }
+  safeRemove(CONFIDENCE_PREFIX + id);
 }
 
 /**

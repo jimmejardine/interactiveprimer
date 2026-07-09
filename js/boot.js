@@ -49,9 +49,10 @@
   /** @type {any} */ (window).__primerBooted = true;
 
   // Record uncaught errors + unhandled promise rejections on window.__primerErrors so an out-of-page
-  // test harness (scripts/smoke-pages.mjs) can detect a broken page. Best-effort; installed first thing
-  // so early failures are captured. (Classic-script inline: this non-module file can't import the shared
-  // installGlobalErrorReporter from js/report-error.js, which the components use.)
+  // test harness (scripts/smoke-pages.mjs) can detect a broken page. This inline recorder IS the single
+  // implementation of the global handlers: boot is a classic pre-module script, so it must capture the
+  // earliest errors itself. (Components report their caught errors via reportError from js/report-error.js,
+  // which pushes onto the same bucket.)
   const errHost = /** @type {any} */ (window);
   errHost.__primerErrors = errHost.__primerErrors || [];
   window.addEventListener("error", (e) => {
@@ -184,8 +185,8 @@
   }
 
   // Third-party libraries are vendored under /3rdparty/ (see scripts/vendor.mjs) so the site runs
-  // fully offline. Pinned versions live in that script (katex 0.16.47, manim-web 0.3.22, json5 2.2.3,
-  // jsxgraph 1.12.2); re-run `npm run vendor` to update them.
+  // fully offline. The vendored versions are recorded in 3rdparty/VENDORED.json (written by
+  // scripts/vendor.mjs); re-run `npm run vendor` to update them.
   const KATEX_CSS = "/3rdparty/katex/katex.min.css";
   const KATEX_MJS = "/3rdparty/katex/katex.mjs";
   const MANIM_JS = "/3rdparty/manim-web/manim-web.browser.js";

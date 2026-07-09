@@ -11,7 +11,7 @@
  * @module
  */
 
-import { getLocale } from "./i18n.js";
+import { getLocale, t } from "./i18n.js";
 import { getCurrentCourse, setCurrentCourse, clearCourse } from "./course.js";
 import { allEntries } from "./confidence-store.js";
 import { confidenceColor } from "./confidence-color.js";
@@ -21,7 +21,16 @@ import { glitter, glitterIntensity } from "./glitter.js";
 import { escapeHtml } from "./html-entities.js";
 import { courseProgress, daysAgo, pickNextConcept, MASTERED_AT } from "./progress-stats.js";
 
-const MASTERY_LABEL = { locked: "Locked", ready: "Ready", learning: "Learning", mastered: "Mastered", "review-due": "Review due" };
+/** Chrome-string key per mastery status (localized via `t()` at render time). */
+const MASTERY_LABEL_KEY = {
+  locked: "dash.status.locked",
+  ready: "dash.status.ready",
+  learning: "dash.status.learning",
+  mastered: "dash.status.mastered",
+  "review-due": "dash.status.reviewDue",
+};
+/** @param {keyof typeof MASTERY_LABEL_KEY} status */
+const masteryLabel = (status) => t(MASTERY_LABEL_KEY[status]);
 
 /**
  * Mount the dashboard into `root`.
@@ -43,12 +52,12 @@ export function mountProgressDashboard(root, { byId }) {
     s.textContent = SEARCH_BOX_CSS;
     document.head.appendChild(s);
   }
-  const head = el("header", "dash-head", `<h1 class="dash-title">My Progress<span class="dash-course"></span></h1>`);
+  const head = el("header", "dash-head", `<h1 class="dash-title">${escapeHtml(t("menu.myProgress"))}<span class="dash-course"></span></h1>`);
   const courseCap = /** @type {HTMLElement} */ (head.querySelector(".dash-course"));
   const exitBtn = document.createElement("button");
   exitBtn.type = "button";
   exitBtn.className = "exit-course-btn";
-  exitBtn.textContent = "Exit course";
+  exitBtn.textContent = t("course.exit");
   exitBtn.addEventListener("click", () => clearCourse()); // → course-change → rebuild to the empty state
   courseCap.after(exitBtn); // in the header, in flow immediately after the course name
   // One horizontal row: a fixed search box, then the course chips in their own sideways-scrolling strip.
@@ -113,10 +122,8 @@ export function mountProgressDashboard(root, { byId }) {
 
     if (!hasCourse) {
       courseCap.innerHTML = "";
-      empty.innerHTML = `<h2>Pick a course to begin</h2>
-        <p>Choose a course above (or from any course page's “Focus on this course” button) and this
-        dashboard will light up with your progress — mastery, streaks, what's ready to learn next, and
-        what's due for review.</p>`;
+      empty.innerHTML = `<h2>${escapeHtml(t("dash.empty.title"))}</h2>
+        <p>${escapeHtml(t("dash.empty.body"))}</p>`;
       return;
     }
 
@@ -209,25 +216,25 @@ function renderChips(host, byId, entriesById, titleOf) {
 /** @param {HTMLElement} host @param {ReturnType<typeof courseProgress>} p */
 function renderTiles(host, p) {
   const pct = Math.round(p.fracMastered * 100);
-  const last = p.lastActive ? `${daysAgo(p.lastActive + "T12:00:00Z", Date.now())}d ago` : "—";
+  const last = p.lastActive ? t("dash.daysAgo", { d: daysAgo(p.lastActive + "T12:00:00Z", Date.now()) }) : "—";
   host.innerHTML = `
     <div class="tile tile-ring">
       ${ringSvg(p.fracMastered, 120, `${pct}%`)}
-      <div class="tile-label">mastered</div>
+      <div class="tile-label">${escapeHtml(t("dash.tile.mastered"))}</div>
     </div>
     <div class="tile">
       <div class="tile-num">${p.xp}<span class="tile-of"> / ${p.xpMax}</span></div>
-      <div class="tile-label">XP (stars)</div>
+      <div class="tile-label">${escapeHtml(t("dash.tile.xp"))}</div>
       <div class="meter"><span style="width:${p.xpMax ? (p.xp / p.xpMax) * 100 : 0}%"></span></div>
     </div>
     <div class="tile tile-counts">
       ${countPill("ready", p.ready)}${countPill("learning", p.learning)}${countPill("mastered", p.mastered)}${countPill("locked", p.locked)}
-      <div class="tile-label">${p.started} of ${p.total} started</div>
+      <div class="tile-label">${escapeHtml(t("dash.tile.started", { started: p.started, total: p.total }))}</div>
     </div>
     <div class="tile">
       <div class="tile-num">🔥 ${p.streakDays}</div>
-      <div class="tile-label">day streak</div>
-      <div class="tile-sub">last active ${last}${p.reviewDue ? ` · <strong>${p.reviewDue}</strong> due` : ""}</div>
+      <div class="tile-label">${escapeHtml(t("dash.tile.streak"))}</div>
+      <div class="tile-sub">${escapeHtml(t("dash.tile.lastActive", { last }))}${p.reviewDue ? ` · ${t("dash.tile.due", { n: `<strong>${p.reviewDue}</strong>` })}` : ""}</div>
     </div>`;
 }
 
@@ -250,15 +257,15 @@ function renderHeatmap(host, buckets, streak) {
       const day = new Date(ms).toISOString().slice(0, 10);
       const n = buckets.get(day) ?? 0;
       const level = n === 0 ? 0 : Math.min(4, 1 + Math.floor(((n - 1) / max) * 3));
-      cells += `<div class="hm-cell" data-level="${level}" title="${day}: ${n} concept${n === 1 ? "" : "s"}"></div>`;
+      cells += `<div class="hm-cell" data-level="${level}" title="${escapeHtml(t(n === 1 ? "dash.heatOne" : "dash.heatMany", { day, n }))}"></div>`;
     }
   }
   host.innerHTML = `
-    <div class="card-head"><h2>Activity</h2><span class="muted">🔥 ${streak}-day streak</span></div>
+    <div class="card-head"><h2>${escapeHtml(t("dash.activity"))}</h2><span class="muted">${escapeHtml(t("dash.streakLong", { n: streak }))}</span></div>
     <div class="hm-grid" style="grid-template-columns: repeat(${WEEKS}, minmax(0, 1fr))">${cells}</div>
-    <div class="hm-legend"><span class="muted">less</span>
+    <div class="hm-legend"><span class="muted">${escapeHtml(t("dash.less"))}</span>
       ${[0, 1, 2, 3, 4].map((l) => `<span class="hm-cell" data-level="${l}"></span>`).join("")}
-      <span class="muted">more</span></div>`;
+      <span class="muted">${escapeHtml(t("dash.more"))}</span></div>`;
 }
 
 /** @param {HTMLElement} host @param {ReturnType<typeof courseProgress>} p @param {(id:string)=>string} titleOf
@@ -271,17 +278,17 @@ function renderPanels(host, p, titleOf, nextId, starsOf) {
 
   host.innerHTML = `
     <div class="card panel">
-      <div class="card-head"><h2>🚀 Ready to learn</h2><span class="muted">${p.ready}</span></div>
-      <p class="muted small">Prerequisites all mastered — the frontier of what you can start next.</p>
-      ${frontier.length ? frontier.map((c) => linkRow(c, "prereqs ✓")).join("") : `<p class="muted">Nothing unlocked yet — master a few basics to open new concepts.</p>`}
+      <div class="card-head"><h2>${escapeHtml(t("dash.readyHead"))}</h2><span class="muted">${p.ready}</span></div>
+      <p class="muted small">${escapeHtml(t("dash.readyDesc"))}</p>
+      ${frontier.length ? frontier.map((c) => linkRow(c, escapeHtml(t("dash.prereqsOk")))).join("") : `<p class="muted">${escapeHtml(t("dash.readyEmpty"))}</p>`}
     </div>
     <div class="card panel">
-      <div class="card-head"><h2>🔁 Reviews due</h2><span class="muted">${p.reviewDue}</span></div>
-      <p class="muted small">Spaced repetition — revisit these to keep them in long-term memory.</p>
-      ${reviews.length ? reviews.map((c) => linkRow(c, `${daysAgo(c.last, Date.now())}d ago`)).join("") : `<p class="muted">All caught up — nothing due for review. 🎉</p>`}
+      <div class="card-head"><h2>${escapeHtml(t("dash.reviewsHead"))}</h2><span class="muted">${p.reviewDue}</span></div>
+      <p class="muted small">${escapeHtml(t("dash.reviewsDesc"))}</p>
+      ${reviews.length ? reviews.map((c) => linkRow(c, escapeHtml(t("dash.daysAgo", { d: daysAgo(c.last, Date.now()) })))).join("") : `<p class="muted">${escapeHtml(t("dash.reviewsEmpty"))}</p>`}
     </div>
     <div class="card panel panel-next">
-      <div class="card-head"><h2>▶ Start here now</h2></div>
+      <div class="card-head"><h2>${escapeHtml(t("dash.nextHead"))}</h2></div>
       ${nextNudge(nextId, starsOf, titleOf)}
     </div>`;
 }
@@ -289,9 +296,9 @@ function renderPanels(host, p, titleOf, nextId, starsOf) {
 /** The single clearest next action — the shared `pickNextConcept` choice (ready-to-learn, else finish a
  * learning concept). @param {string|null} nextId @param {(id:string)=>number} starsOf @param {(id:string)=>string} titleOf */
 function nextNudge(nextId, starsOf, titleOf) {
-  if (!nextId) return `<p class="muted">You've mastered everything in this course. 🎉</p>`;
-  const kind = starsOf(nextId) === 0 ? "Ready to learn — dive in:" : "Continue where you left off:";
-  return `<p class="muted small">${kind}</p><a class="p-next-cta" href="/concepts/${nextId}.html">${escapeHtml(titleOf(nextId))} →</a>`;
+  if (!nextId) return `<p class="muted">${escapeHtml(t("dash.allDone"))}</p>`;
+  const kind = starsOf(nextId) === 0 ? t("dash.nudgeNew") : t("dash.nudgeContinue");
+  return `<p class="muted small">${escapeHtml(kind)}</p><a class="p-next-cta" href="/concepts/${nextId}.html">${escapeHtml(titleOf(nextId))} →</a>`;
 }
 
 /** @param {HTMLElement} host @param {ReturnType<typeof courseProgress>} p @param {(id:string)=>string} titleOf @param {Map<string,any>} byId @param {string} locale */
@@ -305,14 +312,14 @@ function renderList(host, p, titleOf, byId, locale) {
       return `<div class="row">
         <a class="row-title" href="/concepts/${c.id}.html">${escapeHtml(titleOf(c.id))}</a>
         <div class="row-stars">${stars}</div>
-        <div class="row-status"><span class="status" data-status="${c.status}">${MASTERY_LABEL[c.status]}</span></div>
-        <div class="row-date" title="started">${started}</div>
-        <div class="row-date" title="last updated">${updated}</div>
+        <div class="row-status"><span class="status" data-status="${c.status}">${escapeHtml(masteryLabel(c.status))}</span></div>
+        <div class="row-date" title="${escapeHtml(t("dash.col.started"))}">${started}</div>
+        <div class="row-date" title="${escapeHtml(t("dash.col.updated"))}">${updated}</div>
       </div>`;
     })
     .join("");
-  host.innerHTML = `<div class="card-head"><h2>All concepts</h2><span class="muted">${p.total}</span></div>
-    <div class="row row-head"><span>Concept</span><span>Confidence</span><span>Status</span><span>Started</span><span>Updated</span></div>
+  host.innerHTML = `<div class="card-head"><h2>${escapeHtml(t("dash.allConcepts"))}</h2><span class="muted">${p.total}</span></div>
+    <div class="row row-head"><span>${escapeHtml(t("dash.col.concept"))}</span><span>${escapeHtml(t("dash.col.confidence"))}</span><span>${escapeHtml(t("dash.col.status"))}</span><span>${escapeHtml(t("dash.col.started"))}</span><span>${escapeHtml(t("dash.col.updated"))}</span></div>
     ${rows}`;
 }
 
@@ -342,9 +349,9 @@ function starRow(stars, tint) {
   return out;
 }
 
-/** @param {keyof typeof MASTERY_LABEL} status @param {number} n */
+/** @param {keyof typeof MASTERY_LABEL_KEY} status @param {number} n */
 function countPill(status, n) {
-  return `<span class="count-pill" data-status="${status}"><b>${n}</b> ${MASTERY_LABEL[status]}</span>`;
+  return `<span class="count-pill" data-status="${status}"><b>${n}</b> ${escapeHtml(masteryLabel(status))}</span>`;
 }
 
 /** @param {string} tag @param {string} cls @param {string} [html] */

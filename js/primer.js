@@ -43,14 +43,5 @@ export { getSceneStrings, makeStrings } from "./scene-strings.js";
 export { speak, cancelSpeech } from "./speech.js";
 export { parseConceptMeta, getConceptMeta } from "./concept-meta.js";
 export { BASE_LEVEL, maxLevel, formatLevel } from "./levels.js";
-export {
-  ROOT_ID,
-  indexConcepts,
-  findRoots,
-  resolvePrerequisites,
-  effectiveLevel,
-  resolveLevels,
-  validateGraph,
-  neighborhood,
-} from "./graph.js";
+export { resolveLevels, validateGraph } from "./graph.js";
 export { generateQuiz, generateQuestion, shuffle } from "./quiz.js";

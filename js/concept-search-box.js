@@ -11,6 +11,7 @@
  */
 
 import { searchConcepts } from "./concept-search.js";
+import { t } from "./i18n.js";
 
 /** Stylesheet for the box — themed; the caller injects it where the box lives. */
 export const SEARCH_BOX_CSS = `
@@ -71,7 +72,7 @@ let seq = 0;
  * @param {{ items: { id: string, title: string, course?: boolean }[], onSelect: (id: string) => void, placement?: "inline" | "overlay" | "fixed", placeholder?: string }} opts
  * @returns {{ destroy: () => void }}
  */
-export function mountSearchBox(host, { items, onSelect, placement = "inline", placeholder = "Search concepts…" }) {
+export function mountSearchBox(host, { items, onSelect, placement = "inline", placeholder = t("search.concepts") }) {
   const uid = `cg-search-${++seq}`;
   const search = document.createElement("div");
   const variant = placement === "overlay" ? " cg-search--overlay" : placement === "fixed" ? " cg-search--fixed" : "";
@@ -234,6 +235,6 @@ export function mountCourseSearch(host, { byId, locale, onSelect, placement }) {
     items: conceptSearchItems(byId, locale).filter((i) => i.course),
     onSelect,
     placement,
-    placeholder: "Search courses…",
+    placeholder: t("search.courses"),
   });
 }

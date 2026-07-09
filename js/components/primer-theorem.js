@@ -19,6 +19,8 @@
  * @module
  */
 
+import { t } from "../i18n.js";
+
 export class PrimerTheorem extends HTMLElement {
   #built = false;
 
@@ -34,7 +36,7 @@ export class PrimerTheorem extends HTMLElement {
     icon.setAttribute("aria-hidden", "true");
     const label = document.createElement("span");
     label.className = "eyebrow-label";
-    label.textContent = name ? `Theorem — ${name}` : "Theorem";
+    label.textContent = name ? t("theorem.eyebrowNamed", { name }) : t("theorem.eyebrow");
     eyebrow.append(icon, label);
     this.prepend(eyebrow);
   }

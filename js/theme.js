@@ -11,6 +11,8 @@
  * @module
  */
 
+import { safeGet, safeSet } from "./storage.js";
+
 /** @typedef {"light" | "dark" | "fun"} ThemeId */
 
 /**
@@ -66,23 +68,14 @@ export function applyTheme(id) {
   document.documentElement.style.colorScheme =
     THEMES.find((th) => th.id === id)?.scheme ?? "light";
   setThemeColorMeta(id);
-  try {
-    localStorage.setItem(STORAGE_KEY, id);
-  } catch {
-    /* persistence is best-effort */
-  }
+  safeSet(STORAGE_KEY, id);
   ensureFunFont(id === "fun");
   document.dispatchEvent(new CustomEvent("theme-change", { detail: { theme: id } }));
 }
 
 /** Reconcile the synchronously-set theme with storage on startup (idempotent). */
 export function initTheme() {
-  let stored = null;
-  try {
-    stored = localStorage.getItem(STORAGE_KEY);
-  } catch {
-    /* localStorage unavailable */
-  }
+  const stored = safeGet(STORAGE_KEY);
   const prefersDark =
     typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches;
   applyTheme(pickInitialTheme(stored, prefersDark));

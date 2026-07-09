@@ -9,6 +9,7 @@
  */
 
 import { todayISO } from "./confidence-store.js";
+import { safeGet, safeSet } from "./storage.js";
 
 /** localStorage key prefix for the per-page "last flagged" date. */
 export const FEEDBACK_PREFIX = "primer:feedback:";
@@ -30,11 +31,8 @@ export function attentionEvent(id, title) {
  * @returns {boolean}
  */
 export function flaggedToday(id) {
-  try {
-    return localStorage.getItem(FEEDBACK_PREFIX + id) === todayISO();
-  } catch {
-    return false; // localStorage unavailable (private mode, file://)
-  }
+  // safeGet returns null when localStorage is unavailable — never equal to a date, so false.
+  return safeGet(FEEDBACK_PREFIX + id) === todayISO();
 }
 
 /**
@@ -42,9 +40,5 @@ export function flaggedToday(id) {
  * @param {string} id
  */
 export function markFlagged(id) {
-  try {
-    localStorage.setItem(FEEDBACK_PREFIX + id, todayISO());
-  } catch {
-    /* best-effort persistence */
-  }
+  safeSet(FEEDBACK_PREFIX + id, todayISO());
 }

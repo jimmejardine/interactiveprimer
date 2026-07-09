@@ -168,3 +168,27 @@ export function awaitRegistration(eventName, name, { onReady, onTimeout, timeout
   document.addEventListener(eventName, onReg);
   return cancel;
 }
+
+/**
+ * The play triangle as inline SVG (24×24, `fill: currentColor`) — it renders identically on every
+ * platform and recolours with the theme, unlike the Unicode ▶ glyph which each OS draws with its own
+ * font/emoji. Shared by every "big play" facade (`<primer-manim>`, `<primer-geometry>`).
+ */
+export const PLAY_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+
+/**
+ * Styles for the big centred play button overlaid on an idle stage (an accent disc holding the
+ * {@link PLAY_ICON_SVG} triangle, gently pulsing unless the user prefers reduced motion). Interpolate
+ * into a component's shadow `<style>` next to a `.stage`-relative `<button class="big-play">`; the
+ * host component owns showing/hiding it.
+ */
+export const BIG_PLAY_CSS = `
+  .big-play { position: absolute; inset: 0; display: grid; place-items: center; padding: 0; border: 0; background: transparent; cursor: pointer; }
+  .big-play .disc { width: 4.5rem; height: 4.5rem; border-radius: 50%; background: var(--primer-accent, #5b6ee1); display: grid; place-items: center;
+    box-shadow: 0 0 0 1px var(--primer-accent, #5b6ee1), 0 0 18px var(--primer-ring, rgba(70,90,230,0.7)), 0 2px 10px rgba(0, 0, 0, 0.25); }
+  .big-play svg { width: 2.4rem; height: 2.4rem; fill: var(--primer-accent-ink, #fff); margin-left: 0.25rem; /* optical-centre the triangle */ }
+  .big-play:hover .disc, .big-play:focus-visible .disc { filter: brightness(1.1); }
+  @keyframes primer-big-play-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
+  @media (prefers-reduced-motion: no-preference) { .big-play .disc { animation: primer-big-play-pulse 1.8s ease-in-out infinite; } }
+`;

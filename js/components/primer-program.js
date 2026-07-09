@@ -32,6 +32,7 @@ import { getProgram } from "../scenes.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
 import { highlight, dedent, esc } from "../code-highlight.js";
+import { CODE_EDITOR_CSS } from "./code-editor-css.js";
 import { transpileTs } from "../transpile.js";
 import { getQuickJs } from "../quickjs.js";
 import { runJs } from "../run-js.js";
@@ -106,68 +107,19 @@ export class PrimerProgram extends HTMLElement {
         .assign { margin: 0 0 0.5rem; color: var(--primer-ink-soft, #667); font-size: 0.9rem; }
         .assign code { font-family: var(--primer-font-mono, ui-monospace, Menlo, Consolas, monospace); }
 
-        .runner { overflow: hidden;
-          background: var(--code-bg, var(--primer-viz-bg, #fff));
-          border: 1px solid var(--primer-border, #e6e0d4);
-          border-radius: var(--primer-radius, 0.6rem);
-          box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
+        /* editor chrome (toolbar/gutter/editor/output + token colours) shared with <primer-code> —
+           see js/components/code-editor-css.js */
+        ${CODE_EDITOR_CSS}
+        /* program-specific extras, layered over the shared chrome */
         .runner.right { box-shadow: inset 0 0 0 2px var(--primer-ok, #1a8f3c); }
         .runner.wrong { box-shadow: inset 0 0 0 2px var(--primer-bad, #c0392b); }
-        .bar { display: flex; align-items: center; gap: 0.4rem; padding: 0.35rem 0.5rem;
-          background: var(--primer-control-bg, #f1ede4);
-          border-bottom: 1px solid var(--primer-border, #e6e0d4); }
-        .eyebrow-label { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
-          text-transform: uppercase; color: var(--primer-ink-soft, #667); }
-        .spacer { flex: 1; }
-        .bar button { font: inherit; font-size: 0.82rem; cursor: pointer; padding: 0.2rem 0.7rem;
-          border-radius: 0.35rem; border: 1px solid var(--primer-control-border, #ccc);
-          background: transparent; color: var(--primer-ink-soft, #667); }
-        .bar button:hover { color: var(--primer-ink, #111); }
         .bar .check { font-weight: 700; color: var(--primer-accent-ink, #fff);
           background: var(--primer-accent, #4d5bd1); border-color: transparent; }
-        .bar .run { font-weight: 700; color: var(--primer-accent-ink, #fff);
-          background: var(--primer-accent, #4d5bd1); border-color: transparent;
-          box-shadow: 0 0 8px var(--primer-ring, rgba(70,90,230,0.4)); }
-        .bar .run:disabled { opacity: 0.55; cursor: default; box-shadow: none; }
         /* Embedded in a quiz: the quiz's "Check answers" grades it and the question is fixed — hide our
            own Check + New-input (Run + Reset stay, so the learner can test + start over). */
         :host([embedded]) .check, :host([embedded]) .refresh { display: none; }
-
-        .editor { position: relative; display: flex; align-items: stretch; }
-        .gutter { flex: 0 0 auto; box-sizing: border-box; padding: 0.7rem 0.5rem;
-          font-family: var(--primer-font-mono, ui-monospace, Menlo, Consolas, monospace);
-          font-size: 0.9rem; line-height: 1.55; white-space: pre; text-align: right;
-          user-select: none; -webkit-user-select: none;
-          color: var(--code-c, #999); opacity: 0.75;
-          border-right: 1px solid var(--primer-border, #e6e0d4); }
-        .code-wrap { position: relative; flex: 1 1 auto; overflow: hidden; }
-        .code-wrap > pre, .code-wrap > textarea { margin: 0; box-sizing: border-box; padding: 0.7rem 0.95rem;
-          font-family: var(--primer-font-mono, ui-monospace, Menlo, Consolas, monospace);
-          font-size: 0.9rem; line-height: 1.55; tab-size: 4; white-space: pre; }
-        .code-wrap > pre { position: relative; pointer-events: none; overflow: hidden; color: var(--code-ink, #111); }
-        .code-wrap > pre code { font: inherit; padding: 0; white-space: inherit; }
-        .code-wrap > textarea { position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
-          resize: vertical; min-height: 4.5rem; overflow: auto; scrollbar-width: none; outline: none;
-          color: transparent; background: transparent; caret-color: var(--code-ink, #111); }
-        .code-wrap > textarea::-webkit-scrollbar { display: none; }
-        .code-wrap > textarea:focus-visible { outline: 2px solid var(--primer-ring, #88f); outline-offset: -2px; }
-        .k { color: var(--code-k); font-weight: 600; }
-        .b { color: var(--code-b); }
-        .s { color: var(--code-s); }
-        .n { color: var(--code-n); }
-        .f { color: var(--code-f); }
-        .c { color: var(--code-c); font-style: italic; }
-
-        .out-head { padding: 0.3rem 0.7rem; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
-          text-transform: uppercase; color: var(--primer-ink-soft, #667);
-          background: var(--primer-control-bg, #f1ede4);
-          border-top: 1px solid var(--primer-border, #e6e0d4); }
-        .output { margin: 0; padding: 0.7rem 0.95rem; white-space: pre-wrap; overflow: auto;
-          color: var(--code-ink, var(--primer-ink, #111));
-          font-family: var(--primer-font-mono, ui-monospace, Menlo, Consolas, monospace);
-          font-size: 0.9rem; line-height: 1.55; max-height: calc(20 * 1.55 * 0.9rem + 1.4rem); }
-        .output .err { color: var(--primer-bad, #e0564f); font-weight: 600; }
-        .output .muted { color: var(--code-c); font-style: italic; }
+        /* the program's textarea is learner-resizable (primer-code's shared default is fixed) */
+        .code-wrap > textarea { resize: vertical; min-height: 4.5rem; }
         .output .answer { color: var(--primer-accent, #4d5bd1); font-weight: 600; }
 
         .feedback { margin: 0.55rem 0 0; min-height: 1.2rem; font-size: 0.95rem; }

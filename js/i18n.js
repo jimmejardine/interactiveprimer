@@ -16,6 +16,7 @@
 
 import en from "./i18n/en.js";
 import es from "./i18n/es.js";
+import { safeGet, safeSet } from "./storage.js";
 
 /** @typedef {"en" | "es"} LocaleId */
 
@@ -163,12 +164,7 @@ export function initLocale() {
     return;
   }
 
-  let stored = null;
-  try {
-    stored = localStorage.getItem(STORAGE_KEY);
-  } catch {
-    /* localStorage unavailable */
-  }
+  const stored = safeGet(STORAGE_KEY);
   const navLangs =
     typeof navigator !== "undefined" ? navigator.languages ?? [navigator.language] : [];
   const id = pickInitialLocale(stored, navLangs);
@@ -193,9 +189,5 @@ function stripLangParam() {
 
 /** @param {LocaleId} id */
 function persist(id) {
-  try {
-    localStorage.setItem(STORAGE_KEY, id);
-  } catch {
-    /* best-effort persistence */
-  }
+  safeSet(STORAGE_KEY, id);
 }

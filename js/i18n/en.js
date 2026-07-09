@@ -101,6 +101,17 @@ export default {
   "program.wrong": "Not right yet — {name} was {got}, but it should be {expected}.",
   "program.crashed": "Your program stopped with an error: {error}",
 
+  // <primer-code run> editor chrome (shares program.reset/run/outputLabel/running/loadError above,
+  // where the English text is identical — these are only the strings that differ).
+  "code.label": "Code",
+  "code.resetTitle": "Reset the code to the original",
+  "code.editAria": "Editable code — edit it, then press Run",
+  "code.press": "Press Run to see the output",
+  "code.noOutput": "(no output)",
+
+  "theorem.eyebrow": "Theorem",
+  "theorem.eyebrowNamed": "Theorem — {name}",
+
   "video.play": "Play video",
   "video.unavailable": "Couldn't load this video.",
 
@@ -108,6 +119,9 @@ export default {
   "pathway.more": "+{extra} more",
 
   "contextmenu.open": "Open",
+
+  "search.concepts": "Search concepts…",
+  "search.courses": "Search courses…",
 
   "ref.todo": "todo",
   "ref.todoTitle": "Planned — not written yet",
@@ -175,6 +189,47 @@ export default {
   "course.keep": "Keep current",
   "course.importClash": "The imported progress is from the course “{course}”. Switch to it?",
   "course.filtered": "Course:",
+
+  // The "My Progress" dashboard (js/progress-dashboard.js). The heading + exit button reuse
+  // menu.myProgress / course.exit above.
+  "dash.status.locked": "Locked",
+  "dash.status.ready": "Ready",
+  "dash.status.learning": "Learning",
+  "dash.status.mastered": "Mastered",
+  "dash.status.reviewDue": "Review due",
+  "dash.empty.title": "Pick a course to begin",
+  "dash.empty.body":
+    "Choose a course above (or from any course page's “Focus on this course” button) and this dashboard will light up with your progress — mastery, streaks, what's ready to learn next, and what's due for review.",
+  "dash.tile.mastered": "mastered",
+  "dash.tile.xp": "XP (stars)",
+  "dash.tile.started": "{started} of {total} started",
+  "dash.tile.streak": "day streak",
+  "dash.tile.lastActive": "last active {last}",
+  "dash.tile.due": "{n} due",
+  "dash.daysAgo": "{d}d ago",
+  "dash.activity": "Activity",
+  "dash.streakLong": "🔥 {n}-day streak",
+  "dash.less": "less",
+  "dash.more": "more",
+  "dash.heatOne": "{day}: {n} concept",
+  "dash.heatMany": "{day}: {n} concepts",
+  "dash.readyHead": "🚀 Ready to learn",
+  "dash.readyDesc": "Prerequisites all mastered — the frontier of what you can start next.",
+  "dash.readyEmpty": "Nothing unlocked yet — master a few basics to open new concepts.",
+  "dash.prereqsOk": "prereqs ✓",
+  "dash.reviewsHead": "🔁 Reviews due",
+  "dash.reviewsDesc": "Spaced repetition — revisit these to keep them in long-term memory.",
+  "dash.reviewsEmpty": "All caught up — nothing due for review. 🎉",
+  "dash.nextHead": "▶ Start here now",
+  "dash.allDone": "You've mastered everything in this course. 🎉",
+  "dash.nudgeNew": "Ready to learn — dive in:",
+  "dash.nudgeContinue": "Continue where you left off:",
+  "dash.allConcepts": "All concepts",
+  "dash.col.concept": "Concept",
+  "dash.col.confidence": "Confidence",
+  "dash.col.status": "Status",
+  "dash.col.started": "Started",
+  "dash.col.updated": "Updated",
 
   "welcome.title": "Welcome back",
   "welcome.progress": "You're {done} / {total} concepts through {course}.",

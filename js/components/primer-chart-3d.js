@@ -21,6 +21,7 @@ import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
 import { getSliderGroup, subscribeSliders } from "../charts.js";
 import { adoptJsxCss, disposeBoard, resolveJXG } from "./jsx-board.js";
+import { reportError } from "../report-error.js";
 
 export class PrimerChart3d extends HTMLElement {
   /** @type {any} The active JSXGraph board (captured for disposal + theme rebuild). */
@@ -138,6 +139,7 @@ export class PrimerChart3d extends HTMLElement {
       }
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
+      reportError(`primer-chart-3d:${name}`, err);
       stage.innerHTML = `<span class="meta">${t("manim.runError", { error })}</span>`;
     }
   }

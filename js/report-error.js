@@ -36,23 +36,3 @@ export function reportError(source, err) {
     /* reporting must never itself break a page */
   }
 }
-
-let installed = false;
-
-/**
- * Install `window` handlers so truly-uncaught errors and unhandled promise rejections are also recorded on
- * `window.__primerErrors`. Idempotent; call once from boot.
- */
-export function installGlobalErrorReporter() {
-  if (installed || typeof window === "undefined") return;
-  installed = true;
-  window.addEventListener("error", (e) => {
-    const err = e.error instanceof Error ? e.error : new Error(e.message || "uncaught error");
-    bucket().push({ source: "window.error", message: err.message, stack: err.stack });
-  });
-  window.addEventListener("unhandledrejection", (e) => {
-    const r = e.reason;
-    const err = r instanceof Error ? r : new Error(typeof r === "string" ? r : "unhandled rejection");
-    bucket().push({ source: "unhandledrejection", message: err.message, stack: err.stack });
-  });
-}

@@ -23,6 +23,7 @@ import { applyProgress, hasExistingProgress } from "./progress.js";
 import { getCurrentCourse, setCurrentCourse } from "./course.js";
 import { confirmDialog } from "./confirm-dialog.js";
 import { t } from "./i18n.js";
+import { safeGet, safeSet, safeRemove } from "./storage.js";
 import {
   PULL_TTL_MS,
   WRITE_TTL_MS,
@@ -50,46 +51,24 @@ const LAST_PULL = "primer:cloud:pull";
 const LAST_PUSH = "primer:cloud:push";
 const DIRTY = "primer:cloud:dirty"; // JSON { ids: string[], course: boolean }
 
-const readNum = (/** @type {string} */ k) => {
-  try {
-    return Number(localStorage.getItem(k)) || 0;
-  } catch {
-    return 0;
-  }
-};
-const writeNum = (/** @type {string} */ k, /** @type {number} */ v) => {
-  try {
-    localStorage.setItem(k, String(v));
-  } catch {
-    /* best-effort */
-  }
-};
+const readNum = (/** @type {string} */ k) => Number(safeGet(k)) || 0;
+const writeNum = (/** @type {string} */ k, /** @type {number} */ v) => safeSet(k, String(v));
 /** @returns {{ ids: string[], course: boolean }} */
 const readDirty = () => {
   try {
-    const raw = JSON.parse(localStorage.getItem(DIRTY) || "");
+    const raw = JSON.parse(safeGet(DIRTY) || "");
     return { ids: Array.isArray(raw?.ids) ? raw.ids : [], course: !!raw?.course };
   } catch {
-    return { ids: [], course: false };
+    return { ids: [], course: false }; // absent, unavailable, or unparseable
   }
 };
 const writeDirty = (/** @type {{ids:string[],course:boolean}} */ d) => {
-  try {
-    if (!d.ids.length && !d.course) localStorage.removeItem(DIRTY);
-    else localStorage.setItem(DIRTY, JSON.stringify({ ids: [...new Set(d.ids)], course: d.course }));
-  } catch {
-    /* best-effort */
-  }
+  if (!d.ids.length && !d.course) safeRemove(DIRTY);
+  else safeSet(DIRTY, JSON.stringify({ ids: [...new Set(d.ids)], course: d.course }));
 };
 const dirtyCount = (/** @type {{ids:string[],course:boolean}} */ d) => d.ids.length + (d.course ? 1 : 0);
 
-const signedIn = () => {
-  try {
-    return localStorage.getItem(CLOUD_FLAG) === "1";
-  } catch {
-    return false;
-  }
-};
+const signedIn = () => safeGet(CLOUD_FLAG) === "1";
 
 // ---- network -----------------------------------------------------------------------------
 

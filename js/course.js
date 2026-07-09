@@ -11,15 +11,13 @@
  * @module
  */
 
+import { safeGet, safeSet, safeRemove } from "./storage.js";
+
 export const COURSE_KEY = "primer:course";
 
 /** The current course id, or "" if none (or if localStorage is unavailable). @returns {string} */
 export function getCurrentCourse() {
-  try {
-    return localStorage.getItem(COURSE_KEY) || "";
-  } catch {
-    return "";
-  }
+  return safeGet(COURSE_KEY) || "";
 }
 
 /**
@@ -28,12 +26,8 @@ export function getCurrentCourse() {
  */
 export function setCurrentCourse(id) {
   const value = id || "";
-  try {
-    if (value) localStorage.setItem(COURSE_KEY, value);
-    else localStorage.removeItem(COURSE_KEY);
-  } catch {
-    /* persistence is best-effort */
-  }
+  if (value) safeSet(COURSE_KEY, value);
+  else safeRemove(COURSE_KEY);
   document.dispatchEvent(new CustomEvent("course-change", { detail: { course: value } }));
 }
 

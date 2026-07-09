@@ -30,8 +30,11 @@
  * @module
  */
 
+import { attachShared } from "./shared.js";
 import { themeColors } from "../theme.js";
+import { t } from "../i18n.js";
 import { highlight, dedent, esc } from "../code-highlight.js";
+import { CODE_EDITOR_CSS } from "./code-editor-css.js";
 import { transpileTs } from "../transpile.js";
 import { getQuickJs } from "../quickjs.js";
 import { runJs } from "../run-js.js";
@@ -53,10 +56,11 @@ export class PrimerCode extends HTMLElement {
     const code = dedent(this.textContent || "");
     this.#code = code;
     this.#lang = lang;
-    const root = this.shadowRoot ?? this.attachShadow({ mode: "open" });
+    const root = this.shadowRoot ?? attachShared(this);
     root.innerHTML = `
       <style>
         :host { display: block; margin: 0.9rem 0; }
+        /* the static (non-runnable) panel */
         .panel { margin: 0; padding: 0.7rem 0.95rem; overflow-x: auto;
           background: var(--code-bg, var(--primer-viz-bg, #fff));
           color: var(--code-ink, var(--primer-ink, #111));
@@ -65,85 +69,29 @@ export class PrimerCode extends HTMLElement {
           box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
         code { font-family: var(--primer-font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
           font-size: 0.9rem; line-height: 1.55; white-space: pre; tab-size: 4; }
-        .k { color: var(--code-k); font-weight: 600; }
-        .b { color: var(--code-b); }
-        .s { color: var(--code-s); }
-        .n { color: var(--code-n); }
-        .f { color: var(--code-f); }
-        .c { color: var(--code-c); font-style: italic; }
-        /* runnable block: one cohesive frame — toolbar, editor, then an always-visible output */
-        .runner { overflow: hidden;
-          background: var(--code-bg, var(--primer-viz-bg, #fff));
-          border: 1px solid var(--primer-border, #e6e0d4);
-          border-radius: var(--primer-radius, 0.6rem);
-          box-shadow: inset 0 0 0 1px var(--primer-border, #e6e0d4); }
-        .bar { display: flex; align-items: center; gap: 0.4rem; padding: 0.35rem 0.5rem;
-          background: var(--primer-control-bg, #f1ede4);
-          border-bottom: 1px solid var(--primer-border, #e6e0d4); }
-        .eyebrow-label { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
-          text-transform: uppercase; color: var(--primer-ink-soft, #667); }
-        .spacer { flex: 1; }
-        .reset { font: inherit; font-size: 0.82rem; cursor: pointer; padding: 0.2rem 0.7rem;
-          border-radius: 0.35rem; border: 1px solid var(--primer-control-border, #ccc);
-          background: transparent; color: var(--primer-ink-soft, #667); }
-        .reset:hover { color: var(--primer-ink, #111); }
-        .run { font: inherit; font-size: 0.82rem; font-weight: 700; cursor: pointer;
-          padding: 0.2rem 0.85rem; border-radius: 0.35rem; border: 1px solid transparent;
-          color: var(--primer-accent-ink, #fff); background: var(--primer-accent, #4d5bd1);
-          box-shadow: 0 0 8px var(--primer-ring, rgba(70,90,230,0.4)); }
-        .run:disabled { opacity: 0.55; cursor: default; box-shadow: none; }
-        /* editable code: a line-number gutter, then a transparent textarea over the highlighted layer */
-        .editor { position: relative; display: flex; align-items: stretch; }
-        .gutter { flex: 0 0 auto; box-sizing: border-box; padding: 0.7rem 0.5rem;
-          font-family: var(--primer-font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
-          font-size: 0.9rem; line-height: 1.55; white-space: pre; text-align: right;
-          user-select: none; -webkit-user-select: none;
-          color: var(--code-c, #999); opacity: 0.75;
-          border-right: 1px solid var(--primer-border, #e6e0d4); }
-        .code-wrap { position: relative; flex: 1 1 auto; overflow: hidden; }
-        .code-wrap > pre, .code-wrap > textarea { margin: 0; box-sizing: border-box; padding: 0.7rem 0.95rem;
-          font-family: var(--primer-font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
-          font-size: 0.9rem; line-height: 1.55; tab-size: 4; white-space: pre; }
-        /* no wrap: long lines scroll horizontally; the textarea is the scroller, the pre mirrors it */
-        .code-wrap > pre { position: relative; pointer-events: none; overflow: hidden; color: var(--code-ink, #111); }
-        .code-wrap > pre code { font: inherit; padding: 0; white-space: inherit; }
-        .code-wrap > textarea { position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
-          resize: none; overflow: auto; scrollbar-width: none; outline: none;
-          color: transparent; background: transparent; caret-color: var(--code-ink, #111); }
-        .code-wrap > textarea::-webkit-scrollbar { display: none; }
-        .code-wrap > textarea:focus-visible { outline: 2px solid var(--primer-ring, #88f); outline-offset: -2px; }
-        /* always-visible output, divided from the code above it */
-        .out-head { padding: 0.3rem 0.7rem; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
-          text-transform: uppercase; color: var(--primer-ink-soft, #667);
-          background: var(--primer-control-bg, #f1ede4);
-          border-top: 1px solid var(--primer-border, #e6e0d4); }
-        .output { margin: 0; padding: 0.7rem 0.95rem; white-space: pre-wrap; overflow: auto;
-          color: var(--code-ink, var(--primer-ink, #111));
-          font-family: var(--primer-font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
-          font-size: 0.9rem; line-height: 1.55;
-          max-height: calc(20 * 1.55 * 0.9rem + 1.4rem); } /* ~20 lines, then scroll */
-        .output .err { color: #e0564f; font-weight: 600; }
-        .output .muted { color: var(--code-c); font-style: italic; }
+        /* the runnable editor chrome (toolbar/gutter/editor/output + token colours) is shared with
+           <primer-program> — see js/components/code-editor-css.js */
+        ${CODE_EDITOR_CSS}
       </style>
       <div class="wrap">
         ${runnable
           ? `<div class="runner">
                <div class="bar">
-                 <span class="eyebrow-label">Code</span>
+                 <span class="eyebrow-label">${esc(t("code.label"))}</span>
                  <span class="spacer"></span>
-                 <button class="reset" type="button" title="Reset the code to the original">Reset code</button>
-                 <button class="run" type="button">▶ Run</button>
+                 <button class="reset" type="button" title="${esc(t("code.resetTitle"))}">${esc(t("program.reset"))}</button>
+                 <button class="run" type="button">▶ ${esc(t("program.run"))}</button>
                </div>
                <div class="editor">
                  <div class="gutter" aria-hidden="true">1</div>
                  <div class="code-wrap">
                    <pre aria-hidden="true"><code></code></pre>
                    <textarea class="input" spellcheck="false" autocapitalize="off" autocomplete="off"
-                     aria-label="Editable code — edit it, then press Run"></textarea>
+                     aria-label="${esc(t("code.editAria"))}"></textarea>
                  </div>
                </div>
-               <div class="out-head">Output</div>
-               <pre class="output out-pane"><span class="muted">▶ Press Run to see the output</span></pre>
+               <div class="out-head">${esc(t("program.outputLabel"))}</div>
+               <pre class="output out-pane"><span class="muted">▶ ${esc(t("code.press"))}</span></pre>
              </div>`
           : `<pre class="panel code-pane"><code></code></pre>`}
       </div>`;
@@ -234,19 +182,19 @@ export class PrimerCode extends HTMLElement {
     const btn = /** @type {HTMLButtonElement} */ (root.querySelector(".run"));
     this.#running = true;
     btn.disabled = true;
-    out.innerHTML = `<span class="muted">Running…</span>`;
+    out.innerHTML = `<span class="muted">${esc(t("program.running"))}</span>`;
     try {
       const src = /** @type {HTMLTextAreaElement} */ (root.querySelector(".input")).value;
       const js = this.#lang.startsWith("t") ? await transpileTs(src) : src;
       const mod = await getQuickJs();
       if (!mod) {
-        out.innerHTML = `<span class="err">Couldn't load the code runner (are you offline?).</span>`;
+        out.innerHTML = `<span class="err">${esc(t("program.loadError"))}</span>`;
         return;
       }
       const res = runJs(mod, js);
       let html = res.output.map(esc).join("\n");
       if (res.error) html += (html ? "\n" : "") + `<span class="err">${esc(res.error)}</span>`;
-      if (!html) html = `<span class="muted">(no output)</span>`;
+      if (!html) html = `<span class="muted">${esc(t("code.noOutput"))}</span>`;
       out.innerHTML = html;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
