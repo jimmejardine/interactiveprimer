@@ -131,7 +131,9 @@
     },
     { once: true },
   );
-  setTimeout(reveal, 2500);
+  // Fallback so a CSS/render failure never leaves the page blank-and-invisible forever.
+  const REVEAL_FALLBACK_MS = 2500;
+  setTimeout(reveal, REVEAL_FALLBACK_MS);
 
   // Locale, set synchronously BEFORE first paint so chrome renders in the right language
   // with no flash. Mirrors pickInitialLocale() in js/i18n.js (loaded later, which reconciles

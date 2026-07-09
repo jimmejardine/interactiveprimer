@@ -7,6 +7,8 @@
  * @module
  */
 
+import { importUrl } from "./import-url.js";
+
 const SUCRASE_URL = "/3rdparty/sucrase/sucrase.mjs";
 
 /** @type {Promise<any> | null} Cached module import (re-tried if it fails). */
@@ -14,8 +16,7 @@ let pending = null;
 
 function loadSucrase() {
   if (!pending) {
-    // @ts-ignore — runtime URL import; tsc can't resolve a CDN specifier
-    pending = import(/* @vite-ignore */ `${SUCRASE_URL}`).catch((e) => {
+    pending = importUrl(/* @vite-ignore */ `${SUCRASE_URL}`).catch((e) => {
       pending = null; // allow a retry after a transient failure
       throw e;
     });

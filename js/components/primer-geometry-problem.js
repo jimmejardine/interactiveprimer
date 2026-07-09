@@ -21,11 +21,11 @@
  * @module
  */
 
-import { attachShared } from "./shared.js";
+import { attachShared, awaitRegistration } from "./shared.js";
 import { getGeometryProblem } from "../scenes.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
-import { adoptJsxCss, disposeBoard, wrapBoard } from "./jsx-board.js";
+import { adoptJsxCss, disposeBoard, wrapBoard, resolveJXG } from "./jsx-board.js";
 import { makeGeometryTools } from "../geometry-tools.js";
 import { makeRng } from "../rng.js";
 import { checkAnswer } from "../quiz-vars.js";
@@ -116,6 +116,7 @@ export class PrimerGeometryProblem extends HTMLElement {
     if (this.#onTheme) document.removeEventListener("theme-change", this.#onTheme);
     this.#onTheme = null;
     this.#stopWaiting?.();
+    this.#stopWaiting = null; // clear so a reconnect can re-arm the registration wait (guarded by truthiness)
     this.#dispose();
   }
 
@@ -255,7 +256,7 @@ export class PrimerGeometryProblem extends HTMLElement {
     try {
       const mod = await import("jsxgraph");
       if (!this.isConnected || gen !== this.#buildGen) return;
-      const JXG = mod.default ?? /** @type {any} */ (mod).JXG ?? mod;
+      const JXG = resolveJXG(mod);
       this.#jsx = JXG;
       const rng = makeRng(/** @type {number} */ (this.#seed));
 
@@ -807,12 +808,14 @@ export class PrimerGeometryProblem extends HTMLElement {
 
   /** @param {ShadowRoot} root @param {string} name */
   #awaitRegistration(root, name) {
-    this.#stopWaiting?.();
-    const onReg = (/** @type {Event} */ e) => {
-      if (/** @type {CustomEvent} */ (e).detail?.name === name) { this.#stopWaiting?.(); void this.#build(root); }
-    };
-    document.addEventListener("primer:geometry-problem-registered", onReg);
-    this.#stopWaiting = () => { document.removeEventListener("primer:geometry-problem-registered", onReg); this.#stopWaiting = null; };
+    if (this.#stopWaiting) return;
+    this.#stopWaiting = awaitRegistration("primer:geometry-problem-registered", name, {
+      onReady: () => {
+        this.#stopWaiting?.();
+        this.#stopWaiting = null;
+        void this.#build(root);
+      },
+    });
   }
 
   /** A localized chrome string for the problem element — global i18n (`geometryProblem.*`), which

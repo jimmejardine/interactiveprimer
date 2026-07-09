@@ -15,12 +15,12 @@
  * @module
  */
 
-import { attachShared } from "./shared.js";
+import { attachShared, awaitRegistration } from "./shared.js";
 import { get3dChart } from "../scenes.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
 import { getSliderGroup, subscribeSliders } from "../charts.js";
-import { adoptJsxCss, disposeBoard } from "./jsx-board.js";
+import { adoptJsxCss, disposeBoard, resolveJXG } from "./jsx-board.js";
 
 export class PrimerChart3d extends HTMLElement {
   /** @type {any} The active JSXGraph board (captured for disposal + theme rebuild). */
@@ -111,7 +111,7 @@ export class PrimerChart3d extends HTMLElement {
     try {
       const mod = await import("jsxgraph");
       if (!this.isConnected || gen !== this.#buildGen) return; // superseded → abort
-      const JXG = mod.default ?? /** @type {any} */ (mod).JXG ?? mod;
+      const JXG = resolveJXG(mod);
       const colors = themeColors();
       const view = this.#makeView(JXG, stage, entry.opts, colors);
 
@@ -228,21 +228,16 @@ export class PrimerChart3d extends HTMLElement {
    */
   #awaitRegistration(root, stage, name) {
     if (this.#stopWaiting) return;
-    /** @param {Event} e */
-    const onReg = (e) => {
-      if (/** @type {CustomEvent} */ (e).detail?.name !== name) return;
-      this.#cancelWait();
-      void this.#build(root);
-    };
-    const timer = setTimeout(() => {
-      this.#cancelWait();
-      stage.innerHTML = `<span class="meta">${t("manim.noScene", { name })}</span>`;
-    }, 4000);
-    this.#stopWaiting = () => {
-      document.removeEventListener("primer:chart3d-registered", onReg);
-      clearTimeout(timer);
-    };
-    document.addEventListener("primer:chart3d-registered", onReg);
+    this.#stopWaiting = awaitRegistration("primer:chart3d-registered", name, {
+      onReady: () => {
+        this.#cancelWait();
+        void this.#build(root);
+      },
+      onTimeout: () => {
+        this.#cancelWait();
+        stage.innerHTML = `<span class="meta">${t("manim.noScene", { name })}</span>`;
+      },
+    });
   }
 
   /** Stop waiting for a pending registration (if any). */

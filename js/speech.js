@@ -105,7 +105,10 @@ export function speak(text, opts = {}) {
 
     // Safety net: some engines fail to fire `onend` for short or cancelled
     // utterances, which would otherwise stall an awaiting animation loop forever.
-    const timer = setTimeout(finish, Math.max(1500, text.length * 90));
+    // Scale the fallback with the text length (floor MIN_SPEECH_MS, ~MS_PER_CHAR per character).
+    const MIN_SPEECH_MS = 1500;
+    const MS_PER_CHAR = 90;
+    const timer = setTimeout(finish, Math.max(MIN_SPEECH_MS, text.length * MS_PER_CHAR));
 
     window.speechSynthesis.speak(utterance);
   });

@@ -12,7 +12,7 @@
  * @module
  */
 
-import { attachShared } from "./shared.js";
+import { attachShared, awaitRegistration } from "./shared.js";
 import { t } from "../i18n.js";
 import { SLIDER_PANEL_CSS, mountSliderPanel } from "./slider-panel.js";
 import { getSliderGroup, setSliderValues } from "../charts.js";
@@ -61,21 +61,16 @@ export class PrimerChartSliders extends HTMLElement {
    */
   #awaitRegistration(root, controls, name) {
     if (this.#stopWaiting) return;
-    /** @param {Event} e */
-    const onReg = (e) => {
-      if (/** @type {CustomEvent} */ (e).detail?.name !== name) return;
-      this.#cancelWait();
-      this.#mount(root);
-    };
-    const timer = setTimeout(() => {
-      this.#cancelWait();
-      controls.innerHTML = `<span class="meta">${t("manim.noScene", { name })}</span>`;
-    }, 4000);
-    this.#stopWaiting = () => {
-      document.removeEventListener("primer:chart-sliders-registered", onReg);
-      clearTimeout(timer);
-    };
-    document.addEventListener("primer:chart-sliders-registered", onReg);
+    this.#stopWaiting = awaitRegistration("primer:chart-sliders-registered", name, {
+      onReady: () => {
+        this.#cancelWait();
+        this.#mount(root);
+      },
+      onTimeout: () => {
+        this.#cancelWait();
+        controls.innerHTML = `<span class="meta">${t("manim.noScene", { name })}</span>`;
+      },
+    });
   }
 
   /** Stop waiting for a pending registration (if any). */

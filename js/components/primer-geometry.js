@@ -30,12 +30,12 @@
  * @module
  */
 
-import { attachShared } from "./shared.js";
+import { attachShared, awaitRegistration } from "./shared.js";
 import { getGeometryScene } from "../scenes.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
 import { makeStrings } from "../scene-strings.js";
-import { adoptJsxCss, disposeBoard, wrapBoard } from "./jsx-board.js";
+import { adoptJsxCss, disposeBoard, wrapBoard, resolveJXG } from "./jsx-board.js";
 import { getSliderGroup, subscribeSliders } from "../charts.js";
 import { clampStep, createStepCollector, applyStepVisibility } from "../geometry.js";
 import { makeGeometryTools } from "../geometry-tools.js";
@@ -44,6 +44,9 @@ import { reportError } from "../report-error.js";
 
 /** The play triangle as inline SVG (matches `<primer-manim>`'s big-play icon; recolours with the theme). */
 const ICON_PLAY = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+
+/** Extra pause (ms) after a step's own animation before auto-advancing to the next during Play. */
+const AUTOPLAY_HOLD_MS = 750;
 
 export class PrimerGeometry extends HTMLElement {
   /** @type {any} The active JSXGraph board. */
@@ -227,7 +230,7 @@ export class PrimerGeometry extends HTMLElement {
     try {
       const mod = await import("jsxgraph");
       if (!this.isConnected || gen !== this.#buildGen) return; // superseded → abort
-      const JXG = mod.default ?? /** @type {any} */ (mod).JXG ?? mod;
+      const JXG = resolveJXG(mod);
       this.#stepMs = Number.isFinite(entry.opts.stepMs) ? /** @type {number} */ (entry.opts.stepMs) : 450;
 
       const { board, steps } = this.#runBuilder(stage, JXG, entry, name);
@@ -374,7 +377,7 @@ export class PrimerGeometry extends HTMLElement {
         return;
       }
       this.next();
-      this.#playTimer = window.setTimeout(tick, this.#stepMs + 750);
+      this.#playTimer = window.setTimeout(tick, this.#stepMs + AUTOPLAY_HOLD_MS);
     };
     this.#playTimer = window.setTimeout(tick, 0);
     this.#setPlayLabel(true);
@@ -465,7 +468,7 @@ export class PrimerGeometry extends HTMLElement {
     try {
       const mod = await import("jsxgraph");
       if (!this.isConnected) return;
-      const JXG = mod.default ?? /** @type {any} */ (mod).JXG ?? mod;
+      const JXG = resolveJXG(mod);
       expandedEl.replaceChildren();
       for (let i = 1; i <= this.#steps.length; i++) {
         const block = document.createElement("div");
@@ -525,21 +528,16 @@ export class PrimerGeometry extends HTMLElement {
    */
   #awaitRegistration(root, stage, name) {
     if (this.#stopWaiting) return;
-    /** @param {Event} e */
-    const onReg = (e) => {
-      if (/** @type {CustomEvent} */ (e).detail?.name !== name) return;
-      this.#cancelWait();
-      void this.#build(root);
-    };
-    const timer = setTimeout(() => {
-      this.#cancelWait();
-      stage.innerHTML = `<span class="meta">${t("manim.noScene", { name })}</span>`;
-    }, 4000);
-    this.#stopWaiting = () => {
-      document.removeEventListener("primer:geometry-registered", onReg);
-      clearTimeout(timer);
-    };
-    document.addEventListener("primer:geometry-registered", onReg);
+    this.#stopWaiting = awaitRegistration("primer:geometry-registered", name, {
+      onReady: () => {
+        this.#cancelWait();
+        void this.#build(root);
+      },
+      onTimeout: () => {
+        this.#cancelWait();
+        stage.innerHTML = `<span class="meta">${t("manim.noScene", { name })}</span>`;
+      },
+    });
   }
 
   #cancelWait() {

@@ -7,6 +7,8 @@
  * @module
  */
 
+import { importUrl } from "./import-url.js";
+
 // MathLive 0.110.0 — vendored under /3rdparty/mathlive (see scripts/vendor.mjs).
 const BASE = "/3rdparty/mathlive";
 

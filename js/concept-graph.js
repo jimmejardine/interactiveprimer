@@ -16,11 +16,11 @@ import { createContextMenu } from "./context-menu.js";
 import { t } from "./i18n.js";
 import { getCurrentCourse, setCurrentCourse } from "./course.js";
 import { buildDependents, directNeighbors, kHopNeighborhood } from "./graph.js";
+import { mk, clamp } from "./svg-util.js";
 // Defines <primer-math> on this page (concepts.html doesn't load boot.js) so a node with a math
 // title can typeset inside a <foreignObject>. concepts.html supplies the KaTeX CSS + import map.
 import "./components/primer-math.js";
 
-const SVG_NS = "http://www.w3.org/2000/svg";
 const ENERGY_MIN = 0.04; // below this the layout is "settled" and the rAF loop pauses
 const PREWARM = 320; // synchronous ticks before first paint, so the graph opens tidy
 const CLICK_PX = 4; // pointer travel under this (screen px) counts as a click, not a drag
@@ -37,20 +37,6 @@ const COURSE_EDGE_WEIGHT = 3.4; // spring strength for a member→member (gold) 
 const COURSE_CHARGE = 1.7; // repulsion multiplier on a course-member node (shoves ancestors off the spine)
 const COURSE_GAP = 95; // vertical centre-to-centre spacing of pinned course members (the spine)
 const LAYOUT = { outwardPerDepth: 0.45 }; // extra outward push per depth level → edges fan outward
-
-/**
- * @param {string} tag
- * @param {Record<string, string | number>} [attrs]
- * @returns {SVGElement}
- */
-function mk(tag, attrs) {
-  const e = document.createElementNS(SVG_NS, tag);
-  if (attrs) for (const k of Object.keys(attrs)) e.setAttribute(k, String(attrs[k]));
-  return /** @type {SVGElement} */ (e);
-}
-
-/** @param {number} v @param {number} lo @param {number} hi */
-const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 /**
  * Word-wrap an SVG <text> label into vertically-centred <tspan> lines that each fit `maxWidth` px.

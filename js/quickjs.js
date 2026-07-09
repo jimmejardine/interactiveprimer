@@ -7,6 +7,8 @@
  * @module
  */
 
+import { importUrl } from "./import-url.js";
+
 const CORE_URL = "/3rdparty/quickjs/core.mjs";
 const VARIANT_URL = "/3rdparty/quickjs/singlefile/index.mjs";
 
@@ -22,8 +24,7 @@ let pending = null;
 export function getQuickJs() {
   if (!pending) {
     pending = (async () => {
-      // @ts-ignore — runtime URL imports; tsc can't resolve CDN specifiers
-      const [core, variantMod] = await Promise.all([import(`${CORE_URL}`), import(`${VARIANT_URL}`)]);
+      const [core, variantMod] = await Promise.all([importUrl(`${CORE_URL}`), importUrl(`${VARIANT_URL}`)]);
       const variant = variantMod.default ?? variantMod;
       const QuickJS = await core.newQuickJSWASMModuleFromVariant(variant);
       return { QuickJS, shouldInterruptAfterDeadline: core.shouldInterruptAfterDeadline };

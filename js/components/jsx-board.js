@@ -26,6 +26,17 @@ const JSXGRAPH_CSS = "/3rdparty/jsxgraph/jsxgraph.css";
 let jsxCssPromise = null;
 
 /**
+ * Resolve the JSXGraph namespace from the lazily-imported module, whichever export shape the vendored
+ * build ships — `mod.default`, `mod.JXG`, or the module object itself. Centralises the idiom that was
+ * copy-pasted across every JSXGraph-backed component.
+ * @param {any} mod  the awaited `import("jsxgraph")` module
+ * @returns {Record<string, any>}
+ */
+export function resolveJXG(mod) {
+  return mod.default ?? mod.JXG ?? mod;
+}
+
+/**
  * Fetch jsxgraph.css once and wrap it in a constructable stylesheet. Resolves null on any failure
  * (CORS, offline) so a board never blocks on its stylesheet.
  * @returns {Promise<CSSStyleSheet | null>}

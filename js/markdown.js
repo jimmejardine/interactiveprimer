@@ -8,16 +8,11 @@
  * @module
  */
 
+import { escapeHtml } from "./html-entities.js";
+
 // `\x60` is the backtick character; used in regexes so the source has no literal backtick inside a
 // regex literal (which trips up some parsers).
 const BT = "\\x60";
-
-/** HTML-escape text (everything is escaped before inline formatting is applied). @param {string} s */
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, (c) =>
-    /** @type {Record<string, string>} */ ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
-  );
-}
 
 /**
  * Apply inline formatting to one already-HTML-escaped line: code spans, `[text](url)` links,

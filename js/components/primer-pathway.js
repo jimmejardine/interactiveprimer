@@ -18,7 +18,8 @@
  * @module
  */
 
-import { attachShared } from "./shared.js";
+import { attachShared, katexHref } from "./shared.js";
+import { escapeHtml as esc } from "../html-entities.js";
 import { conceptIdFromPath } from "../concept-meta.js";
 import { neighborhood } from "../graph.js";
 import { loadGraph } from "../graph-data.js";
@@ -273,14 +274,14 @@ export class PrimerPathway extends HTMLElement {
     // document-level katex.min.css — which can't cross into this shadow root. When any displayed
     // node has a math label, clone the KaTeX <link> (already injected into <head> by boot.js) so
     // the typeset math is styled inside the shadow boundary; no math → no extra stylesheet.
-    const katexHref = document.querySelector('link[href*="katex.min.css"]')?.getAttribute("href") ?? null;
+    const katexUrl = katexHref();
     const hasMath =
-      katexHref &&
+      katexUrl &&
       [hood.id, ...col1, ...col3, ...peers].some((id) => {
         const c = byId.get(id);
         return c?.titleHtml && !c?.titles?.[locale];
       });
-    const katexLink = hasMath ? `<link rel="stylesheet" href="${katexHref}">` : "";
+    const katexLink = hasMath ? `<link rel="stylesheet" href="${katexUrl}">` : "";
 
     root.innerHTML = `
       ${katexLink}
@@ -529,21 +530,6 @@ export class PrimerPathway extends HTMLElement {
 /** Last path segment of an id (fallback label when a title is missing). @param {string} id */
 function leaf(id) {
   return id.split("/").pop() ?? id;
-}
-
-/** @param {string} s */
-function esc(s) {
-  return s.replace(
-    /[&<>"']/g,
-    (c) =>
-      /** @type {Record<string, string>} */ ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-      })[c],
-  );
 }
 
 /** Escape an id for use inside a CSS attribute selector (ids contain "/"). @param {string} id */

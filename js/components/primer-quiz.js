@@ -23,7 +23,8 @@
  */
 
 import katex from "katex";
-import { attachShared } from "./shared.js";
+import { attachShared, awaitRegistration, katexHref } from "./shared.js";
+import { escapeHtml } from "../html-entities.js";
 import { generateQuiz, extractConfig } from "../quiz.js";
 import { getQuiz } from "../scenes.js";
 import { makeStrings } from "../scene-strings.js";
@@ -115,21 +116,16 @@ export class PrimerQuiz extends HTMLElement {
    */
   #awaitRegistration(root, name) {
     if (this.#stopWaiting) return;
-    /** @param {Event} e */
-    const onReg = (e) => {
-      if (/** @type {CustomEvent} */ (e).detail?.name !== name) return;
-      this.#cancelWait();
-      this.#resolve(root);
-    };
-    const timer = setTimeout(() => {
-      this.#cancelWait();
-      root.innerHTML = `<div class="card"><p class="meta">${t("quiz.empty")}</p></div>`;
-    }, 4000);
-    this.#stopWaiting = () => {
-      document.removeEventListener("primer:quiz-registered", onReg);
-      clearTimeout(timer);
-    };
-    document.addEventListener("primer:quiz-registered", onReg);
+    this.#stopWaiting = awaitRegistration("primer:quiz-registered", name, {
+      onReady: () => {
+        this.#cancelWait();
+        this.#resolve(root);
+      },
+      onTimeout: () => {
+        this.#cancelWait();
+        root.innerHTML = `<div class="card"><p class="meta">${t("quiz.empty")}</p></div>`;
+      },
+    });
   }
 
   /** Stop waiting for a pending registration (if any). */
@@ -230,12 +226,8 @@ export class PrimerQuiz extends HTMLElement {
     // This KaTeX output lives in the shadow root, which the page-level katex.min.css
     // can't reach; clone that stylesheet link in so the math is laid out (the fonts
     // themselves still resolve via the document-level link).
-    const katexHref =
-      /** @type {HTMLLinkElement | null} */ (
-        document.querySelector('link[rel="stylesheet"][href*="katex"]')
-      )?.href ?? "";
     root.innerHTML = `
-      ${katexHref ? `<link rel="stylesheet" href="${katexHref}">` : ""}
+      ${katexHref() ? `<link rel="stylesheet" href="${katexHref()}">` : ""}
       <style>
         .quiz button[type="submit"][disabled] { opacity: 0.5; cursor: not-allowed; }
         /* Confine the high-score glitter to this panel. */
@@ -745,22 +737,6 @@ function latexEscape(s) {
       _: "\\_",
       "^": "\\textasciicircum{}",
       "~": "\\textasciitilde{}",
-    })[c],
-  );
-}
-
-/**
- * @param {string} s
- * @returns {string}
- */
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, (c) =>
-    /** @type {Record<string,string>} */ ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
     })[c],
   );
 }

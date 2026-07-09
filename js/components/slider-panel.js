@@ -13,6 +13,7 @@
  */
 
 import { snapToAnchor } from "../chart-snap.js";
+import { escapeHtml } from "../html-entities.js";
 
 /** @typedef {import("../charts.js").SliderDef} SliderDef */
 
@@ -342,20 +343,4 @@ function updateTickDensity(host) {
     const spacing = gaps > 0 ? width / gaps : Infinity;
     ticks.classList.toggle("sparse-labels", width > 0 && spacing < LABEL_MIN_PX);
   }
-}
-
-/**
- * @param {string} s
- * @returns {string}
- */
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) =>
-    /** @type {Record<string,string>} */ ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
-    })[c],
-  );
 }

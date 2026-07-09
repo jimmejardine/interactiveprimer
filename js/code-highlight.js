@@ -6,6 +6,19 @@
  * @module
  */
 
+/** @type {Record<string, string>} */
+const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
+/**
+ * Escape only the three HTML-structural characters for safe innerHTML. Code display deliberately leaves
+ * quotes literal — they're pervasive in source and need no escaping in text content, and the highlighter's
+ * snapshot tests pin that. This is intentionally NOT the shared 5-char {@link escapeHtml}.
+ * @param {string} s
+ * @returns {string}
+ */
+export function esc(s) {
+  return String(s).replace(/[&<>]/g, (c) => ESC[c]);
+}
+
 const JS_KEYWORDS = [
   "let", "const", "var", "function", "return", "if", "else", "for", "while", "do", "break",
   "continue", "switch", "case", "default", "in", "of", "new", "class", "extends", "super", "this",
@@ -53,11 +66,6 @@ const BUILTINS = {
   ]),
   sql: new Set([]),
 };
-
-/** Escape HTML-special chars. @param {string} s */
-export function esc(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
 
 /** @param {string} cls @param {string} s */
 function span(cls, s) {

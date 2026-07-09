@@ -439,12 +439,13 @@ export class PrimerMenu extends HTMLElement {
     const loggedInAs = q(".logged-in-as");
 
     // A status line, shown centred + red (CSS) for a few seconds then cleared. Empty clears at once.
+    const STATUS_CLEAR_MS = 3000;
     let statusTimer = 0;
     const cloudMsg = (/** @type {string} */ msg) => {
       cloudStatus.textContent = msg;
       cloudStatus.hidden = !msg;
       clearTimeout(statusTimer);
-      if (msg) statusTimer = window.setTimeout(() => { cloudStatus.textContent = ""; cloudStatus.hidden = true; }, 3000);
+      if (msg) statusTimer = window.setTimeout(() => { cloudStatus.textContent = ""; cloudStatus.hidden = true; }, STATUS_CLEAR_MS);
     };
     const renderCloud = () => {
       const user = getUser();

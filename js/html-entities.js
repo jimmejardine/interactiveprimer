@@ -34,3 +34,17 @@ export function decodeEntities(s) {
     return NAMED[body.toLowerCase()] ?? whole;
   });
 }
+
+/** @type {Record<string, string>} */
+const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+
+/**
+ * Escape the five HTML-special characters so authored/dynamic text is safe to interpolate into an
+ * `innerHTML` string. The encode counterpart to {@link decodeEntities}. Pure and DOM-free (runs in the
+ * Node build too). Previously copy-pasted (as `esc`/`escapeHtml`) across a dozen components.
+ * @param {string} s
+ * @returns {string}
+ */
+export function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ESCAPES[c]);
+}

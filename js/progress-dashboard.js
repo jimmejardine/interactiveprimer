@@ -18,6 +18,7 @@ import { confidenceColor } from "./confidence-color.js";
 import { mountCourseSearch, SEARCH_BOX_CSS } from "./concept-search-box.js";
 import { mountConceptGraph } from "./concept-graph.js";
 import { glitter, glitterIntensity } from "./glitter.js";
+import { escapeHtml } from "./html-entities.js";
 import { courseProgress, daysAgo, pickNextConcept, MASTERED_AT } from "./progress-stats.js";
 
 const MASTERY_LABEL = { locked: "Locked", ready: "Ready", learning: "Learning", mastered: "Mastered", "review-due": "Review due" };
@@ -352,9 +353,4 @@ function el(tag, cls, html) {
   n.className = cls;
   if (html != null) n.innerHTML = html;
   return n;
-}
-
-/** @param {string} s */
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
 }

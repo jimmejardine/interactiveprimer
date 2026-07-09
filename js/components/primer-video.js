@@ -20,6 +20,7 @@
 import { attachShared } from "./shared.js";
 import { t } from "../i18n.js";
 import { youtubeId, startSeconds } from "../youtube.js";
+import { escapeHtml as esc } from "../html-entities.js";
 
 /** YouTube's play-button glyph. */
 const PLAY_SVG =
@@ -89,21 +90,6 @@ export class PrimerVideo extends HTMLElement {
       frame.replaceChildren(iframe);
     });
   }
-}
-
-/** @param {string} s */
-function esc(s) {
-  return s.replace(
-    /[&<>"']/g,
-    (c) =>
-      /** @type {Record<string, string>} */ ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-      })[c],
-  );
 }
 
 if (!customElements.get("primer-video")) {

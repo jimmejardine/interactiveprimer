@@ -27,7 +27,7 @@
  * @module
  */
 
-import { attachShared } from "./shared.js";
+import { attachShared, awaitRegistration } from "./shared.js";
 import { getProgram } from "../scenes.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
@@ -81,6 +81,7 @@ export class PrimerProgram extends HTMLElement {
     if (this.#onTheme) document.removeEventListener("theme-change", this.#onTheme);
     this.#onTheme = null;
     this.#stopWaiting?.();
+    this.#stopWaiting = null; // clear so a reconnect can re-arm the registration wait (guarded by truthiness)
   }
 
   get #root() {
@@ -442,18 +443,16 @@ export class PrimerProgram extends HTMLElement {
 
   /** @param {ShadowRoot} root @param {string} name */
   #awaitRegistration(root, name) {
-    this.#stopWaiting?.();
-    const onReg = (/** @type {Event} */ e) => {
-      if (/** @type {CustomEvent} */ (e).detail?.name === name) {
-        this.#stopWaiting?.();
+    if (this.#stopWaiting) return;
+    this.#stopWaiting = awaitRegistration("primer:program-registered", name, {
+      onReady: () => {
+        this.#stopWaiting = null;
         void this.#build(root);
-      }
-    };
-    document.addEventListener("primer:program-registered", onReg);
-    this.#stopWaiting = () => {
-      document.removeEventListener("primer:program-registered", onReg);
-      this.#stopWaiting = null;
-    };
+      },
+      onTimeout: () => {
+        this.#stopWaiting = null;
+      },
+    });
   }
 
   /** Read the theme palette and set the code token colours as custom props (they inherit into the

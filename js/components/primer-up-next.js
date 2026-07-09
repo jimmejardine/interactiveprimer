@@ -26,6 +26,7 @@ import { getCurrentCourse } from "../course.js";
 import { readEntry } from "../confidence-store.js";
 import { formatLevel } from "../levels.js";
 import { computeUpNext } from "../up-next.js";
+import { escapeHtml as esc } from "../html-entities.js";
 
 /** @typedef {import("../types/domain.js").ResolvedConcept} ResolvedConcept */
 
@@ -165,14 +166,6 @@ export class PrimerUpNext extends HTMLElement {
  */
 function titleOf(node, locale, id) {
   return node?.titles?.[locale] ?? node?.title ?? (id.split("/").pop() ?? id);
-}
-
-/** Escape text for safe HTML interpolation. @param {string} s @returns {string} */
-function esc(s) {
-  return String(s).replace(
-    /[&<>"']/g,
-    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c,
-  );
 }
 
 if (!customElements.get("primer-up-next")) {

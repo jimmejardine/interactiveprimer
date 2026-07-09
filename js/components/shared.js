@@ -120,3 +120,51 @@ export function parseIdList(value) {
     .map((s) => s.trim())
     .filter(Boolean);
 }
+
+/**
+ * The href of the page's KaTeX stylesheet `<link>`, for cloning into a shadow root so KaTeX markup
+ * typesets there (a document-level `<link>` can't cross the shadow boundary; fonts still resolve via
+ * the document link). "" if the page has none yet. One canonical selector, replacing the two that had
+ * drifted (`href*="katex"` vs `href*="katex.min.css"`).
+ * @returns {string}
+ */
+export function katexHref() {
+  return (
+    /** @type {HTMLLinkElement | null} */ (document.querySelector('link[rel="stylesheet"][href*="katex"]'))?.href ?? ""
+  );
+}
+
+/** How long a scene component waits for its deferred `registerX(...)` before giving up. */
+export const REGISTRATION_TIMEOUT_MS = 4000;
+
+/**
+ * Wait for a `primer:<x>-registered` event whose `detail.name` matches `name`, then call `onReady`;
+ * if it hasn't arrived within `timeoutMs`, call `onTimeout` (e.g. show a "no scene" message for a
+ * typo'd name). Returns a **cancel** function (removes the listener + clears the timer); calling it —
+ * or letting either path fire — is idempotent. Replaces the hand-rolled copy in every scene component.
+ * @param {string} eventName  e.g. "primer:chart-registered"
+ * @param {string} name  the scene name to match on `detail.name`
+ * @param {{ onReady: () => void, onTimeout?: () => void, timeoutMs?: number }} handlers
+ * @returns {() => void} cancel
+ */
+export function awaitRegistration(eventName, name, { onReady, onTimeout, timeoutMs = REGISTRATION_TIMEOUT_MS }) {
+  let done = false;
+  /** @param {Event} e */
+  const onReg = (e) => {
+    if (/** @type {CustomEvent} */ (e).detail?.name !== name) return;
+    cancel();
+    onReady();
+  };
+  const timer = setTimeout(() => {
+    cancel();
+    onTimeout?.();
+  }, timeoutMs);
+  const cancel = () => {
+    if (done) return;
+    done = true;
+    document.removeEventListener(eventName, onReg);
+    clearTimeout(timer);
+  };
+  document.addEventListener(eventName, onReg);
+  return cancel;
+}

@@ -21,13 +21,13 @@
  * @module
  */
 
-import { attachShared } from "./shared.js";
+import { attachShared, awaitRegistration } from "./shared.js";
 import { getChart } from "../scenes.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
 import { SLIDER_PANEL_CSS, mountSliderPanel } from "./slider-panel.js";
 import { groupForChart, getSliderGroup, subscribeSliders, setSliderValues, getChartMeta, resolveLegend } from "../charts.js";
-import { adoptJsxCss, disposeBoard, wrapBoard } from "./jsx-board.js";
+import { adoptJsxCss, disposeBoard, wrapBoard, resolveJXG } from "./jsx-board.js";
 import { reportError } from "../report-error.js";
 
 /**
@@ -176,7 +176,7 @@ export class PrimerChart extends HTMLElement {
     try {
       const mod = await import("jsxgraph");
       if (!this.isConnected || gen !== this.#buildGen) return; // superseded by a newer build → abort
-      const JXG = mod.default ?? /** @type {any} */ (mod).JXG ?? mod;
+      const JXG = resolveJXG(mod);
       this.#update = builder(stage, this.#wrapJXG(JXG));
       this.#mountTitleAndControls(root, name);
     } catch (err) {
@@ -289,21 +289,16 @@ export class PrimerChart extends HTMLElement {
    */
   #awaitRegistration(root, stage, name) {
     if (this.#stopWaiting) return;
-    /** @param {Event} e */
-    const onReg = (e) => {
-      if (/** @type {CustomEvent} */ (e).detail?.name !== name) return;
-      this.#cancelWait();
-      void this.#build(root);
-    };
-    const timer = setTimeout(() => {
-      this.#cancelWait();
-      stage.innerHTML = `<span class="meta">${t("manim.noScene", { name })}</span>`;
-    }, 4000);
-    this.#stopWaiting = () => {
-      document.removeEventListener("primer:chart-registered", onReg);
-      clearTimeout(timer);
-    };
-    document.addEventListener("primer:chart-registered", onReg);
+    this.#stopWaiting = awaitRegistration("primer:chart-registered", name, {
+      onReady: () => {
+        this.#cancelWait();
+        void this.#build(root);
+      },
+      onTimeout: () => {
+        this.#cancelWait();
+        stage.innerHTML = `<span class="meta">${t("manim.noScene", { name })}</span>`;
+      },
+    });
   }
 
   /** Stop waiting for a pending registration (if any). */
