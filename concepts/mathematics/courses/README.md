@@ -24,14 +24,21 @@ Documentation only (the graph build scans `*.html`, not `.md`).
 courses/courses                              (hub)
 courses/primary-school/primary-school        (hub)
 courses/primary-school/za/za                 (hub) → grade-r, grade-1..7   [CAPS: Foundation R–3, Intermediate 4–6, Senior 7]
+courses/primary-school/ca/ca                 (hub) → kindergarten, grade-1..6   [pan-Canadian / WNCP strands]
+courses/primary-school/au/au                 (hub) → foundation, year-1..6   [Australian Curriculum (ACARA)]
 courses/secondary-school/secondary-school    (hub)
 courses/secondary-school/uk/uk               (hub) → year-7..9, gcse-year-10..11, a-level-year-12..13
 courses/secondary-school/ib/ib               (hub) → myp-year-1..5, dp-year-1..2
 courses/secondary-school/za/za               (hub) → grade-8..9, grade-10..12   [CAPS: Senior 8–9, FET 10–12]
+courses/secondary-school/ca/ca               (hub) → grade-7..12   [pan-Canadian / WNCP strands]
+courses/secondary-school/au/au               (hub) → year-7..12   [Australian Curriculum (ACARA)]
 ```
 
-Country codes are internet suffixes (`uk`); `ib` = International Baccalaureate. MYP years mirror UK
-KS3→GCSE; DP years mirror A-level. Courses freely share members (soft refs make that safe).
+Country codes are internet suffixes (`uk`, `za`, `ca`, `au`); `ib` = International Baccalaureate. MYP years
+mirror UK KS3→GCSE; DP years mirror A-level. Canada (`ca`) is a jurisdiction-neutral pan-Canadian path on
+the shared WNCP strands (Number, Patterns & Relations, Shape & Space, Statistics & Probability); Australia
+(`au`) follows the Australian Curriculum (ACARA) strands, senior years kept uniform per-year. Courses freely
+share members (soft refs make that safe).
 
 ## Build-out priority (what the todo chips point at)
 
