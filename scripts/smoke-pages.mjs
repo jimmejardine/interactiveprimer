@@ -9,11 +9,14 @@
  * All third-party libs are vendored under /3rdparty, so this runs fully offline against the local server.
  *
  * Usage:
- *   node scripts/smoke-pages.mjs                     # every page
+ *   node scripts/smoke-pages.mjs                     # every page (own private server, own asset cache)
  *   node scripts/smoke-pages.mjs --filter algebra    # only ids containing "algebra"
  *   node scripts/smoke-pages.mjs --changed           # only concept pages changed in git
  *   node scripts/smoke-pages.mjs --shard 1/4         # shard 1 of 4 (for CI parallelism)
  *   node scripts/smoke-pages.mjs --max 50 --concurrency 12
+ *   node scripts/smoke-pages.mjs --dev               # run against the existing :8080 dev server (don't spawn)
+ *   node scripts/smoke-pages.mjs --server http://localhost:3000
+ *   node scripts/smoke-pages.mjs --dev --no-cache    # let EVERY request hit the dev server (debug what loads)
  *
  * Exit code 1 if any page has a JavaScript error; 0 otherwise.
  */
@@ -34,8 +37,15 @@ const opt = (name, def) => {
 
 const filter = opt("--filter", "");
 const maxN = Number(opt("--max", "0")) || 0;
-const concurrency = Number(opt("--concurrency", "8")) || 8;
+// Accept `-- --concurrency N` (canonical), or `--concurrency N` without `--` (npm exposes it as
+// npm_config_concurrency), or `CONCURRENCY=N npm run test:pages`.
+const concurrency =
+  Number(opt("--concurrency", "") || process.env.npm_config_concurrency || process.env.CONCURRENCY || "16") ||
+  16;
 const shardSpec = opt("--shard", "");
+// Run against an existing server instead of spawning a private one: `--dev` = http://localhost:8080.
+const serverArg = opt("--server", "") || (has("--dev") ? "http://localhost:8080" : "");
+const noCache = has("--no-cache"); // disable the in-harness asset cache (watch every request hit the server)
 
 // --- 1. Enumerate concept ids from the graph -------------------------------------------------------
 const graph = JSON.parse(await readFile(join(ROOT, "dist/graph.json"), "utf8"));
@@ -62,33 +72,39 @@ if (ids.length === 0) {
   process.exit(0);
 }
 
-// --- 2. Ensure a server (reuse :8080 if it's already up; never kill someone else's) ----------------
-const isUp = async (base) => {
+// --- 2. Server: use an existing one (--dev / --server) or spin up a private ephemeral one ----------
+const isUp = async (b) => {
   try {
-    const r = await fetch(`${base}/js/boot.js`, { method: "HEAD" });
+    const r = await fetch(`${b}/js/boot.js`, { method: "HEAD" });
     return r.ok || r.status === 405 || r.status === 200;
   } catch {
     return false;
   }
 };
 
-let base = "http://localhost:8080";
-let ownServer = null;
-if (!(await isUp(base))) {
+let base;
+let server = null; // the process WE spawned (null when reusing an existing server — never kill that one)
+if (serverArg) {
+  base = serverArg.replace(/\/+$/, "");
+  if (!(await isUp(base))) {
+    console.error(`No server responding at ${base} — start it first (e.g. \`npm run serve\`).`);
+    process.exit(2);
+  }
+  console.log(`Using the existing server at ${base} (not spawning or stopping it).`);
+} else {
+  // A PRIVATE static server on an ephemeral port — NOT the user's :8080 dev server, so the run neither
+  // floods its logs nor is coupled to it. Torn down at the end.
   const port = 8100 + Math.floor(Math.random() * 800);
   base = `http://localhost:${port}`;
-  ownServer = spawn(process.execPath, [join(ROOT, "scripts/serve.js"), String(port)], {
-    cwd: ROOT,
-    stdio: "ignore",
-  });
+  server = spawn(process.execPath, [join(ROOT, "scripts/serve.js"), String(port)], { cwd: ROOT, stdio: "ignore" });
   let ready = false;
-  for (let i = 0; i < 60 && !ready; i++) {
+  for (let i = 0; i < 80 && !ready; i++) {
     await sleep(100);
     ready = await isUp(base);
   }
   if (!ready) {
     console.error("Could not start scripts/serve.js for the smoke test.");
-    ownServer.kill();
+    server.kill();
     process.exit(2);
   }
 }
@@ -140,8 +156,35 @@ async function checkPage(page, id) {
   process.stdout.write(`\r  ${done}/${ids.length} checked · ${failures.length} broken   `);
 }
 
+// serve.js sends `cache-control: no-cache`, so Chromium re-fetches every asset on EVERY navigation. Give the
+// harness its own in-memory cache instead: the first time an asset is seen it's fetched from the server and
+// stored; every later page (across all tabs — this Map is shared) is served from memory. We cache every
+// NON-HTML asset (js, css, json, fonts, wasm, images, /site.webmanifest, favicon…); the concept HTML pages
+// themselves are unique per navigation and always fetched fresh. `--no-cache` disables all of this.
+const assetCache = new Map(); // absolute url -> { contentType, body: Buffer }
+const isCacheable = (pathname) => !pathname.endsWith(".html");
+
 async function worker() {
   const page = await browser.newPage();
+  if (!noCache) {
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const hit = isCacheable(new URL(req.url()).pathname) && assetCache.get(req.url());
+      if (hit) req.respond({ status: 200, contentType: hit.contentType, body: hit.body });
+      else req.continue();
+    });
+    page.on("response", async (resp) => {
+      const url = resp.url();
+      if (resp.ok() && isCacheable(new URL(url).pathname) && !assetCache.has(url)) {
+        try {
+          const body = await resp.buffer();
+          assetCache.set(url, { contentType: resp.headers()["content-type"] || "application/octet-stream", body });
+        } catch {
+          /* some responses (e.g. redirects) can't be buffered — skip caching them */
+        }
+      }
+    });
+  }
   while (queue.length) {
     const id = queue.shift();
     await checkPage(page, id);
@@ -154,7 +197,7 @@ await Promise.all(Array.from({ length: Math.min(concurrency, ids.length) }, work
 process.stdout.write("\n");
 
 await browser.close();
-if (ownServer) ownServer.kill();
+if (server) server.kill(); // only the private server we spawned — never an existing/dev server
 
 // --- 4. Report -------------------------------------------------------------------------------------
 if (slow.length) {
