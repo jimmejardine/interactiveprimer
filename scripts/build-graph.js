@@ -29,7 +29,13 @@ import { parseConceptMeta } from "../js/concept-meta.js";
 import { buildStaleRows, formatStaleRow } from "../js/stale-report.js";
 import { extractConceptRefs, extractForwardRefs, extractSoftRefs, extractTodoRefs, extractCourseMembers } from "../js/concept-refs.js";
 import { decodeEntities } from "../js/html-entities.js";
-import { validateGraph, indexConcepts, buildDependents, attachOrphans } from "../js/graph.js";
+import {
+  validateGraph,
+  indexConcepts,
+  buildDependents,
+  attachOrphans,
+  pruneCoursesFromCourseMembers,
+} from "../js/graph.js";
 import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
 import { parseJsonc } from "../js/jsonc.js";
 
@@ -255,6 +261,11 @@ async function main() {
   // a weak/thin edge like any harvested ref). Done before attachOrphans/validateGraph so X stops
   // being an orphan and any cycle the reverse edge creates is still caught by detectCycles.
   const indexed = indexConcepts(concepts);
+
+  // A course's member list is its lessons — not other courses it happens to link to (a follow-on
+  // course, a "previous grade", a university year's subject courses). Drop those; keep the hub at [0].
+  pruneCoursesFromCourseMembers(concepts);
+
   for (const [p, targets] of forwardByConcept) {
     for (const x of targets) {
       const target = indexed.get(x);

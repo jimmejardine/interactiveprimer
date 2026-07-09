@@ -33,6 +33,11 @@ export const SEARCH_BOX_CSS = `
   }
   .cg-results {
     position: absolute; top: calc(100% + 0.4rem); left: 0; right: 0; z-index: 6;
+    /* Keep the input narrow, but let the results popup be comfortably wider: min-width overrides the
+       left:0/right:0 stretch when the box is narrow (grows rightward from the left-anchored box, capped
+       to the viewport); when the box is wider than this (e.g. the full-width home tile) left:0/right:0
+       win and the popup matches the input — so it's never narrower than the box. */
+    min-width: min(22rem, 92vw);
     list-style: none; margin: 0; padding: 0.3rem; max-height: 16rem; overflow-y: auto;
     background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
     border: 1px solid var(--primer-border, #ccc); border-radius: var(--primer-radius, 0.6rem);

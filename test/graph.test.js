@@ -5,6 +5,7 @@ import {
   indexConcepts,
   findRoots,
   attachOrphans,
+  pruneCoursesFromCourseMembers,
   ORPHANS_ID,
   reachableFromRoots,
   resolvePrerequisites,
@@ -68,6 +69,24 @@ test("attachOrphans re-parents orphans under the orphans node, leaving wired con
   assert.deepEqual(byId.get("wired"), ["root"]); // untouched
   assert.deepEqual(byId.get("root"), []); // the root is never attached to anything
   assert.deepEqual(byId.get("orphans"), ["root"]); // the orphans node is never attached to itself
+});
+
+test("pruneCoursesFromCourseMembers drops other courses but keeps the hub and lessons", () => {
+  /** @type {Concept[]} */
+  const cs = [
+    // courseA lists its own hub, two lessons, and a link to another course (courseB).
+    { id: "a/a", title: "Course A", prerequisites: [], course: true, courseMembers: ["a/a", "a/l1", "b/b", "a/l2"] },
+    { id: "a/l1", title: "Lesson 1", prerequisites: [] },
+    { id: "a/l2", title: "Lesson 2", prerequisites: [] },
+    { id: "b/b", title: "Course B", prerequisites: [], course: true, courseMembers: ["b/b", "b/l1"] },
+    { id: "b/l1", title: "B Lesson 1", prerequisites: [] },
+  ];
+  pruneCoursesFromCourseMembers(cs);
+  const byId = new Map(cs.map((c) => [c.id, c]));
+  // courseB is removed from courseA's members; the hub (index 0) and real lessons stay, in order.
+  assert.deepEqual(byId.get("a/a")?.courseMembers, ["a/a", "a/l1", "a/l2"]);
+  // courseB is untouched (it references no other course).
+  assert.deepEqual(byId.get("b/b")?.courseMembers, ["b/b", "b/l1"]);
 });
 
 test("attachOrphans is a no-op when the orphans node is absent", () => {

@@ -72,6 +72,25 @@ export function attachOrphans(concepts) {
 }
 
 /**
+ * Prune other **courses** out of every course's `courseMembers`, in place. Courses often
+ * cross-reference one another (a follow-on course, a "previous grade" link, a university year that
+ * points at its subject courses) — but another course is not a lesson *in* this course, so it should
+ * not count as one of its concepts. The course's own hub page at index 0 is always kept; only
+ * referenced ids that are themselves courses are dropped from the tail. No-op for non-course concepts
+ * and for members that aren't in the set (those are reported elsewhere as dangling refs).
+ * @param {Concept[]} concepts
+ * @returns {Concept[]} the same array (courseMembers mutated in place)
+ */
+export function pruneCoursesFromCourseMembers(concepts) {
+  const courseIds = new Set(concepts.filter((c) => c.course).map((c) => c.id));
+  for (const c of concepts) {
+    if (!c.course || !c.courseMembers) continue;
+    c.courseMembers = c.courseMembers.filter((m, i) => i === 0 || !courseIds.has(m));
+  }
+  return concepts;
+}
+
+/**
  * Reverse adjacency: for each concept, the ids of concepts that depend on it.
  * Edges to unknown concepts are ignored (dangling refs are reported separately).
  * @param {Map<string, Concept>} byId
