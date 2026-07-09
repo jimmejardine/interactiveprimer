@@ -40,6 +40,7 @@ import { getSliderGroup, subscribeSliders } from "../charts.js";
 import { clampStep, createStepCollector, applyStepVisibility } from "../geometry.js";
 import { makeGeometryTools } from "../geometry-tools.js";
 import { makeRng } from "../rng.js";
+import { reportError } from "../report-error.js";
 
 /** The play triangle as inline SVG (matches `<primer-manim>`'s big-play icon; recolours with the theme). */
 const ICON_PLAY = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
@@ -284,6 +285,7 @@ export class PrimerGeometry extends HTMLElement {
       }
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
+      reportError(`primer-geometry:${name}`, err);
       stage.innerHTML = `<span class="meta">${t("manim.runError", { error })}</span>`;
     }
   }

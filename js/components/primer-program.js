@@ -38,6 +38,7 @@ import { runJs } from "../run-js.js";
 import { makeRng } from "../rng.js";
 import { parseVariables, drawBindings } from "../quiz-vars.js";
 import { buildProgramSource, extractAnswer, compareResult, displayValue } from "../quiz-program.js";
+import { reportError } from "../report-error.js";
 
 const INPUT_NAME = "INPUT";
 const ANSWER_NAME = "ANSWER";
@@ -247,6 +248,7 @@ export class PrimerProgram extends HTMLElement {
         `<span class="muted">▶ ${esc(t("program.press"))}</span>`;
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
+      reportError(`primer-program:${this.getAttribute("name") ?? ""}`, err);
       this.#feedback(`<span class="meta">${esc(t("manim.runError", { error }))}</span>`);
     }
   }

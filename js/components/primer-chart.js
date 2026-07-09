@@ -28,6 +28,7 @@ import { t } from "../i18n.js";
 import { SLIDER_PANEL_CSS, mountSliderPanel } from "./slider-panel.js";
 import { groupForChart, getSliderGroup, subscribeSliders, setSliderValues, getChartMeta, resolveLegend } from "../charts.js";
 import { adoptJsxCss, disposeBoard, wrapBoard } from "./jsx-board.js";
+import { reportError } from "../report-error.js";
 
 /**
  * @typedef {object} ChartParam
@@ -180,6 +181,7 @@ export class PrimerChart extends HTMLElement {
       this.#mountTitleAndControls(root, name);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
+      reportError(`primer-chart:${name}`, err);
       stage.innerHTML = `<span class="meta">${t("manim.runError", { error })}</span>`;
       this.#update = null;
     }

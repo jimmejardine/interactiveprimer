@@ -36,6 +36,7 @@ import { glitter, glitterIntensity } from "../glitter.js";
 import { playSound } from "../sounds.js";
 import { loadMathLive } from "../mathfield.js";
 import { getMathKeyboard } from "../math-keyboards.js";
+import { reportError } from "../report-error.js";
 
 /** @typedef {import("../types/domain.js").AuthoredQuestion} AuthoredQuestion */
 /** @typedef {import("../types/domain.js").GeneratedQuiz} GeneratedQuiz */
@@ -83,6 +84,7 @@ export class PrimerQuiz extends HTMLElement {
       raw = builder({ sceneStrings: makeStrings(name) });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
+      reportError(`primer-quiz:${name}`, err);
       root.innerHTML = `<div class="card"><p class="meta">${t("quiz.buildError", { error })}</p></div>`;
       return;
     }
@@ -150,6 +152,7 @@ export class PrimerQuiz extends HTMLElement {
       quiz = generateQuiz(this.#bank, this.#count, Math.random);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
+      reportError(`primer-quiz:${this.getAttribute("name") ?? ""}`, err);
       root.innerHTML = `<div class="card"><p class="meta">${t("quiz.buildError", { error })}</p></div>`;
       return;
     }

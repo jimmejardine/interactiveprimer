@@ -22,6 +22,7 @@ import { makeStrings } from "../scene-strings.js";
 import { speak, cancelSpeech, pauseSpeech, resumeSpeech } from "../speech.js";
 import { themeColors } from "../theme.js";
 import { t } from "../i18n.js";
+import { reportError } from "../report-error.js";
 
 /**
  * Monochrome control icons as inline SVG (24×24, `fill: currentColor`) — they render identically on
@@ -198,6 +199,7 @@ export class PrimerManim extends HTMLElement {
       face(btn, ICON.replay, t("manim.replay"));
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
+      reportError(`primer-manim:${name}`, err);
       stage.innerHTML = `<span class="meta">${t("manim.runError", { error })}</span>`;
       this.#state = "idle";
       face(btn, ICON.play, t("manim.play"));

@@ -48,6 +48,28 @@
   if (/** @type {any} */ (window).__primerBooted) return;
   /** @type {any} */ (window).__primerBooted = true;
 
+  // Record uncaught errors + unhandled promise rejections on window.__primerErrors so an out-of-page
+  // test harness (scripts/smoke-pages.mjs) can detect a broken page. Best-effort; installed first thing
+  // so early failures are captured. (Classic-script inline: this non-module file can't import the shared
+  // installGlobalErrorReporter from js/report-error.js, which the components use.)
+  const errHost = /** @type {any} */ (window);
+  errHost.__primerErrors = errHost.__primerErrors || [];
+  window.addEventListener("error", (e) => {
+    errHost.__primerErrors.push({
+      source: "window.error",
+      message: (e.error && e.error.message) || e.message || "uncaught error",
+      stack: e.error && e.error.stack,
+    });
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const r = /** @type {any} */ (e).reason;
+    errHost.__primerErrors.push({
+      source: "unhandledrejection",
+      message: (r && r.message) || (typeof r === "string" ? r : "unhandled rejection"),
+      stack: r && r.stack,
+    });
+  });
+
   // Theme, set synchronously BEFORE the stylesheet is injected so there is no flash of
   // the wrong palette. js/theme.js (loaded later) reconciles + persists this. Keep this
   // in step with pickInitialTheme(): stored choice wins, else follow the OS preference.
