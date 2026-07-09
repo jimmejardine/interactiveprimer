@@ -7,7 +7,7 @@
  * @module
  */
 
-const SUCRASE_URL = "https://esm.sh/sucrase@3.35.1";
+const SUCRASE_URL = "/3rdparty/sucrase/sucrase.mjs";
 
 /** @type {Promise<any> | null} Cached module import (re-tried if it fails). */
 let pending = null;

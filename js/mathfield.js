@@ -7,8 +7,8 @@
  * @module
  */
 
-const VERSION = "0.110.0";
-const BASE = `https://cdn.jsdelivr.net/npm/mathlive@${VERSION}`;
+// MathLive 0.110.0 — vendored under /3rdparty/mathlive (see scripts/vendor.mjs).
+const BASE = "/3rdparty/mathlive";
 
 /** @type {Promise<boolean> | null} */
 let pending = null;

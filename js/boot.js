@@ -159,19 +159,17 @@
     /* non-fatal: keep the authored lang="en" */
   }
 
-  // Pinned dependency URLs — the single source of truth for versions.
-  const KATEX_VERSION = "0.16.47";
-  const MANIM_VERSION = "0.3.22";
-  const JSON5_VERSION = "2.2.3";
-  const JSXGRAPH_VERSION = "1.12.2";
-  const KATEX_CSS = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VERSION}/dist/katex.min.css`;
-  const KATEX_MJS = `https://cdn.jsdelivr.net/npm/katex@${KATEX_VERSION}/dist/katex.mjs`;
-  const MANIM_JS = `https://cdn.jsdelivr.net/npm/manim-web@${MANIM_VERSION}/dist/manim-web.browser.js`;
-  const JSON5_MJS = `https://cdn.jsdelivr.net/npm/json5@${JSON5_VERSION}/dist/index.min.mjs`;
-  // JSXGraph powers <primer-chart> (SVG plots). Its stylesheet (distrib/jsxgraph.css) is NOT
-  // loaded here — <primer-chart> lazy-injects it on first use, so a page with no chart pays
-  // nothing. Keep this version in step with the jsxgraph.css href in js/components/primer-chart.js.
-  const JSXGRAPH_MJS = `https://cdn.jsdelivr.net/npm/jsxgraph@${JSXGRAPH_VERSION}/distrib/jsxgraphcore.mjs`;
+  // Third-party libraries are vendored under /3rdparty/ (see scripts/vendor.mjs) so the site runs
+  // fully offline. Pinned versions live in that script (katex 0.16.47, manim-web 0.3.22, json5 2.2.3,
+  // jsxgraph 1.12.2); re-run `npm run vendor` to update them.
+  const KATEX_CSS = "/3rdparty/katex/katex.min.css";
+  const KATEX_MJS = "/3rdparty/katex/katex.mjs";
+  const MANIM_JS = "/3rdparty/manim-web/manim-web.browser.js";
+  const JSON5_MJS = "/3rdparty/json5/index.min.mjs";
+  // JSXGraph powers <primer-chart> (SVG plots). Its stylesheet (jsxgraph.css) is NOT loaded here —
+  // <primer-chart> lazy-injects it on first use, so a page with no chart pays nothing. Keep in step
+  // with the JSXGRAPH_CSS href in js/components/jsx-board.js.
+  const JSXGRAPH_MJS = "/3rdparty/jsxgraph/jsxgraphcore.mjs";
 
   const head = document.head;
 
@@ -220,19 +218,8 @@
   //     fonts, so the prose harmonises with KaTeX's Computer-Modern math. Loaded eagerly here
   //     (light + dark both use it); `display=swap` shows the Georgia fallback first, then swaps
   //     in with no blocking. The fun theme's rounded display font is still loaded on demand by
-  //     js/theme.js. preconnect warms the font CDN so the swap lands fast.
-  const FONT_CSS =
-    "https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,500;0,600;0,700;1,400;1,600&display=swap";
-  for (const [rel, href, cross] of [
-    ["preconnect", "https://fonts.googleapis.com", false],
-    ["preconnect", "https://fonts.gstatic.com", true],
-  ]) {
-    const l = document.createElement("link");
-    l.rel = /** @type {string} */ (rel);
-    l.href = /** @type {string} */ (href);
-    if (cross) l.crossOrigin = "anonymous";
-    head.appendChild(l);
-  }
+  //     js/theme.js. Vendored under /3rdparty/fonts/ (self-hosted for offline).
+  const FONT_CSS = "/3rdparty/fonts/stix.css";
   const fontLink = document.createElement("link");
   fontLink.rel = "stylesheet";
   fontLink.href = FONT_CSS;

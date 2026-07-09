@@ -28,9 +28,8 @@ export const THEMES = [
 
 export const STORAGE_KEY = "primer:theme";
 
-/** Google Fonts stylesheet for the fun theme's rounded display font. */
-const FUN_FONT_HREF =
-  "https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&display=swap";
+/** Fredoka display font for the fun theme — vendored under /3rdparty/fonts/ (offline). */
+const FUN_FONT_HREF = "/3rdparty/fonts/fredoka.css";
 const FUN_FONT_ID = "primer-fun-font";
 
 const VALID = new Set(THEMES.map((t) => t.id));

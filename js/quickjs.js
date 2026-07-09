@@ -7,8 +7,8 @@
  * @module
  */
 
-const CORE_URL = "https://esm.sh/quickjs-emscripten-core@0.32.0";
-const VARIANT_URL = "https://esm.sh/@jitl/quickjs-singlefile-browser-release-sync@0.32.0";
+const CORE_URL = "/3rdparty/quickjs/core.mjs";
+const VARIANT_URL = "/3rdparty/quickjs/singlefile/index.mjs";
 
 /** @type {Promise<{ QuickJS: any, shouldInterruptAfterDeadline: any } | null> | null} */
 let pending = null;

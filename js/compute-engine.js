@@ -8,8 +8,8 @@
  * @module
  */
 
-const VERSION = "0.59.0";
-const URL = `https://cdn.jsdelivr.net/npm/@cortex-js/compute-engine@${VERSION}/+esm`;
+// Compute Engine 0.59.0 — vendored under /3rdparty/compute-engine (see scripts/vendor.mjs).
+const URL = "/3rdparty/compute-engine/compute-engine.mjs";
 
 /** @type {Promise<any> | null} */
 let pending = null;
