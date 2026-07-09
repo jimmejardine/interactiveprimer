@@ -125,11 +125,18 @@ async function checkPage(page, id) {
 
   let timedOut = false;
   try {
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 25000 });
+    await page.goto(url, { waitUntil: "load", timeout: 30000 });
   } catch {
-    timedOut = true; // slow/never-idle page; still read the error bucket below
+    timedOut = true; // page never fired `load`; still read the error bucket below
   }
-  await sleep(400); // let async scene/chart builders finish after their imports resolve
+  // Wait for the framework's own "done" signal (render.js dispatches `primer:rendered` via .finally, so it
+  // fires even on a render error) — far more reliable than network-idle, which many fine pages never reach.
+  await page
+    .waitForFunction(() => window.__primerRendered === true, { timeout: 15000 })
+    .catch(() => {
+      timedOut = true; // render never signalled — genuinely stuck (reported as "slow", not a JS error)
+    });
+  await sleep(600); // let async scene/chart builders finish after their imports resolve, post-render
 
   let reported = [];
   try {
@@ -166,6 +173,13 @@ const isCacheable = (pathname) => !pathname.endsWith(".html");
 
 async function worker() {
   const page = await browser.newPage();
+  // Set a flag when the framework finishes rendering — injected before each page's own scripts (survives
+  // every navigation on this tab), so `checkPage`'s waitForFunction can't miss the `primer:rendered` event.
+  await page.evaluateOnNewDocument(() => {
+    document.addEventListener("primer:rendered", () => {
+      window.__primerRendered = true;
+    }, { once: true });
+  });
   if (!noCache) {
     await page.setRequestInterception(true);
     page.on("request", (req) => {
@@ -201,7 +215,7 @@ if (server) server.kill(); // only the private server we spawned — never an ex
 
 // --- 4. Report -------------------------------------------------------------------------------------
 if (slow.length) {
-  console.warn(`\n⚠ ${slow.length} page(s) did not reach network-idle within 25s (no JS error detected):`);
+  console.warn(`\n⚠ ${slow.length} page(s) never fired 'primer:rendered' within 15s (no JS error detected):`);
   for (const id of slow.slice(0, 20)) console.warn(`    ${id}`);
   if (slow.length > 20) console.warn(`    …and ${slow.length - 20} more`);
 }

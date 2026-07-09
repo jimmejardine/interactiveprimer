@@ -257,7 +257,10 @@ registers a family sharing one domain+range — no board boilerplate. Markup is 
 - **Config item** (optional **first** entry, recognised by no `options`/`answer`): `{ num_questions,
   preamble }`. Route a translatable `preamble` through `sceneStrings` (an all-maths quiz needs none).
 - **`variables`** — space-separated `name=[…]`; the bracket picks the kind: `[lo:hi]` integer, `[lo;hi]`
-  real (3 dp), `[v1,v2,…]` a choice. Negatives ok (`[-5:5]`).
+  real (3 dp), `[v1,v2,…]` a choice. Negatives ok (`[-5:5]`). Tokens are **whitespace-free** (the spec splits
+  on spaces), so a choice **value** can't contain a space — write `_` for a space and it renders as one
+  (`[handwritten_digits,filtering_spam]` → "handwritten digits"). A name that collides with an evaluator
+  function (e.g. `max`, `min`) is rejected — rename it.
 - **`prompt`, option `text`, and `answer`** each accept **a string** (any `{…}` is **evaluated against the
   drawn variables** — `{a + b}`, `{2 * a}`, adjacent groups concatenate; double braces `{{12}}` keep a
   literal LaTeX `{12}`) **or a function of `v`** (`answer: (v) => v.a + v.b`). For `answer` a bare string is

@@ -11,7 +11,9 @@
  * where the bracket separator chooses the kind:
  *   [lo:hi]  → integer in [lo, hi] (inclusive)
  *   [lo;hi]  → real in [lo, hi], rounded to 3 decimal places
- *   [v,v,v]  → a choice of one of the listed tokens (numbers, else strings)
+ *   [v,v,v]  → a choice of one of the listed tokens (numbers, else strings). Tokens are
+ *              whitespace-free (the spec splits on spaces); use `_` for a space in a string
+ *              value — `[handwritten_digits,filtering_spam]` displays as "handwritten digits".
  *
  * Placeholders `{name}` in the prompt expand to the value; the `answer` is an
  * expression over the variables (e.g. "a + b"), evaluated by a small safe evaluator.
@@ -128,7 +130,9 @@ export function instantiate(vars, rng) {
       bindings[v.name] = round3(v.lo + rng() * (v.hi - v.lo));
     } else {
       const raw = v.values[Math.floor(rng() * v.values.length)];
-      bindings[v.name] = NUMBER_RE.test(raw) ? Number(raw) : raw;
+      // Choice values are whitespace-free (the spec is tokenised on spaces); an underscore in a
+      // string value stands in for a space, so "handwritten_digits" displays as "handwritten digits".
+      bindings[v.name] = NUMBER_RE.test(raw) ? Number(raw) : raw.replace(/_/g, " ");
     }
   }
   return bindings;

@@ -118,6 +118,14 @@ test("instantiate: deterministic, in range, reals 3dp, choice from list", () => 
   assert.ok([7, 8, 9].includes(/** @type {number} */ (r1.c)));
 });
 
+test("instantiate: underscores in a string choice value become spaces", () => {
+  const vars = parseVariables("task=[handwritten_digits,filtering_spam]");
+  assert.deepEqual(vars[0], { name: "task", kind: "choice", values: ["handwritten_digits", "filtering_spam"] });
+  const drawn = /** @type {string} */ (drawBindings(vars, "", () => 0).task);
+  assert.equal(drawn, "handwritten digits");
+  assert.equal(drawBindings(vars, "", () => 0.99).task, "filtering spam");
+});
+
 test("substitute: {name} placeholders, declared only, KaTeX-safe", () => {
   const b = { a: 3, b: 7 };
   assert.equal(substitute("What is ${a} + {b}$?", b), "What is $3 + 7$?");
