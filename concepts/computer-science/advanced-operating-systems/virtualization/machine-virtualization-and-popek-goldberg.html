@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Machine Virtualization and the Popek-Goldberg Theorem</primer-title>
+
+    <primer-card>
+      <p>
+        Every time you launch a cloud instance — an AWS EC2 box, an Azure VM, a throwaway VirtualBox guest on
+        your laptop — you are handed something that <em>looks and behaves exactly like a real computer</em>:
+        it boots its own kernel, thinks it owns the CPU, programs "its" MMU, talks to "its" disk. And yet it is
+        one of dozens of such machines sharing a single physical host, none of them aware of the others, none
+        able to touch the host or each other. That illusion — a whole machine, faithfully reproduced in
+        software, safely multiplexed — is <strong>machine virtualization</strong>, and it is the foundation the
+        entire cloud is built on.
+      </p>
+      <p>
+        You already know how an OS virtualizes the CPU and memory <em>for a process</em>. This module goes one
+        level up: virtualizing the <em>whole machine</em> for an entire <strong>guest operating system</strong>.
+        The program that pulls this off is the <strong>virtual machine monitor</strong> (VMM), also called a
+        <strong>hypervisor</strong>. This first lesson asks the deepest question in the field: <em>when is it
+        even possible</em> to virtualize a machine efficiently — and why the world's most popular CPU, the x86,
+        infamously flunked the test for thirty years.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What the hypervisor sells: three properties</h2>
+      <p>
+        In 1974 Gerald Popek and Robert Goldberg wrote the paper that still defines the subject:
+        <em>"Formal Requirements for Virtualizable Third Generation Architectures."</em> They pinned down what it
+        even <em>means</em> for a piece of software to be a virtual machine monitor. A VMM is a program with
+        <strong>three</strong> essential properties:
+      </p>
+      <ul>
+        <li><strong>Fidelity (equivalence).</strong> A program running under the VMM behaves
+          <em>identically</em> to how it would on bare hardware — same results — except for timing and for
+          resource limits. The guest cannot tell it is virtualized by observing its own computation.</li>
+        <li><strong>Performance (efficiency).</strong> The <em>vast majority</em> of guest instructions execute
+          <strong>directly on the real CPU</strong>, with no VMM intervention. This is the line that rules out
+          a pure emulator/interpreter (like QEMU's TCG or an old-school simulator): correct, but far too slow to
+          count as efficient virtualization.</li>
+        <li><strong>Safety (resource control).</strong> The VMM is in <em>complete control</em> of the real
+          resources. A guest can never access hardware the VMM did not grant it, nor escape its sandbox, nor
+          starve its neighbours by seizing the machine.</li>
+      </ul>
+      <p>
+        Fidelity and safety are also achievable by pure emulation; the hard, defining requirement is doing all
+        three <em>while</em> letting most instructions run native. That "run native but stay in control" tension
+        is the whole game — and it is exactly the <primer-ref to="computer-science/advanced-operating-systems/kernel/the-system-call-interface">limited-direct-execution</primer-ref>
+        idea you met for processes, now applied to a whole guest OS.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The trick: de-privilege the guest</h2>
+      <p>
+        Here is the mechanism the theorem is about. The guest OS was written to run in <strong>ring 0</strong>,
+        the most privileged mode — it expects to disable interrupts, reload page tables, and issue I/O directly.
+        The VMM will not allow that. Instead it runs the entire guest — <em>including the guest kernel</em> — at
+        a <strong>lower privilege level</strong> (this is called <em>ring compression</em> or de-privileging).
+        The guest kernel still <em>thinks</em> it is in ring 0, but it is not.
+      </p>
+      <p>
+        Now the plan is beautifully simple. Ordinary, harmless guest instructions (arithmetic, loads, branches)
+        run <strong>directly on the CPU</strong> at full speed — that buys us performance. But the moment the
+        de-privileged guest attempts a <strong>privileged</strong> operation, the hardware raises a fault — a
+        <strong>trap</strong> — that lands in the VMM. The VMM then <strong>emulates</strong> what the
+        instruction should have done to the <em>virtual</em> machine's state, and resumes the guest. This is
+        <strong>trap-and-emulate</strong> (the whole of the next lesson). It preserves fidelity and safety while
+        keeping almost everything native — <em>provided</em> every instruction that could break the illusion
+        actually traps. That single proviso is the Popek-Goldberg theorem.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the instruction-classification Venn figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "pgVenn": {
+          "title": "The classification of instructions — a machine is virtualizable when sensitive ⊆ privileged",
+          "priv": "PRIVILEGED\n(trap in user mode)",
+          "sens": "SENSITIVE\n(control- or behaviour-sensitive)",
+          "good": "safe: sensitive AND privileged — these TRAP, so the VMM catches them",
+          "bad": "THE LEAK: sensitive but NOT privileged — runs silently, breaks the illusion",
+          "innoc": "innocuous — run native, no VMM needed",
+          "x86": "classic x86 lives here: 17 sensitive, non-privileged instructions"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Two ways to classify every instruction</h2>
+      <p>
+        Popek and Goldberg cut the instruction set two different ways, and the whole theorem lives in how those
+        two cuts overlap.
+      </p>
+      <ul>
+        <li>An instruction is <strong>privileged</strong> if, executed in user mode, it <em>traps</em> (raises a
+          fault); executed in supervisor mode it just runs. This is a property of the <em>hardware</em>: does it
+          trap or not? (Think <primer-math>\texttt{lgdt}</primer-math>, <primer-math>\texttt{hlt}</primer-math>,
+          writing control register <primer-math>\texttt{cr3}</primer-math>.)</li>
+        <li>An instruction is <strong>sensitive</strong> if it can break virtualization. Two flavours:
+          <em>control-sensitive</em> — it changes the configuration of resources (alters interrupt flags, the
+          amount of memory, which mode the CPU is in); and <em>behaviour-sensitive</em> — its <em>result
+          depends</em> on the real configuration (e.g. reads the true privilege level, or behaves differently
+          in user vs kernel mode).</li>
+        <li>Everything else is <strong>innocuous</strong> — a plain <primer-math>\texttt{add}</primer-math> or
+          <primer-math>\texttt{mov}</primer-math> between registers. These can always run native.</li>
+      </ul>
+      <p>
+        The diagram below is the heart of the lesson. For trap-and-emulate to work, <em>every</em> sensitive
+        instruction must also be privileged — so that the hardware traps it and the VMM gets a chance to
+        emulate. If any sensitive instruction is <strong>not</strong> privileged, it runs silently in the
+        de-privileged guest, quietly reads or mutates real machine state, and the illusion shatters. That is the
+        crescent labelled "THE LEAK".
+      </p>
+      <primer-geometry scene="pgVenn"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The theorem</h2>
+      <primer-theorem name="Popek-Goldberg (1974)">
+        <ul>
+          <li>An architecture is (efficiently, trap-and-emulate) <strong>virtualizable</strong> if the set of
+            <strong>sensitive</strong> instructions is a <em>subset</em> of the set of <strong>privileged</strong>
+            instructions: <primer-math>\text{sensitive} \subseteq \text{privileged}</primer-math>.</li>
+          <li>Intuition: if every instruction that could break the illusion also traps, the VMM can intercept and
+            emulate all of them — so it stays in control while everything else runs native.</li>
+          <li>A VMM must deliver all three: <strong>fidelity</strong> (equivalent behaviour),
+            <strong>performance</strong> (most instructions run native), and <strong>safety</strong> (total
+            resource control).</li>
+          <li>Corollary: any <em>sensitive-but-unprivileged</em> instruction is a leak — it neither traps nor is
+            emulated — so a machine with even one is <strong>not</strong> classically virtualizable.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why classic x86 failed — the 17 problem instructions</h2>
+      <p>
+        The IBM System/370 satisfied the theorem, which is why IBM had rock-solid VMs in the 1970s. The x86 did
+        not. In 2000, John Scott Robin and Cynthia Irvine audited the Pentium instruction set and found
+        <strong>17 instructions</strong> that are sensitive but <em>not</em> privileged — they execute
+        harmlessly (no trap) in user mode while quietly leaking or depending on real machine state. A few
+        infamous examples:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Instruction</th><th>What it does</th><th>Why it's a leak</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>PUSHF / POPF</strong></td><td>push / pop the FLAGS register (incl. the interrupt-enable flag IF)</td><td>in user mode, <code>popf</code> silently <em>ignores</em> writes to IF instead of trapping — the guest kernel's "disable interrupts" is lost with no fault</td></tr>
+            <tr><td><strong>SGDT / SIDT / SLDT</strong></td><td>store the GDT / IDT / LDT register</td><td>a de-privileged guest can <em>read the real</em> descriptor-table addresses — behaviour-sensitive, reveals it is virtualized</td></tr>
+            <tr><td><strong>SMSW</strong></td><td>store machine status word (part of CR0)</td><td>reads real control state from user mode without trapping</td></tr>
+            <tr><td><strong>PUSH / POP with CS/SS</strong>, <strong>LAR/LSL</strong>, <strong>MOV from segment</strong></td><td>read code/stack-segment selector or descriptor rights</td><td>the low 2 bits of a segment selector expose the <em>current privilege level</em> — the guest can literally see it is not in ring 0</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The killer is the <em>silent</em> ones like <primer-math>\texttt{popf}</primer-math>. A guest kernel
+        executing "disable interrupts" expects the machine to obey; on de-privileged x86 the write to the
+        interrupt flag is discarded with <strong>no trap</strong>, so the VMM never learns the guest wanted
+        interrupts off. There is nothing to intercept. This is precisely a sensitive-but-unprivileged
+        instruction — and it is why, for decades, x86 could not be virtualized by textbook trap-and-emulate.
+        The next lessons are the industry's two escape routes: <strong>binary translation</strong> (VMware) and
+        <strong>hardware virtualization extensions</strong> (Intel VT-x / AMD-V).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Automate the test</h2>
+      <p>
+        The theorem is a set-membership check, so let's run it. Below, every instruction carries two boolean
+        tags — is it sensitive, is it privileged. The machine is virtualizable exactly when no instruction is
+        sensitive-yet-unprivileged. Add a leaky instruction and watch the verdict flip.
+      </p>
+      <primer-code run>
+        // Popek-Goldberg as a program: an ISA is virtualizable iff sensitive ⊆ privileged.
+        interface Insn { name: string; sensitive: boolean; privileged: boolean; }
+
+        // A tiny model ISA. The last few are the classic x86 "leaks".
+        const isa: Insn[] = [
+          { name: "add",   sensitive: false, privileged: false }, // innocuous
+          { name: "mov",   sensitive: false, privileged: false }, // innocuous
+          { name: "lgdt",  sensitive: true,  privileged: true  }, // sensitive AND traps -> safe
+          { name: "hlt",   sensitive: true,  privileged: true  }, // sensitive AND traps -> safe
+          { name: "cli",   sensitive: true,  privileged: true  }, // sensitive AND traps -> safe
+          { name: "popf",  sensitive: true,  privileged: false }, // LEAK: silently drops IF
+          { name: "sgdt",  sensitive: true,  privileged: false }, // LEAK: reads real GDT
+          { name: "smsw",  sensitive: true,  privileged: false }, // LEAK: reads real CR0
+        ];
+
+        const leaks = isa.filter((i) =&gt; i.sensitive &amp;&amp; !i.privileged);
+        for (const i of isa) {
+          const cls = !i.sensitive ? "innocuous (run native)"
+            : i.privileged ? "sensitive+privileged (traps -> VMM emulates)"
+            : "SENSITIVE, NOT privileged -> LEAK";
+          console.log(`${i.name.padEnd(6)} : ${cls}`);
+        }
+        console.log(`\nleaks found: ${leaks.length}  [${leaks.map((l) =&gt; l.name).join(", ")}]`);
+        console.log(leaks.length === 0
+          ? "=> sensitive ⊆ privileged: VIRTUALIZABLE by trap-and-emulate"
+          : "=> NOT classically virtualizable (this is exactly classic x86's problem)");
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="If x86 wasn't virtualizable, how did VMware ship a product in 1999?">
+      <p>
+        Popek-Goldberg says <em>trap-and-emulate</em> can't virtualize x86 — it does <strong>not</strong> say
+        x86 can't be virtualized <em>at all</em>. VMware's founders (Mendel Rosenblum's Stanford group, out of
+        the Disco research VMM) simply refused to rely on traps. Their Workstation product used <strong>dynamic
+        binary translation</strong>: as the guest kernel runs, the VMM scans its code just ahead of execution
+        and <em>rewrites</em> the dangerous instructions — every <primer-math>\texttt{popf}</primer-math>,
+        every <primer-math>\texttt{sgdt}</primer-math> — into safe sequences that call into the VMM. Innocuous
+        code is copied through almost unchanged and still runs native. It was an engineering tour de force that
+        turned a "non-virtualizable" CPU into the foundation of a multi-billion-dollar company — years before
+        Intel and AMD fixed the hardware.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Privileged' and 'sensitive' are different properties — don't conflate them">
+      <p>
+        The single most common confusion here is treating "privileged" and "sensitive" as synonyms. They answer
+        <em>different</em> questions. <strong>Privileged</strong> is about the <em>hardware's reaction</em>: does
+        this instruction trap when run in user mode? <strong>Sensitive</strong> is about <em>semantics</em>: can
+        this instruction observe or change real machine configuration? A well-designed ISA makes every sensitive
+        instruction privileged, so the two sets line up. A badly designed one (classic x86) has sensitive
+        instructions that are <em>not</em> privileged — and those, not the privileged ones, are the whole
+        problem. The theorem is not "all sensitive instructions" or "all privileged instructions" — it is about
+        the <em>containment</em> of one set inside the other.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Where this module goes</h2>
+      <p>
+        You now have the yardstick every later lesson is measured against. Next we build
+        <primer-ref forward to="computer-science/advanced-operating-systems/virtualization/trap-and-emulate-and-binary-translation">trap-and-emulate
+        and the software workarounds</primer-ref> (binary translation, paravirtualization) that made x86 usable;
+        then <primer-ref forward to="computer-science/advanced-operating-systems/virtualization/hardware-assisted-virtualization">hardware-assisted
+        virtualization</primer-ref>, where Intel and AMD finally made x86 satisfy the theorem in silicon; then
+        <primer-ref forward to="computer-science/advanced-operating-systems/virtualization/memory-virtualization">memory</primer-ref>
+        and <primer-ref forward to="computer-science/advanced-operating-systems/virtualization/io-virtualization">I/O</primer-ref>
+        virtualization; and finally the
+        <primer-ref forward to="computer-science/advanced-operating-systems/virtualization/hypervisor-architectures">hypervisor
+        architectures</primer-ref> that package it all.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: the three VMM properties, the two classifications, the theorem, x86's failure. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "pgQuiz@1": {
+          "intro": "Fidelity/performance/safety; privileged vs sensitive instructions; virtualizable iff sensitive ⊆ privileged; classic x86's 17 leaks.",
+          "propsQ": "The three defining properties of a virtual machine monitor are…",
+          "propsRight": "fidelity (equivalence), performance (efficiency), and safety (resource control)",
+          "propsWrong1": "compression, encryption, and replication",
+          "propsWrong2": "scheduling, paging, and journaling",
+          "propsWrong3": "speed, size, and cost",
+          "effQ": "Which VMM property specifically rules out a pure interpreter/emulator as 'real' virtualization?",
+          "effRight": "performance — the vast majority of guest instructions must run directly on the CPU",
+          "effWrong1": "fidelity — an emulator can never be correct",
+          "effWrong2": "safety — an emulator has no resource control",
+          "effWrong3": "none — an emulator is a valid VMM",
+          "privQ": "An instruction is 'privileged' (in the Popek-Goldberg sense) if…",
+          "privRight": "it traps when executed in user mode",
+          "privWrong1": "it can only be written by the OS vendor",
+          "privWrong2": "it takes more than one cycle",
+          "privWrong3": "it reads from memory",
+          "sensQ": "A 'sensitive' instruction is one that…",
+          "sensRight": "changes or depends on the real resource configuration (control- or behaviour-sensitive)",
+          "sensWrong1": "always traps in every mode",
+          "sensWrong2": "is only used by antivirus software",
+          "sensWrong3": "is any instruction that touches a register",
+          "thmQ": "Popek-Goldberg: an architecture is virtualizable by trap-and-emulate if…",
+          "thmRight": "the sensitive instructions are a subset of the privileged instructions",
+          "thmWrong1": "the privileged instructions are a subset of the sensitive instructions",
+          "thmWrong2": "there are no privileged instructions",
+          "thmWrong3": "every instruction is sensitive",
+          "leakQ": "What is a 'sensitive but not privileged' instruction, and why is it fatal?",
+          "leakRight": "it can break the illusion yet does NOT trap, so the VMM never gets to emulate it",
+          "leakWrong1": "it traps twice, doubling the cost",
+          "leakWrong2": "it is simply slow but harmless",
+          "leakWrong3": "it can only run in ring 0",
+          "x86Q": "How many sensitive-but-unprivileged instructions did Robin & Irvine find in classic x86?",
+          "x86Right": "17",
+          "x86Wrong1": "0",
+          "x86Wrong2": "1",
+          "x86Wrong3": "256",
+          "popfQ": "Why is x86's POPF a classic virtualization leak?",
+          "popfRight": "in user mode it silently ignores the interrupt-flag write instead of trapping",
+          "popfWrong1": "it is the slowest x86 instruction",
+          "popfWrong2": "it always crashes the guest",
+          "popfWrong3": "it can only be used by the BIOS",
+          "deprivQ": "'De-privileging' (ring compression) the guest means…",
+          "deprivRight": "running the guest kernel at a lower privilege level than the ring 0 it expects",
+          "deprivWrong1": "deleting the guest's kernel entirely",
+          "deprivWrong2": "giving the guest full ring-0 hardware access",
+          "deprivWrong3": "encrypting the guest's memory",
+          "ibmQ": "Which historical architecture satisfied Popek-Goldberg and had solid VMs in the 1970s?",
+          "ibmRight": "the IBM System/370",
+          "ibmWrong1": "the original x86 / Pentium",
+          "ibmWrong2": "the ARM Cortex-A",
+          "ibmWrong3": "the MOS 6502",
+          "fidQ": "'Fidelity' (equivalence) means a guest program's results are identical to bare metal EXCEPT for…",
+          "fidRight": "timing and resource-availability effects",
+          "fidWrong1": "the actual computed results, which always differ",
+          "fidWrong2": "nothing — everything including timing is identical",
+          "fidWrong3": "the instruction set, which is emulated differently",
+          "leakNumQ": "A model ISA has ${s}$ sensitive instructions, of which ${p}$ are also privileged. How many instructions are 'leaks' (sensitive but not privileged)?",
+          "leakNumFollow": "For this ISA to be virtualizable, that leak count must be…"
+        }
+      }
+    </script>
+
+    <primer-quiz name="pgQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/kernel/the-system-call-interface"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Two overlapping circles (a Venn diagram): PRIVILEGED and SENSITIVE. The overlap is the safe region
+     (traps -> emulated); the sensitive-only crescent is "THE LEAK". Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "pgVenn",
+    ({ board, colors, step, sceneStrings }) => {
+      // Two overlapping circles. Privileged on the right, Sensitive on the left, overlapping in the middle.
+      const cS = [3.4, 2.6];   // sensitive centre (left)
+      const cP = [5.6, 2.6];   // privileged centre (right)
+      const r = 2.2;
+
+      const circle = (c, ci, labelKey, lx) => {
+        board.create("circle", [c, r], {
+          strokeColor: colors.line, strokeWidth: 2,
+          fillColor: colors.cat[ci], fillOpacity: 0.16, highlight: false, fixed: true,
+        });
+        board.create("text", [lx, 4.7, sceneStrings(labelKey)], {
+          strokeColor: colors.ink, fontSize: 12.5, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:700; white-space:pre-line; text-align:center; max-width:190px",
+        });
+      };
+
+      const note = (x, y, key, ci) =>
+        board.create("text", [x, y, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 10.5, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "white-space:pre-line; text-align:center; max-width:150px",
+        });
+
+      // Base: the two labelled sets.
+      circle(cS, 0, "sens", 2.4);
+      circle(cP, 1, "priv", 6.6);
+
+      // Step 1: the safe overlap (sensitive AND privileged -> traps).
+      step(sceneStrings("good"), () => {
+        board.create("text", [4.5, 2.6, "traps\n✓"], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:700; white-space:pre-line; text-align:center",
+        });
+        note(4.5, 0.55, "good", 1);
+      });
+
+      // Step 2: the leak crescent (sensitive, NOT privileged).
+      step(sceneStrings("bad"), () => {
+        board.create("text", [2.55, 2.6, "LEAK\n✗"], {
+          strokeColor: colors.cat[0], fontSize: 12, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:700; white-space:pre-line; text-align:center",
+        });
+        note(1.2, 1.0, "x86", 0);
+      });
+
+      // Step 3: innocuous region outside both.
+      step(sceneStrings("innoc"), () => note(4.5, -0.7, "innoc", 2));
+    },
+    {
+      boundingbox: [-0.4, 5.4, 9.4, -1.4],
+      keepAspect: true,
+      title: () => makeStrings("pgVenn")("title"),
+    },
+  );
+
+  registerQuiz("pgQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("propsQ"), options: [
+      { text: () => sceneStrings("propsRight"), correct: true },
+      { text: () => sceneStrings("propsWrong1"), correct: false },
+      { text: () => sceneStrings("propsWrong2"), correct: false },
+      { text: () => sceneStrings("propsWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("effQ"), options: [
+      { text: () => sceneStrings("effRight"), correct: true },
+      { text: () => sceneStrings("effWrong1"), correct: false },
+      { text: () => sceneStrings("effWrong2"), correct: false },
+      { text: () => sceneStrings("effWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("privQ"), options: [
+      { text: () => sceneStrings("privRight"), correct: true },
+      { text: () => sceneStrings("privWrong1"), correct: false },
+      { text: () => sceneStrings("privWrong2"), correct: false },
+      { text: () => sceneStrings("privWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("sensQ"), options: [
+      { text: () => sceneStrings("sensRight"), correct: true },
+      { text: () => sceneStrings("sensWrong1"), correct: false },
+      { text: () => sceneStrings("sensWrong2"), correct: false },
+      { text: () => sceneStrings("sensWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("thmQ"), options: [
+      { text: () => sceneStrings("thmRight"), correct: true },
+      { text: () => sceneStrings("thmWrong1"), correct: false },
+      { text: () => sceneStrings("thmWrong2"), correct: false },
+      { text: () => sceneStrings("thmWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("leakQ"), options: [
+      { text: () => sceneStrings("leakRight"), correct: true },
+      { text: () => sceneStrings("leakWrong1"), correct: false },
+      { text: () => sceneStrings("leakWrong2"), correct: false },
+      { text: () => sceneStrings("leakWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("x86Q"), options: [
+      { text: () => sceneStrings("x86Right"), correct: true },
+      { text: () => sceneStrings("x86Wrong1"), correct: false },
+      { text: () => sceneStrings("x86Wrong2"), correct: false },
+      { text: () => sceneStrings("x86Wrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("popfQ"), options: [
+      { text: () => sceneStrings("popfRight"), correct: true },
+      { text: () => sceneStrings("popfWrong1"), correct: false },
+      { text: () => sceneStrings("popfWrong2"), correct: false },
+      { text: () => sceneStrings("popfWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("deprivQ"), options: [
+      { text: () => sceneStrings("deprivRight"), correct: true },
+      { text: () => sceneStrings("deprivWrong1"), correct: false },
+      { text: () => sceneStrings("deprivWrong2"), correct: false },
+      { text: () => sceneStrings("deprivWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("ibmQ"), options: [
+      { text: () => sceneStrings("ibmRight"), correct: true },
+      { text: () => sceneStrings("ibmWrong1"), correct: false },
+      { text: () => sceneStrings("ibmWrong2"), correct: false },
+      { text: () => sceneStrings("ibmWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fidQ"), options: [
+      { text: () => sceneStrings("fidRight"), correct: true },
+      { text: () => sceneStrings("fidWrong1"), correct: false },
+      { text: () => sceneStrings("fidWrong2"), correct: false },
+      { text: () => sceneStrings("fidWrong3"), correct: false },
+    ] },
+    {
+      // leaks = s - p (sensitive that are not also privileged).
+      prompt: (v) => sceneStrings("leakNumQ", v),
+      variables: "s=[6:12] p=[1:5]",
+      answer: (v) => v.s - v.p,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

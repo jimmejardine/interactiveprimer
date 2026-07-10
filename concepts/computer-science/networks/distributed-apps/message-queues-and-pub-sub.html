@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Message Queues and Pub/Sub</primer-title>
+
+    <primer-card>
+      <p>
+        It is Friday, 20:00, and a popular show just dropped. In sixty seconds, two million people press
+        "buy." Your checkout service can comfortably charge <em>fifty</em> cards a second. If every "buy"
+        button reached straight into the payment code — a synchronous
+        <primer-ref soft to="computer-science/networks/client-server-and-the-web">request waiting for a
+        reply</primer-ref> — the payment service would be buried under forty thousand simultaneous calls, tip
+        over, and take the whole shop down with it. Yet the shop stays up, every order eventually charges, and
+        nobody notices. How?
+      </p>
+      <p>
+        The trick is to stop making the two services talk <em>directly</em>. Instead, the web servers drop each
+        order into a <strong>queue</strong> — a buffer in the middle — and reply "got it!" instantly. The
+        payment service then pulls orders out of the queue at its own steady pace of fifty a second. The queue
+        absorbs the flood; the spike becomes a backlog that drains over the next few minutes. This is
+        <strong>asynchronous messaging</strong>, and the humble queue in the middle is one of the most
+        important structures in all of distributed systems.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Synchronous vs asynchronous, and what the queue buys you</h2>
+      <p>
+        In a <strong>synchronous</strong> call, the caller sends a request and <em>blocks</em> — it waits,
+        doing nothing useful, until the reply comes back. The two parties are coupled tightly: they must both
+        be alive at the same instant, and the caller runs no faster than the callee. That is exactly the
+        socket/RPC model, and it is perfect when you need an answer <em>right now</em> (what's my balance?).
+      </p>
+      <p>
+        In <strong>asynchronous</strong> messaging, the sender (the <strong>producer</strong>) hands a message
+        to a <strong>broker</strong> and moves on immediately, without waiting for it to be processed. Later —
+        milliseconds or minutes later — a <strong>consumer</strong> picks the message up and acts on it. The
+        queue between them is a simple idea with three superpowers:
+      </p>
+      <ul>
+        <li>
+          <strong>Decoupling in time.</strong> Producer and consumer need not be alive at the same moment. The
+          payment service can be redeployed, or crash and restart, and orders simply wait safely in the queue
+          until it comes back. Nothing is lost.
+        </li>
+        <li>
+          <strong>Decoupling in rate — <em>load levelling</em>.</strong> A bursty producer and a steady
+          consumer no longer have to match speeds. The queue soaks up the peaks and hands work out smoothly, so
+          the consumer is sized for the <em>average</em> load, not the terrifying peak.
+        </li>
+        <li>
+          <strong>Decoupling in knowledge.</strong> The producer doesn't know or care <em>who</em> consumes the
+          message, how many consumers there are, or what they do with it. You can add a second consumer (say, a
+          fraud checker) without touching the producer at all.
+        </li>
+      </ul>
+
+      <p>
+        The picture below is load levelling itself. The bursty curve is the arrival rate — a quiet baseline
+        with a big spike when the show drops. The flat line is what a single consumer can actually process per
+        second (drag the slider to change its capacity). While arrivals sit <em>above</em> the line, the gap is
+        not lost — it piles up in the queue as backlog; when arrivals fall <em>below</em> the line, the
+        consumer eats through that backlog. The queue turns a spike you cannot handle into a delay you can.
+      </p>
+
+      <primer-chart scene="loadLevel"></primer-chart>
+      <primer-chart-sliders name="ll"></primer-chart-sliders>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two shapes: point-to-point queues and publish/subscribe</h2>
+      <p>
+        There are two fundamentally different messaging patterns, and choosing the wrong one is a common design
+        error. They differ in a single question: <em>when a message is delivered, does exactly one recipient
+        get it, or do many?</em>
+      </p>
+      <ul>
+        <li>
+          <strong>Point-to-point (a work queue).</strong> Each message represents a <em>task to be done once</em>
+          — charge this card, resize this image, send this email. Many consumers may be attached to the queue,
+          but each message goes to <strong>exactly one</strong> of them. This is the <em>competing consumers</em>
+          pattern: several identical workers pull from the same queue, and the broker hands each message to
+          whichever worker is free. Add more workers and throughput rises — the queue automatically load
+          balances across them. The task must not be done twice, so exactly one consumer wins each message.
+        </li>
+        <li>
+          <strong>Publish/subscribe (a topic).</strong> Each message is an <em>event announced to the world</em>
+          — "order 42 was placed." The producer <strong>publishes</strong> to a <strong>topic</strong>, and
+          <strong>every</strong> subscriber gets its own copy. This is <em>fan-out</em>: the "order placed"
+          event might go simultaneously to the warehouse (to pick the item), the email service (to send a
+          receipt), and the analytics pipeline (to update a dashboard) — three independent subscribers, each
+          receiving the same event, none aware of the others.
+        </li>
+      </ul>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "patterns": {
+            "title": "Work queue (one consumer wins) vs pub/sub topic (all subscribers get a copy)",
+            "queueLabel": "WORK QUEUE — competing consumers",
+            "topicLabel": "PUB/SUB TOPIC — fan-out",
+            "prod": "Producer",
+            "pub": "Publisher",
+            "q": "queue",
+            "t": "topic",
+            "w1": "Worker A",
+            "w2": "Worker B",
+            "w3": "Worker C",
+            "s1": "Warehouse",
+            "s2": "Email",
+            "s3": "Analytics",
+            "one": "each message → exactly ONE worker",
+            "all": "each message → a copy for EVERY subscriber"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="patterns"
+        caption="Left: a producer feeds a work queue, and each message goes to exactly one of three competing workers (round-robin). Right: a publisher feeds a topic, and every one of three subscribers — warehouse, email, analytics — receives its own copy of each message (fan-out)."
+      ></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Delivery guarantees, acknowledgements, and the dead-letter queue</h2>
+      <p>
+        A message queue faces the same partial-failure problem as
+        <primer-ref soft to="computer-science/networks/programming/the-socket-api">any network
+        communication</primer-ref>: a consumer might crash <em>after</em> pulling a message but
+        <em>before</em> finishing the work. If the broker deleted the message the instant it was handed out, that
+        task would vanish. So brokers use <strong>acknowledgements</strong>:
+      </p>
+      <ul>
+        <li>
+          The broker delivers a message but keeps it, marked "in flight."
+        </li>
+        <li>
+          Only when the consumer sends an <strong>ack</strong> ("done, safely processed") does the broker
+          delete it.
+        </li>
+        <li>
+          If the consumer crashes or the ack doesn't arrive within a timeout, the broker <strong>redelivers</strong>
+          the message to another consumer.
+        </li>
+      </ul>
+      <p>
+        This gives <strong>at-least-once</strong> delivery: no message is ever lost, but a message whose ack was
+        lost (not the message — the <em>ack</em>) gets processed twice. Just as with
+        <primer-ref soft to="computer-science/networks/distributed-apps/rpc-and-grpc">RPC retries</primer-ref>,
+        the consequence is unavoidable: <strong>consumers must be idempotent</strong>, because duplicates
+        <em>will</em> happen. A message the broker gives up on after many failed attempts — malformed, or it
+        keeps crashing its consumer — is moved aside to a <strong>dead-letter queue</strong> (DLQ), a holding
+        pen for "poison" messages so one bad message can't block the whole queue forever. A human (or an alert)
+        inspects the DLQ later.
+      </p>
+
+      <primer-vignette title="Isn't 'exactly-once delivery' a thing brokers advertise?">
+        <p>
+          You will see "exactly-once" on marketing pages, and it is <em>almost</em> a fib. True exactly-once
+          <em>delivery</em> over an unreliable network is impossible — the ack can always be the thing that gets
+          lost, forcing a redelivery. What systems like Kafka actually provide is exactly-once
+          <em>processing</em>: at-least-once delivery, plus deduplication (each message carries an ID the
+          consumer records) or transactional writes that make a duplicate a no-op. The <em>effect</em> happens
+          once even though the <em>message</em> may be delivered twice. It is the same trick as RPC's
+          exactly-once effect — and the same reason your consumer still has to be idempotent underneath.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Ordering, partitioning, and two flavours of broker</h2>
+      <p>
+        Do messages arrive in the order they were sent? Often you want them to — "account created" before
+        "account updated." But strict global ordering fights against scale: if every message must be processed
+        in one sequence, you can only have <em>one</em> consumer working at a time, which kills the parallelism
+        that competing consumers gave you. The standard resolution is <strong>partitioning</strong>: split the
+        stream into independent partitions by a <strong>key</strong> (say, the customer ID). Order is guaranteed
+        <em>within</em> a partition but not across partitions — so all of one customer's events stay in order,
+        while different customers are processed in parallel. Ordering and throughput are traded off by the
+        <em>granularity</em> of the key.
+      </p>
+      <p>
+        Two influential broker designs sit at different points on this landscape:
+      </p>
+      <ul>
+        <li>
+          <strong>RabbitMQ (a classic message broker, speaks AMQP).</strong> Think of it as a smart post
+          office: it routes each message to queues, tracks per-message acks, and <em>deletes</em> a message once
+          it is acknowledged. Rich routing, great for task queues and request/response-style work. The message
+          is gone once consumed.
+        </li>
+        <li>
+          <strong>Kafka (a partitioned, append-only log).</strong> Think of it as a durable, replayable diary.
+          Producers append events to the end of a partitioned log; consumers read forward by tracking their own
+          <strong>offset</strong> (their bookmark). Messages are <em>not</em> deleted when read — they are kept
+          for days, so a new consumer can replay history from the start, and many independent consumer groups
+          can read the same log at their own pace. This makes Kafka the backbone of event-streaming and
+          analytics pipelines, where "who has read this and can we delete it" is deliberately decoupled from
+          "store the events."
+        </li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>Watch the backlog drain</h2>
+      <p>
+        Let's make load levelling and competing consumers concrete. Below, a producer emits a big burst of
+        messages up front and then goes quiet, while consumers each process a fixed number per tick. We track
+        the queue backlog every tick and watch it build, then drain — and we see how adding a second consumer
+        halves the time to clear the flood.
+      </p>
+
+      <primer-code run>
+        // Arrivals per tick: a burst at the start (30, 25, 20) then a quiet trickle of 2/tick.
+        const arrivals = [30, 25, 20, 2, 2, 2, 2, 2, 2, 2, 2, 2];
+
+        function simulate(consumers: number, ratePerConsumer: number): void {
+          const capacity = consumers * ratePerConsumer;   // total processed per tick
+          let backlog = 0;
+          let processed = 0;
+          const bars: string[] = [];
+          arrivals.forEach((incoming, tick) =&gt; {
+            backlog += incoming;                           // producer adds work
+            const done = Math.min(backlog, capacity);      // consumers drain what they can
+            backlog -= done;
+            processed += done;
+            bars.push(`t${tick}: ${"#".repeat(backlog).padEnd(30)} backlog=${backlog}`);
+          });
+          console.log(`--- ${consumers} consumer(s), capacity ${capacity}/tick ---`);
+          bars.forEach((b) =&gt; console.log(b));
+          const totalIn = arrivals.reduce((s, x) =&gt; s + x, 0);
+          console.log(`total arrived=${totalIn}, total processed=${processed}\n`);
+        }
+
+        // One consumer: the burst piles up and drains slowly.
+        simulate(1, 10);
+        // Two competing consumers: double the drain rate, backlog clears much faster.
+        simulate(2, 10);
+      </primer-code>
+
+      <p>
+        With one consumer the backlog towers up to the 30s and takes many ticks to melt away; with two
+        competing consumers the same flood clears in roughly half the time. The producer never changed — we
+        just widened the outlet. That is the entire economic argument for competing consumers.
+      </p>
+
+      <primer-vignette title="Watch out! — a queue smooths bursts, but it is not infinite">
+        <p>
+          The queue's magic tempts a dangerous belief: "just put a queue in front of it and we can handle any
+          load." No. A queue smooths a <em>temporary</em> burst on the assumption that, <em>on average</em>, the
+          consumer keeps up. If arrivals exceed the consumer's capacity <strong>for a sustained period</strong>,
+          the backlog does not smooth — it grows without bound. Two things then blow up: <strong>latency</strong>
+          (a message added to a million-deep queue waits behind all million, so end-to-end delay climbs into
+          minutes or hours) and <strong>memory/disk</strong> (the broker must store the ever-growing backlog
+          until it runs out and starts dropping or rejecting messages). A queue converts an overload into
+          <em>delay</em>, and delay is only survivable if the overload is brief. Monitor queue depth as a
+          first-class health metric; if it trends up and never comes down, you have a capacity problem no queue
+          can hide. And remember the other half: because delivery is <strong>at-least-once</strong>, the same
+          message <em>will</em> occasionally be delivered twice — so every consumer <strong>must be
+          idempotent</strong>. Processing "charge card" twice because an ack got lost is not a hypothetical; it
+          is Tuesday.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "mqQuiz@1": { "instructions": "Check your grasp of asynchronous messaging: decoupling and load levelling, work queues vs pub/sub, delivery guarantees and acks, ordering/partitioning, and broker styles." } }
+    </script>
+    <primer-quiz name="mqQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/distributed-systems/distributed-systems",
+      "computer-science/networks/programming/the-socket-api"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerChartSliders, registerGeometryScene, makeStrings } from "primer";
+
+  // Load levelling: a bursty arrival rate vs a flat consumer capacity. The area
+  // where arrivals sit above capacity is the backlog the queue absorbs.
+  registerChartSliders("ll", [
+    { name: "C", label: "consumer capacity (msgs/sec)", min: 1, max: 12, step: 0.5, value: 4 },
+  ]);
+  registerCharts(
+    [{
+      name: "loadLevel",
+      f: [
+        (t) => 2 + 11 * Math.exp(-Math.pow(t - 3, 2) / 1.2),   // bursty arrival rate
+        (t, s) => s.C,                                          // flat consumer capacity
+      ],
+      line: (colors, i) =>
+        i === 0 ? { strokeColor: colors.cat[0], strokeWidth: 2 }
+                : { strokeColor: colors.cat[1], strokeWidth: 2, dash: 2 },
+      legend: ["arrival rate (bursty)", "consumer capacity"],
+    }],
+    { xmin: 0, xmax: 10, ymin: 0, ymax: 14, xaxisname: "time (s)", yaxisname: "messages / s" },
+    "ll",
+  );
+
+  // Left: work queue -> one of three workers. Right: topic -> copy to all three subscribers.
+  registerGeometryScene("patterns", ({ board, colors, sceneStrings }) => {
+    const txt = (x, y, s, col, bold = true, w = 120) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+        cssStyle: `${bold ? "font-weight:700;" : ""} text-align:center; width:${w}px; display:inline-block`,
+      });
+    const arrow = (a, b, col, dash = 0) =>
+      board.create("arrow", [a, b], { strokeColor: col, strokeWidth: 2, dash, fixed: true, highlight: false });
+
+    // ---- LEFT: work queue, competing consumers ----
+    txt(-5, 4.4, sceneStrings("queueLabel"), colors.cat[0], true, 170);
+    txt(-6.5, 2.5, sceneStrings("prod"), colors.ink);
+    txt(-4.7, 2.5, sceneStrings("q"), colors.cat[0]);
+    arrow([-5.9, 2.5], [-5.2, 2.5], colors.line);
+    // one message goes to exactly one worker (solid to A, faint to others)
+    arrow([-4.2, 2.5], [-3.0, 3.6], colors.cat[0]);
+    arrow([-4.2, 2.5], [-3.0, 2.5], colors.line, 2);
+    arrow([-4.2, 2.5], [-3.0, 1.4], colors.line, 2);
+    txt(-2.3, 3.6, sceneStrings("w1"), colors.ink);
+    txt(-2.3, 2.5, sceneStrings("w2"), colors.ink);
+    txt(-2.3, 1.4, sceneStrings("w3"), colors.ink);
+    txt(-4.3, 0.3, sceneStrings("one"), colors.cat[0], false, 200);
+
+    // ---- RIGHT: pub/sub topic, fan-out ----
+    txt(4.4, 4.4, sceneStrings("topicLabel"), colors.cat[1], true, 170);
+    txt(2.4, 2.5, sceneStrings("pub"), colors.ink);
+    txt(4.2, 2.5, sceneStrings("t"), colors.cat[1]);
+    arrow([3.0, 2.5], [3.7, 2.5], colors.line);
+    // every subscriber gets a copy (all solid)
+    arrow([4.7, 2.5], [5.9, 3.6], colors.cat[1]);
+    arrow([4.7, 2.5], [5.9, 2.5], colors.cat[1]);
+    arrow([4.7, 2.5], [5.9, 1.4], colors.cat[1]);
+    txt(6.7, 3.6, sceneStrings("s1"), colors.ink);
+    txt(6.7, 2.5, sceneStrings("s2"), colors.ink);
+    txt(6.7, 1.4, sceneStrings("s3"), colors.ink);
+    txt(4.6, 0.3, sceneStrings("all"), colors.cat[1], false, 210);
+  }, {
+    boundingbox: [-8, 5, 8, -0.6],
+    keepAspect: false,
+    title: () => makeStrings("patterns")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("mqQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "The core difference between synchronous request/response and asynchronous messaging is…",
+      options: [
+        { text: "Sync blocks the caller until a reply; async hands a message to a broker and moves on immediately", correct: true },
+        { text: "Async is always faster end-to-end than sync", correct: false },
+        { text: "Sync uses UDP, async uses TCP", correct: false },
+        { text: "Async requires the producer and consumer to be alive at the same instant", correct: false },
+      ] },
+
+    { prompt: "'Load levelling' by a queue means…",
+      options: [
+        { text: "the queue absorbs bursts so the consumer can be sized for average load, not peak load", correct: true },
+        { text: "every consumer is given exactly the same number of messages", correct: false },
+        { text: "the producer and consumer are forced to run at the same speed", correct: false },
+        { text: "messages are compressed to level out bandwidth", correct: false },
+      ] },
+
+    { prompt: "'Decoupling in time' provided by a queue means…",
+      options: [
+        { text: "the consumer can be down (crashed or redeploying); messages wait safely until it returns", correct: true },
+        { text: "messages are delivered at precisely scheduled times", correct: false },
+        { text: "the producer and consumer clocks are synchronised", correct: false },
+        { text: "old messages automatically expire after one second", correct: false },
+      ] },
+
+    { prompt: "In a point-to-point WORK QUEUE with competing consumers, each message goes to…",
+      options: [
+        { text: "exactly one of the consumers", correct: true },
+        { text: "every consumer attached to the queue", correct: false },
+        { text: "a random subset of half the consumers", correct: false },
+        { text: "no consumer until an admin approves it", correct: false },
+      ] },
+
+    { prompt: "In PUBLISH/SUBSCRIBE, when a producer publishes to a topic…",
+      options: [
+        { text: "every subscriber receives its own copy of the message (fan-out)", correct: true },
+        { text: "exactly one subscriber wins the message", correct: false },
+        { text: "the message is stored but never delivered", correct: false },
+        { text: "only the fastest subscriber gets it", correct: false },
+      ] },
+
+    { prompt: "An 'order placed' event that must reach the warehouse, the email service, and analytics all at once is a job for…",
+      options: [
+        { text: "publish/subscribe (a topic, fan-out to many subscribers)", correct: true },
+        { text: "a point-to-point work queue (one consumer wins)", correct: false },
+        { text: "a synchronous RPC call", correct: false },
+        { text: "a dead-letter queue", correct: false },
+      ] },
+
+    { prompt: "Why do brokers use acknowledgements (acks) before deleting a message?",
+      options: [
+        { text: "So a consumer that crashes mid-task doesn't lose the message — it is redelivered until acked", correct: true },
+        { text: "To compress the message before storing it", correct: false },
+        { text: "To guarantee messages are delivered in strict global order", correct: false },
+        { text: "To encrypt the message on the wire", correct: false },
+      ] },
+
+    { prompt: "Acks-and-redelivery give which delivery guarantee, and what does it demand of consumers?",
+      options: [
+        { text: "At-least-once — so consumers must be idempotent because duplicates will happen", correct: true },
+        { text: "At-most-once — so consumers may safely assume no duplicates ever", correct: false },
+        { text: "Exactly-once by the transport alone — so idempotency is unnecessary", correct: false },
+        { text: "No guarantee — messages are delivered on a best-effort basis only", correct: false },
+      ] },
+
+    { prompt: "What is a dead-letter queue (DLQ)?",
+      options: [
+        { text: "A holding pen for messages that repeatedly fail, so one poison message can't block the queue forever", correct: true },
+        { text: "A queue that only accepts messages at night", correct: false },
+        { text: "The backup copy of every message ever sent", correct: false },
+        { text: "A queue for messages whose consumer has the highest priority", correct: false },
+      ] },
+
+    { prompt: "How do systems reconcile message ORDERING with parallel throughput?",
+      options: [
+        { text: "Partition by a key — order is guaranteed within a partition, and different partitions run in parallel", correct: true },
+        { text: "Use a single consumer forever so global order is always preserved", correct: false },
+        { text: "Deliver messages in random order and sort them on the client", correct: false },
+        { text: "Ordering and throughput never conflict, so no tradeoff is needed", correct: false },
+      ] },
+
+    { prompt: "How does Kafka differ from a classic broker like RabbitMQ?",
+      options: [
+        { text: "Kafka is an append-only partitioned log; messages are kept and replayable via consumer offsets, not deleted on read", correct: true },
+        { text: "Kafka deletes each message the instant it is acknowledged, unlike RabbitMQ", correct: false },
+        { text: "Kafka cannot have more than one consumer per topic", correct: false },
+        { text: "Kafka is synchronous request/response, RabbitMQ is asynchronous", correct: false },
+      ] },
+
+    { prompt: "In Kafka, a consumer tracks its position in a partition using…",
+      options: [
+        { text: "an offset (a bookmark into the log it advances as it reads)", correct: true },
+        { text: "the message's IP address", correct: false },
+        { text: "a countdown timer that deletes the message", correct: false },
+        { text: "the producer's thread ID", correct: false },
+      ] },
+
+    { prompt: "In the backlog demo, adding a second competing consumer…",
+      options: [
+        { text: "roughly doubled the drain rate, so the same burst cleared in about half the time", correct: true },
+        { text: "had no effect because the producer rate was unchanged", correct: false },
+        { text: "caused every message to be processed twice", correct: false },
+        { text: "made the backlog grow faster", correct: false },
+      ] },
+
+    { prompt: "What happens if arrivals exceed the consumer's capacity for a SUSTAINED period?",
+      options: [
+        { text: "The backlog grows without bound — latency and memory/disk blow up; a queue can't hide a real capacity shortfall", correct: true },
+        { text: "The queue automatically speeds up the consumer to match", correct: false },
+        { text: "Nothing — a queue can absorb any load indefinitely", correct: false },
+        { text: "The producer is automatically paused by TCP", correct: false },
+      ] },
+
+    { prompt: "Why is a queue's DEPTH worth monitoring as a first-class health metric?",
+      options: [
+        { text: "A depth that trends up and never comes back down signals overload no queue can absorb", correct: true },
+        { text: "Because deep queues automatically become dead-letter queues", correct: false },
+        { text: "Because depth determines the encryption strength", correct: false },
+        { text: "Because a deeper queue is always faster", correct: false },
+      ] },
+
+    { prompt: "'Exactly-once' as offered by real systems like Kafka actually means…",
+      options: [
+        { text: "exactly-once processing (at-least-once delivery + dedup/transactions), not literally exactly-once delivery", correct: true },
+        { text: "the transport guarantees a message is physically delivered exactly one time", correct: false },
+        { text: "consumers no longer need to be idempotent at all", correct: false },
+        { text: "each message is delivered to exactly one subscriber in a topic", correct: false },
+      ] },
+  ]);
+</script>

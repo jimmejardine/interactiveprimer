@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Peephole Optimization</primer-title>
+
+    <primer-card>
+      <p>
+        Code straight out of a
+        <primer-ref to="computer-science/compiler-design/codegen/a-simple-code-generator">simple code generator</primer-ref>
+        is correct but naïve. It stores a value it just loaded; it multiplies by two the long way; it jumps
+        to a label that only jumps somewhere else. Each blemish is <em>tiny and local</em> — and that is
+        exactly what makes it easy to fix. <strong>Peephole optimization</strong> slides a small window — a
+        "peephole" of two or three instructions — along the generated code and, wherever the window matches
+        a known-wasteful pattern, rewrites it into something cheaper.
+      </p>
+      <p>
+        The whole method is a set of <strong>local rewrite rules</strong> plus one crucial control loop:
+        keep sweeping until nothing changes — a <strong>fixed point</strong>. It is the compiler's cleanup
+        crew: cheap, dumb, and remarkably effective, catching the leftover clumsiness that global
+        optimizations don't bother with and that the code generator couldn't see one statement at a time.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A sliding window over the code</h2>
+      <p>
+        Picture the generated instructions in a column and a little frame covering a couple of them at a
+        time. At each position the optimizer asks: "does what I can see match a rule?" If so, it rewrites;
+        then it slides on. Reveal the sweep — each stop finds a different idiom to fix:
+      </p>
+      <primer-geometry scene="peepWindow"></primer-geometry>
+      <p>
+        Every rewrite is justified purely by what is <em>inside</em> the window — no global analysis, no
+        dataflow — which is what keeps peephole optimization fast and simple. The power comes not from any
+        single clever rule but from having many small ones and applying them relentlessly.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The classic rule families</h2>
+      <p>
+        Peephole rules cluster into a handful of recurring categories. A representative rule from each:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Category</th><th>Before</th><th>After</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Redundant load/store</td><td><code>LD R1, x</code> ; <code>ST x, R1</code></td><td><code>LD R1, x</code></td></tr>
+            <tr><td>Algebraic identity</td><td><code>ADD R2, R2, 0</code></td><td><em>(deleted)</em></td></tr>
+            <tr><td>Strength reduction</td><td><code>MUL R3, R3, 2</code></td><td><code>SHL R3, R3, 1</code></td></tr>
+            <tr><td>Constant folding</td><td><code>ADD R5, 2, 3</code></td><td><code>LD R5, 5</code></td></tr>
+            <tr><td>Dead / useless code</td><td><code>MOV R4, R4</code></td><td><em>(deleted)</em></td></tr>
+            <tr><td>Jump-to-jump (control flow)</td><td><code>goto L1</code> ; … ; <code>L1: goto L2</code></td><td><code>goto L2</code></td></tr>
+            <tr><td>Machine idiom</td><td><code>SUB R6, R6, R6</code></td><td><code>XOR R6, R6, R6</code></td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        <strong>Redundant load/store</strong> deletes a store whose value provably already sits in the
+        register. <strong>Algebraic identities</strong> (<primer-math>x+0</primer-math>,
+        <primer-math>x\times 1</primer-math>) and <strong>strength reduction</strong>
+        (<primer-math>x\times 2 \Rightarrow x \ll 1</primer-math>, <primer-math>x\div 8 \Rightarrow x \gg
+        3</primer-math>) replace an expensive operation with a cheaper equivalent.
+        <strong>Constant folding</strong> evaluates compile-time-known arithmetic. <strong>Jump-to-jump</strong>
+        simplification short-circuits chains of branches. And <strong>machine idioms</strong> swap a generic
+        instruction for the target's preferred fast form (clearing a register with <code>XOR R,R,R</code> is
+        a genuine x86 idiom). None of them needs to understand the program — only the window.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why you must sweep to a fixed point</h2>
+      <p>
+        The single most important property of peephole optimization is that <strong>one rewrite can enable
+        another</strong>. Delete an <primer-math>x+0</primer-math> that sat between a load and a store, and
+        suddenly the load and store are <em>adjacent</em> — exposing a redundant-store pattern that was
+        invisible before. So a single pass is never enough: you must run passes <strong>repeatedly until a
+        whole sweep makes no change</strong>. Because each rewrite makes the code strictly smaller or
+        cheaper by some measure, the process is guaranteed to terminate.
+      </p>
+      <primer-code>
+        repeat:
+            changed ← false
+            slide the window across the whole instruction list:
+                if the window matches a rewrite rule:
+                    apply the rewrite;  changed ← true
+        until not changed          // fixed point: a full pass changed nothing
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>A peephole optimizer you can run</h2>
+      <p>
+        The optimizer below carries a few rules — redundant store, add/sub of zero, multiply-by-two, useless
+        move, and jump-to-jump — and sweeps to a fixed point. The input is deliberately arranged so that
+        deleting an <code>ADD …, 0</code> in the first pass makes a load and store adjacent, which the
+        <em>second</em> pass then collapses — the enabling cascade in action:
+      </p>
+      <primer-code run>
+        function isLabel(s: string): boolean { return /^\w+:/.test(s); }
+
+        // One sweep of the window. Returns the new code and whether anything changed.
+        function pass(code: string[]): { code: string[]; changed: boolean } {
+          const out: string[] = [];
+          let changed = false;
+          for (let i = 0; i &lt; code.length; i++) {
+            const cur = code[i], nxt = code[i + 1] ?? "";
+
+            // Redundant store after load: LD Rn, m ; ST m, Rn  ->  keep the load, drop the store.
+            const ld = cur.match(/^LD (R\d+), (\w+)$/);
+            if (ld &amp;&amp; nxt === `ST ${ld[2]}, ${ld[1]}`) { out.push(cur); i++; changed = true; continue; }
+
+            // Algebraic identity: ADD/SUB Rn, Rn, 0  ->  delete.
+            if (/^(?:ADD|SUB) (R\d+), \1, 0$/.test(cur)) { changed = true; continue; }
+
+            // Strength reduction: MUL Rn, Rm, 2  ->  SHL Rn, Rm, 1.
+            const mul = cur.match(/^MUL (R\d+), (R\d+), 2$/);
+            if (mul) { out.push(`SHL ${mul[1]}, ${mul[2]}, 1`); changed = true; continue; }
+
+            // Useless move: MOV Rn, Rn  ->  delete.
+            if (/^MOV (R\d+), \1$/.test(cur)) { changed = true; continue; }
+
+            // Jump-to-jump: goto L, where "L: goto M" exists  ->  goto M.
+            const g = cur.match(/^goto (\w+)$/);
+            if (g) {
+              const tgt = code.find((s) =&gt; s.startsWith(g[1] + ":"));
+              const gm = tgt?.match(/^\w+: goto (\w+)$/);
+              if (gm) { out.push(`goto ${gm[1]}`); changed = true; continue; }
+            }
+
+            out.push(cur); // no rule fired: keep the instruction (and never delete across a label)
+          }
+          return { code: out, changed };
+        }
+
+        let code = [
+          "LD R1, x",
+          "ADD R9, R9, 0",   // identity — deleting it makes LD and ST adjacent
+          "ST x, R1",        // redundant store, but not yet adjacent to the LD
+          "MUL R3, R3, 2",   // strength reduction
+          "MOV R4, R4",      // useless move
+          "goto L1",         // jump-to-jump
+          "L1: goto L2",
+        ];
+
+        let n = 0, changed = true;
+        while (changed &amp;&amp; n &lt; 10) {
+          const r = pass(code); code = r.code; changed = r.changed; n++;
+          console.log(`--- after pass ${n} ---`);
+          code.forEach((l) =&gt; console.log("  " + l));
+        }
+        console.log(`reached a fixed point after ${n} passes`);
+      </primer-code>
+      <p>
+        Pass 1 folds four idioms at once but cannot yet touch the store; pass 2 collapses the now-adjacent
+        load/store; pass 3 finds nothing and the sweep halts. That "run again because a rewrite opened a new
+        opportunity" is the entire discipline of peephole optimization.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Peephole across basic blocks — can the window jump a branch?">
+      <p>
+        Classic peephole optimizers work on a linear window and stop at block boundaries, but the idea
+        generalises. <strong>Superoptimizers</strong> take the peephole concept to its logical extreme:
+        given a short instruction sequence, search <em>all</em> possible shorter sequences and keep any that
+        is provably equivalent — finding rewrites no human rule-writer anticipated. Peephole rules can also
+        be <em>learned</em> or verified with an SMT solver to guarantee each rewrite preserves semantics on
+        every input. But the humble sliding-window optimizer with a hand-written rule set remains a fixture
+        of every back end precisely because it is so cheap and catches so much of the low-hanging fruit that
+        earlier phases leave behind.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Respect labels and branch targets — and keep sweeping">
+      <p>
+        The dangerous peephole bug is rewriting across a <strong>label</strong>. If some instruction inside
+        your window is the target of a jump from elsewhere, control can enter the window <em>in the
+        middle</em> — so a rule that assumes the window runs top-to-bottom (like "delete this store because
+        the value is still in the register") is simply <strong>wrong</strong>: a branch might reach the
+        store without ever executing the load. Never delete or merge instructions across a label unless you
+        have confirmed nothing branches into the region. This is the peephole echo of the
+        <primer-ref soft to="computer-science/compiler-design/codegen/basic-blocks-and-flow-graphs">basic-block</primer-ref>
+        idea — a window that spans a label is no longer single-entry.
+      </p>
+      <p>
+        The second discipline is <strong>iteration</strong>. Because rewrites enable one another, a single
+        pass leaves easy wins on the table. Always loop to a fixed point — but bound the loop (each rewrite
+        must make measurable progress) so a badly-written pair of rules that undo each other can't spin
+        forever.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: window / rule families / fixed point / label safety + small variable-driven strength-reduction. Bank of 12, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "peepQuiz@1": {
+          "intro": "Peephole optimization slides a small window over generated code, applying local rewrite rules to a fixed point. Numbers change every attempt.",
+          "whatQ": "Peephole optimization works by…",
+          "wtWindow": "sliding a small window over the code and applying local rewrite rules",
+          "wtGlobal": "solving a global dataflow problem over the whole program",
+          "wtParse": "re-parsing the source",
+          "wtReg": "allocating registers",
+          "sizeQ": "The 'peephole' (window) typically spans…",
+          "szFew": "a few adjacent instructions (two or three)",
+          "szWhole": "the entire program",
+          "szBlockAll": "every basic block at once",
+          "szOne": "always exactly one instruction",
+          "redQ": "The rule 'LD R1, x ; ST x, R1  ->  LD R1, x' is an example of…",
+          "rdStore": "redundant load/store elimination",
+          "rdStrength": "strength reduction",
+          "rdConst": "constant folding",
+          "rdJump": "jump-to-jump simplification",
+          "strQ": "Rewriting 'MUL R, R, 2' as 'SHL R, R, 1' is…",
+          "stStrength": "strength reduction — replacing an op with a cheaper equivalent",
+          "stDead": "dead-code elimination",
+          "stFold": "constant folding",
+          "stIdent": "an algebraic identity that deletes the instruction",
+          "identQ": "Deleting 'ADD R, R, 0' entirely uses…",
+          "idAlg": "an algebraic identity (x + 0 = x)",
+          "idStrength": "strength reduction",
+          "idJump": "jump-to-jump",
+          "idIdiom": "a machine idiom",
+          "foldQ": "Turning 'ADD R5, 2, 3' into 'LD R5, 5' is…",
+          "fdFold": "constant folding",
+          "fdStrength": "strength reduction",
+          "fdDead": "dead-code elimination",
+          "fdRed": "redundant load elimination",
+          "jumpQ": "Rewriting 'goto L1' where 'L1: goto L2' into 'goto L2' is…",
+          "jpJump": "jump-to-jump (control-flow) simplification",
+          "jpFold": "constant folding",
+          "jpStrength": "strength reduction",
+          "jpIdent": "an algebraic identity",
+          "fixQ": "Why must peephole passes be repeated to a fixed point?",
+          "fxEnable": "one rewrite can expose a new pattern that another rule can then simplify",
+          "fxSlow": "the CPU is slow",
+          "fxRandom": "rewrites are applied at random",
+          "fxNever": "they need not be — one pass is always enough",
+          "labelQ": "What must a peephole rewrite NEVER do?",
+          "lbLabel": "delete or merge instructions across a label that may be a branch target",
+          "lbReg": "use registers",
+          "lbConst": "fold constants",
+          "lbShift": "use shift instructions",
+          "termQ": "Peephole optimization is guaranteed to terminate because…",
+          "tmProgress": "each rewrite makes the code strictly smaller/cheaper, and the loop is bounded",
+          "tmLuck": "it just usually does",
+          "tmInput": "the input is finite length only",
+          "tmNo": "it is not guaranteed to terminate",
+          "shiftQ": "Strength reduction turns 'MUL R, R, ${p}' (a power of two) into 'SHL R, R, s'. If $2^s = {p}$, what is the shift amount $s$?",
+          "divQ": "Dividing by $2^{k}$ where $k = {k}$ becomes a right shift 'SHR R, R, s'. What is s?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="peepQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/codegen/a-simple-code-generator"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Peephole toolkit: left-aligned instruction rows + a dashed sliding window with a note.
+  function peepTools(board, colors) {
+    const row = (y, text, col) =>
+      board.create("text", [-5, y, text], {
+        anchorX: "left", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+        strokeColor: col, color: col, cssStyle: "font-family: monospace",
+      });
+    const windowBox = (yLo, yHi, col, note) => {
+      board.create("polygon", [[-5.5, yLo], [1.7, yLo], [1.7, yHi], [-5.5, yHi]], {
+        borders: { strokeColor: col, strokeWidth: 2, dash: 2 },
+        vertices: { visible: false }, fillColor: col, fillOpacity: 0.1,
+        fixed: true, highlight: false, withLabel: false,
+      });
+      board.create("text", [2.2, (yLo + yHi) / 2, note], {
+        anchorX: "left", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    };
+    return { row, windowBox };
+  }
+
+  registerGeometryScene("peepWindow", ({ board, step, colors }) => {
+    const T = peepTools(board, colors);
+    // Base content: the generated instruction listing, always visible.
+    T.row(4, "LD  R1, x", colors.ink);
+    T.row(3, "ST  x, R1", colors.ink);
+    T.row(2, "ADD R2, R2, 0", colors.ink);
+    T.row(1, "MUL R3, R3, 2", colors.ink);
+    T.row(0, "goto L1", colors.ink);
+    T.row(-1, "L1: goto L2", colors.ink);
+
+    step("Window over the load/store pair: the value is already in R1 → delete the redundant ST.", () => {
+      T.windowBox(2.6, 4.4, colors.cat[0], "redundant store → delete");
+    });
+    step("Slide down: x + 0 is an identity → delete the instruction.", () => {
+      T.windowBox(1.6, 2.4, colors.cat[1], "x + 0 → delete");
+    });
+    step("Slide again: ×2 is strength-reducible → SHL R3, R3, 1.", () => {
+      T.windowBox(0.6, 1.4, colors.cat[2], "×2 → SHL R3,R3,1");
+    });
+    step("Over the branch pair: goto L1 where L1 just jumps to L2 → goto L2.", () => {
+      T.windowBox(-1.4, 0.4, colors.cat[3], "jump-to-jump → goto L2");
+    });
+  }, { boundingbox: [-6, 5.2, 8, -2.2], keepAspect: false, title: "The peephole sliding over generated code" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("peepQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("whatQ"),
+      options: [
+        { text: () => sceneStrings("wtWindow"), correct: true },
+        { text: () => sceneStrings("wtGlobal"), correct: false },
+        { text: () => sceneStrings("wtParse"), correct: false },
+        { text: () => sceneStrings("wtReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sizeQ"),
+      options: [
+        { text: () => sceneStrings("szFew"), correct: true },
+        { text: () => sceneStrings("szWhole"), correct: false },
+        { text: () => sceneStrings("szBlockAll"), correct: false },
+        { text: () => sceneStrings("szOne"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("redQ"),
+      options: [
+        { text: () => sceneStrings("rdStore"), correct: true },
+        { text: () => sceneStrings("rdStrength"), correct: false },
+        { text: () => sceneStrings("rdConst"), correct: false },
+        { text: () => sceneStrings("rdJump"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("strQ"),
+      options: [
+        { text: () => sceneStrings("stStrength"), correct: true },
+        { text: () => sceneStrings("stDead"), correct: false },
+        { text: () => sceneStrings("stFold"), correct: false },
+        { text: () => sceneStrings("stIdent"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("identQ"),
+      options: [
+        { text: () => sceneStrings("idAlg"), correct: true },
+        { text: () => sceneStrings("idStrength"), correct: false },
+        { text: () => sceneStrings("idJump"), correct: false },
+        { text: () => sceneStrings("idIdiom"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("foldQ"),
+      options: [
+        { text: () => sceneStrings("fdFold"), correct: true },
+        { text: () => sceneStrings("fdStrength"), correct: false },
+        { text: () => sceneStrings("fdDead"), correct: false },
+        { text: () => sceneStrings("fdRed"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("jumpQ"),
+      options: [
+        { text: () => sceneStrings("jpJump"), correct: true },
+        { text: () => sceneStrings("jpFold"), correct: false },
+        { text: () => sceneStrings("jpStrength"), correct: false },
+        { text: () => sceneStrings("jpIdent"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fixQ"),
+      options: [
+        { text: () => sceneStrings("fxEnable"), correct: true },
+        { text: () => sceneStrings("fxSlow"), correct: false },
+        { text: () => sceneStrings("fxRandom"), correct: false },
+        { text: () => sceneStrings("fxNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("labelQ"),
+      options: [
+        { text: () => sceneStrings("lbLabel"), correct: true },
+        { text: () => sceneStrings("lbReg"), correct: false },
+        { text: () => sceneStrings("lbConst"), correct: false },
+        { text: () => sceneStrings("lbShift"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("termQ"),
+      options: [
+        { text: () => sceneStrings("tmProgress"), correct: true },
+        { text: () => sceneStrings("tmLuck"), correct: false },
+        { text: () => sceneStrings("tmInput"), correct: false },
+        { text: () => sceneStrings("tmNo"), correct: false },
+      ],
+    },
+    {
+      // MUL by p = 2^s becomes SHL by s. p in {2,4,8,16,32} -> s = log2(p).
+      prompt: (v) => sceneStrings("shiftQ", v),
+      variables: "p=[2,4,8,16,32]",
+      answer: (v) => Math.round(Math.log2(v.p)),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Dividing by 2^k is a right shift by k.
+      prompt: (v) => sceneStrings("divQ", v),
+      variables: "k=[1:8]",
+      answer: (v) => v.k,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

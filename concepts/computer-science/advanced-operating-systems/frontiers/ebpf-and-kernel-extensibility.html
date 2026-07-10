@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>eBPF and Kernel Extensibility</primer-title>
+
+    <primer-card>
+      <p>
+        Here is a wish that has haunted operating systems since the beginning: <em>I want to add my own code to
+        the running kernel — a new packet filter, a custom tracer, a security check — without rebooting, and
+        without the machine crashing if I get it wrong.</em> The kernel is the most privileged, most trusted code
+        on the machine; it runs in
+        <primer-ref to="computer-science/advanced-operating-systems/kernel/the-system-call-interface">ring 0</primer-ref>
+        with no seatbelt. Historically your only options were both bad: rebuild the kernel from source (slow,
+        static), or load a <strong>kernel module</strong> — native code injected straight into the kernel's
+        address space, where a single stray pointer takes down the whole machine.
+      </p>
+      <p>
+        <strong>eBPF</strong> (the "extended Berkeley Packet Filter") is the modern answer, and it is one of the
+        most quietly revolutionary things to happen to Linux in a decade. The trick is audacious: let users ship
+        code <em>into</em> the kernel, but first <strong>prove — statically, before it ever runs — that the code
+        cannot crash the kernel, cannot loop forever, and cannot touch memory it shouldn't.</strong> A program
+        that fails the proof is simply rejected at load time. Code that passes runs at native speed, JIT-compiled,
+        stitched onto a hook deep in the kernel. This lesson is about how that bargain works and why it changed
+        systems programming.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The old bargain: power you could not survive</h2>
+      <p>
+        A traditional <strong>loadable kernel module</strong> (a Linux <primer-math>\texttt{.ko}</primer-math>
+        file) is compiled native code that <primer-math>\texttt{insmod}</primer-math> drops directly into kernel
+        space. It is maximally powerful — it can do <em>anything</em> the kernel can — and that is exactly the
+        problem. There is no sandbox. A null dereference in your module is a null dereference in the kernel: a
+        kernel panic, a frozen machine, possibly corrupted data on disk. Writing one correctly demands deep
+        expertise, and even experts ship bugs. You would never let an <em>application</em> developer, let alone an
+        end user, load one on a production fleet.
+      </p>
+      <p>
+        So the field lived with a painful trade-off. If you wanted to observe or extend kernel behaviour, you
+        either paid the cost of crossing into user space for every event (slow), or you accepted the terrifying
+        risk of native kernel code (dangerous). eBPF dissolves the trade-off by adding a third thing between the
+        two: a <strong>restricted, verifiable execution environment inside the kernel</strong>.
+      </p>
+      <primer-theorem name="The eBPF bargain">
+        <ul>
+          <li><strong>A tiny in-kernel virtual machine.</strong> eBPF programs are bytecode for a small RISC-like
+            VM with ~11 registers and a fixed instruction set — not arbitrary native code.</li>
+          <li><strong>A static verifier gates every load.</strong> Before a program runs, the kernel walks all of
+            its execution paths and <em>proves</em> it terminates and only touches memory it is allowed to. No
+            proof, no load.</li>
+          <li><strong>Then JIT to native speed.</strong> A verified program is compiled to native machine code, so
+            it runs as fast as a module — the safety cost is paid once, at load time, not per instruction.</li>
+          <li><strong>Attached to hooks.</strong> The verified program is hung on a specific kernel event —
+            a syscall entry, a tracepoint, a network receive path, a scheduler event — and fires there.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Strings for the verify -> JIT -> attach pipeline figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "pipe": {
+          "title": "The eBPF pipeline: source compiles to bytecode, the verifier proves it safe, the JIT makes it fast, then it attaches to a kernel hook",
+          "srcLab": "USER SPACE",
+          "kernLab": "KERNEL",
+          "src": "eBPF C / bpftrace\ncompiled to BPF bytecode",
+          "load": "bpf() syscall\nloads the bytecode",
+          "verify": "VERIFIER\nprove: terminates,\nmemory-safe, bounded",
+          "jit": "JIT COMPILER\nbytecode -> native",
+          "attach": "ATTACH to hook\nkprobe / tracepoint /\nXDP / socket / sched",
+          "reject": "REJECTED\n(loop, bad pointer,\nunbounded) -> no load",
+          "event": "kernel event fires\n-> program runs at\nnative speed",
+          "arrowLoad": "load",
+          "arrowOk": "proof holds",
+          "arrowBad": "proof fails",
+          "arrowFire": "on event"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The pipeline: verify, then JIT, then attach</h2>
+      <p>
+        Follow a program from your editor to a live kernel hook. You write it in a restricted C (or a one-liner in
+        <primer-math>\texttt{bpftrace}</primer-math>), compile it to BPF bytecode, and hand it to the kernel via
+        the <primer-math>\texttt{bpf()}</primer-math> system call. The <strong>verifier</strong> is the gate: it
+        performs a symbolic walk of every path through your program's control-flow graph, tracking the possible
+        range of every register, and rejects anything it cannot <em>prove</em> safe. Only then does the JIT turn
+        the bytecode into native code and the loader attach it to a hook.
+      </p>
+      <primer-geometry scene="pipe"></primer-geometry>
+      <p>
+        Notice where the cost lands. All the checking happens <em>once</em>, at load — the hot path (the program
+        firing on every packet or every syscall) is native code with no runtime safety tax. That is the whole
+        point: <strong>move the safety check out of the hot path and into a one-time proof.</strong>
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What the verifier actually proves</h2>
+      <p>
+        The verifier is not magic and it is not a general theorem prover — it is a deliberately <em>conservative</em>
+        static analysis, and understanding its rules explains why eBPF programs look the way they do:
+      </p>
+      <ul>
+        <li><strong>Termination.</strong> Historically, no backward jumps at all — the program had to be a DAG, so
+          it provably halts. Modern kernels allow <strong>bounded loops</strong> the verifier can prove finite
+          (an unbounded <primer-math>\texttt{while(1)}</primer-math> is still rejected). This is why there is a
+          hard cap on total instructions checked (originally 4096, now up to ~1 million).</li>
+        <li><strong>Memory safety.</strong> Every pointer access must be provably in-bounds. Before you read a
+          network packet byte you must first compare against the packet-end pointer; the verifier tracks that you
+          did, and rejects the access otherwise. You cannot fabricate a pointer from an integer.</li>
+        <li><strong>Restricted capability.</strong> A program may only call a fixed allow-list of
+          <strong>helper functions</strong> the kernel exposes (look up a map entry, read a timestamp, redirect a
+          packet). It cannot call arbitrary kernel functions.</li>
+      </ul>
+      <p>
+        The escape hatch for keeping state and talking to user space is <strong>BPF maps</strong>: kernel-resident
+        key/value tables that a program reads and writes, and that a user-space process can also read. That is how
+        a tracer accumulates a histogram in the kernel and your terminal prints it.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A verifier, in miniature</h2>
+      <p>
+        The real verifier is thousands of lines of careful range-tracking. But its <em>spirit</em> is easy to
+        model: reject unbounded loops, reject out-of-bounds memory, reject disallowed calls; accept everything
+        else. The simulation runs three candidate programs through a toy verifier and shows which load and which
+        bounce.
+      </p>
+      <primer-code run>
+        // A toy eBPF verifier. Each "program" is a list of ops. The verifier proves:
+        //  (1) no unbounded loop, (2) every memory access is in-bounds, (3) only allowed helpers are called.
+        type Op =
+          | { kind: "load"; offset: number }         // read packet[offset]
+          | { kind: "helper"; name: string }         // call a kernel helper
+          | { kind: "loop"; bounded: boolean };      // a loop the verifier can/can't bound
+
+        const PACKET_LEN = 64;                        // provable packet size
+        const ALLOWED = new Set(["map_lookup", "ktime", "redirect"]);
+
+        function verify(name: string, prog: Op[]): boolean {
+          for (const op of prog) {
+            if (op.kind === "loop" &amp;&amp; !op.bounded) {
+              console.log(`  REJECT ${name}: unbounded loop -> cannot prove termination`);
+              return false;
+            }
+            if (op.kind === "load" &amp;&amp; (op.offset &lt; 0 || op.offset &gt;= PACKET_LEN)) {
+              console.log(`  REJECT ${name}: load at offset ${op.offset} is out of bounds [0,${PACKET_LEN})`);
+              return false;
+            }
+            if (op.kind === "helper" &amp;&amp; !ALLOWED.has(op.name)) {
+              console.log(`  REJECT ${name}: helper "${op.name}" is not on the allow-list`);
+              return false;
+            }
+          }
+          console.log(`  ACCEPT ${name}: proof holds -> JIT and attach`);
+          return true;
+        }
+
+        verify("packet_counter", [{ kind: "load", offset: 12 }, { kind: "helper", name: "map_lookup" }]);
+        verify("spin_forever",   [{ kind: "loop", bounded: false }]);
+        verify("wild_read",      [{ kind: "load", offset: 999 }]);
+        verify("bad_call",       [{ kind: "helper", name: "format_disk" }]);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Where eBPF lives now — three worlds</h2>
+      <p>
+        Once you can safely run code at kernel hooks, whole categories of tooling collapse into it. Three
+        ecosystems dominate:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Domain</th><th>Hook it uses</th><th>Real tools</th><th>What it replaces</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Observability</strong></td><td>kprobes, tracepoints, USDT</td><td><primer-math>\texttt{bpftrace}</primer-math>, <primer-math>\texttt{bcc}</primer-math>, Pixie</td><td>strace/printk hacks; per-event user-space crossings</td></tr>
+            <tr><td><strong>Networking</strong></td><td>XDP (at the driver), tc, sockets</td><td>Cilium, Katran (Facebook LB)</td><td>iptables chains; kernel-bypass complexity</td></tr>
+            <tr><td><strong>Security</strong></td><td>LSM hooks, syscall entry</td><td>Falco, Tetragon, seccomp-bpf</td><td>bolted-on scanners; auditd</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The networking case is the most dramatic. <strong>XDP</strong> (eXpress Data Path) runs your eBPF program
+        in the network driver, on the raw packet, <em>before</em> the kernel even builds its socket buffer — so a
+        DDoS-dropping or load-balancing decision happens at the earliest possible instant, tens of millions of
+        packets per second per core. Facebook's <strong>Katran</strong> load balancer and the
+        <strong>Cilium</strong> project (the default networking layer for much of Kubernetes) are built on exactly
+        this. Meanwhile <primer-math>\texttt{bpftrace}</primer-math> lets you answer questions like "which
+        processes are opening which files, histogram the latency" in a single line, on a live production box, with
+        no reboot and near-zero overhead.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why is it called Berkeley Packet Filter if it does scheduling and security now?">
+      <p>
+        The name is a fossil. In 1992 the original <strong>BPF</strong> was a genuinely small idea from Berkeley:
+        a tiny bytecode language so that <primer-math>\texttt{tcpdump}</primer-math> could push a packet-matching
+        rule <em>into</em> the kernel and avoid copying every packet up to user space just to throw most away.
+        That is "classic BPF" — a packet filter, nothing more. Around 2014, Alexei Starovoitov and Daniel Borkmann
+        rebuilt it as <strong>eBPF</strong>: more registers, 64-bit, maps, helper functions, a real verifier, and
+        crucially the ability to attach to <em>any</em> hook, not just the network. The "packet filter" heritage
+        stuck to the name the way "dialling" stuck to phones. Today eBPF is closer to "a safe, universal, in-kernel
+        scripting runtime" — some people only half-jokingly call it a JavaScript-for-the-kernel — and the acronym
+        is mostly retired; Linux folk just say "BPF".
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Verified safe' means safe-for-the-kernel, not correct or trustworthy">
+      <p>
+        The verifier proves a narrow, precise property: your program will not crash the kernel, loop forever, or
+        read out of bounds. It does <em>not</em> prove your program is <em>correct</em> — a verified tracer can
+        still compute a wrong histogram — and it does <em>not</em> mean the program is harmless. A verified,
+        perfectly "safe" eBPF program with the right privileges can still read sensitive data flowing through the
+        kernel, mislead an admin, or act as a rootkit hiding processes. That is why loading BPF generally requires
+        <primer-math>\texttt{CAP\_BPF}</primer-math>/root, why the verifier itself is a juicy attack surface (a
+        verifier <em>bug</em> that lets an unsafe program slip through is a kernel exploit), and why "unprivileged
+        eBPF" has been progressively locked down. Read "verified" as "cannot corrupt the kernel by construction",
+        not as "audited, correct, and benign".
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Why this is a big deal</h2>
+      <p>
+        Step back and see the shape of it. For fifty years, extending the kernel meant either recompiling it or
+        risking it. eBPF adds a genuinely new option to operating-system design: <strong>a safe, fast, dynamic
+        extension mechanism</strong>, where safety is established by proof rather than by trust or by isolation.
+        It moves Linux part-way toward an idea microkernels chased from the other direction — user-controlled
+        policy without user-controlled crashes — but achieves it <em>inside</em> a monolithic kernel. The next
+        lessons in this module look at other frontiers where the classic OS is being rethought; eBPF is the one
+        that already shipped to billions of machines.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: modules vs eBPF, the verifier's guarantees, the pipeline, maps, XDP/uses, the name. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "ebpfQuiz@1": {
+          "intro": "Kernel modules vs eBPF, what the verifier proves, the verify->JIT->attach pipeline, maps, and real uses.",
+          "moduleQ": "Why is loading a traditional native kernel module dangerous?",
+          "moduleRight": "it runs unsandboxed in kernel space, so a single bad pointer panics the whole machine",
+          "moduleWrong1": "it is written in a scripting language that is too slow",
+          "moduleWrong2": "it always requires a reboot to take effect",
+          "moduleWrong3": "the kernel refuses to run any code it did not compile itself",
+          "coreQ": "What is the core idea that makes eBPF safe?",
+          "coreRight": "a static verifier proves the program terminates and is memory-safe BEFORE it is allowed to run",
+          "coreWrong1": "it runs the program a few times and watches for crashes",
+          "coreWrong2": "it encrypts the program so no one can tamper with it",
+          "coreWrong3": "it runs the program in a separate virtual machine over the network",
+          "vmQ": "eBPF programs execute as…",
+          "vmRight": "bytecode for a small in-kernel virtual machine, JIT-compiled to native code once verified",
+          "vmWrong1": "arbitrary native machine code loaded directly, like a module",
+          "vmWrong2": "interpreted one instruction at a time forever, for safety",
+          "vmWrong3": "a separate user-space process the kernel calls out to",
+          "termQ": "How does the verifier guarantee an eBPF program terminates?",
+          "termRight": "it rejects unbounded loops and caps the number of instructions it will check",
+          "termWrong1": "it kills any program that runs longer than one second",
+          "termWrong2": "it asks the programmer to promise it terminates",
+          "termWrong3": "it does not — eBPF programs may loop forever",
+          "memQ": "Before reading a byte from a network packet, an eBPF program must…",
+          "memRight": "prove the access is in-bounds (e.g. compare against the packet-end pointer) or the verifier rejects it",
+          "memWrong1": "copy the whole packet into user space first",
+          "memWrong2": "acquire a global kernel lock",
+          "memWrong3": "nothing — packet memory is always safe to read",
+          "costQ": "When is the safety cost of eBPF paid?",
+          "costRight": "once, at load time (verification); the running program is native-speed with no per-instruction tax",
+          "costWrong1": "on every single instruction, which is why eBPF is slow",
+          "costWrong2": "never — there is no safety checking at all",
+          "costWrong3": "only when the program crashes",
+          "mapQ": "How does an eBPF program keep state and share data with user space?",
+          "mapRight": "through BPF maps — kernel-resident key/value tables both sides can access",
+          "mapWrong1": "by writing to a file on disk each event",
+          "mapWrong2": "it cannot keep any state at all",
+          "mapWrong3": "by making a system call back into user space per event",
+          "xdpQ": "What makes XDP (eXpress Data Path) fast?",
+          "xdpRight": "the program runs in the driver on the raw packet, before the kernel builds its socket buffer",
+          "xdpWrong1": "it skips the verifier to save time",
+          "xdpWrong2": "it runs the program on the GPU",
+          "xdpWrong3": "it processes packets only after they reach the application",
+          "helperQ": "An eBPF program may call…",
+          "helperRight": "only a fixed allow-list of kernel helper functions, not arbitrary kernel code",
+          "helperWrong1": "any function anywhere in the kernel",
+          "helperWrong2": "any C library function like printf and malloc",
+          "helperWrong3": "no functions at all",
+          "useQ": "Which of these is a real production use of eBPF?",
+          "useRight": "Cilium/Katran networking, bpftrace observability, and Falco/Tetragon security",
+          "useWrong1": "compiling C++ programs faster",
+          "useWrong2": "rendering 3D graphics on the CPU",
+          "useWrong3": "replacing the bootloader",
+          "safeMeanQ": "'The verifier accepted my program' guarantees that it…",
+          "safeMeanRight": "cannot corrupt or crash the kernel — NOT that it is correct or benign",
+          "safeMeanWrong1": "computes the right answer",
+          "safeMeanWrong2": "cannot possibly be malicious",
+          "safeMeanWrong3": "will run faster than a kernel module",
+          "nameQ": "Why is eBPF named after a 'packet filter'?",
+          "nameRight": "it descends from 1992 BPF, a tiny in-kernel language for tcpdump; eBPF generalised it far beyond networking",
+          "nameWrong1": "it can only ever filter network packets",
+          "nameWrong2": "it was invented by a company called Packet Filter Inc.",
+          "nameWrong3": "the verifier filters out bad packets"
+        }
+      }
+    </script>
+
+    <primer-quiz name="ebpfQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/kernel/the-system-call-interface"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The verify -> JIT -> attach pipeline: a user-space source box, the bpf() load arrow into the kernel,
+     the verifier (branching to a reject box or onward), the JIT, the attach hook, and the firing event.
+     Colours from themeColors(); wide block diagram so keepAspect:false. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "pipe",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (cx, cy, w, h, key, ci, op) => {
+        const x0 = cx - w / 2, x1 = cx + w / 2, y0 = cy - h / 2, y1 = cy + h / 2;
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[ci], fillOpacity: op == null ? 0.22 : op,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [cx, cy, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 11.5, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "text-align:center; white-space:pre-line;",
+        });
+      };
+      const arrow = (p1, p2, ci, label, dashed) => {
+        board.create("arrow", [p1, p2], {
+          strokeColor: colors.cat[ci], strokeWidth: 2.5, dash: dashed ? 2 : 0,
+          lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+        });
+        if (label)
+          board.create("text", [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2 + 0.25, label], {
+            strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle",
+            fixed: true, highlight: false,
+          });
+      };
+      const caption = (x, y, text) =>
+        board.create("text", [x, y, text], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:700",
+        });
+
+      // The kernel band as base content, and the two zone labels.
+      board.create("polygon", [[2.4, -0.3], [14.4, -0.3], [14.4, 3.6], [2.4, 3.6]], {
+        fillColor: colors.cat[1], fillOpacity: 0.06,
+        borders: { strokeColor: colors.line, strokeWidth: 1, dash: 2, highlight: false },
+        vertices: { visible: false }, fixed: true, highlight: false,
+      });
+      caption(2.6, 5.5, sceneStrings("srcLab"));
+      caption(8.4, 4.1, sceneStrings("kernLab"));
+
+      step(sceneStrings("src"), () => {
+        box(2.6, 4.7, 3.0, 1.3, "src", 0);
+      });
+      step(sceneStrings("verify"), () => {
+        arrow([2.6, 4.05], [2.6, 2.9], 2, sceneStrings("arrowLoad"), false);
+        box(2.6, 2.2, 3.0, 1.3, "verify", 3);
+      });
+      step(sceneStrings("reject"), () => {
+        arrow([4.1, 2.2], [6.2, 2.2], 1, sceneStrings("arrowBad"), true);
+        box(7.6, 2.2, 2.6, 1.3, "reject", 1, 0.28);
+      });
+      step(sceneStrings("jit"), () => {
+        arrow([2.6, 1.55], [2.6, 0.9], 2, sceneStrings("arrowOk"), false);
+        box(2.6, 0.2, 3.0, 1.1, "jit", 0);
+        arrow([4.1, 0.2], [7.9, 0.2], 2, false);
+      });
+      step(sceneStrings("attach"), () => {
+        box(9.9, 0.2, 3.4, 1.5, "attach", 3);
+        arrow([11.6, 0.2], [13.2, 0.2], 2, sceneStrings("arrowFire"), false);
+        box(14.0, 0.2, 2.4, 1.5, "event", 0);
+      });
+    },
+    {
+      boundingbox: [0.4, 6.0, 15.6, -1.2],
+      keepAspect: false,
+      title: () => makeStrings("pipe")("title"),
+    },
+  );
+
+  registerQuiz("ebpfQuiz@1", ({ sceneStrings }) => {
+    const mc = (q, right, w1, w2, w3) => ({
+      prompt: () => sceneStrings(q),
+      options: [
+        { text: () => sceneStrings(right), correct: true },
+        { text: () => sceneStrings(w1), correct: false },
+        { text: () => sceneStrings(w2), correct: false },
+        { text: () => sceneStrings(w3), correct: false },
+      ],
+    });
+    return [
+      { num_questions: 5, preamble: () => sceneStrings("intro") },
+      mc("moduleQ", "moduleRight", "moduleWrong1", "moduleWrong2", "moduleWrong3"),
+      mc("coreQ", "coreRight", "coreWrong1", "coreWrong2", "coreWrong3"),
+      mc("vmQ", "vmRight", "vmWrong1", "vmWrong2", "vmWrong3"),
+      mc("termQ", "termRight", "termWrong1", "termWrong2", "termWrong3"),
+      mc("memQ", "memRight", "memWrong1", "memWrong2", "memWrong3"),
+      mc("costQ", "costRight", "costWrong1", "costWrong2", "costWrong3"),
+      mc("mapQ", "mapRight", "mapWrong1", "mapWrong2", "mapWrong3"),
+      mc("xdpQ", "xdpRight", "xdpWrong1", "xdpWrong2", "xdpWrong3"),
+      mc("helperQ", "helperRight", "helperWrong1", "helperWrong2", "helperWrong3"),
+      mc("useQ", "useRight", "useWrong1", "useWrong2", "useWrong3"),
+      mc("safeMeanQ", "safeMeanRight", "safeMeanWrong1", "safeMeanWrong2", "safeMeanWrong3"),
+      mc("nameQ", "nameRight", "nameWrong1", "nameWrong2", "nameWrong3"),
+    ];
+  });
+</script>

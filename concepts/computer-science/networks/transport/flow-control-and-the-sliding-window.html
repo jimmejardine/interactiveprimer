@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Flow Control and the Sliding Window</primer-title>
+
+    <primer-card>
+      <p>
+        Picture pouring water from a fire hose into a teacup. The hose is a beefy server on a fast link; the
+        teacup is a tiny IoT sensor, or a phone that's busy and slow to empty its buffer. If the fast sender
+        blasts data as quickly as it can, the slow receiver's buffer <strong>overflows</strong>, and every byte
+        that arrives with nowhere to go is simply dropped — forcing wasteful retransmissions of data the network
+        already carried. The receiver needs a way to say "<em>slow down, I'm full.</em>"
+      </p>
+      <p>
+        That mechanism is <strong>flow control</strong>, and it is one of TCP's quiet essentials. It is a
+        conversation strictly between the two <em>endpoints</em> about the <em>receiver's</em> capacity — and it
+        must not be confused with its famous cousin,
+        <primer-ref todo to="computer-science/networks/transport/tcp-congestion-control">congestion
+        control</primer-ref>, which is about the <em>network's</em> capacity. Same idea (send slower), utterly
+        different problem.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The receive window (rwnd)</h2>
+      <p>
+        Every TCP receiver keeps a buffer for bytes that have arrived but the application hasn't yet read. The
+        amount of <em>free space</em> left in that buffer is the <strong>receive window</strong>,
+        <primer-math>\text{rwnd}</primer-math>. The elegant part: the receiver advertises this number back to
+        the sender in the <strong>window field of every ACK</strong> it sends. There's no separate protocol —
+        flow control piggybacks on the acknowledgements that are flowing anyway.
+      </p>
+      <p>
+        The rule the sender obeys is simple. The amount of <strong>unacknowledged data in flight must never
+        exceed the receiver's advertised window</strong>:
+      </p>
+      <primer-math display>\text{LastByteSent} - \text{LastByteAcked} \;\le\; \text{rwnd}</primer-math>
+      <p>
+        As the receiving application drains its buffer, free space opens up, <primer-math>\text{rwnd}</primer-math>
+        grows, and later ACKs advertise the larger value — permitting the sender to speed back up. As the buffer
+        fills, <primer-math>\text{rwnd}</primer-math> shrinks toward zero, throttling the sender. The receiver
+        is, in effect, continuously handing the sender a permission slip that says exactly how much more it may
+        send.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The sliding window in motion</h2>
+      <p>
+        The "window" is a range of byte-sequence numbers the sender is allowed to have in flight. As ACKs
+        arrive, its <strong>left edge advances</strong> (acknowledged bytes leave the window); as the advertised
+        <primer-math>\text{rwnd}</primer-math> permits, its <strong>right edge advances</strong> (new bytes may
+        be sent). The window <em>slides</em> forward over the byte stream — hence the name. Data conceptually
+        falls into four zones: sent-and-acked, sent-but-unacked (in flight), allowed-to-send-now, and
+        can't-send-yet. The demo animates the window sliding as ACKs come back:
+      </p>
+
+      <primer-code run>
+        // A sliding window over a byte stream. The window may hold up to `rwnd`
+        // unacknowledged bytes; as ACKs arrive its left edge advances, and the
+        // right edge follows so the window stays the advertised size.
+        const stream = 20;      // total bytes to send (labelled 0..19)
+        let rwnd = 6;           // receiver advertises room for 6 bytes
+        let base = 0;           // LastByteAcked + 1: left edge of the window
+        let nextSeq = 0;        // next byte to send
+
+        function draw(justAcked: number | null) {
+          let row = "";
+          for (let b = 0; b &lt; stream; b++) {
+            if (b &lt; base) row += ".";                         // acked, gone
+            else if (b &lt; nextSeq) row += "*";                 // in flight (sent, unacked)
+            else if (b &lt; base + rwnd) row += "_";             // allowed to send now
+            else row += "x";                                   // outside window: can't send yet
+          }
+          const tag = justAcked === null ? "start" : `ACK up to ${justAcked}`;
+          console.log(`[${row}]  base=${base} rwnd=${rwnd}  (${tag})`);
+        }
+
+        console.log("legend: . acked   * in-flight   _ sendable   x blocked\n");
+        draw(null);
+
+        // Send everything the window currently allows.
+        while (nextSeq &lt; base + rwnd &amp;&amp; nextSeq &lt; stream) nextSeq++;
+        draw(null);
+
+        // Receiver ACKs a few bytes at a time; window slides right each time.
+        for (const ackedUpTo of [2, 4, 7, 11, 15, 19]) {
+          base = ackedUpTo + 1;                               // left edge advances
+          while (nextSeq &lt; base + rwnd &amp;&amp; nextSeq &lt; stream) nextSeq++; // fill the window
+          draw(ackedUpTo);
+        }
+        console.log("\nThe window of '_'/'*' slides rightward as ACKs free up space.");
+      </primer-code>
+
+      <p>
+        The effective sending window is actually bounded by <em>two</em> limits at once — the receiver's
+        <primer-math>\text{rwnd}</primer-math> and the network's congestion window
+        <primer-math>\text{cwnd}</primer-math> (from
+        <primer-ref todo to="computer-science/networks/transport/tcp-congestion-control">congestion
+        control</primer-ref>). TCP always respects the smaller of the two:
+      </p>
+      <primer-math display>\text{SendWindow} = \min(\text{cwnd},\ \text{rwnd})</primer-math>
+      <p>
+        Whichever bottleneck is tighter — the <em>receiver</em> being slow, or the <em>network</em> being
+        congested — wins. Flow control sets <primer-math>\text{rwnd}</primer-math>; congestion control sets
+        <primer-math>\text{cwnd}</primer-math>; TCP obeys both.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The zero-window deadlock (and its fix)</h2>
+      <p>
+        Suppose the receiver's buffer fills completely: it advertises <primer-math>\text{rwnd}=0</primer-math>,
+        and the sender dutifully stops. Later, the application reads the buffer, freeing space — so the receiver
+        sends a fresh ACK advertising a bigger window. But what if <em>that ACK is lost?</em> Now we have a
+        classic deadlock: the sender is waiting for a window update that will never arrive, and the receiver
+        thinks it already sent one and is waiting for data. Both sides wait forever.
+      </p>
+
+      <primer-theorem name="The persist timer">
+        <ul>
+          <li>When the sender is blocked by a zero window, it starts a <strong>persist timer</strong>.</li>
+          <li>On expiry, it sends a tiny <strong>window probe</strong> — a segment of one byte — forcing the
+            receiver to reply with a current ACK that re-advertises its window.</li>
+          <li>If the window is truly open now, the probe's ACK reveals it and the sender resumes; if still zero,
+            the sender waits and probes again. The deadlock is impossible.</li>
+        </ul>
+      </primer-theorem>
+
+      <primer-vignette title="Silly window syndrome — and Nagle's algorithm">
+        <p>
+          A related pathology: if a slow receiver frees just <em>one byte</em> at a time and advertises a
+          one-byte window each time, the sender ends up shipping tiny one-byte segments — 40 bytes of header to
+          carry a single byte of data. This is <strong>silly window syndrome</strong>, and TCP fights it from
+          both ends: the <em>receiver</em> refuses to advertise a tiny window until a worthwhile chunk of space
+          is free, and the <em>sender</em> uses <strong>Nagle's algorithm</strong> to coalesce small writes,
+          holding back a tiny segment until either an ACK arrives or enough data accumulates to fill one. Both
+          are about keeping segments efficiently large.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>How big should the window be? The bandwidth-delay product</h2>
+      <p>
+        To keep a link fully utilised, the window must be large enough to hold an entire round trip's worth of
+        data "in the pipe" at once — otherwise the sender stalls waiting for ACKs, exactly the
+        <primer-ref soft to="computer-science/networks/transport/reliable-data-transfer">stop-and-wait
+        problem</primer-ref> in miniature. That target size is the <strong>bandwidth-delay product (BDP)</strong>:
+      </p>
+      <primer-math display>\text{BDP} = \text{bandwidth} \times \text{RTT}</primer-math>
+      <p>
+        Think of the network as a pipe: bandwidth is its cross-sectional area, RTT is its length, so their
+        product is its <em>volume</em> — how many bytes fit inside it in flight. For a 100 Mbps link with a
+        100 ms RTT, that's <primer-math>10^8 \times 0.1 = 10^7</primer-math> bits ≈ 1.25 MB. If the window is
+        smaller than the BDP, you can't fill the pipe and throughput suffers, no matter how fat the link. This
+        is why TCP has a <strong>window scale</strong> option: the plain 16-bit window field maxes out at
+        65535 bytes, far too small for modern "long fat networks," so the option multiplies it up to gigabytes.
+      </p>
+
+      <primer-vignette title="Watch out! — flow control is NOT congestion control">
+        <p>
+          These two are endlessly conflated because both make TCP "send slower," but they solve
+          <em>completely different</em> problems and use different variables:
+        </p>
+        <ul>
+          <li>
+            <strong>Flow control protects the RECEIVER.</strong> It stops a fast sender from overrunning a slow
+            receiver's buffer. Its signal is the explicit <primer-math>\text{rwnd}</primer-math> the receiver
+            advertises. It is a two-party, end-to-end conversation; the network in between is irrelevant to it.
+          </li>
+          <li>
+            <strong>Congestion control protects the NETWORK.</strong> It stops all the senders <em>collectively</em>
+            from overwhelming the routers and links between them. Its signal is <em>implicit</em> — packet loss
+            or delay — and its variable is <primer-math>\text{cwnd}</primer-math>, which TCP computes on its own.
+          </li>
+        </ul>
+        <p>
+          A receiver can advertise a huge <primer-math>\text{rwnd}</primer-math> (plenty of buffer) while the
+          <em>network</em> is badly congested, or a fast, empty network can still be throttled by a slow
+          receiver. That's exactly why the effective window is
+          <primer-math>\min(\text{cwnd}, \text{rwnd})</primer-math> — TCP has to satisfy <em>both</em> guardians
+          at once. Keep them separate in your head and half of TCP's behaviour suddenly makes sense.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "flowQuiz@1": { "instructions": "Check your grasp of flow control: the receive window, the sliding window, min(cwnd, rwnd), the zero-window deadlock and persist timer, the bandwidth-delay product, and the crucial flow-vs-congestion distinction." } }
+    </script>
+    <primer-quiz name="flowQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/networks/transport/tcp-in-depth"],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("flowQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "The problem flow control solves is…",
+      options: [
+        { text: "a fast sender overwhelming a slow receiver's buffer", correct: true },
+        { text: "too many senders overwhelming the network's routers", correct: false },
+        { text: "packets arriving corrupted", correct: false },
+        { text: "sequence numbers running out", correct: false },
+      ] },
+
+    { prompt: "The receive window (rwnd) represents…",
+      options: [
+        { text: "the free space left in the receiver's buffer", correct: true },
+        { text: "the bandwidth of the link", correct: false },
+        { text: "the number of routers on the path", correct: false },
+        { text: "the sender's CPU load", correct: false },
+      ] },
+
+    { prompt: "How does the receiver tell the sender its current rwnd?",
+      options: [
+        { text: "it advertises it in the window field of every ACK", correct: true },
+        { text: "via a separate control connection", correct: false },
+        { text: "by sending a special RST", correct: false },
+        { text: "it doesn't — the sender guesses", correct: false },
+      ] },
+
+    { prompt: "The flow-control rule the sender obeys is…",
+      options: [
+        { text: "LastByteSent − LastByteAcked ≤ rwnd", correct: true },
+        { text: "LastByteSent must always equal rwnd", correct: false },
+        { text: "rwnd must equal the bandwidth", correct: false },
+        { text: "the sender may ignore rwnd if the link is fast", correct: false },
+      ] },
+
+    { prompt: "As the sliding window operates, its left edge advances when…",
+      options: [
+        { text: "ACKs arrive, retiring acknowledged bytes from the window", correct: true },
+        { text: "the sender writes more data", correct: false },
+        { text: "a packet is lost", correct: false },
+        { text: "the RTT increases", correct: false },
+      ] },
+
+    { prompt: "TCP's effective sending window is…",
+      options: [
+        { text: "min(cwnd, rwnd) — the tighter of network and receiver limits", correct: true },
+        { text: "max(cwnd, rwnd)", correct: false },
+        { text: "cwnd + rwnd", correct: false },
+        { text: "always just rwnd", correct: false },
+      ] },
+
+    { prompt: "The zero-window deadlock arises when…",
+      options: [
+        { text: "the receiver frees space and sends a window update, but that ACK is lost", correct: true },
+        { text: "the sender runs out of sequence numbers", correct: false },
+        { text: "the checksum fails repeatedly", correct: false },
+        { text: "the RTT drops to zero", correct: false },
+      ] },
+
+    { prompt: "The persist timer fixes the zero-window deadlock by…",
+      options: [
+        { text: "having the sender send tiny window probes to force a fresh ACK", correct: true },
+        { text: "resetting the whole connection", correct: false },
+        { text: "doubling the congestion window", correct: false },
+        { text: "ignoring the zero window and sending anyway", correct: false },
+      ] },
+
+    { prompt: "Silly window syndrome is…",
+      options: [
+        { text: "shipping tiny segments because the receiver advertises tiny windows", correct: true },
+        { text: "the window growing without bound", correct: false },
+        { text: "a checksum error", correct: false },
+        { text: "losing the SYN during the handshake", correct: false },
+      ] },
+
+    { prompt: "Nagle's algorithm helps by…",
+      options: [
+        { text: "coalescing small writes into fuller segments", correct: true },
+        { text: "encrypting the payload", correct: false },
+        { text: "shrinking the receive buffer", correct: false },
+        { text: "disabling acknowledgements", correct: false },
+      ] },
+
+    { prompt: "The bandwidth-delay product (BDP) is…",
+      options: [
+        { text: "bandwidth × RTT — how many bytes fit 'in the pipe' in flight", correct: true },
+        { text: "bandwidth ÷ RTT", correct: false },
+        { text: "the size of one packet", correct: false },
+        { text: "the number of hops times the packet size", correct: false },
+      ] },
+
+    { prompt: "If the window is smaller than the BDP, then…",
+      options: [
+        { text: "the sender stalls waiting for ACKs and can't fill the pipe — throughput suffers", correct: true },
+        { text: "throughput is unaffected", correct: false },
+        { text: "the link automatically speeds up", correct: false },
+        { text: "flow control is disabled", correct: false },
+      ] },
+
+    { prompt: "TCP's window scale option exists because…",
+      options: [
+        { text: "the 16-bit window field maxes at 65535 bytes, too small for long fat networks", correct: true },
+        { text: "old routers can't read 16-bit fields", correct: false },
+        { text: "it encrypts the window value", correct: false },
+        { text: "congestion control requires it", correct: false },
+      ] },
+
+    { prompt: "Flow control vs congestion control: flow control protects the ___ and congestion control protects the ___.",
+      options: [
+        { text: "receiver; network", correct: true },
+        { text: "network; receiver", correct: false },
+        { text: "sender; receiver", correct: false },
+        { text: "router; sender", correct: false },
+      ] },
+
+    { prompt: "Flow control's signal is explicit (advertised rwnd); congestion control's signal is…",
+      options: [
+        { text: "implicit — inferred from packet loss or delay", correct: true },
+        { text: "also an advertised window field", correct: false },
+        { text: "a message from the router to the sender", correct: false },
+        { text: "the TIME_WAIT duration", correct: false },
+      ] },
+  ]);
+</script>

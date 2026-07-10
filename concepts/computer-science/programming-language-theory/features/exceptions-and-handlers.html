@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Exceptions and Handlers</primer-title>
+
+    <primer-card>
+      <p>
+        Most control flow is polite: a function is called, it computes, it returns, and control resumes right
+        where it left off. Exceptions are the impolite kind. A <code>raise</code> deep inside a call abandons the
+        current computation entirely, tears down the stack frame by frame, and lands at the nearest enclosing
+        <code>handle</code> — possibly many calls up. This <strong>non-local</strong> jump is exactly what you
+        want when something has gone wrong ten layers deep and there is nothing sensible for the intervening
+        layers to do but get out of the way.
+      </p>
+      <p>
+        To model it rigorously we need an operational semantics in which an exception <em>propagates</em>: a rule
+        that says "if a subterm raises, so does the whole term," unwinding until a handler stops it. We also need
+        a typing discipline, and here lies a genuinely surprising design decision — <code>raise e</code> can be
+        given <em>any</em> type at all, because it never returns a value of that type. That single choice is what
+        lets exceptions slot into an otherwise ordinary type system, and it is also why the type system, on its
+        own, tells you nothing about <em>which</em> exceptions a function might throw.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Unwinding the stack</h2>
+      <p>
+        Picture the runtime as a stack of frames, innermost on top. A <code>raise</code> at the top does not
+        return to its caller; instead each frame is <em>discarded</em> in turn — its pending work thrown away —
+        until a frame that installed a <code>handle</code> is reached. That frame catches the exception, binds its
+        payload, and runs the handler body <em>in place of</em> everything that was unwound. Watch the stack
+        collapse:
+      </p>
+      <primer-geometry scene="unwind"></primer-geometry>
+      <p>
+        The crucial word is <em>discarded</em>. When frame <code>g</code> is unwound, any half-finished
+        computation it held — the multiplication it was about to do, the file it was about to close — simply
+        vanishes. (This is why languages add <code>finally</code> / <code>ensure</code> blocks: a hook that runs
+        <em>during</em> unwinding, so cleanup is not skipped.) Control never comes back to a discarded frame;
+        exceptions are <strong>one-shot escapes</strong>, not resumable jumps — an important contrast with the
+        continuations of the next lesson.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Operational semantics: propagate, then catch</h2>
+      <p>
+        The cleanest formulation uses <strong>evaluation contexts</strong> <primer-math>E</primer-math> — a term
+        with a single hole marking where evaluation is currently focused. Two families of rules do everything.
+        First, <em>propagation</em>: a raised exception blows away whatever context surrounds it (unless that
+        context is a handler):
+      </p>
+      <primer-math display>
+        E[\,\mathsf{raise}\ v\,] \longrightarrow \mathsf{raise}\ v
+        \qquad (E \neq \mathsf{handle}\ [\,\cdot\,]\ \mathsf{with}\ h)
+      </primer-math>
+      <p>
+        This single schema <em>is</em> the stack unwinding: each step peels one layer of context off, propagating
+        the <primer-math>\mathsf{raise}\ v</primer-math> outward. Second, the handler rules — one for when the
+        protected term finished normally, one for when it raised:
+      </p>
+      <primer-math display>
+        \mathsf{handle}\ v\ \mathsf{with}\ h \longrightarrow v
+        \qquad\qquad
+        \mathsf{handle}\ (\mathsf{raise}\ v)\ \mathsf{with}\ h \longrightarrow h\ v
+      </primer-math>
+      <p>
+        If the body produced a value <primer-math>v</primer-math>, the handler is discarded and
+        <primer-math>v</primer-math> passes through. If the body raised, the handler <primer-math>h</primer-math>
+        (a function from the exception type to the result type) is applied to the payload
+        <primer-math>v</primer-math>. Notice the handler catches only the <em>first</em> layer: a raise inside the
+        handler itself propagates further out, to the next enclosing <code>handle</code>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Typing: why <code>raise e</code> has <em>any</em> type</h2>
+      <p>
+        Fix a type <primer-math>T_{\mathit{exn}}</primer-math> of exception values (in ML, the extensible
+        <code>exn</code> type). The typing rule for <code>raise</code> is the one that surprises everyone:
+      </p>
+      <primer-math display>
+        \dfrac{\Gamma \vdash e : T_{\mathit{exn}}}{\Gamma \vdash \mathsf{raise}\ e : T}
+      </primer-math>
+      <p>
+        The result type <primer-math>T</primer-math> in the conclusion is <em>completely unconstrained</em> — it
+        appears nowhere in the premise. Why is that sound? Because <code>raise e</code> <strong>never returns a
+        value</strong>: it always diverts control. Progress-and-preservation is happy to hand it whatever type the
+        surrounding context demands, since no value of type <primer-math>T</primer-math> is ever actually
+        produced. This is the same move that types a non-terminating loop or an explicit <code>abort</code> at any
+        type — the "bottom" trick. It lets <code>raise NotFound</code> sit in a branch of an <code>if</code> whose
+        other branch has type <code>int</code>, and the whole <code>if</code> still types as <code>int</code>.
+      </p>
+      <p>
+        The handler pins the type back down. <code>handle</code> demands that the protected body and the
+        handler's output <em>agree</em>, giving the whole expression that common type:
+      </p>
+      <primer-math display>
+        \dfrac{\Gamma \vdash e : T \qquad \Gamma \vdash h : T_{\mathit{exn}} \to T}
+             {\Gamma \vdash \mathsf{handle}\ e\ \mathsf{with}\ h : T}
+      </primer-math>
+      <primer-theorem name="Exceptions and the return type">
+        <ul>
+          <li>
+            The type system tracks only the <strong>normal-return type</strong> <primer-math>T</primer-math>. It
+            says nothing about <em>which</em> exceptions a term may raise — that information is invisible in
+            <primer-math>\Gamma \vdash e : T</primer-math>.
+          </li>
+          <li>
+            Consequently a function of type <primer-math>\mathtt{int} \to \mathtt{int}</primer-math> may still
+            raise; the arrow describes what it returns <em>if</em> it returns normally, not what it might throw
+            instead.
+          </li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Exceptions <em>are</em> a sum type, made control-flow</h2>
+      <p>
+        You can implement exceptions with nothing but the <primer-ref to="computer-science/programming-language-theory/features/algebraic-data-types-and-pattern-matching">algebraic
+        data types</primer-ref> from the previous lesson. Model "a computation that either succeeds with a
+        <primer-math>T</primer-math> or raises an exception <primer-math>x</primer-math>" as the sum
+        <primer-math>T + T_{\mathit{exn}}</primer-math> — a <code>Result</code>. Propagation becomes
+        <em>short-circuiting</em>: once you hit a <code>Raised</code>, you stop and pass it up untouched;
+        <code>handle</code> is a <code>case</code> that turns a <code>Raised</code> back into a normal value. Run
+        this store-free evaluator, which raises on division by zero and shows a handler catching it:
+      </p>
+      <primer-code run>
+        // "Raise as a value": a computation yields Ok(v) or Raised(exn).  T + Exn.
+        type Exn = { kind: "DivByZero" } | { kind: "NotFound"; key: string };
+        type Result =
+          | { tag: "ok"; value: number }
+          | { tag: "raised"; exn: Exn };
+
+        const ok = (n: number): Result =&gt; ({ tag: "ok", value: n });
+        const raise = (e: Exn): Result =&gt; ({ tag: "raised", exn: e });
+
+        // A tiny expression language, with a division that can raise.
+        type Expr =
+          | { tag: "num"; n: number }
+          | { tag: "div"; l: Expr; r: Expr }
+          | { tag: "raise"; exn: Exn }
+          | { tag: "handle"; body: Expr; onExn: (e: Exn) =&gt; Expr };
+
+        function evalExpr(e: Expr): Result {
+          switch (e.tag) {
+            case "num":   return ok(e.n);
+            case "raise": return raise(e.exn);
+            case "div": {
+              const l = evalExpr(e.l);
+              if (l.tag === "raised") return l;          // propagate: short-circuit
+              const r = evalExpr(e.r);
+              if (r.tag === "raised") return r;          // propagate
+              if (r.value === 0) return raise({ kind: "DivByZero" });
+              return ok(Math.trunc(l.value / r.value));
+            }
+            case "handle": {
+              const res = evalExpr(e.body);
+              if (res.tag === "ok") return res;          // handle v with h  =&gt;  v
+              return evalExpr(e.onExn(res.exn));         // handle (raise v) with h  =&gt;  h v
+            }
+          }
+        }
+
+        const num = (n: number): Expr =&gt; ({ tag: "num", n });
+        const div = (l: Expr, r: Expr): Expr =&gt; ({ tag: "div", l, r });
+
+        // 10 / 0  raises, unwinding straight past the pending work...
+        console.log("unhandled:", JSON.stringify(evalExpr(div(num(10), num(0)))));
+
+        // ...but wrapped in a handler that returns -1 on DivByZero, it is caught.
+        const guarded: Expr = {
+          tag: "handle",
+          body: div(num(10), num(0)),
+          onExn: (ex) =&gt; num(ex.kind === "DivByZero" ? -1 : 0),
+        };
+        console.log("handled:  ", JSON.stringify(evalExpr(guarded)));   // { tag: "ok", value: -1 }
+      </primer-code>
+      <p>
+        The three <code>if (…tag === "raised") return …</code> lines are the propagation rule in disguise, and the
+        <code>handle</code> case is precisely the two handler rules. Exceptions add no new <em>data</em> to the
+        language — only a new <em>control discipline</em> over a plain sum type. (Chaining those short-circuits by
+        hand is tedious, which is exactly why languages bake the discipline in — and why the pattern is captured
+        abstractly by the <em>exception monad</em>.)
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Do exceptions have to be one-shot escapes?">
+      <p>
+        No — and one language family thinks they made the wrong default. In Common Lisp's <strong>condition
+        system</strong>, signalling a condition does <em>not</em> immediately unwind the stack. Handlers run
+        <em>while the signalling frame is still alive</em>, and they can choose to <strong>resume</strong> the
+        computation via a <em>restart</em> — patching the problem and continuing from where the error was raised,
+        rather than abandoning everything below the handler. It is strictly more expressive than the
+        raise/catch of ML, C++, Java and Python (all of which unwind first, ask questions never). The modern
+        research direction — <strong>algebraic effects and handlers</strong> — generalises exactly this idea:
+        an "exception" whose handler receives the <em>continuation</em> and may invoke it zero, one, or many
+        times, unifying exceptions, generators, async, and more under one construct. Exceptions, it turns out,
+        are just the special case where the handler ignores the continuation.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out!">
+      <p>
+        The typing rule <primer-math>\Gamma \vdash \mathsf{raise}\ e : T</primer-math> gives a raise
+        <em>any</em> type — which means the type system will <strong>not</strong> warn you about exceptions you
+        forgot to handle. A function typed <code>int → int</code> can throw <code>NotFound</code>, and nothing in
+        that arrow reveals it. Standard ML, OCaml, C++ and (mostly) Python all take this route: exceptions are
+        an <em>unchecked effect</em>. Java famously tried the opposite with <em>checked exceptions</em> in the
+        <code>throws</code> clause — putting the raised-exception set into the type — and the ergonomics were
+        controversial enough that almost no later language copied it. The takeaway: reading a function's type
+        tells you what it returns, never what it might throw. To know that, read the code, the docs, or reach for
+        an effect system.
+      </p>
+      <p>
+        A second, sharper trap: exceptions silently break <strong>equational reasoning</strong>. In a pure
+        language <code>let x = e in x + x</code> equals <code>e + e</code>. With exceptions (and effects) it does
+        not — if <code>e</code> raises, the first form raises once at the <code>let</code>, and substituting
+        <code>e</code> twice changes <em>where</em> and <em>how often</em> the effect happens. Refactorings that
+        are obviously safe in pure code can move, duplicate, or delete a raise.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "unwind": {
+          "title": "raise unwinds the stack to the nearest handler",
+          "main": "main",
+          "handleFrame": "handle … with h",
+          "g": "g  (pending × )",
+          "f": "f  (raise NotFound)",
+          "raiseLbl": "raise NotFound",
+          "discard": "discarded",
+          "caught": "caught here → run h(NotFound)",
+          "s1": "The stack, innermost frame on top: main called handle, which called g, which called f.",
+          "s2": "f raises NotFound. It does NOT return to g.",
+          "s3": "Frames f and g are DISCARDED — their pending work is thrown away.",
+          "s4": "The handle frame catches it: bind the payload and run h(NotFound) in its place.",
+          "cap": "Unwinding discards every frame up to the nearest enclosing handler."
+        }
+      }
+    </script>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "excQuiz@1": {
+          "intro": "Exceptions raise and unwind the stack to the nearest handler. raise has ANY type; the type system does not track which exceptions are thrown. Numbers vary each attempt.",
+          "raiseQ": "When `raise v` is evaluated, what happens to control flow?",
+          "raUnwind": "it abandons the current computation, unwinding frames until an enclosing handler catches it",
+          "raReturn": "it returns v to the immediate caller normally",
+          "raNothing": "nothing; it is a no-op",
+          "raRestart": "it always restarts the program",
+          "typeQ": "What type does the term `raise e` receive?",
+          "tyAny": "ANY type T — it never returns a value, so T is unconstrained",
+          "tyExn": "always the exception type",
+          "tyUnit": "always Unit",
+          "tyBool": "always Bool",
+          "whyAnyQ": "Why is it sound to give `raise e` any type T?",
+          "waNoReturn": "because it never actually returns a value of type T (it diverts control)",
+          "waSlow": "because raising is slow",
+          "waConvention": "it is an arbitrary convention with no justification",
+          "waCoerce": "because T is coerced to Unit at runtime",
+          "handleQ": "The rule `handle (raise v) with h  →  h v` says a handler…",
+          "haApply": "applies the handler function h to the exception payload v",
+          "haIgnore": "ignores the payload and returns unit",
+          "haRethrow": "always re-raises v",
+          "haStack": "duplicates the stack",
+          "handleVQ": "What does `handle v with h` step to when the body already produced a value v?",
+          "hvV": "v — the handler is discarded and v passes through",
+          "hvHv": "h v",
+          "hvUnit": "unit",
+          "hvErr": "an error",
+          "trackQ": "Reading a function's type `int → int`, what does it tell you about exceptions?",
+          "trkNothing": "nothing — the arrow describes the normal return, not which exceptions may be thrown",
+          "trkAll": "the complete set of exceptions it can throw",
+          "trkNone": "that it throws no exceptions",
+          "trkOne": "that it throws exactly one exception",
+          "checkedQ": "Java's 'checked exceptions' differ from ML/OCaml exceptions by…",
+          "chkType": "putting the set of thrown exceptions into the type (the throws clause)",
+          "chkFast": "running faster",
+          "chkResume": "being resumable",
+          "chkNone": "not existing",
+          "sumQ": "Exceptions can be implemented on top of which pure feature?",
+          "smSum": "a sum type (Result = value + exn), with propagation as short-circuiting",
+          "smArray": "a fixed-size array",
+          "smFloat": "floating-point numbers",
+          "smGoto": "an integer counter",
+          "propQ": "In the operational rule E[raise v] → raise v, this schema models…",
+          "prUnwind": "the stack unwinding — each step peels one context layer, propagating the raise outward",
+          "prAlloc": "allocation of a new cell",
+          "prType": "type inference",
+          "prParse": "parsing",
+          "finallyQ": "Why do languages add finally / ensure blocks?",
+          "fnCleanup": "to run cleanup code DURING unwinding, so it is not skipped when a frame is discarded",
+          "fnSpeed": "to make handlers faster",
+          "fnType": "to change the return type",
+          "fnResume": "to resume the raise",
+          "resumeQ": "Are ML/Java/C++ exceptions resumable (can the handler continue from the raise point)?",
+          "reNo": "no — they are one-shot escapes; the unwound frames are gone (unlike Lisp conditions)",
+          "reYes": "yes, always",
+          "reSometimes": "only for arithmetic exceptions",
+          "reNever": "the concept is meaningless",
+          "eqQ": "Why can adding exceptions break equational reasoning like `let x = e in x + x` = `e + e`?",
+          "eqEffect": "if e raises, substituting it twice changes where and how often the effect happens",
+          "eqSpeed": "it slows the program",
+          "eqParse": "it changes parsing",
+          "eqNever": "it never breaks it",
+          "countQ": "A raise passes through ${k} pending stack frames before a handler catches it. How many of those frames are discarded (their pending work thrown away)?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="excQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/programming-language-theory/features/references-and-mutable-state"],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // A call-stack unwinding diagram: a vertical stack of frames, a raise at the top,
+  // frames discarded up to the nearest handler frame which catches.
+  registerGeometryScene(
+    "unwind",
+    ({ board, colors, step, sceneStrings }) => {
+      const frame = (cy, text, ci, dashed = false) => {
+        const w = 4.6, h = 0.95, cx = 0;
+        const corners = [
+          [cx - w / 2, cy - h / 2],
+          [cx + w / 2, cy - h / 2],
+          [cx + w / 2, cy + h / 2],
+          [cx - w / 2, cy + h / 2],
+        ];
+        board.create("polygon", corners, {
+          borders: { strokeColor: colors.line, strokeWidth: 2, dash: dashed ? 2 : 0 },
+          fillColor: colors.cat[ci % colors.cat.length],
+          fillOpacity: dashed ? 0.06 : 0.16, fixed: true, highlight: false,
+          vertices: { visible: false },
+        });
+        board.create("text", [cx, cy, text], {
+          strokeColor: colors.ink, color: colors.ink, fontSize: 13,
+          anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      };
+      const sideLabel = (cy, text, col) =>
+        board.create("text", [3.2, cy, text], {
+          strokeColor: col, color: col, fontSize: 12,
+          anchorX: "start", anchorY: "middle", fixed: true, highlight: false,
+        });
+
+      // y-positions bottom (main) to top (f, innermost).
+      const yMain = -3, yHandle = -1, yG = 1, yF = 3;
+
+      step(sceneStrings("s1"), () => {
+        frame(yMain, sceneStrings("main"), 0);
+        frame(yHandle, sceneStrings("handleFrame"), 2);
+        frame(yG, sceneStrings("g"), 0);
+        frame(yF, sceneStrings("f"), 0);
+      });
+      step(sceneStrings("s2"), () => {
+        board.create("arrow", [[0, yF - 0.55], [0, yF - 1.4]], {
+          strokeColor: colors.cat[3], strokeWidth: 2.5, fixed: true, highlight: false,
+        });
+        sideLabel(yF, sceneStrings("raiseLbl"), colors.cat[3]);
+      });
+      step(sceneStrings("s3"), () => {
+        // Redraw f and g as discarded (dashed, faded).
+        frame(yF, sceneStrings("f"), 0, true);
+        frame(yG, sceneStrings("g"), 0, true);
+        sideLabel(yF, sceneStrings("discard"), colors.cat[3]);
+        sideLabel(yG, sceneStrings("discard"), colors.cat[3]);
+        board.create("arrow", [[0, yG - 0.55], [0, yHandle + 0.55]], {
+          strokeColor: colors.cat[3], strokeWidth: 2.5, fixed: true, highlight: false,
+        });
+      });
+      step(sceneStrings("s4"), () => {
+        sideLabel(yHandle, sceneStrings("caught"), colors.cat[1]);
+        board.create("text", [0, -4.1, sceneStrings("cap")], {
+          strokeColor: colors.ink, color: colors.ink, fontSize: 11.5, opacity: 0.85,
+          anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      });
+    },
+    {
+      boundingbox: [-3.6, 4.0, 6.6, -4.7],
+      keepAspect: false,
+      title: () => makeStrings("unwind")("title"),
+    },
+  );
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("excQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("raiseQ"),
+      options: [
+        { text: () => sceneStrings("raUnwind"), correct: true },
+        { text: () => sceneStrings("raReturn"), correct: false },
+        { text: () => sceneStrings("raNothing"), correct: false },
+        { text: () => sceneStrings("raRestart"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("typeQ"),
+      options: [
+        { text: () => sceneStrings("tyAny"), correct: true },
+        { text: () => sceneStrings("tyExn"), correct: false },
+        { text: () => sceneStrings("tyUnit"), correct: false },
+        { text: () => sceneStrings("tyBool"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyAnyQ"),
+      options: [
+        { text: () => sceneStrings("waNoReturn"), correct: true },
+        { text: () => sceneStrings("waSlow"), correct: false },
+        { text: () => sceneStrings("waConvention"), correct: false },
+        { text: () => sceneStrings("waCoerce"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("handleQ"),
+      options: [
+        { text: () => sceneStrings("haApply"), correct: true },
+        { text: () => sceneStrings("haIgnore"), correct: false },
+        { text: () => sceneStrings("haRethrow"), correct: false },
+        { text: () => sceneStrings("haStack"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("handleVQ"),
+      options: [
+        { text: () => sceneStrings("hvV"), correct: true },
+        { text: () => sceneStrings("hvHv"), correct: false },
+        { text: () => sceneStrings("hvUnit"), correct: false },
+        { text: () => sceneStrings("hvErr"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("trackQ"),
+      options: [
+        { text: () => sceneStrings("trkNothing"), correct: true },
+        { text: () => sceneStrings("trkAll"), correct: false },
+        { text: () => sceneStrings("trkNone"), correct: false },
+        { text: () => sceneStrings("trkOne"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("checkedQ"),
+      options: [
+        { text: () => sceneStrings("chkType"), correct: true },
+        { text: () => sceneStrings("chkFast"), correct: false },
+        { text: () => sceneStrings("chkResume"), correct: false },
+        { text: () => sceneStrings("chkNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sumQ"),
+      options: [
+        { text: () => sceneStrings("smSum"), correct: true },
+        { text: () => sceneStrings("smArray"), correct: false },
+        { text: () => sceneStrings("smFloat"), correct: false },
+        { text: () => sceneStrings("smGoto"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("propQ"),
+      options: [
+        { text: () => sceneStrings("prUnwind"), correct: true },
+        { text: () => sceneStrings("prAlloc"), correct: false },
+        { text: () => sceneStrings("prType"), correct: false },
+        { text: () => sceneStrings("prParse"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("finallyQ"),
+      options: [
+        { text: () => sceneStrings("fnCleanup"), correct: true },
+        { text: () => sceneStrings("fnSpeed"), correct: false },
+        { text: () => sceneStrings("fnType"), correct: false },
+        { text: () => sceneStrings("fnResume"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("resumeQ"),
+      options: [
+        { text: () => sceneStrings("reNo"), correct: true },
+        { text: () => sceneStrings("reYes"), correct: false },
+        { text: () => sceneStrings("reSometimes"), correct: false },
+        { text: () => sceneStrings("reNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("eqQ"),
+      options: [
+        { text: () => sceneStrings("eqEffect"), correct: true },
+        { text: () => sceneStrings("eqSpeed"), correct: false },
+        { text: () => sceneStrings("eqParse"), correct: false },
+        { text: () => sceneStrings("eqNever"), correct: false },
+      ],
+    },
+    {
+      // All k pending frames are discarded during unwinding.
+      prompt: (v) => sceneStrings("countQ", v),
+      variables: "k=[2:9]",
+      answer: (v) => v.k,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

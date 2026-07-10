@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Hardware-Assisted Virtualization</primer-title>
+
+    <primer-card>
+      <p>
+        For a decade, virtualizing x86 meant heroic software: VMware's
+        <primer-ref to="computer-science/advanced-operating-systems/virtualization/trap-and-emulate-and-binary-translation">binary
+        translator</primer-ref> rewriting kernel code on the fly, or Xen porting the guest. Both existed only
+        because the CPU couldn't do textbook
+        <primer-ref to="computer-science/advanced-operating-systems/virtualization/machine-virtualization-and-popek-goldberg">trap-and-emulate</primer-ref>.
+        Then, in 2005–06, Intel shipped <strong>VT-x</strong> and AMD shipped <strong>AMD-V (SVM)</strong> —
+        virtualization extensions that added, in silicon, exactly what Popek and Goldberg said x86 was missing.
+        Overnight, an unmodified guest could be virtualized cleanly, and the trap-and-emulate ideal came true on
+        the world's most stubborn ISA. This lesson is how that hardware works.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A new axis: root vs non-root mode</h2>
+      <p>
+        The elegant idea behind VT-x/AMD-V is to stop fighting over the four privilege rings and instead add an
+        <strong>orthogonal</strong> dimension. The CPU now has two <em>worlds</em>:
+      </p>
+      <ul>
+        <li><strong>VMX root mode</strong> — where the <strong>VMM/hypervisor</strong> runs. This is the "real"
+          machine; the hypervisor here has full control.</li>
+        <li><strong>VMX non-root mode</strong> — where the <strong>guest</strong> runs. Crucially, non-root mode
+          has its <em>own</em> full set of rings 0–3. So the guest kernel runs in
+          <strong>non-root ring 0</strong> — it is <em>genuinely</em> in ring 0, exactly where it expects to be,
+          no de-privileging or ring compression needed. The guest is no longer lied to about its ring.</li>
+      </ul>
+      <p>
+        This solves the leak problem at a stroke. The old trouble was that de-privileging the guest made
+        sensitive instructions misbehave (a <primer-math>\texttt{popf}</primer-math> silently dropping the
+        interrupt flag). Now the guest kernel really is in ring 0 of its own world, so those instructions behave
+        correctly for the guest — <em>and</em> the hardware can be configured to intercept precisely the
+        operations the hypervisor cares about, forcing a controlled exit to root mode. Sensitivity and
+        privilege are reconciled by hardware.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the root/non-root VM-entry/exit figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "vmx": {
+          "title": "VMX root (VMM) vs non-root (guest) — VM-entry drops into the guest, VM-exit returns to the VMM",
+          "root": "VMX ROOT MODE — the hypervisor / VMM\n(the real machine; full control)",
+          "nonroot": "VMX NON-ROOT MODE — the guest\nguest ring 0 (kernel)  ·  guest ring 3 (apps)",
+          "vmcs": "VMCS\n(VM Control Structure): guest state, host state,\nand the controls that decide which events exit",
+          "entry": "VM-ENTRY  (VMLAUNCH / VMRESUME): load guest state, run the guest",
+          "exit": "VM-EXIT: a configured event (CPUID, EPT fault, I/O, external interrupt) → save guest, jump to VMM"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Crossing between the worlds</h2>
+      <p>
+        Movement between root and non-root is a hardware transition, not a trap in the old sense:
+      </p>
+      <ul>
+        <li>A <strong>VM-entry</strong> takes the CPU from root into non-root — the hypervisor executes
+          <primer-math>\texttt{VMLAUNCH}</primer-math> (first time) or
+          <primer-math>\texttt{VMRESUME}</primer-math> (subsequent) and the guest starts/continues running.</li>
+        <li>A <strong>VM-exit</strong> takes the CPU from non-root back into root — triggered when the guest does
+          something the hypervisor asked to be notified about. The hardware <em>atomically</em> saves the entire
+          guest processor state and loads the host's, then jumps to the hypervisor's exit handler.</li>
+      </ul>
+      <primer-geometry scene="vmx"></primer-geometry>
+      <p>
+        All of this hangs off one in-memory data structure: the <strong>VMCS</strong> (VM Control Structure;
+        AMD calls it the VMCB). It holds a <em>guest-state area</em> (the registers, control regs, RIP, RSP to
+        run the guest with), a <em>host-state area</em> (what to restore on exit), and a set of
+        <strong>execution controls</strong> — bitmaps and fields that tell the CPU <em>which</em> events should
+        cause a VM-exit. The hypervisor programs the VMCS, executes
+        <primer-math>\texttt{VMLAUNCH}</primer-math>, and the CPU does the rest.</p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What causes a VM-exit?</h2>
+      <p>
+        The hypervisor tunes the VMCS controls to exit on exactly the events it must mediate, and no more —
+        because <strong>every exit is expensive</strong> (a full state swap, thousands of cycles). Typical
+        exit causes:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Guest event</th><th>Why the VMM must see it</th><th>Frequency</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><primer-math>\texttt{CPUID}</primer-math></td><td>the VMM presents a <em>virtual</em> CPU feature set to the guest</td><td>rare</td></tr>
+            <tr><td>access to a control register / <primer-math>\texttt{HLT}</primer-math></td><td>the VMM virtualizes CPU config and idle</td><td>occasional</td></tr>
+            <tr><td>I/O port or MMIO to a virtual device</td><td>the VMM emulates the device</td><td>workload-dependent</td></tr>
+            <tr><td>EPT violation (nested page fault)</td><td>the VMM must fix up guest-physical→host-physical mapping</td><td>can be hot</td></tr>
+            <tr><td>external interrupt / timer</td><td>the VMM owns the real interrupt controller and reschedules</td><td>frequent</td></tr>
+            <tr><td>explicit <primer-math>\texttt{VMCALL}</primer-math></td><td>a paravirtual hypercall from a cooperating guest</td><td>as designed</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Ordinary guest instructions — arithmetic, memory access to already-mapped pages, even most privileged
+        instructions the guest runs in its own ring 0 — cause <strong>no exit at all</strong>; they run at full
+        native speed in non-root mode. The whole performance game of a hardware VMM is <em>minimising VM-exits</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why this "made trap-and-emulate clean again"</h2>
+      <p>
+        Compare the three eras. Old trap-and-emulate needed de-privileging and broke on x86's leaks. Binary
+        translation fixed the leaks but at the cost of a complex JIT and translated-code overhead. Hardware
+        assist gives you the <em>best of both</em>: the guest runs unmodified <strong>and</strong> in its own
+        ring 0 (no translation, no leaks), while a hardware-defined exit mechanism intercepts exactly the
+        sensitive events the VMM chose — genuine trap-and-emulate, but with the "trap" upgraded to a precise,
+        programmable VM-exit. The VMM code shrinks from a binary translator to a comparatively simple exit
+        handler.
+      </p>
+      <p>
+        There was a catch in the first generation (2006): a VM-exit was <em>slower</em> than a VMware
+        binary-translation callout, so on syscall/kernel-heavy workloads early VT-x could <em>lose</em> to
+        software. Intel and AMD spent the next several generations driving exit latency down (from ~3000+ cycles
+        toward a few hundred) and — critically — adding
+        <primer-ref forward to="computer-science/advanced-operating-systems/virtualization/memory-virtualization">nested
+        paging (EPT/NPT)</primer-ref> so that the single most frequent exit — the page fault — could be handled
+        <em>in hardware without any exit at all</em>. That is the next lesson.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Counting the cost of exits</h2>
+      <p>
+        A hardware VMM's speed is dominated by how often the guest exits and how much each exit costs. The
+        simulation models a one-second slice of guest execution, tallies the exits by cause, and reports what
+        fraction of time is <em>stolen</em> by the VMM. Notice how a modest per-exit cost, multiplied by a
+        high exit <em>rate</em>, dominates everything.
+      </p>
+      <primer-code run>
+        // How much of a second does a hardware VMM lose to VM-exits?
+        const CYCLES_PER_SEC = 3_000_000_000;  // a 3 GHz core
+        const EXIT_COST = 1200;                 // cycles for one VM-exit + handler + VM-entry
+
+        // Exit events during a 1-second guest slice (illustrative rates for a busy guest).
+        const exits = [
+          { cause: "external interrupt/timer", perSec: 250_000 },
+          { cause: "I/O to virtual devices",   perSec: 120_000 },
+          { cause: "EPT violation (page fix)", perSec:  60_000 },
+          { cause: "CPUID / control regs",     perSec:   2_000 },
+        ];
+
+        let total = 0;
+        for (const e of exits) {
+          const cost = e.perSec * EXIT_COST;
+          total += e.perSec;
+          console.log(`${e.cause.padEnd(28)} ${e.perSec.toLocaleString().padStart(9)} exits  -&gt; ${(cost / 1e6).toFixed(1)}M cycles`);
+        }
+        const lostCycles = total * EXIT_COST;
+        const overhead = (lostCycles / CYCLES_PER_SEC) * 100;
+        console.log(`\ntotal VM-exits/sec : ${total.toLocaleString()}`);
+        console.log(`cycles lost to exits: ${(lostCycles / 1e6).toFixed(0)}M of ${CYCLES_PER_SEC / 1e6}M`);
+        console.log(`virtualization overhead: ${overhead.toFixed(1)}% of the CPU`);
+        console.log("\n=> the biggest wins come from ELIMINATING whole classes of exit (e.g. EPT removes");
+        console.log("   page-fault exits; posted interrupts remove interrupt exits), not shaving per-exit cost.");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The design law</h2>
+      <primer-theorem name="Hardware-assisted virtualization (VT-x / AMD-V)">
+        <ul>
+          <li>A new <strong>root</strong> (VMM) vs <strong>non-root</strong> (guest) mode axis, orthogonal to
+            rings 0–3, lets the guest kernel run genuinely in <em>its own ring 0</em> — no de-privileging, no
+            leaks.</li>
+          <li><strong>VM-entry</strong> (<primer-math>\texttt{VMLAUNCH}</primer-math>/<primer-math>\texttt{VMRESUME}</primer-math>)
+            runs the guest; a configured event causes a <strong>VM-exit</strong> that atomically saves guest and
+            restores host state, jumping to the VMM.</li>
+          <li>The <strong>VMCS/VMCB</strong> holds guest state, host state, and controls selecting which events
+            exit — so the VMM intercepts exactly what it needs.</li>
+          <li>Performance is governed by the <strong>VM-exit rate × per-exit cost</strong>; the big wins come
+            from <em>removing whole classes of exit</em> (nested paging, posted interrupts), not just making
+            each exit cheaper.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Why did first-generation VT-x sometimes LOSE to VMware's software VMM?">
+      <p>
+        When Intel launched VT-x in 2006, many benchmarks showed VMware's mature binary translator
+        <em>beating</em> the shiny new hardware. The reason is instructive: a translated
+        <primer-math>\texttt{popf}</primer-math> was an <em>inline</em> call inside the translation cache —
+        maybe a few hundred cycles — whereas an early VM-exit flushed pipelines and swapped a large processor
+        state through memory, costing several thousand. So on a workload that hammered privileged operations,
+        <em>fewer but heavier</em> hardware exits lost to <em>many but lighter</em> software callouts. Hardware
+        won decisively only once (a) exit latency fell generation on generation, and (b) nested paging removed
+        the most common exit entirely. It's a lovely reminder that "hardware support" is not automatically
+        faster — the whole system's exit <em>rate</em> is what matters.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Root/non-root is NOT another privilege ring — and 'ring -1' is a myth">
+      <p>
+        People often call the hypervisor "ring −1", as if VMX root mode were a fifth, more-privileged ring below
+        ring 0. It isn't. Root vs non-root is a <strong>separate, orthogonal</strong> mode bit: <em>both</em>
+        worlds contain a full set of rings 0–3. The guest kernel runs in non-root ring 0 and the guest apps in
+        non-root ring 3; the hypervisor runs in root ring 0. "Ring −1" is a catchy shorthand for "more
+        privileged than the guest's ring 0", but taking it literally leads you to imagine a nested ring
+        hierarchy that the hardware does not have. The extra privilege comes from the <em>world</em>, not from a
+        deeper ring.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Where next</h2>
+      <p>
+        Hardware fixed the <em>CPU</em> side of virtualization. But there are two more hard illusions to build:
+        the guest's <primer-ref forward to="computer-science/advanced-operating-systems/virtualization/memory-virtualization">memory</primer-ref>
+        (two levels of address translation, and the nested paging that keeps page-fault exits out of the VMM)
+        and its
+        <primer-ref forward to="computer-science/advanced-operating-systems/virtualization/io-virtualization">I/O
+        devices</primer-ref>. Both lean heavily on the root/non-root machinery you just learned.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: root/non-root, VMCS, VM-entry/exit, exit causes, cost model. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "vmxQuiz@1": {
+          "intro": "VMX root (VMM) vs non-root (guest); VMLAUNCH/VMRESUME and VM-exit; the VMCS; what causes exits and why they cost.",
+          "modeQ": "What does VT-x/AMD-V add to the CPU?",
+          "modeRight": "an orthogonal root (VMM) vs non-root (guest) mode, each with its own rings 0–3",
+          "modeWrong1": "a fifth privilege ring below ring 0",
+          "modeWrong2": "a second physical CPU for the hypervisor",
+          "modeWrong3": "a way to run without any hypervisor",
+          "guestringQ": "Under hardware-assisted virtualization, the guest kernel runs in…",
+          "guestringRight": "non-root ring 0 — genuinely its own ring 0, so no de-privileging is needed",
+          "guestringWrong1": "root ring 0, alongside the hypervisor",
+          "guestringWrong2": "ring 3, fully de-privileged",
+          "guestringWrong3": "an emulated software CPU",
+          "entryQ": "A 'VM-entry' does what?",
+          "entryRight": "transitions the CPU from root (VMM) into non-root, starting/resuming the guest",
+          "entryWrong1": "loads a new operating system from disk",
+          "entryWrong2": "exits the guest back to the hypervisor",
+          "entryWrong3": "reboots the physical machine",
+          "exitQ": "A 'VM-exit' does what?",
+          "exitRight": "transitions from non-root guest back to the root-mode VMM, saving guest and loading host state",
+          "exitWrong1": "shuts the virtual machine down permanently",
+          "exitWrong2": "enters the guest from the hypervisor",
+          "exitWrong3": "switches the guest to a different core with no state save",
+          "vmcsQ": "The VMCS (VMCB on AMD) holds…",
+          "vmcsRight": "guest state, host state, and controls that select which events cause a VM-exit",
+          "vmcsWrong1": "the guest's file system",
+          "vmcsWrong2": "the translation cache of rewritten code",
+          "vmcsWrong3": "the physical RAM of the host",
+          "instrQ": "Which instruction does the hypervisor use to start running a guest?",
+          "instrRight": "VMLAUNCH (then VMRESUME on later entries)",
+          "instrWrong1": "POPF",
+          "instrWrong2": "SYSCALL",
+          "instrWrong3": "HLT",
+          "causeQ": "Which of these typically causes a VM-exit?",
+          "causeRight": "the guest executing CPUID or faulting on an EPT (nested-page) miss",
+          "causeWrong1": "an ordinary add between two registers",
+          "causeWrong2": "a branch that is correctly predicted",
+          "causeWrong3": "a load from an already-mapped page",
+          "perfQ": "A hardware VMM's performance is dominated by…",
+          "perfRight": "the VM-exit rate multiplied by the per-exit cost",
+          "perfWrong1": "the number of rings the CPU has",
+          "perfWrong2": "the size of the guest's disk",
+          "perfWrong3": "the colour of the hypervisor's UI",
+          "cleanQ": "Why did hardware assist make textbook trap-and-emulate work on x86 again?",
+          "cleanRight": "the guest runs unmodified in its own ring 0, and hardware intercepts chosen events via VM-exit",
+          "cleanWrong1": "it removed all privileged instructions from x86",
+          "cleanWrong2": "it forced every guest to be paravirtualized",
+          "cleanWrong3": "it made the VMM interpret every instruction",
+          "firstgenQ": "Why did FIRST-generation VT-x sometimes lose to VMware's binary translation?",
+          "firstgenRight": "an early VM-exit cost more than an inline translated callout on kernel-heavy loads",
+          "firstgenWrong1": "the hardware could not run 64-bit guests",
+          "firstgenWrong2": "binary translation had no overhead at all",
+          "firstgenWrong3": "VT-x could only run one VM",
+          "reduceQ": "The biggest hardware-VMM speedups came from…",
+          "reduceRight": "eliminating whole classes of VM-exit (e.g. nested paging, posted interrupts)",
+          "reduceWrong1": "adding more privilege rings",
+          "reduceWrong2": "making the guest disk larger",
+          "reduceWrong3": "disabling interrupts permanently",
+          "amdQ": "AMD's equivalent of Intel VT-x is called…",
+          "amdRight": "AMD-V (SVM)",
+          "amdWrong1": "AMD binary translation",
+          "amdWrong2": "AMD Xen",
+          "amdWrong3": "AMD ring -1",
+          "exitCostQ": "A guest triggers ${e}$ thousand VM-exits, each costing ${c}$ cycles. How many thousand cycles are lost to exits?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="vmxQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/virtualization/trap-and-emulate-and-binary-translation",
+      "computer-science/computer-architecture/memory/the-tlb"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Two stacked worlds: VMX root (VMM) on top, VMX non-root (guest) below, with the VMCS between them, and
+     VM-entry (down) / VM-exit (up) arrows. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "vmx",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, key, ci, weight) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[ci], fillOpacity: 0.2,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 11.5, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: `white-space:pre-line; text-align:center; max-width:320px; ${weight ? "font-weight:700;" : ""}`,
+        });
+      };
+      const arrow = (p, q, key, dx) => {
+        board.create("arrow", [p, q], { strokeColor: colors.line, strokeWidth: 2.5, highlight: false, fixed: true });
+        board.create("text", [(p[0] + q[0]) / 2 + dx, (p[1] + q[1]) / 2, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "white-space:pre-line; text-align:center; max-width:200px",
+        });
+      };
+
+      // Root world on top, non-root below, VMCS bar between.
+      box(0.4, 5.4, 9.6, 7.0, "root", 1, true);       // VMX root (VMM)
+      box(0.4, 3.4, 9.6, 4.3, "vmcs", 3, false);      // VMCS bar
+      box(0.4, 0.4, 9.6, 2.7, "nonroot", 0, true);    // VMX non-root (guest)
+
+      // VM-entry: root -> guest (down, left side).
+      step(sceneStrings("entry"), () => arrow([2.4, 5.3], [2.4, 2.8], "entry", -1.9));
+      // VM-exit: guest -> root (up, right side).
+      step(sceneStrings("exit"), () => arrow([7.4, 2.8], [7.4, 5.3], "exit", 1.9));
+    },
+    {
+      boundingbox: [-2.6, 7.4, 11.8, -0.2],
+      keepAspect: false,
+      title: () => makeStrings("vmx")("title"),
+    },
+  );
+
+  registerQuiz("vmxQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("modeQ"), options: [
+      { text: () => sceneStrings("modeRight"), correct: true },
+      { text: () => sceneStrings("modeWrong1"), correct: false },
+      { text: () => sceneStrings("modeWrong2"), correct: false },
+      { text: () => sceneStrings("modeWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("guestringQ"), options: [
+      { text: () => sceneStrings("guestringRight"), correct: true },
+      { text: () => sceneStrings("guestringWrong1"), correct: false },
+      { text: () => sceneStrings("guestringWrong2"), correct: false },
+      { text: () => sceneStrings("guestringWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("entryQ"), options: [
+      { text: () => sceneStrings("entryRight"), correct: true },
+      { text: () => sceneStrings("entryWrong1"), correct: false },
+      { text: () => sceneStrings("entryWrong2"), correct: false },
+      { text: () => sceneStrings("entryWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("exitQ"), options: [
+      { text: () => sceneStrings("exitRight"), correct: true },
+      { text: () => sceneStrings("exitWrong1"), correct: false },
+      { text: () => sceneStrings("exitWrong2"), correct: false },
+      { text: () => sceneStrings("exitWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("vmcsQ"), options: [
+      { text: () => sceneStrings("vmcsRight"), correct: true },
+      { text: () => sceneStrings("vmcsWrong1"), correct: false },
+      { text: () => sceneStrings("vmcsWrong2"), correct: false },
+      { text: () => sceneStrings("vmcsWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("instrQ"), options: [
+      { text: () => sceneStrings("instrRight"), correct: true },
+      { text: () => sceneStrings("instrWrong1"), correct: false },
+      { text: () => sceneStrings("instrWrong2"), correct: false },
+      { text: () => sceneStrings("instrWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("causeQ"), options: [
+      { text: () => sceneStrings("causeRight"), correct: true },
+      { text: () => sceneStrings("causeWrong1"), correct: false },
+      { text: () => sceneStrings("causeWrong2"), correct: false },
+      { text: () => sceneStrings("causeWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("perfQ"), options: [
+      { text: () => sceneStrings("perfRight"), correct: true },
+      { text: () => sceneStrings("perfWrong1"), correct: false },
+      { text: () => sceneStrings("perfWrong2"), correct: false },
+      { text: () => sceneStrings("perfWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cleanQ"), options: [
+      { text: () => sceneStrings("cleanRight"), correct: true },
+      { text: () => sceneStrings("cleanWrong1"), correct: false },
+      { text: () => sceneStrings("cleanWrong2"), correct: false },
+      { text: () => sceneStrings("cleanWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("firstgenQ"), options: [
+      { text: () => sceneStrings("firstgenRight"), correct: true },
+      { text: () => sceneStrings("firstgenWrong1"), correct: false },
+      { text: () => sceneStrings("firstgenWrong2"), correct: false },
+      { text: () => sceneStrings("firstgenWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("reduceQ"), options: [
+      { text: () => sceneStrings("reduceRight"), correct: true },
+      { text: () => sceneStrings("reduceWrong1"), correct: false },
+      { text: () => sceneStrings("reduceWrong2"), correct: false },
+      { text: () => sceneStrings("reduceWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("amdQ"), options: [
+      { text: () => sceneStrings("amdRight"), correct: true },
+      { text: () => sceneStrings("amdWrong1"), correct: false },
+      { text: () => sceneStrings("amdWrong2"), correct: false },
+      { text: () => sceneStrings("amdWrong3"), correct: false },
+    ] },
+    {
+      // lost = e (thousand exits) * c cycles = thousand cycles
+      prompt: (v) => sceneStrings("exitCostQ", v),
+      variables: "e=[10:200] c=[500:2500]",
+      answer: (v) => v.e * v.c,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

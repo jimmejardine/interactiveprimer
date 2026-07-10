@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Constant Propagation and Folding</primer-title>
+
+    <primer-card>
+      <p>
+        Programmers write constants without noticing. A configuration flag set to <code>1</code>, a loop that
+        starts at <code>0</code>, an array whose width is <code>#define</code>'d to <code>8</code> — the source
+        is full of values that never actually change at run time. <strong>Constant propagation</strong> is the
+        analysis that discovers, for each variable at each program point, whether it is guaranteed to hold a
+        single known constant; <strong>constant folding</strong> is the transformation that then evaluates any
+        now-fully-constant expression at compile time. Together they turn <code>x = 3; y = x * 8 + 1;</code>
+        into <code>y = 25;</code> before the program ever runs — and, crucially, they expose <em>more</em>
+        constants downstream, so the two feed each other in a cascade.
+      </p>
+      <p>
+        The analysis rides on the def–use structure exposed by
+        <primer-ref to="computer-science/compiler-design/optimization/reaching-definitions">reaching definitions</primer-ref>:
+        to know the value of <primer-math>x</primer-math> where it is used, you follow the definitions that reach
+        that use. If exactly one definition reaches and it assigns a constant, the value is that constant. If
+        two definitions reach with <em>different</em> constants, the value is unknowable — and capturing that
+        "unknowable" precisely is what makes constant propagation a beautiful little exercise in
+        <primer-ref soft to="computer-science/compiler-design/optimization/lattices-and-fixed-points">lattice theory</primer-ref>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The constant-propagation lattice</h2>
+      <p>
+        Each variable, at each point, is assigned one of three <em>kinds</em> of value, drawn from a small
+        lattice with three levels:
+      </p>
+      <primer-geometry scene="cpLattice"></primer-geometry>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Element</th><th>Reads as</th><th>Meaning</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><primer-math>\top</primer-math> (top)</td><td>"undefined"</td>
+              <td>no definition has been seen yet — optimistically, it <em>could</em> still be any single constant</td></tr>
+            <tr><td><primer-math>c</primer-math> (a constant)</td><td>"the value <primer-math>c</primer-math>"</td>
+              <td>every definition reaching here assigns the same constant <primer-math>c</primer-math> (e.g. <primer-math>7</primer-math>, <primer-math>-3</primer-math>)</td></tr>
+            <tr><td><primer-math>\bot</primer-math> (bottom)</td><td>"NAC" — Not A Constant</td>
+              <td>the variable can hold different values on different paths; give up on it</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The order is <primer-math>\top \sqsupseteq c \sqsupseteq \bot</primer-math>: top is the most optimistic
+        ("might be constant"), bottom the most conservative ("definitely varies"), and the individual constants
+        sit in an <em>antichain</em> in the middle — no constant is above or below another. Notice the picture:
+        there is one <primer-math>\top</primer-math>, then an infinite fan of constants
+        <primer-math>\dots, -1, 0, 1, 2, \dots</primer-math>, then one <primer-math>\bot</primer-math>. The
+        lattice is technically <em>infinitely wide</em>, but its <strong>height is only 3</strong> per
+        variable: any single variable can drop at most twice —
+        <primer-math>\top \to c \to \bot</primer-math> — and that finite height is exactly what guarantees the
+        iterative analysis terminates.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The meet rule — where two paths collide</h2>
+      <p>
+        At a control-flow merge, a variable's value is the <strong>meet</strong>
+        (<primer-math>\wedge</primer-math>) of its values on the incoming edges. Three rules, applied
+        component-wise per variable, define it completely:
+      </p>
+      <primer-math display>\top \wedge v = v, \qquad \bot \wedge v = \bot, \qquad c_1 \wedge c_2 = \begin{cases} c_1 & \text{if } c_1 = c_2,\\[2pt] \bot & \text{if } c_1 \neq c_2. \end{cases}</primer-math>
+      <p>
+        Read them in plain words. Meeting with <primer-math>\top</primer-math> ("no information yet") leaves the
+        other value untouched — top is the identity. Meeting with <primer-math>\bot</primer-math> ("already
+        varies") stays <primer-math>\bot</primer-math> — bottom is absorbing. And meeting two constants agrees
+        only if they are literally the same constant; <strong>two <em>different</em> constants meet to
+        <primer-math>\bot</primer-math></strong> (NAC), because a variable that is <primer-math>2</primer-math>
+        on one path and <primer-math>3</primer-math> on another is, at their join, simply not a constant.
+      </p>
+      <p>
+        The transfer function inside a block then just evaluates expressions in this three-valued arithmetic:
+        <primer-math>c_1 + c_2</primer-math> folds to the constant sum; anything combined with
+        <primer-math>\bot</primer-math> yields <primer-math>\bot</primer-math>; anything with a
+        <primer-math>\top</primer-math> operand stays <primer-math>\top</primer-math> (with the usual short-circuit
+        exceptions, e.g. <primer-math>0 \times \bot = 0</primer-math>).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Folding, in code</h2>
+      <p>
+        Once the lattice value of every variable is known, folding is a straight walk over the statements,
+        replacing any expression whose operands are all constant with its computed value. The engine below
+        propagates a three-valued environment through a straight-line block and folds as it goes.
+      </p>
+      <primer-code run>
+        // Constant-propagation lattice value: TOP (undefined), a number, or NAC (bottom).
+        type CP = "TOP" | "NAC" | number;
+
+        // meet of two lattice values (used at merges).
+        function meet(a: CP, b: CP): CP {
+          if (a === "TOP") return b;
+          if (b === "TOP") return a;
+          if (a === "NAC" || b === "NAC") return "NAC";
+          return a === b ? a : "NAC";          // two DIFFERENT constants -> NAC
+        }
+
+        // evaluate  a op b  in three-valued arithmetic.
+        function apply(op: string, a: CP, b: CP): CP {
+          if (a === "NAC" || b === "NAC") return "NAC";
+          if (a === "TOP" || b === "TOP") return "TOP";
+          switch (op) {
+            case "+": return a + b;
+            case "-": return a - b;
+            case "*": return a * b;
+            default:  return "NAC";
+          }
+        }
+
+        type Stmt = { dst: string; a: string | number; op?: string; b?: string | number };
+        const env = new Map&lt;string, CP&gt;();
+        const val = (t: string | number): CP =&gt;
+          typeof t === "number" ? t : (env.get(t) ?? "TOP");
+
+        // A straight-line block. x is a genuine constant; input n is NAC (unknown).
+        env.set("n", "NAC");
+        const block: Stmt[] = [
+          { dst: "x", a: 3 },                        // x = 3
+          { dst: "y", a: "x", op: "*", b: 8 },       // y = x * 8   -> 24
+          { dst: "z", a: "y", op: "+", b: 1 },       // z = y + 1   -> 25
+          { dst: "w", a: "z", op: "+", b: "n" },     // w = z + n   -> NAC (n unknown)
+        ];
+
+        for (const s of block) {
+          const result: CP = s.op ? apply(s.op, val(s.a), val(s.b!)) : val(s.a);
+          env.set(s.dst, result);
+          const rhs = s.op ? `${s.a} ${s.op} ${s.b}` : `${s.a}`;
+          const folded = typeof result === "number" ? `${s.dst} = ${result}   (folded)` : `${s.dst} = ${rhs}   [${result}]`;
+          console.log(folded);
+        }
+      </primer-code>
+      <p>
+        <code>x</code>, <code>y</code> and <code>z</code> fold to <code>3</code>, <code>24</code>,
+        <code>25</code>; <code>w</code> stays symbolic because it depends on the unknown input <code>n</code>.
+        The cascade is the whole point: folding <code>x</code> is what let <code>y</code> fold, which is what let
+        <code>z</code> fold.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Sparse conditional constant propagation</h2>
+      <p>
+        The classic algorithm has a blind spot: it evaluates <em>every</em> branch, even ones that a constant
+        condition proves can never run. <strong>Sparse Conditional Constant Propagation</strong> (SCCP, Wegman
+        &amp; Zadeck) fixes this by tracking two things at once — the lattice value of each variable
+        <em>and</em> the reachability of each CFG edge — and letting them reinforce each other:
+      </p>
+      <primer-theorem name="SCCP, the key idea">
+        <ul>
+          <li>a variable's value is met only over edges currently marked <strong>reachable</strong> — so a
+            definition on a dead branch never pollutes the value with a spurious <primer-math>\bot</primer-math>;</li>
+          <li>when a branch condition folds to a constant, only the taken edge is marked reachable — the other
+            successor may become <strong>unreachable</strong> and its whole subgraph drops out;</li>
+          <li>the two worklists (SSA def–use edges and flow edges) run to a joint fixed point, discovering more
+            constants <em>and</em> more dead code than either analysis could alone.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Because SCCP starts every variable at <primer-math>\top</primer-math> and every edge as unreachable
+        (optimistic on both axes), it is strictly more powerful than doing constant propagation and dead-code
+        elimination in separate passes: <code>if (false) x = ...;</code> never even lowers
+        <primer-math>x</primer-math> off <primer-math>\top</primer-math>, so a constant that a pessimistic pass
+        would have surrendered survives.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why isn't constant propagation just 'follow the arithmetic'? What can go wrong?">
+      <p>
+        The subtlety is loops and merges. Consider <code>i = 0;</code> before a loop whose body does
+        <code>i = i + 1;</code>. At the loop header, <primer-math>i</primer-math>'s value is the meet of the
+        entry (<primer-math>0</primer-math>) and the back-edge (<primer-math>i+1</primer-math>). On the first
+        optimistic pass the back-edge carries <primer-math>\top</primer-math>, so the header holds
+        <primer-math>0</primer-math>; the body then computes <primer-math>1</primer-math>, feeds it back, and
+        <primer-math>0 \wedge 1 = \bot</primer-math>. The header correctly settles on
+        <primer-math>\bot</primer-math> — <primer-math>i</primer-math> is <em>not</em> a compile-time constant,
+        exactly as intuition demands. The lattice's finite height is what stops this bouncing: each variable can
+        only fall <primer-math>\top \to c \to \bot</primer-math>, so the loop's iteration must stop.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Two different constants meet to NAC — and this analysis is NOT distributive">
+      <p>
+        First trap: at a merge, <primer-math>2 \wedge 3</primer-math> is <strong>not</strong> some average or the
+        latest value — it is <primer-math>\bot</primer-math> (NAC). A variable that is a different constant on
+        two paths is simply not a constant at their join. Second, subtler trap: constant propagation is
+        <strong>monotone but not distributive</strong>, which means the iterative solver can be <em>strictly
+        more conservative</em> than the ideal meet-over-all-paths answer. The textbook witness: path A does
+        <code>a=2; b=3;</code>, path B does <code>a=3; b=2;</code>, then both merge and compute
+        <code>c = a + b;</code>. On <em>each</em> individual path <primer-math>c = 5</primer-math>, so the
+        meet-over-all-paths (MOP) solution is <primer-math>c = 5</primer-math>, a constant. But the iterative
+        analysis meets <em>first</em> — <primer-math>a \to \bot</primer-math>,
+        <primer-math>b \to \bot</primer-math> — and only <em>then</em> computes
+        <primer-math>c = \bot + \bot = \bot</primer-math>. So the iterative (MFP) result says NAC where MOP found
+        <primer-math>5</primer-math>. The analysis is <strong>safe</strong> (never claims a false constant) but
+        <strong>imprecise</strong>: <primer-math>\mathrm{MFP} \sqsubseteq \mathrm{MOP}</primer-math>, with the
+        gap opening precisely because <primer-math>+</primer-math> does not distribute over
+        <primer-math>\wedge</primer-math> in this lattice.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: lattice elements + meet rules + folding + SCCP + non-distributivity. Bank of 13, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "cpQuiz@1": {
+          "intro": "The constant-propagation lattice has three levels per variable: ⊤ (undefined) ⊒ constant ⊒ ⊥ (NAC). Meet of two different constants is ⊥. Numbers change every attempt.",
+          "topQ": "In the constant-propagation lattice, ⊤ (top) means…",
+          "tpUndef": "undefined so far — optimistically it could still turn out to be a single constant",
+          "tpNac": "definitely not a constant",
+          "tpZero": "the constant zero",
+          "tpErr": "an error value",
+          "botQ": "⊥ (bottom, 'NAC') means…",
+          "boNac": "the variable can hold different values on different paths — not a constant",
+          "boTop": "no definition seen yet",
+          "boConst": "a specific known constant",
+          "boUnreach": "the block is unreachable",
+          "meetDiffQ": "At a merge, the meet of the constants 2 and 3 is…",
+          "mdNac": "⊥ (NAC) — different constants are not a single constant",
+          "md5": "5 — they are added",
+          "md2": "2 — the first one wins",
+          "mdTop": "⊤",
+          "meetTopQ": "The meet of ⊤ and the constant 7 is…",
+          "mtSeven": "7 — ⊤ is the identity for meet",
+          "mtTop": "⊤",
+          "mtNac": "⊥ (NAC)",
+          "mtZero": "0",
+          "meetBotQ": "The meet of ⊥ (NAC) and the constant 7 is…",
+          "mbNac": "⊥ (NAC) — ⊥ is absorbing",
+          "mbSeven": "7",
+          "mbTop": "⊤",
+          "mbZero": "0",
+          "heightQ": "What is the height of the constant-propagation lattice (per variable)?",
+          "htThree": "3 — a variable can only drop ⊤ → c → ⊥",
+          "htInf": "infinite — there are infinitely many constants",
+          "htTwo": "2",
+          "htOne": "1",
+          "termQ": "Given infinitely many constants, why does the analysis still terminate?",
+          "teHeight": "each variable can descend at most twice (finite height 3), so the chains are finite",
+          "teLuck": "it might not terminate",
+          "teInput": "because the program input is finite",
+          "teEdges": "because there are finitely many edges only",
+          "foldQ": "Constant FOLDING is…",
+          "foEval": "evaluating an expression whose operands are all known constants at compile time",
+          "foProp": "copying a variable's name to another",
+          "foDel": "deleting unreachable blocks",
+          "foAlloc": "assigning registers",
+          "sccpQ": "What does SCCP (sparse conditional constant propagation) add over plain constant propagation?",
+          "scReach": "it tracks edge reachability too, so constant branch conditions kill dead successors and their defs don't pollute values",
+          "scFast": "it only makes the same analysis run faster",
+          "scReg": "it performs register allocation",
+          "scNothing": "nothing — it is identical",
+          "distQ": "Constant propagation is monotone but not distributive. A consequence is…",
+          "diGap": "the iterative (MFP) solution can be strictly more conservative than the meet-over-all-paths (MOP) solution",
+          "diExact": "MFP always exactly equals MOP",
+          "diWrong": "the analysis is unsafe and may report false constants",
+          "diNoTerm": "the analysis never terminates",
+          "mopQ": "In the a=2,b=3 vs a=3,b=2 then c=a+b example, what does MOP find for c, and what does the iterative solver find?",
+          "moFive": "MOP finds c = 5 (constant); the iterative solver finds ⊥ (NAC)",
+          "moBoth5": "both find 5",
+          "moBothNac": "both find ⊥",
+          "moSwap": "MOP finds ⊥; iterative finds 5",
+          "foldNumQ": "Constant folding: x = ${a}; then y = x * ${b} + ${c}; what constant does y fold to?",
+          "meetNumQ": "A variable is the constant ${a} on one path and ${a} on the other (same value). Enter its meet (a single number)."
+        }
+      }
+    </script>
+
+    <primer-quiz name="cpQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/optimization/reaching-definitions"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // The three-level constant-propagation lattice: ⊤ on top, constants in a middle antichain, ⊥ at the bottom.
+  registerGeometryScene("cpLattice", ({ board, step, colors }) => {
+    const dot = (x, y, col) =>
+      board.create("point", [x, y], { fixed: true, size: 3, strokeColor: col, fillColor: col, name: "", withLabel: false, highlight: false });
+    const lbl = (x, y, text, col, fs = 15) =>
+      board.create("text", [x, y, text], { anchorX: "middle", anchorY: "middle", fontSize: fs, fixed: true, highlight: false, strokeColor: col, color: col });
+    const link = (a, b, col) =>
+      board.create("segment", [a, b], { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false, straightFirst: false, straightLast: false });
+
+    const top = [0, 3];
+    const consts = [[-4, 0], [-2, 0], [0, 0], [2, 0], [4, 0]];
+    const bot = [0, -3];
+
+    // Base content: the whole Hasse diagram.
+    for (const c of consts) { link(top, c, colors.line); link(c, bot, colors.line); }
+    for (const c of consts) dot(c[0], c[1], colors.cat[2]);
+    dot(top[0], top[1], colors.cat[0]);
+    dot(bot[0], bot[1], colors.cat[1]);
+    lbl(0, 3.5, "⊤  (undefined)", colors.cat[0], 16);
+    lbl(0, -3.5, "⊥  (NAC — not a constant)", colors.cat[1], 16);
+    const names = ["…", "−1", "0", "1", "…"];
+    consts.forEach((c, i) => lbl(c[0], c[1] + 0.45, names[i], colors.cat[2], 14));
+    lbl(0, 1.55, "constants (an antichain)", colors.ink, 13);
+
+    step("Top ⊤ is the most optimistic: 'no definition seen — could still be any single constant'.", () => {
+      lbl(4.7, 3, "most optimistic", colors.cat[0], 12);
+    });
+    step("The individual constants form an antichain — none above or below another.", () => {
+      lbl(4.7, 0, "height 3 total", colors.ink, 12);
+    });
+    step("Bottom ⊥ (NAC) is the most conservative. A variable can only fall ⊤ → c → ⊥ (two steps).", () => {
+      lbl(4.7, -3, "most conservative", colors.cat[1], 12);
+    });
+  }, { boundingbox: [-6.5, 4.4, 7.5, -4.4], keepAspect: false, title: "The constant-propagation lattice (height 3, infinitely wide)" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("cpQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("topQ"),
+      options: [
+        { text: () => sceneStrings("tpUndef"), correct: true },
+        { text: () => sceneStrings("tpNac"), correct: false },
+        { text: () => sceneStrings("tpZero"), correct: false },
+        { text: () => sceneStrings("tpErr"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("botQ"),
+      options: [
+        { text: () => sceneStrings("boNac"), correct: true },
+        { text: () => sceneStrings("boTop"), correct: false },
+        { text: () => sceneStrings("boConst"), correct: false },
+        { text: () => sceneStrings("boUnreach"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("meetDiffQ"),
+      options: [
+        { text: () => sceneStrings("mdNac"), correct: true },
+        { text: () => sceneStrings("md5"), correct: false },
+        { text: () => sceneStrings("md2"), correct: false },
+        { text: () => sceneStrings("mdTop"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("meetTopQ"),
+      options: [
+        { text: () => sceneStrings("mtSeven"), correct: true },
+        { text: () => sceneStrings("mtTop"), correct: false },
+        { text: () => sceneStrings("mtNac"), correct: false },
+        { text: () => sceneStrings("mtZero"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("meetBotQ"),
+      options: [
+        { text: () => sceneStrings("mbNac"), correct: true },
+        { text: () => sceneStrings("mbSeven"), correct: false },
+        { text: () => sceneStrings("mbTop"), correct: false },
+        { text: () => sceneStrings("mbZero"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("heightQ"),
+      options: [
+        { text: () => sceneStrings("htThree"), correct: true },
+        { text: () => sceneStrings("htInf"), correct: false },
+        { text: () => sceneStrings("htTwo"), correct: false },
+        { text: () => sceneStrings("htOne"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("termQ"),
+      options: [
+        { text: () => sceneStrings("teHeight"), correct: true },
+        { text: () => sceneStrings("teLuck"), correct: false },
+        { text: () => sceneStrings("teInput"), correct: false },
+        { text: () => sceneStrings("teEdges"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("foldQ"),
+      options: [
+        { text: () => sceneStrings("foEval"), correct: true },
+        { text: () => sceneStrings("foProp"), correct: false },
+        { text: () => sceneStrings("foDel"), correct: false },
+        { text: () => sceneStrings("foAlloc"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sccpQ"),
+      options: [
+        { text: () => sceneStrings("scReach"), correct: true },
+        { text: () => sceneStrings("scFast"), correct: false },
+        { text: () => sceneStrings("scReg"), correct: false },
+        { text: () => sceneStrings("scNothing"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("distQ"),
+      options: [
+        { text: () => sceneStrings("diGap"), correct: true },
+        { text: () => sceneStrings("diExact"), correct: false },
+        { text: () => sceneStrings("diWrong"), correct: false },
+        { text: () => sceneStrings("diNoTerm"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("mopQ"),
+      options: [
+        { text: () => sceneStrings("moFive"), correct: true },
+        { text: () => sceneStrings("moBoth5"), correct: false },
+        { text: () => sceneStrings("moBothNac"), correct: false },
+        { text: () => sceneStrings("moSwap"), correct: false },
+      ],
+    },
+    {
+      // y = a * b + c.
+      prompt: (v) => sceneStrings("foldNumQ", v),
+      variables: "a=[2:6] b=[2:6] c=[1:9]",
+      answer: (v) => v.a * v.b + v.c,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // meet of equal constants is that constant.
+      prompt: (v) => sceneStrings("meetNumQ", v),
+      variables: "a=[-5:9]",
+      answer: (v) => v.a,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

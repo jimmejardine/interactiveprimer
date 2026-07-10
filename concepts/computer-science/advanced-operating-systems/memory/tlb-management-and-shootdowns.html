@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>TLB Management and Shootdowns</primer-title>
+
+    <primer-card>
+      <p>
+        The
+        <primer-ref to="computer-science/computer-architecture/memory/the-tlb">translation lookaside buffer</primer-ref>
+        is the small, blazing-fast cache that stores recent virtual-to-physical translations so the MMU does not
+        have to walk the
+        <primer-ref to="computer-science/advanced-operating-systems/memory/address-translation-in-depth">page table</primer-ref>
+        on every memory access. The hardware fills it and checks it automatically. So where does the operating
+        system come in? Everywhere the TLB can go <em>wrong</em>.
+      </p>
+      <p>
+        The TLB is a cache with no automatic coherence with the thing it caches. When the OS changes a page table
+        — remaps a page, revokes write permission, unmaps a region, or switches to a different process entirely —
+        the TLB may still hold the <strong>stale</strong> old translation, and the hardware will happily use it.
+        Nothing in silicon notices; keeping the TLB consistent with the page tables is <strong>software's
+        job</strong>. This lesson is about that job, and about its nastiest form on a multicore machine: the
+        <strong>TLB shootdown</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The context-switch problem: whose translations are these?</h2>
+      <p>
+        A TLB entry says "virtual page <primer-math>0\text{x}400</primer-math> maps to frame
+        <primer-math>0\text{x}9a2</primer-math>". But <em>every</em> process has a page
+        <primer-math>0\text{x}400</primer-math>, mapped to different frames. When the scheduler switches from
+        process A to process B, A's cached translations are now actively <strong>dangerous</strong> — if B reads
+        them it will read A's memory. The blunt fix, used for decades, is to <strong>flush the entire TLB on
+        every context switch</strong> (on x86, reloading <primer-math>\texttt{CR3}</primer-math> does this
+        automatically).
+      </p>
+      <p>
+        Correct, but brutally expensive. After a flush the new process starts with a <strong>cold</strong> TLB and
+        takes a burst of TLB misses — each a full page-table walk — until it warms up again. On a machine that
+        context-switches thousands of times a second, throwing away every translation each time is a serious tax.
+      </p>
+      <primer-theorem name="The TLB is an OS-managed cache">
+        <ul>
+          <li>the TLB caches page-table entries but has <strong>no hardware coherence</strong> with them: after
+            the OS edits a PTE, the stale TLB copy must be <em>explicitly</em> invalidated by software;</li>
+          <li>because a bare virtual page number is ambiguous across processes, a context switch must either
+            <strong>flush</strong> the TLB or <strong>tag</strong> entries with an address-space identifier;</li>
+          <li>on a multiprocessor, one core's page-table change can leave <em>other</em> cores holding stale
+            entries — reconciling them is a software <strong>TLB shootdown</strong>.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>ASIDs / PCIDs: tag the entries, skip the flush</h2>
+      <p>
+        The elegant fix is to stop pretending a virtual page number is enough. Tag every TLB entry with an
+        <strong>address-space identifier</strong> — an <strong>ASID</strong> on ARM, a <strong>PCID</strong>
+        (process-context identifier) on x86-64. Now an entry means "in address space 7, page
+        <primer-math>0\text{x}400</primer-math> maps to frame <primer-math>0\text{x}9a2</primer-math>", and the
+        TLB only reports a hit when the <em>current</em> address-space tag matches. Process A's and process B's
+        entries can coexist peacefully.
+      </p>
+      <p>
+        The payoff is that a context switch no longer needs a flush: load the new
+        <primer-math>\texttt{CR3}</primer-math> with the "don't-flush" bit set, and A's still-warm entries wait
+        quietly for when A runs again. On x86 the PCID field is <primer-math>12</primer-math> bits
+        (<primer-math>4096</primer-math> IDs), so the OS recycles a small pool of IDs across its many processes.
+        The mechanism is the hardware's; deciding <em>which</em> PCID a process gets, and when to recycle one, is
+        the kernel's policy.
+      </p>
+      <primer-code run>
+        // A tagged TLB (ASID/PCID): entries survive a context switch because each carries its address-space id.
+        // Compare flush-on-switch vs tagged, counting cold misses after each switch.
+        type Entry = { asid: number; vpn: number };
+        const CAP = 4;
+
+        function run(tagged: boolean): number {
+          let tlb: Entry[] = [];
+          let misses = 0;
+          // A schedule: (asid, vpn) references, with context switches interleaved.
+          const refs: Entry[] = [
+            { asid: 1, vpn: 10 }, { asid: 1, vpn: 11 }, { asid: 1, vpn: 10 }, // A warms up
+            { asid: 2, vpn: 10 }, { asid: 2, vpn: 20 },                       // switch to B
+            { asid: 1, vpn: 10 }, { asid: 1, vpn: 11 },                       // switch back to A
+          ];
+          let lastAsid = -1;
+          for (const r of refs) {
+            if (r.asid !== lastAsid) {
+              if (!tagged) tlb = []; // untagged: flush the whole TLB on every switch
+              lastAsid = r.asid;
+            }
+            const hit = tlb.some((e) => e.vpn === r.vpn && (!tagged || e.asid === r.asid));
+            if (!hit) {
+              misses++;
+              tlb.push({ asid: r.asid, vpn: r.vpn });
+              if (tlb.length &gt; CAP) tlb.shift();
+            }
+          }
+          return misses;
+        }
+
+        console.log(`flush-on-switch (untagged): ${run(false)} TLB misses`);
+        console.log(`tagged (ASID/PCID):         ${run(true)} TLB misses`);
+        console.log("Tagging keeps A's translations warm across the trip through B.");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Global pages: the kernel is everywhere</h2>
+      <p>
+        There is one set of translations you almost never want to flush: the <strong>kernel's</strong>. The kernel
+        is mapped into the top of every process's address space at the same virtual addresses, and those
+        translations are valid no matter which process is running. x86 lets a PTE set a <strong>global</strong>
+        bit; global entries survive a <primer-math>\texttt{CR3}</primer-math> reload (they are not flushed on a
+        context switch). This keeps the hot kernel-code and kernel-data translations warm across every switch —
+        the OS marks its own mappings global precisely because they are shared by all.
+      </p>
+      <primer-vignette title="Wait — didn't Meltdown make the kernel un-global?">
+        <p>
+          Yes, and it is a lovely story of security overturning an optimisation. The <strong>Meltdown</strong>
+          vulnerability (2018) let user code speculatively read kernel memory <em>because</em> the kernel was
+          mapped into every process. The fix, <strong>kernel page-table isolation (KPTI/PTI)</strong>, gives each
+          process two page tables — a user one with the kernel <em>unmapped</em>, and a kernel one — and switches
+          between them on every syscall. That means an extra <primer-math>\texttt{CR3}</primer-math> reload (and
+          TLB pressure) per kernel entry: exactly the flush that global pages and PCIDs were invented to avoid.
+          PCIDs became essential overnight — they blunt the cost of PTI's extra address-space switches. Sometimes
+          the fastest design is the one you are forbidden to use.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <!-- Strings for the TLB-shootdown IPI figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "shoot": {
+          "title": "A TLB shootdown: the initiating core interrupts every peer that might cache the stale entry",
+          "init": "CPU 0 (initiator): edits a shared PTE, flushes its own TLB (INVLPG)",
+          "c1": "CPU 1",
+          "c2": "CPU 2",
+          "c3": "CPU 3",
+          "ipi": "IPI: \"invalidate this page\"",
+          "wait": "CPU 0 spins until every peer acknowledges — only then is the change safe."
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The multicore nightmare: TLB shootdowns</h2>
+      <p>
+        Now the hard part. A page can be mapped on several cores at once (a shared library, a threaded process
+        whose threads run on different CPUs). Suppose core 0 unmaps that page, or revokes its write permission. It
+        edits the page table — a single memory write — and invalidates <em>its own</em> TLB. But cores 1, 2 and 3
+        may still hold the old translation in <em>their</em> TLBs, and x86 hardware does <strong>not</strong>
+        broadcast the invalidation for you. If core 2 keeps using its stale entry, it writes to a page that core 0
+        just froze. Disaster.
+      </p>
+      <p>
+        The OS must therefore reach out and tell the other cores to flush. It does this with an
+        <strong>inter-processor interrupt (IPI)</strong>: core 0 sends a "please invalidate this page" interrupt
+        to every core that might have the mapping, then <strong>spins waiting for all of them to acknowledge</strong>
+        before it treats the change as done. This coordinated flush is a <strong>TLB shootdown</strong>.
+      </p>
+      <primer-geometry scene="shoot"></primer-geometry>
+      <p>
+        It is expensive precisely because it is <em>synchronous and cross-core</em>. The initiator pays an IPI
+        round-trip — thousands of cycles — and, worse, it must wait for the <em>slowest</em> peer to notice the
+        interrupt, finish what it was doing, flush, and reply. A single <primer-math>\texttt{munmap}</primer-math>
+        of a page shared across <primer-math>N</primer-math> cores turns into <primer-math>N</primer-math>
+        interrupts and a barrier. On a big machine, a workload that constantly maps and unmaps shared memory can
+        spend a startling fraction of its time in shootdowns.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Counting the cost</h2>
+      <p>
+        Model a shootdown crudely. Say sending and completing one IPI to a peer costs about
+        <primer-math>c \approx 3000</primer-math> cycles of coordination, and the change touches
+        <primer-math>N</primer-math> peer cores. The initiator's cost grows with the number of cores it must
+        wait on:
+      </p>
+      <primer-math display>\text{cost} \;\approx\; c \times (N-1) \;+\; \text{(wait for the slowest peer to respond)}.</primer-math>
+      <p>
+        The first term is why shootdowns scale badly: a <primer-math>64</primer-math>-core box unmapping a
+        widely-shared page can pay <primer-math>63</primer-math> IPIs for one page. This is why kernels work so
+        hard to <strong>avoid</strong> or <strong>batch</strong> them — freeing many pages then doing
+        <em>one</em> shootdown for the lot, tracking exactly which cores ever ran a given address space (an
+        <em>mm_cpumask</em>) so they only interrupt cores that could possibly hold the entry, and deferring
+        flushes on freshly-idle cores (Linux's "lazy TLB" mode). A shootdown you can skip is the best kind.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! Editing a PTE is not finished until the stale TLB copies are gone">
+      <p>
+        The classic bug — in real kernels, not just exams — is to change a page-table entry and move on, assuming
+        the write "took effect". It did, in memory; but every core (including the one that made the change) may
+        still be translating through a cached copy of the <em>old</em> entry. Correctness requires
+        <strong>PTE edit → local invalidate (INVLPG) → shoot down every peer that might cache it → wait for
+        acknowledgements</strong>, and only <em>then</em> is it safe to, say, hand the freed frame to another
+        purpose. Skip the shootdown and you get a heisenbug: a core writing through a translation that should no
+        longer exist, corrupting whatever now owns that frame. The page table is memory; the TLB is a stale
+        rumour of it, and the rumour must be silenced deliberately.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Some architectures broadcast invalidations in hardware — why doesn't x86?">
+      <p>
+        ARMv8 has a <primer-math>\texttt{TLBI}</primer-math> instruction that, with the right scope, broadcasts a
+        TLB invalidation to <em>all</em> cores in the inner-shareable domain in hardware, with a
+        <primer-math>\texttt{DSB}</primer-math> barrier to wait for completion — no IPIs, no software round-trip.
+        It is genuinely cheaper. x86 stuck with software shootdowns (via <primer-math>\texttt{INVLPG}</primer-math>
+        and IPIs) largely for historical and flexibility reasons: the OS knows <em>exactly</em> which cores ran a
+        given address space and can interrupt only those, whereas a hardware broadcast hits everyone. Recent x86
+        has begun adding remote-invalidation hints, and the trade-off — precise-but-slow software versus
+        blunt-but-fast hardware — is an active design frontier, not a settled question.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: TLB-coherence, ASID/PCID, global pages, shootdown concepts + numeric IPI-cost calcs. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "tlbMgmtQuiz@1": {
+          "intro": "The TLB is a software-managed cache: tag entries to skip context-switch flushes; shoot down stale copies on peer cores.",
+          "cohQ": "After the OS edits a page-table entry, why must it invalidate the TLB?",
+          "cohRight": "the TLB caches translations with no hardware coherence, so it may still hold the stale entry",
+          "cohWrong1": "the page table stops working until the TLB is cleared",
+          "cohWrong2": "the CPU refuses to run until told",
+          "cohWrong3": "it doesn't — the hardware updates the TLB automatically",
+          "csQ": "Without address-space tags, what must happen to the TLB on a context switch?",
+          "csRight": "it must be flushed, because a bare VPN is ambiguous across processes",
+          "csWrong1": "nothing — entries are already per-process",
+          "csWrong2": "it is copied to disk",
+          "csWrong3": "it is doubled in size",
+          "asidQ": "What do ASIDs / PCIDs achieve?",
+          "asidRight": "they tag TLB entries with an address space so a context switch need not flush",
+          "asidWrong1": "they make pages larger",
+          "asidWrong2": "they encrypt translations",
+          "asidWrong3": "they remove the page table",
+          "globQ": "A 'global' page-table entry on x86…",
+          "globRight": "survives a CR3 reload, keeping shared kernel translations warm across context switches",
+          "globWrong1": "is visible to every machine on the network",
+          "globWrong2": "can never be cached in the TLB",
+          "globWrong3": "is always read-only",
+          "shootQ": "A TLB shootdown is…",
+          "shootRight": "the OS using inter-processor interrupts to make peer cores flush a now-stale translation",
+          "shootWrong1": "the hardware auto-invalidating all TLBs",
+          "shootWrong2": "shooting down a network packet",
+          "shootWrong3": "flushing the CPU's data cache",
+          "whyIpiQ": "Why does a shootdown need IPIs on x86 rather than a single instruction?",
+          "whyIpiRight": "x86 does not broadcast TLB invalidations in hardware, so software must notify each core",
+          "whyIpiWrong1": "IPIs are faster than any instruction",
+          "whyIpiWrong2": "the page table is on another machine",
+          "whyIpiWrong3": "to encrypt the invalidation",
+          "costGrowQ": "Why do shootdowns scale badly with core count?",
+          "costGrowRight": "the initiator must interrupt and wait for every peer that might cache the entry",
+          "costGrowWrong1": "each core has its own page table on disk",
+          "costGrowWrong2": "IPIs get slower as memory grows",
+          "costGrowWrong3": "they don't — cost is constant",
+          "avoidQ": "Which is a real technique kernels use to reduce shootdown cost?",
+          "avoidRight": "track which cores ran an address space and interrupt only those (mm_cpumask), and batch flushes",
+          "avoidWrong1": "flush the entire TLB more often",
+          "avoidWrong2": "disable the TLB entirely",
+          "avoidWrong3": "run every process on one core",
+          "ptiQ": "Kernel page-table isolation (KPTI, the Meltdown fix) increased the value of PCIDs because…",
+          "ptiRight": "it adds an address-space switch on every syscall, whose flush cost PCIDs blunt",
+          "ptiWrong1": "it removed the kernel from memory",
+          "ptiWrong2": "it made pages smaller",
+          "ptiWrong3": "it disabled the TLB",
+          "ipiNumQ": "A page is shared across {n} cores. The initiator shoots down the other N−1 at ~{c} cycles each. How many cycles is that? (initiator excluded)",
+          "coldNumQ": "After a full flush a process takes {k} cold TLB misses, each a walk of {w} cycles. Total walk cost in cycles?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="tlbMgmtQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/memory/address-translation-in-depth",
+      "computer-science/computer-architecture/memory/the-tlb"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The shootdown IPI diagram: an initiating core (CPU 0) sending invalidation IPIs to three peers.
+     Static base content (block diagram) so it shows on load; colours only from themeColors(). Plus the quiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "shoot",
+    ({ board, colors, sceneStrings }) => {
+      const W = 2.2, H = 1.0;
+      // Initiator box (left).
+      const initBox = ([x, y], key, cat) => {
+        board.create("polygon", [[x, y], [x + W, y], [x + W, y + H], [x, y + H]], {
+          fillColor: cat, fillOpacity: 0.25,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [x + W / 2, y + H / 2, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:600; max-width:200px; text-align:center",
+        });
+        return [x + W, y + H / 2]; // right-middle anchor
+      };
+
+      const initAnchor = initBox([-0.2, 2.2], "init", colors.cat[1]);
+
+      // Three peer cores on the right, stacked.
+      const peers = [
+        { key: "c1", y: 4.2 },
+        { key: "c2", y: 2.2 },
+        { key: "c3", y: 0.2 },
+      ];
+      peers.forEach((p) => {
+        const px = 5.6;
+        board.create("polygon", [[px, p.y], [px + W, p.y], [px + W, p.y + H], [px, p.y + H]], {
+          fillColor: colors.cat[0], fillOpacity: 0.22,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [px + W / 2, p.y + H / 2, sceneStrings(p.key)], {
+          strokeColor: colors.ink, fontSize: 13, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:600",
+        });
+        // IPI arrow from initiator to this peer.
+        board.create("arrow", [initAnchor, [px, p.y + H / 2]], {
+          strokeColor: colors.cat[2], strokeWidth: 2, lastArrow: { type: 1, size: 5 }, highlight: false, fixed: true,
+        });
+      });
+      // IPI label.
+      board.create("text", [3.0, 3.7, sceneStrings("ipi")], {
+        strokeColor: colors.cat[2], fontSize: 11, anchorX: "middle", anchorY: "middle",
+        fixed: true, highlight: false, cssStyle: "font-weight:600",
+      });
+      // Wait caption below.
+      board.create("text", [4.2, -0.5, sceneStrings("wait")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle",
+        fixed: true, highlight: false, cssStyle: "max-width:520px; text-align:center",
+      });
+    },
+    {
+      boundingbox: [-0.8, 5.6, 8.4, -1.2],
+      keepAspect: false,
+      title: () => makeStrings("shoot")("title"),
+    },
+  );
+
+  registerQuiz("tlbMgmtQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("cohQ"),
+      options: [
+        { text: () => sceneStrings("cohRight"), correct: true },
+        { text: () => sceneStrings("cohWrong1"), correct: false },
+        { text: () => sceneStrings("cohWrong2"), correct: false },
+        { text: () => sceneStrings("cohWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("csQ"),
+      options: [
+        { text: () => sceneStrings("csRight"), correct: true },
+        { text: () => sceneStrings("csWrong1"), correct: false },
+        { text: () => sceneStrings("csWrong2"), correct: false },
+        { text: () => sceneStrings("csWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("asidQ"),
+      options: [
+        { text: () => sceneStrings("asidRight"), correct: true },
+        { text: () => sceneStrings("asidWrong1"), correct: false },
+        { text: () => sceneStrings("asidWrong2"), correct: false },
+        { text: () => sceneStrings("asidWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("globQ"),
+      options: [
+        { text: () => sceneStrings("globRight"), correct: true },
+        { text: () => sceneStrings("globWrong1"), correct: false },
+        { text: () => sceneStrings("globWrong2"), correct: false },
+        { text: () => sceneStrings("globWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("shootQ"),
+      options: [
+        { text: () => sceneStrings("shootRight"), correct: true },
+        { text: () => sceneStrings("shootWrong1"), correct: false },
+        { text: () => sceneStrings("shootWrong2"), correct: false },
+        { text: () => sceneStrings("shootWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyIpiQ"),
+      options: [
+        { text: () => sceneStrings("whyIpiRight"), correct: true },
+        { text: () => sceneStrings("whyIpiWrong1"), correct: false },
+        { text: () => sceneStrings("whyIpiWrong2"), correct: false },
+        { text: () => sceneStrings("whyIpiWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("costGrowQ"),
+      options: [
+        { text: () => sceneStrings("costGrowRight"), correct: true },
+        { text: () => sceneStrings("costGrowWrong1"), correct: false },
+        { text: () => sceneStrings("costGrowWrong2"), correct: false },
+        { text: () => sceneStrings("costGrowWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("avoidQ"),
+      options: [
+        { text: () => sceneStrings("avoidRight"), correct: true },
+        { text: () => sceneStrings("avoidWrong1"), correct: false },
+        { text: () => sceneStrings("avoidWrong2"), correct: false },
+        { text: () => sceneStrings("avoidWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ptiQ"),
+      options: [
+        { text: () => sceneStrings("ptiRight"), correct: true },
+        { text: () => sceneStrings("ptiWrong1"), correct: false },
+        { text: () => sceneStrings("ptiWrong2"), correct: false },
+        { text: () => sceneStrings("ptiWrong3"), correct: false },
+      ],
+    },
+    {
+      // Peers interrupted = n-1, cost = (n-1)*c.
+      prompt: (v) => sceneStrings("ipiNumQ", v),
+      variables: "n=[4:64] c=[2000,3000,4000]",
+      answer: (v) => (v.n - 1) * v.c,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Cold-miss walk cost = k*w.
+      prompt: (v) => sceneStrings("coldNumQ", v),
+      variables: "k=[10:60] w=[100,150,200]",
+      answer: (v) => v.k * v.w,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

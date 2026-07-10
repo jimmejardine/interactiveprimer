@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Software-Defined Networking</primer-title>
+
+    <primer-card>
+      <p>
+        Imagine you run the network for a large company: hundreds of switches and
+        <primer-ref soft to="computer-science/networks/network-layer/the-router-and-forwarding">routers</primer-ref>
+        from three different vendors, humming away in wiring closets across a dozen buildings. One Monday, security
+        asks you to block a compromised subnet from reaching the finance servers — everywhere, immediately. In a
+        traditional network you now face a grim afternoon: log into each box, one at a time, in its own arcane
+        command language, and hand-edit its configuration, praying you don't fat-finger a typo that black-holes
+        the building. Each device is an <em>island</em> that makes its own decisions and must be tamed
+        individually.
+      </p>
+      <p>
+        <strong>Software-Defined Networking (SDN)</strong> asks a radical question: what if the network had a
+        <em>brain</em>? What if all those forwarding decisions were made in one place — a program with a
+        god's-eye view of the whole topology — that then simply told each switch what to do? You would write the
+        rule "block that subnet" <strong>once</strong>, to the brain, and it would push it out everywhere. That
+        separation — a central software <strong>control plane</strong> steering a fleet of dumb, fast forwarding
+        boxes — is the whole idea of SDN, and it reshaped how large networks are built.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two planes, and the great separation</h2>
+      <p>
+        Every networking device really does two different jobs, and SDN's central insight is that these jobs
+        should be pulled apart.
+      </p>
+      <ul>
+        <li>
+          <strong>The data plane (or forwarding plane)</strong> is the grunt work: a packet arrives, the device
+          looks it up in a table, and shoves it out the right port — millions of times a second, in dedicated
+          hardware. This is <em>mechanical</em>: "if the packet matches X, send it to port Y."
+        </li>
+        <li>
+          <strong>The control plane</strong> is the <em>thinking</em>: deciding what those forwarding-table
+          entries should <em>be</em> in the first place. In a
+          <primer-ref soft to="computer-science/networks/routing">traditional router</primer-ref> this is where
+          routing protocols like OSPF and BGP run, gossiping with neighbours to compute best paths.
+        </li>
+      </ul>
+      <p>
+        In a <strong>traditional</strong> network, every single router carries <em>both</em> planes inside its own
+        box, and the control planes are <strong>distributed</strong>: each router computes its own view of the
+        network by talking to its neighbours, and they must all somehow converge on a consistent picture. Nobody
+        has the whole map; every box has a blurry local sketch.
+      </p>
+      <p>
+        <strong>SDN</strong> makes the cut: it <em>rips the control plane out of every switch</em> and
+        <strong>centralises it in software</strong> — a single logical <strong>controller</strong> that holds a
+        complete, global view of the topology and computes all the forwarding decisions. The switches keep only
+        the data plane: they become fast, cheap, obedient boxes that forward packets exactly as the controller
+        instructs, and think for themselves not at all.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "sdnSplit": {
+            "title": "SDN: one central controller programming dumb, fast switches",
+            "apps": "Applications (routing logic, firewall policy, load balancing) sit on top.",
+            "north": "Northbound API — apps tell the controller WHAT they want.",
+            "ctrl": "The controller — one logical brain with a global view of the whole network.",
+            "south": "Southbound API (e.g. OpenFlow) — the controller installs match-action rules into switches.",
+            "switches": "Switches keep only the data plane: match a packet, act on it, at hardware speed.",
+            "packets": "Packets flow between switches along the paths the controller programmed."
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="sdnSplit"
+        caption="A layered diagram. At the top, application boxes (routing, firewall, load balancing) connect down through a northbound API to a single central controller in the middle. The controller connects down through a southbound API (OpenFlow) to a row of three switches at the bottom, which form the data plane and forward packets among themselves."
+      ></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>OpenFlow: match, then act</h2>
+      <p>
+        For the controller to program the switches, the two need a shared language. The protocol that launched SDN
+        (from Stanford, 2008) is <strong>OpenFlow</strong>, and its model of a switch is beautifully simple: a
+        switch holds one or more <strong>flow tables</strong>, and each entry is a
+        <strong>match–action</strong> rule.
+      </p>
+      <ul>
+        <li>
+          <strong>Match</strong> — a pattern over packet header fields: source/destination IP, MAC, TCP/UDP port,
+          VLAN, incoming port, and so on. Fields can be wildcarded, so one rule can match a whole class of
+          packets.
+        </li>
+        <li>
+          <strong>Action</strong> — what to do with a packet that matches: <em>forward</em> it out a given port,
+          <em>drop</em> it, <em>flood</em> it, rewrite a header field, or <em>send it up to the controller</em> for
+          a decision.
+        </li>
+      </ul>
+      <p>
+        A switch's entire behaviour is then just: for each packet, find the highest-priority matching rule and
+        apply its action. When a packet matches <em>no</em> rule, the switch punts it up to the controller (a
+        "packet-in"), which decides what to do and installs a new flow entry so future packets of that kind are
+        handled in hardware without asking again. Here is the shape of that decision loop, written as controller
+        logic — illustrative, not runnable, since a real controller talks to real switches:
+      </p>
+
+      <primer-code lang="typescript">
+        // A toy OpenFlow-style controller reacting to a packet with no matching rule.
+        interface Packet { srcIp: string; dstIp: string; inPort: number; }
+        interface FlowRule { match: Partial&lt;Packet&gt;; action: "FORWARD" | "DROP"; outPort?: number; }
+
+        function onPacketIn(pkt: Packet, installRule: (r: FlowRule) =&gt; void): void {
+          if (isBlocked(pkt.srcIp)) {
+            // Install a DROP rule so the switch silently discards this whole flow itself.
+            installRule({ match: { srcIp: pkt.srcIp }, action: "DROP" });
+            return;
+          }
+          // Otherwise compute the egress port from the GLOBAL topology view...
+          const outPort = shortestPathPort(pkt.dstIp);
+          // ...and push a match-action rule so future packets skip the controller entirely.
+          installRule({ match: { dstIp: pkt.dstIp }, action: "FORWARD", outPort });
+        }
+      </primer-code>
+
+      <p>
+        The first packet of a flow takes a slow trip to the controller; every packet after it is switched at line
+        rate by the rule that got installed. The controller sets <em>policy</em>; the hardware does the
+        <em>work</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Northbound and southbound: the two API directions</h2>
+      <p>
+        A controller sits in the middle of a stack and talks in two directions, and the jargon is worth nailing
+        down because it comes up constantly.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>API</th><th>Who talks to whom</th><th>Carries</th><th>Example</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Northbound</strong></td>
+              <td>applications ↔ controller (upward)</td>
+              <td>high-level intent: "isolate these tenants", "route video over the fast link"</td>
+              <td>a REST API the controller exposes</td>
+            </tr>
+            <tr>
+              <td><strong>Southbound</strong></td>
+              <td>controller ↔ switches (downward)</td>
+              <td>concrete flow-table rules and stats</td>
+              <td>OpenFlow, P4Runtime, NETCONF</td>
+            </tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Read it as a sandwich. <strong>Above</strong> the controller sit network <em>applications</em> — a
+        firewall app, a load-balancer app, a traffic-engineering app — which express <em>what they want</em>
+        through the northbound API without caring how it is achieved. <strong>Below</strong> the controller sit
+        the switches, which receive <em>how to do it</em> through the southbound API as concrete match–action
+        rules. The controller's job is to translate intent (north) into forwarding rules (south), using its
+        global view. Because the apps are just software calling an API, you can add a brand-new network behaviour
+        by <em>writing a program</em> — not by re-flashing hardware.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What centralisation buys — and what it risks</h2>
+      <p>
+        Pulling the brain out of the boxes and into one program is a genuine superpower, with a genuine catch.
+      </p>
+      <ul>
+        <li>
+          <strong>Programmability.</strong> New network behaviour becomes an app you write against the northbound
+          API, not a firmware upgrade across a hundred devices.
+        </li>
+        <li>
+          <strong>Global optimisation.</strong> With the whole topology in view, the controller can compute
+          traffic-engineered paths a distributed protocol never could — Google's B4 wide-area network famously
+          ran its inter-datacentre links at near-100% utilisation this way, unheard of with traditional routing.
+        </li>
+        <li>
+          <strong>Fast, uniform policy change.</strong> "Block that subnet everywhere" is one call to the
+          controller, pushed out consistently in seconds.
+        </li>
+        <li>
+          <strong>Network virtualisation.</strong> One physical network can be sliced into many isolated virtual
+          networks (crucial for cloud multi-tenancy) purely by installing different flow rules.
+        </li>
+      </ul>
+      <p>
+        The catch is structural and unavoidable: you have created a <strong>single logical point of control</strong>.
+        If the controller fails, no new flow decisions can be made; if it is a bottleneck, it throttles the whole
+        network; if it is compromised, the attacker owns everything. So a real SDN controller is never truly one
+        box — it must itself be a <em>replicated, fault-tolerant distributed system</em>, which drags in exactly
+        the hard problems of
+        <primer-ref soft to="computer-science/distributed-systems/replication-and-consistency">replication and consensus</primer-ref>
+        you thought you were escaping. Centralising the <em>logic</em> does not let you centralise the
+        <em>machine</em>.
+      </p>
+
+      <primer-vignette title="Watch out! — 'centralised control' is logical, not a literal single box">
+        <p>
+          The single most dangerous misreading of SDN is to picture a lone controller server bossing the network.
+          If you literally build that, you have built a spectacular <strong>single point of failure</strong>: one
+          crash and the network can no longer adapt. "Centralised control" in SDN means
+          <em>logically</em> centralised — the network behaves <em>as if</em> one brain decides everything — but
+          that brain is realised as a <strong>cluster</strong> of controller instances that replicate state and
+          run a
+          <primer-ref soft to="computer-science/distributed-systems/replication-and-consistency">consensus protocol</primer-ref>
+          to agree on one consistent view. You have not abolished distributed systems; you have concentrated them
+          into the control plane.
+        </p>
+        <p>
+          And crucially, the <strong>data plane stays distributed and fast</strong>. Even if the controller goes
+          completely dark, the switches keep forwarding packets according to the rules already installed —
+          existing flows don't drop. What you lose is the ability to make <em>new</em> decisions, not the traffic
+          already flowing. Never conflate "the controller is centralised" with "packets flow through the
+          controller" — they emphatically do not.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>SDN's cousin: NFV</h2>
+      <p>
+        SDN is often mentioned in the same breath as <strong>Network Functions Virtualisation (NFV)</strong>, and
+        it is worth separating them cleanly because they solve different problems and are frequently confused.
+      </p>
+      <ul>
+        <li>
+          <strong>SDN</strong> is about <em>where the control decisions are made</em> — moving the control plane
+          out of switches into central software. It changes <em>how packets are steered</em>.
+        </li>
+        <li>
+          <strong>NFV</strong> is about <em>what the network appliances are made of</em> — taking functions that
+          used to be dedicated hardware boxes (firewalls, load balancers, NAT, intrusion detection) and running
+          them as <em>software</em> on ordinary commodity servers or virtual machines. It changes <em>where the
+          middleboxes run</em>.
+        </li>
+      </ul>
+      <p>
+        They are complementary. SDN gives you programmable <em>steering</em>; NFV gives you programmable
+        <em>appliances</em> to steer traffic through. Together they let a cloud operator spin up a whole tenant's
+        network — switches, firewalls, load balancers — entirely in software, in seconds, on shared hardware. That
+        combination is the backbone of modern data-centre and 5G-core networking.
+      </p>
+
+      <primer-vignette title="How does a switch survive if the controller has the whole brain?">
+        <p>
+          If the switch does no thinking, what happens the instant a packet arrives that matches no installed
+          rule? The switch does the one thing it's allowed to: it fires a <em>packet-in</em> message up to the
+          controller and (usually) buffers the packet while it waits for an answer. The controller decides, installs
+          a flow rule, and from then on that whole class of packets is handled in hardware without another trip
+          upstairs. Two consequences fall out of this. First, the <em>very first</em> packet of each new flow pays
+          a latency penalty for the round-trip to the controller — which is why controllers try to install rules
+          <em>proactively</em>, before traffic arrives, wherever they can predict it. Second, the controller must
+          be <em>reachable</em>: SDN networks run a separate, carefully protected control channel so the
+          switches can always find their brain even when the data network is congested or misbehaving.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "sdnQuiz@1": { "instructions": "Check your grasp of SDN: the control/data plane split, OpenFlow, northbound vs southbound APIs, the benefits, and the single-point-of-failure risk." } }
+    </script>
+    <primer-quiz name="sdnQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/network-layer/the-router-and-forwarding",
+      "computer-science/networks/routing"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // A layered SDN diagram: applications on top -> northbound API -> central
+  // controller -> southbound API (OpenFlow) -> a row of dumb switches (data plane).
+  registerGeometryScene("sdnSplit", ({ board, step, colors, sceneStrings }) => {
+    const box = (x, y, w, h, s, col, fill) => {
+      board.create("polygon",
+        [[x - w / 2, y - h / 2], [x + w / 2, y - h / 2], [x + w / 2, y + h / 2], [x - w / 2, y + h / 2]],
+        { fillColor: fill, fillOpacity: 0.12, strokeColor: col, strokeWidth: 2,
+          vertices: { visible: false }, borders: { strokeColor: col, strokeWidth: 2, highlight: false },
+          fixed: true, highlight: false });
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+        strokeColor: col, color: col, cssStyle: "font-weight:600; text-align:center; width:210px; display:inline-block",
+      });
+    };
+    const arrowLabel = (x, y, s, col) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true, highlight: false,
+        strokeColor: col, color: col, cssStyle: "font-style:italic",
+      });
+
+    // Applications row (top)
+    step(sceneStrings("apps"), () => box(0, 4, 8, 1.1, sceneStrings("apps"), colors.cat[0], colors.cat[0]));
+
+    // Northbound API
+    step(sceneStrings("north"), () => {
+      board.create("arrow", [[0, 3.4], [0, 2.6]], { strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false });
+      board.create("arrow", [[0, 2.6], [0, 3.4]], { strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false });
+      arrowLabel(2.6, 3.0, "northbound", colors.ink);
+    });
+
+    // Controller (middle)
+    step(sceneStrings("ctrl"), () => box(0, 2, 6, 1.1, sceneStrings("ctrl"), colors.cat[1], colors.cat[1]));
+
+    // Southbound API
+    step(sceneStrings("south"), () => {
+      board.create("arrow", [[0, 1.4], [0, 0.6]], { strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false });
+      board.create("arrow", [[0, 0.6], [0, 1.4]], { strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false });
+      arrowLabel(3.0, 1.0, "southbound (OpenFlow)", colors.ink);
+    });
+
+    // Switches row (bottom) — data plane
+    step(sceneStrings("switches"), () => {
+      box(-3, 0, 2.2, 0.9, "switch", colors.cat[2], colors.cat[2]);
+      box(0, 0, 2.2, 0.9, "switch", colors.cat[2], colors.cat[2]);
+      box(3, 0, 2.2, 0.9, "switch", colors.cat[2], colors.cat[2]);
+    });
+
+    // Packets flowing between switches
+    step(sceneStrings("packets"), () => {
+      board.create("arrow", [[-1.9, -0.15], [-1.1, -0.15]], { strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false });
+      board.create("arrow", [[1.1, -0.15], [1.9, -0.15]], { strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false });
+      arrowLabel(0, -0.9, "data plane — packets forwarded at line rate", colors.ink);
+    });
+  }, {
+    boundingbox: [-6, 5, 6, -1.6],
+    keepAspect: false,
+    title: () => makeStrings("sdnSplit")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("sdnQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "What is the core idea of Software-Defined Networking?",
+      options: [
+        { text: "separate the control plane from the data plane and centralise the control plane in software", correct: true },
+        { text: "replace all fibre cabling with wireless links", correct: false },
+        { text: "run every routing protocol independently on each switch, as before", correct: false },
+        { text: "encrypt every packet end-to-end by default", correct: false },
+      ] },
+
+    { prompt: "The DATA plane of a switch is responsible for…",
+      options: [
+        { text: "matching each packet and forwarding it out a port, at hardware speed", correct: true },
+        { text: "computing best paths by gossiping with neighbours", correct: false },
+        { text: "deciding the overall routing policy for the network", correct: false },
+        { text: "authenticating users before they connect", correct: false },
+      ] },
+
+    { prompt: "The CONTROL plane is responsible for…",
+      options: [
+        { text: "deciding what the forwarding-table entries should be", correct: true },
+        { text: "physically pushing bytes out the correct port", correct: false },
+        { text: "storing the packets on disk", correct: false },
+        { text: "supplying electrical power to the switch", correct: false },
+      ] },
+
+    { prompt: "How does a traditional (non-SDN) network organise its control plane?",
+      options: [
+        { text: "each router runs its own control plane, computing paths by talking to neighbours", correct: true },
+        { text: "a single central server computes every router's tables", correct: false },
+        { text: "there is no control plane at all", correct: false },
+        { text: "control decisions are made by the end hosts, not the routers", correct: false },
+      ] },
+
+    { prompt: "In SDN, the controller has a global view of the network. This lets it…",
+      options: [
+        { text: "compute globally optimised forwarding decisions no distributed protocol could", correct: true },
+        { text: "physically forward every packet through itself", correct: false },
+        { text: "eliminate the need for any switches", correct: false },
+        { text: "run without any connection to the switches", correct: false },
+      ] },
+
+    { prompt: "OpenFlow models a switch as a set of flow-table entries, each of which is a…",
+      options: [
+        { text: "match-action rule: match packet-header fields, then act (forward/drop/etc.)", correct: true },
+        { text: "full copy of the routing protocol source code", correct: false },
+        { text: "list of usernames and passwords", correct: false },
+        { text: "compressed archive of recent packets", correct: false },
+      ] },
+
+    { prompt: "When a packet matches NO installed flow rule, an OpenFlow switch typically…",
+      options: [
+        { text: "sends it up to the controller (packet-in), which decides and installs a new rule", correct: true },
+        { text: "silently drops it and forgets it happened", correct: false },
+        { text: "reboots itself to clear the tables", correct: false },
+        { text: "floods it to the entire internet", correct: false },
+      ] },
+
+    { prompt: "The NORTHBOUND API connects…",
+      options: [
+        { text: "applications to the controller — apps express what they want", correct: true },
+        { text: "the controller to the switches", correct: false },
+        { text: "one switch directly to another", correct: false },
+        { text: "the network to the public internet", correct: false },
+      ] },
+
+    { prompt: "The SOUTHBOUND API (e.g. OpenFlow) connects…",
+      options: [
+        { text: "the controller to the switches — installing concrete flow rules", correct: true },
+        { text: "applications to the controller", correct: false },
+        { text: "end users to their nearest switch", correct: false },
+        { text: "two separate controllers to each other", correct: false },
+      ] },
+
+    { prompt: "Which is a genuine benefit of SDN?",
+      options: [
+        { text: "new network behaviour can be added by writing an app, not re-flashing hardware", correct: true },
+        { text: "packets no longer need to be forwarded at all", correct: false },
+        { text: "the network works even with no controller ever configured", correct: false },
+        { text: "it removes the need for IP addresses", correct: false },
+      ] },
+
+    { prompt: "What is the main structural RISK of centralising the control plane?",
+      options: [
+        { text: "the controller becomes a single point of failure / bottleneck if built as one box", correct: true },
+        { text: "switches become too intelligent to manage", correct: false },
+        { text: "packets can no longer be dropped when needed", correct: false },
+        { text: "the network can never be virtualised", correct: false },
+      ] },
+
+    { prompt: "'Centralised control' in SDN correctly means…",
+      options: [
+        { text: "logically centralised — realised as a replicated cluster running consensus, not one literal box", correct: true },
+        { text: "every packet physically passes through one server", correct: false },
+        { text: "there is exactly one switch in the whole network", correct: false },
+        { text: "control decisions are made by end hosts", correct: false },
+      ] },
+
+    { prompt: "If the SDN controller crashes completely, what happens to traffic on EXISTING flows?",
+      options: [
+        { text: "it keeps flowing — switches forward per already-installed rules; only NEW decisions stop", correct: true },
+        { text: "all packets stop instantly because they route through the controller", correct: false },
+        { text: "the switches erase their flow tables and reboot", correct: false },
+        { text: "the packets are rerouted to the public internet", correct: false },
+      ] },
+
+    { prompt: "How does NFV (Network Functions Virtualisation) differ from SDN?",
+      options: [
+        { text: "NFV runs network appliances (firewalls, LBs) as software on commodity servers; SDN centralises control decisions", correct: true },
+        { text: "NFV and SDN are two names for exactly the same thing", correct: false },
+        { text: "NFV centralises the control plane; SDN virtualises appliances", correct: false },
+        { text: "NFV is a physical cabling standard", correct: false },
+      ] },
+
+    { prompt: "Why does the FIRST packet of a new flow often incur extra latency in an SDN network?",
+      options: [
+        { text: "it may be punted up to the controller for a decision before a rule is installed", correct: true },
+        { text: "the switch must encrypt it before forwarding", correct: false },
+        { text: "TCP requires a special handshake only for SDN", correct: false },
+        { text: "the controller compresses every first packet", correct: false },
+      ] },
+  ]);
+</script>

@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Log-Structured File Systems</primer-title>
+
+    <primer-card>
+      <p>
+        Journaling accepted the double-write cost to keep the old in-place layout. In 1991 Mendel Rosenblum and John
+        Ousterhout asked a more radical question: what if writing to the log was not the <em>overhead</em> but the
+        <strong>entire file system</strong>? Their <strong>Log-Structured File System</strong> (LFS) treats the whole
+        disk as one enormous <strong>append-only log</strong>. Nothing is ever overwritten in place; every new or changed
+        block — data <em>and</em> metadata — is simply appended to the end of the log in one long sequential stream.
+      </p>
+      <p>
+        The motivation was a hardware trend that is even truer today. Disk <em>seeks</em> barely improved while
+        <em>bandwidth</em> and RAM sizes exploded. Big RAM caches absorb most <em>reads</em>, so the disk's job becomes
+        dominated by <em>writes</em> — and the fastest thing a disk (or an SSD) can do is a large <em>sequential</em>
+        write, with no seeking. LFS is built to make <strong>every</strong> write sequential. Buffer thousands of small
+        random updates in memory, then flush them as one giant contiguous <strong>segment</strong>, and you convert a
+        seek-bound workload into a bandwidth-bound one. The ideas that felt exotic in 1991 now run inside every SSD and
+        every flash-aware file system.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Buffer into segments, append forever</h2>
+      <p>
+        LFS never issues a small write to the disk. It accumulates dirty blocks in an in-memory <strong>segment</strong>
+        (typically 512 KB–several MB) and writes the segment out <em>whole</em>, sequentially, once it is full. Because a
+        block's location changes every time it is rewritten, the classic problem appears: <em>where is a file's inode
+        now?</em> In a normal file system inodes live at fixed spots; in LFS they wander down the log with everything
+        else.
+      </p>
+      <primer-theorem name="How LFS finds anything: the inode map">
+        <ul>
+          <li>every write — data block, then inode, then a piece of the <strong>inode map</strong> (imap) — is appended
+            to the current segment;</li>
+          <li>the <strong>imap</strong> translates an inode number to the inode's <em>current</em> disk address, and it
+            too is written into the log (in pieces, near the data);</li>
+          <li>a small fixed <strong>checkpoint region</strong> (the one place LFS overwrites in place) points at the
+            latest imap pieces — the single anchor from which the whole live file system can be found.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Reads still work: consult the checkpoint region → find the imap → find the inode → find the block. The imap is
+        small and heavily cached, so in practice reads cost about the same as any other file system. Writes, meanwhile,
+        are always one big sequential append — the point of the whole design.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the segment / cleaning figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "lfs": {
+          "title": "The disk as an append-only log of segments; the cleaner compacts live blocks to reclaim space",
+          "seg": "segment",
+          "live": "live",
+          "dead": "dead",
+          "newseg": "new segment",
+          "s1": "The log: fixed-size segments, each holding data + inodes + imap, written sequentially",
+          "s2": "Overwrites make old block versions DEAD (their space is stranded in old segments)",
+          "s3": "The cleaner reads segments, copies the few LIVE blocks forward, and frees the segments",
+          "flow": "cleaner: compact live → new segment"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The catch: garbage collection</h2>
+      <p>
+        Appending forever has an obvious problem — you run out of disk. When you overwrite block 5 of a file, LFS writes a
+        <em>new</em> version further down the log and the <em>old</em> version becomes <strong>dead</strong> garbage,
+        still occupying space in an old segment. Over time segments become a patchwork of live and dead blocks. To keep
+        going, LFS must reclaim that space with a <strong>cleaner</strong> (garbage collector / segment cleaning):
+      </p>
+      <ul>
+        <li>read a handful of partly-dead segments into memory;</li>
+        <li>identify which blocks are still <strong>live</strong> (the imap still points at them);</li>
+        <li>write those live blocks forward into a fresh, compact segment;</li>
+        <li>mark the old segments <strong>free</strong> for reuse.</li>
+      </ul>
+      <p>
+        This is LFS's Achilles heel. Cleaning is <em>extra</em> I/O that competes with real work, and its cost depends on
+        <strong>utilisation</strong> <primer-math>u</primer-math> — the fraction of a segment that is still live. Cleaning
+        a segment that is <primer-math>u</primer-math> live yields only <primer-math>(1-u)</primer-math> of a segment's
+        worth of free space, but you must read and rewrite the <primer-math>u</primer-math> live part. When segments are
+        nearly full of live data, cleaning thrashes. LFS therefore tries to clean <em>cold</em> (rarely-changing, so
+        stably-live or stably-dead) segments and leave hot ones to accumulate more deaths before touching them.
+      </p>
+      <primer-geometry scene="lfs"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Simulate a cleaning pass</h2>
+      <p>
+        The model below holds several segments, each a mix of live and dead blocks. The cleaner scans them, copies the
+        live blocks into a new compact segment, and reports how much space it reclaimed and how much I/O the copying cost
+        — the tension at the heart of LFS.
+      </p>
+      <primer-code run>
+        // Segment cleaning. Each segment is an array of blocks; a block is "dead" if it was overwritten later.
+        const SEG = 8; // blocks per segment
+        const segments: boolean[][] = [
+          // true = live, false = dead
+          [true, false, false, true, false, false, true, false],
+          [false, false, true, false, false, true, false, false],
+          [true, true, false, false, false, false, false, false],
+        ];
+
+        let liveCopied = 0, deadReclaimed = 0;
+        const newSegment: string[] = [];
+        segments.forEach((seg, s) =&gt; {
+          const live = seg.filter((b) =&gt; b).length;
+          const dead = SEG - live;
+          liveCopied += live;
+          deadReclaimed += dead;
+          seg.forEach((b, i) =&gt; { if (b) newSegment.push(`seg${s}:blk${i}`); });
+          const u = ((live / SEG) * 100).toFixed(0);
+          console.log(`segment ${s}: utilisation ${u}%  ->  copy ${live} live, reclaim ${dead} dead`);
+        });
+
+        console.log(`\nlive blocks copied forward (the cleaning cost): ${liveCopied}`);
+        console.log(`free blocks reclaimed: ${liveCopied + deadReclaimed} - ${liveCopied} = ${deadReclaimed}`);
+        console.log(`new compact segment holds: ${newSegment.length} live blocks`);
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="Every SSD is secretly a log-structured file system — why?">
+      <p>
+        Flash cannot overwrite a byte in place: you can write a fresh page, but to <em>re-use</em> a page you must erase
+        its whole surrounding block (hundreds of pages) first, and each cell tolerates only a limited number of
+        erasures. So the SSD's controller runs a <strong>Flash Translation Layer</strong> that does <em>exactly</em> what
+        LFS does — write every update to a fresh location, keep a map from logical to physical address, and run a
+        garbage collector to reclaim pages whose data has been superseded, spreading erasures evenly to
+        <strong>wear-level</strong>. Rosenblum and Ousterhout designed LFS for spinning disks whose seeks were slow;
+        the design turned out to be the <em>native</em> shape of flash. This is why "write amplification" and
+        "over-provisioning" — LFS cleaning concepts — are the vocabulary of every SSD datasheet, and why flash-friendly
+        file systems like F2FS are explicitly log-structured.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! LFS does not make reads sequential — it makes WRITES sequential">
+      <p>
+        A frequent misconception is that a log-structured file system reads fast because everything is "in order." The
+        opposite can be true. LFS optimises <em>write</em> throughput by turning random writes into one sequential
+        stream; it says nothing kind about read <em>layout</em>. In fact a file that was written a few blocks at a time
+        over its lifetime ends up <em>scattered</em> across many segments down the log, so reading it back
+        sequentially may require hopping all over the disk — the very fragmentation LFS created by never overwriting in
+        place. LFS bets that big RAM caches absorb most reads so this rarely bites, and that write speed is what's scarce.
+        When that bet is wrong (large files read cold, sequentially), LFS read performance can disappoint. Know which
+        side of the trade you are optimising.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>A bonus: crash recovery almost for free</h2>
+      <p>
+        Because LFS only ever appends, crash recovery is easy — a pleasant side effect of the design. After a crash, LFS
+        starts from the last <strong>checkpoint</strong> and <strong>rolls forward</strong> through the segments written
+        since, incorporating the complete ones and discarding a torn tail. There is no whole-disk
+        <primer-math>\texttt{fsck}</primer-math> and no separate journal, because <em>the log <strong>is</strong> the
+        journal</em>. This is the same insight the
+        <primer-ref forward to="computer-science/advanced-operating-systems/filesystems/copy-on-write-file-systems">copy-on-write
+        file systems</primer-ref> of the next lesson push even further: if you never overwrite live data, consistency
+        stops being something you bolt on and becomes a property of the layout itself.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: LFS concepts + numeric cleaning/utilisation calcs. Bank of 12, draws 5.
+         Variable names avoid evaluator collisions (sb, up, ns, ss). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "lfsQuiz@1": {
+          "intro": "LFS treats the disk as an append-only log, buffering writes into large segments for sequential throughput. The imap locates wandering inodes; the cleaner reclaims dead blocks.",
+          "coreQ": "The core idea of a log-structured file system is to…",
+          "coRight": "treat the whole disk as an append-only log, buffering writes into large sequential segments",
+          "coWrong1": "overwrite each block in place as fast as possible",
+          "coWrong2": "keep three copies of every file",
+          "coWrong3": "store files only in RAM",
+          "whyQ": "LFS optimises for sequential writes because, on modern hardware…",
+          "whRight": "big RAM caches absorb reads, so writes dominate, and sequential writes avoid slow seeks",
+          "whWrong1": "reads are impossible from disk",
+          "whWrong2": "disks have no bandwidth limit",
+          "whWrong3": "sequential writes are slower than random ones",
+          "imapQ": "The inode map (imap) exists in LFS because…",
+          "imRight": "an inode's disk location changes every time it is rewritten, so its current address must be tracked",
+          "imWrong1": "inodes are stored in the CPU",
+          "imWrong2": "LFS has no inodes",
+          "imWrong3": "the disk cannot address blocks",
+          "checkpointQ": "The checkpoint region in LFS is special because it…",
+          "chRight": "is the one fixed spot overwritten in place, anchoring where the latest imap lives",
+          "chWrong1": "stores every file's data",
+          "chWrong2": "is never written at all",
+          "chWrong3": "is a copy of the whole disk",
+          "deadQ": "In LFS, a block becomes 'dead' when…",
+          "deRight": "a newer version is appended later, so the imap no longer points at the old one",
+          "deWrong1": "the disk is turned off",
+          "deWrong2": "it is read too many times",
+          "deWrong3": "the file is opened",
+          "cleanerQ": "The segment cleaner (garbage collector) works by…",
+          "clRight": "reading partly-dead segments, copying live blocks to a fresh segment, and freeing the old ones",
+          "clWrong1": "deleting all data older than a day",
+          "clWrong2": "reformatting the disk",
+          "clWrong3": "compressing the RAM",
+          "costQ": "Segment cleaning is most expensive when segments are…",
+          "csRight": "highly utilised (mostly live) — little is reclaimed but the live blocks must be rewritten",
+          "csWrong1": "completely empty",
+          "csWrong2": "completely dead",
+          "csWrong3": "never — cleaning is always free",
+          "ssdQ": "An SSD's Flash Translation Layer resembles LFS because it…",
+          "ssRight": "writes updates to fresh pages, keeps a mapping, and garbage-collects to wear-level",
+          "ssWrong1": "overwrites flash cells in place instantly",
+          "ssWrong2": "never needs garbage collection",
+          "ssWrong3": "stores data on a spinning platter",
+          "recoverQ": "LFS crash recovery is cheap because it…",
+          "rcRight": "rolls forward from the last checkpoint through the log — the log IS the journal",
+          "rcWrong1": "runs a full fsck over the whole disk",
+          "rcWrong2": "restores from a network backup",
+          "rcWrong3": "cannot recover at all",
+          "liveNumQ": "A segment holds {sb} blocks and is {up}% live. How many blocks are live?",
+          "reclaimNumQ": "A segment of {sb} blocks is {up}% live. How many DEAD blocks would cleaning reclaim?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="lfsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/filesystems/crash-consistency-and-fsck"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- LFS segments + cleaning: a row of segments each split into live/dead blocks; a step marks some blocks
+     dead, then a step compacts the live blocks into a new segment. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "lfs",
+    ({ board, colors, step, sceneStrings }) => {
+      const BW = 0.9, BH = 1.1;          // block width/height
+      const NBLK = 4;                     // blocks per segment
+      const segX = [0.4, 4.6, 8.8];       // left x of each segment
+      const segY = 4.2;
+
+      const drawBlock = (x, y, liveState) => {
+        // liveState: "live" | "dead"
+        board.create("polygon", [[x, y], [x + BW, y], [x + BW, y + BH], [x, y + BH]], {
+          fillColor: liveState === "live" ? colors.cat[2] : colors.bg,
+          fillOpacity: liveState === "live" ? 0.35 : 0.08,
+          borders: { strokeColor: colors.line, strokeWidth: 1.2, dash: liveState === "dead" ? 2 : 0, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+      };
+
+      // Which blocks start live; the rest go dead in step 2.
+      const liveMask = [
+        [true, false, false, true],
+        [false, false, true, false],
+        [true, true, false, false],
+      ];
+
+      // Base + step 1: draw the segments, all blocks present (live-coloured), with a label.
+      step(sceneStrings("s1"), () => {
+        segX.forEach((sx, s) => {
+          for (let i = 0; i < NBLK; i++) drawBlock(sx + i * BW, segY, "live");
+          board.create("text", [sx + (NBLK * BW) / 2, segY - 0.4, `${sceneStrings("seg")} ${s}`], {
+            strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+          });
+        });
+      });
+
+      // Step 2: mark the overwritten blocks dead.
+      step(sceneStrings("s2"), () => {
+        segX.forEach((sx, s) => {
+          for (let i = 0; i < NBLK; i++) if (!liveMask[s][i]) {
+            drawBlock(sx + i * BW, segY, "dead");
+            board.create("text", [sx + i * BW + BW / 2, segY + BH / 2, "✗"], {
+              strokeColor: colors.cat[1], fontSize: 14, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+            });
+          }
+        });
+      });
+
+      // Step 3: compact the live blocks into a new segment below, old segments freed.
+      step(sceneStrings("s3"), () => {
+        const liveCount = liveMask.flat().filter(Boolean).length;
+        const ny = 1.6, nx = 4.6;
+        for (let i = 0; i < liveCount; i++) drawBlock(nx + i * BW, ny, "live");
+        board.create("text", [nx + (liveCount * BW) / 2, ny - 0.4, sceneStrings("newseg")], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+        board.create("arrow", [[nx + 1, segY - 0.15], [nx + 1, ny + BH + 0.15]], {
+          strokeColor: colors.cat[3], strokeWidth: 2, lastArrow: { size: 6 }, fixed: true, highlight: false,
+        });
+        board.create("text", [nx + 2.6, (segY + ny) / 2 + 0.3, sceneStrings("flow")], {
+          strokeColor: colors.ink, fontSize: 10, anchorX: "left", anchorY: "middle", fixed: true, highlight: false,
+          cssStyle: "max-width:200px; opacity:0.9",
+        });
+      });
+    },
+    {
+      boundingbox: [-0.6, 6.0, 13.2, 0.6],
+      keepAspect: false,
+      title: () => makeStrings("lfs")("title"),
+    },
+  );
+
+  registerQuiz("lfsQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("coreQ"), options: [
+      { text: () => sceneStrings("coRight"), correct: true },
+      { text: () => sceneStrings("coWrong1"), correct: false },
+      { text: () => sceneStrings("coWrong2"), correct: false },
+      { text: () => sceneStrings("coWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("whyQ"), options: [
+      { text: () => sceneStrings("whRight"), correct: true },
+      { text: () => sceneStrings("whWrong1"), correct: false },
+      { text: () => sceneStrings("whWrong2"), correct: false },
+      { text: () => sceneStrings("whWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("imapQ"), options: [
+      { text: () => sceneStrings("imRight"), correct: true },
+      { text: () => sceneStrings("imWrong1"), correct: false },
+      { text: () => sceneStrings("imWrong2"), correct: false },
+      { text: () => sceneStrings("imWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("checkpointQ"), options: [
+      { text: () => sceneStrings("chRight"), correct: true },
+      { text: () => sceneStrings("chWrong1"), correct: false },
+      { text: () => sceneStrings("chWrong2"), correct: false },
+      { text: () => sceneStrings("chWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("deadQ"), options: [
+      { text: () => sceneStrings("deRight"), correct: true },
+      { text: () => sceneStrings("deWrong1"), correct: false },
+      { text: () => sceneStrings("deWrong2"), correct: false },
+      { text: () => sceneStrings("deWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cleanerQ"), options: [
+      { text: () => sceneStrings("clRight"), correct: true },
+      { text: () => sceneStrings("clWrong1"), correct: false },
+      { text: () => sceneStrings("clWrong2"), correct: false },
+      { text: () => sceneStrings("clWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("costQ"), options: [
+      { text: () => sceneStrings("csRight"), correct: true },
+      { text: () => sceneStrings("csWrong1"), correct: false },
+      { text: () => sceneStrings("csWrong2"), correct: false },
+      { text: () => sceneStrings("csWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("ssdQ"), options: [
+      { text: () => sceneStrings("ssRight"), correct: true },
+      { text: () => sceneStrings("ssWrong1"), correct: false },
+      { text: () => sceneStrings("ssWrong2"), correct: false },
+      { text: () => sceneStrings("ssWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("recoverQ"), options: [
+      { text: () => sceneStrings("rcRight"), correct: true },
+      { text: () => sceneStrings("rcWrong1"), correct: false },
+      { text: () => sceneStrings("rcWrong2"), correct: false },
+      { text: () => sceneStrings("rcWrong3"), correct: false },
+    ] },
+    {
+      // Live blocks = sb * up / 100 (chosen so it is integer).
+      prompt: (v) => sceneStrings("liveNumQ", v),
+      variables: "sb=[8,16,32] up=[25,50,75]",
+      answer: (v) => (v.sb * v.up) / 100,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Dead (reclaimed) blocks = sb * (100 - up) / 100.
+      prompt: (v) => sceneStrings("reclaimNumQ", v),
+      variables: "sb=[8,16,32] up=[25,50,75]",
+      answer: (v) => (v.sb * (100 - v.up)) / 100,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

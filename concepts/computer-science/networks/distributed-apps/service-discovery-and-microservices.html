@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Service Discovery and Microservices</primer-title>
+
+    <primer-card>
+      <p>
+        Once upon a time an application was <em>one program</em> — a single codebase, compiled into a single
+        deployable lump, running as one process (a <strong>monolith</strong>). Inside it, the checkout code
+        called the inventory code with a plain function call: instant, reliable, and either both ran or the
+        whole thing crashed together. Then the lump got too big to reason about, too big for one team to deploy
+        without stepping on another, and too coarse to scale (you couldn't add capacity to just the image
+        resizer without cloning the entire application). So people broke the monolith apart into
+        <strong>microservices</strong>: many small, independently-deployed services, each owning one job, each
+        talking to the others <em>over the network</em>.
+      </p>
+      <p>
+        That last phrase is the whole story. The instant "checkout calls inventory" stops being a function call
+        and becomes a network call, everything you learned on the earlier pages of this course arrives at once —
+        <primer-ref soft to="computer-science/networks/distributed-apps/rpc-and-grpc">RPC's leaky
+        abstraction</primer-ref>, <primer-ref soft to="computer-science/networks/distributed-apps/load-balancing">load
+        balancing</primer-ref>, partial failure, timeouts. This page is about the two problems that architecture
+        creates and the patterns that tame them: <strong>how services find each other</strong> when they come
+        and go, and <strong>how they survive each other's failures</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The microservices tradeoff</h2>
+      <p>
+        Microservices are not automatically "better" than a monolith — they trade one set of problems for
+        another, and the trade is only worth it at a certain scale of team and system.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>You gain</th><th>You pay</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Independent deploys — ship one service without redeploying everything</td><td>A network hop between every call: latency, and calls that can now fail on their own</td></tr>
+            <tr><td>Independent scaling — add instances of just the hot service</td><td>Distributed failure — one slow service can stall the callers waiting on it</td></tr>
+            <tr><td>Team autonomy — each team owns and releases its own service</td><td>Operational complexity — dozens of services to deploy, monitor, and trace</td></tr>
+            <tr><td>Technology freedom — pick the right language/DB per service</td><td>Hard-won data consistency — no single database transaction spans services</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The blunt summary: <strong>microservices trade a function call for a network call</strong>. A monolith
+        is simpler and faster and should be the default for a small system; you reach for microservices when the
+        <em>organisational</em> and <em>scaling</em> gains outweigh the very real cost of turning in-process
+        certainty into distributed uncertainty.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The discovery problem</h2>
+      <p>
+        In a monolith, inventory's code is <em>right there</em> in memory. In microservices, the inventory
+        service runs as some number of instances, on some machines, at some IP addresses — and those change
+        constantly. Instances are created and destroyed as traffic rises and falls (autoscaling), moved when a
+        host is drained for maintenance, restarted with a new IP after a crash. Hard-coding
+        <code>inventory = 10.2.3.4:8080</code> is hopeless: that address is stale by lunchtime. So: <em>how does
+        the checkout service find a healthy inventory instance to call, right now?</em>
+      </p>
+      <p>
+        The answer is a <strong>service registry</strong>: a live, authoritative directory of "which services
+        exist and where their healthy instances are." It works in three beats:
+      </p>
+      <ul>
+        <li>
+          <strong>Registration.</strong> When an inventory instance starts, it announces itself to the registry:
+          "I'm inventory, I'm at 10.2.3.4:8080." When it shuts down, it deregisters.
+        </li>
+        <li>
+          <strong>Health &amp; TTL.</strong> The registry health-checks each instance (or the instance sends a
+          periodic <em>heartbeat</em>). An instance that stops heartbeating within its <strong>TTL</strong>
+          (time-to-live) is presumed dead and dropped from the directory automatically — so a crashed instance
+          silently disappears rather than receiving doomed traffic.
+        </li>
+        <li>
+          <strong>Lookup.</strong> The checkout service asks the registry "give me a healthy inventory
+          instance," gets back a current address, and calls it. Tools built for this include
+          <strong>Consul</strong>, <strong>etcd</strong>, and <strong>ZooKeeper</strong> (the last two are
+          <primer-ref soft to="computer-science/distributed-systems/consensus-paxos-and-raft">consensus</primer-ref>-backed,
+          so the directory itself is consistent and fault-tolerant).
+        </li>
+      </ul>
+
+      <p>
+        There are two places the lookup logic can live, and the distinction is worth knowing:
+      </p>
+      <ul>
+        <li>
+          <strong>Client-side discovery.</strong> The caller queries the registry itself, gets the list of
+          instances, and picks one (doing its own load balancing). Fewer moving parts, but every client needs
+          the discovery logic baked in.
+        </li>
+        <li>
+          <strong>Server-side discovery.</strong> The caller just sends the request to a fixed
+          <primer-ref soft to="computer-science/networks/distributed-apps/load-balancing">load balancer</primer-ref>
+          / router, which consults the registry and forwards to a healthy instance. The client stays dumb; the
+          routing tier does the work. This is what a Kubernetes Service does under the hood.
+        </li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>The API gateway</h2>
+      <p>
+        If a system has forty microservices, you do not want the outside world — mobile apps, browsers,
+        partners — talking to forty different addresses and each learning forty sets of rules. Instead you put a
+        single front door in front of them all: the <strong>API gateway</strong>. Every external request enters
+        through the gateway, which then routes it to the right internal service. Because <em>all</em> traffic
+        funnels through this one place, it is the natural home for the cross-cutting concerns you'd otherwise
+        reimplement in every service:
+      </p>
+      <ul>
+        <li><strong>Routing</strong> — map <code>/orders/*</code> to the order service, <code>/users/*</code> to the user service.</li>
+        <li><strong>Authentication &amp; authorization</strong> — check the caller's token once, at the edge, so internal services can trust it.</li>
+        <li><strong>Rate limiting</strong> — throttle abusive callers before they reach the fragile internals.</li>
+        <li><strong>TLS termination, request logging, response aggregation</strong> — done in one place, consistently.</li>
+      </ul>
+      <p>
+        The gateway is to a fleet of services what a receptionist is to an office building: one entrance, one
+        set of rules, and the visitor never needs to know which floor anyone sits on.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Resilience: timeouts, retries, and the circuit breaker</h2>
+      <p>
+        Now the failures. Because every inter-service call is a network call, every one of them can be slow,
+        fail, or hang forever. A resilient service defends itself with a small, layered toolkit:
+      </p>
+      <ul>
+        <li>
+          <strong>Timeouts.</strong> Never wait forever. Cap every call, so a dead dependency turns into a
+          prompt error you can handle instead of a hung thread that ties up resources.
+        </li>
+        <li>
+          <strong>Retries with backoff and jitter.</strong> A failed call might just be a transient blip, so
+          retry — but <em>not</em> immediately and <em>not</em> in lockstep. Wait a bit and increase the wait
+          each time (<strong>exponential backoff</strong>: 1s, 2s, 4s…), and add a random <strong>jitter</strong>
+          so a thousand clients that all failed at the same instant don't all retry at the same instant.
+        </li>
+        <li>
+          <strong>The circuit breaker.</strong> The star of the show — a pattern that stops a struggling
+          service from being hammered to death.
+        </li>
+      </ul>
+      <p>
+        A <strong>circuit breaker</strong> wraps calls to a dependency and watches them, exactly like the
+        electrical breaker in your home that trips to protect the wiring. It has three states:
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "breaker": {
+            "title": "The circuit breaker: closed → open → half-open",
+            "closed": "CLOSED",
+            "open": "OPEN",
+            "half": "HALF-OPEN",
+            "closedSub": "calls pass through; count failures",
+            "openSub": "fail fast: reject instantly, don't call",
+            "halfSub": "let ONE trial call through",
+            "trip": "failures ≥ threshold",
+            "cool": "after a cooldown",
+            "recover": "trial succeeds → reset",
+            "relapse": "trial fails → trip again"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="breaker"
+        caption="A three-state diagram. CLOSED (calls pass through, failures counted) transitions to OPEN when failures reach a threshold. OPEN (reject instantly without calling) transitions to HALF-OPEN after a cooldown. HALF-OPEN lets one trial call through: on success it returns to CLOSED, on failure it returns to OPEN."
+      ></primer-geometry>
+
+      <ul>
+        <li><strong>Closed</strong> — normal. Calls pass through to the dependency; the breaker counts failures.</li>
+        <li><strong>Open</strong> — tripped. Once failures cross a threshold, the breaker <em>stops calling</em>
+          the dependency altogether and fails fast (returns an error, or a fallback, immediately). This gives
+          the sick service breathing room to recover instead of being pounded, and stops callers wasting time on
+          calls that will fail anyway.</li>
+        <li><strong>Half-open</strong> — probing. After a cooldown, the breaker lets a <em>single</em> trial call
+          through. If it succeeds, the dependency is healthy again and the breaker closes (normal service
+          resumes); if it fails, the breaker re-opens and waits again.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>Watch a circuit breaker trip and recover</h2>
+      <p>
+        Let's drive a breaker through a real incident: a downstream service goes down for a while, then
+        recovers. We use a logical clock (ticks) instead of wall time. Watch it trip to OPEN, short-circuit the
+        doomed calls (saving everyone the wait), probe once in HALF-OPEN, and close again when the trial call
+        finally succeeds.
+      </p>
+
+      <primer-code run>
+        type State = "CLOSED" | "OPEN" | "HALF_OPEN";
+
+        class CircuitBreaker {
+          state: State = "CLOSED";
+          private failures = 0;
+          private openedAt = 0;
+          constructor(private threshold: number, private cooldown: number) {}
+
+          call(now: number, downstreamOk: boolean): string {
+            // In OPEN, refuse to call until the cooldown elapses.
+            if (this.state === "OPEN") {
+              if (now - this.openedAt &lt; this.cooldown) return "OPEN → short-circuit (fail fast)";
+              this.state = "HALF_OPEN";                       // time to probe
+            }
+            if (this.state === "HALF_OPEN") {
+              if (downstreamOk) { this.state = "CLOSED"; this.failures = 0; return "HALF-OPEN trial OK → CLOSED"; }
+              this.state = "OPEN"; this.openedAt = now;       return "HALF-OPEN trial FAILED → OPEN";
+            }
+            // CLOSED: really make the call.
+            if (downstreamOk) { this.failures = 0; return "call OK"; }
+            this.failures++;
+            if (this.failures &gt;= this.threshold) { this.state = "OPEN"; this.openedAt = now; return `call FAILED (#${this.failures}) → TRIP OPEN`; }
+            return `call FAILED (#${this.failures})`;
+          }
+        }
+
+        // Downstream health per tick: healthy, then DOWN for ticks 2..8, then healthy again.
+        const health = [true, true, false, false, false, false, false, false, false, true, true, true, true];
+
+        const cb = new CircuitBreaker(3, 3);   // trip after 3 failures; probe after 3 ticks
+        for (let now = 0; now &lt; health.length; now++) {
+          const result = cb.call(now, health[now]);
+          console.log(`t${String(now).padStart(2)}  down=${!health[now] ? "Y" : "."}  [${cb.state.padEnd(9)}]  ${result}`);
+        }
+      </primer-code>
+
+      <p>
+        Trace it: the first three failures trip the breaker OPEN; the next several calls are
+        <em>short-circuited</em> — the breaker refuses to even attempt them, so the failing service isn't
+        pounded and callers get an instant error instead of a slow timeout. After the cooldown it goes HALF-OPEN
+        and probes; because the downstream is still down, the trial fails and it re-opens. Once the downstream
+        recovers, the next probe succeeds and the breaker snaps back to CLOSED. That is fault
+        <primer-ref soft to="computer-science/distributed-systems/fault-tolerance">isolation</primer-ref> in
+        thirty lines.
+      </p>
+
+      <primer-vignette title="Watch out! — a naive retry can DDoS your own system">
+        <p>
+          Microservices trade a function call for a <strong>network</strong> call, and that changes the risk
+          arithmetic completely: every call can now be slow, fail, or time out, and the tempting reflex — "just
+          retry it" — is how a small hiccup becomes a self-inflicted outage. Picture one service getting a bit
+          slow. A thousand callers time out at once and all retry <em>immediately</em>; now the struggling
+          service faces <em>double</em> the load, gets slower still, triggering more timeouts and more retries —
+          a <strong>retry storm</strong> where your own fleet DDoSes the weakest link and drags the whole system
+          down. This is why naive retries are dangerous and the defences are non-negotiable: retry with
+          <strong>exponential backoff</strong> (wait longer each attempt) <em>and</em> <strong>jitter</strong>
+          (randomise the wait, so clients don't synchronise into a thundering herd), cap the number of
+          attempts, and wrap the dependency in a <strong>circuit breaker</strong> so that once it's clearly
+          failing you stop calling it entirely and let it recover. Retrying without backoff, jitter, and a
+          breaker doesn't add resilience — it adds a positive feedback loop that turns a blip into a collapse.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "microQuiz@1": { "instructions": "Check your grasp of microservices and their tradeoffs, the discovery problem and the service registry, the API gateway, and resilience patterns including the circuit breaker." } }
+    </script>
+    <primer-quiz name="microQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/distributed-apps/load-balancing",
+      "computer-science/distributed-systems/distributed-systems"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // The circuit breaker state machine: three state boxes (CLOSED, OPEN, HALF-OPEN)
+  // with labelled transition arrows. Static base content so it shows on load.
+  registerGeometryScene("breaker", ({ board, colors, sceneStrings }) => {
+    const state = (x, y, key, subKey, col) => {
+      board.create("text", [x, y + 0.35, sceneStrings(key)], {
+        anchorX: "middle", anchorY: "middle", fontSize: 15, fixed: true, highlight: false,
+        strokeColor: col, color: col, cssStyle: "font-weight:800",
+      });
+      board.create("text", [x, y - 0.35, sceneStrings(subKey)], {
+        anchorX: "middle", anchorY: "middle", fontSize: 10, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+        cssStyle: "text-align:center; width:150px; display:inline-block",
+      });
+    };
+    const arrow = (a, b, col) =>
+      board.create("arrow", [a, b], { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false });
+    const edgeLbl = (x, y, key, col) =>
+      board.create("text", [x, y, sceneStrings(key)], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true, highlight: false,
+        strokeColor: col, color: col, cssStyle: "font-weight:600; text-align:center; width:130px; display:inline-block",
+      });
+
+    // CLOSED top-left, OPEN top-right, HALF-OPEN bottom-middle
+    state(-4, 3, "closed", "closedSub", colors.cat[0]);
+    state(4, 3, "open", "openSub", colors.cat[2]);
+    state(0, -2, "half", "halfSub", colors.cat[1]);
+
+    // CLOSED → OPEN (failures ≥ threshold)
+    arrow([-2.4, 3.2], [2.4, 3.2], colors.cat[2]);
+    edgeLbl(0, 3.7, "trip", colors.cat[2]);
+    // OPEN → HALF-OPEN (after cooldown)
+    arrow([3.4, 2.2], [1.0, -1.2], colors.cat[1]);
+    edgeLbl(3.1, 0.3, "cool", colors.cat[1]);
+    // HALF-OPEN → CLOSED (trial succeeds)
+    arrow([-1.0, -1.2], [-3.4, 2.2], colors.cat[0]);
+    edgeLbl(-3.1, 0.3, "recover", colors.cat[0]);
+    // HALF-OPEN → OPEN (trial fails)
+    arrow([1.2, -1.6], [3.2, 1.9], colors.cat[2]);
+    edgeLbl(2.9, -1.4, "relapse", colors.cat[2]);
+  }, {
+    boundingbox: [-7, 4.6, 7, -3.4],
+    keepAspect: false,
+    title: () => makeStrings("breaker")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("microQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "The single most important change when a monolith is split into microservices is that…",
+      options: [
+        { text: "an in-process function call becomes a network call — which can be slow, fail, or time out", correct: true },
+        { text: "the code automatically runs faster", correct: false },
+        { text: "there is no longer any need for a database", correct: false },
+        { text: "all services must be written in the same language", correct: false },
+      ] },
+
+    { prompt: "Which is a genuine ADVANTAGE of microservices over a monolith?",
+      options: [
+        { text: "Independent deployment and scaling of each service", correct: true },
+        { text: "A single database transaction can span every service", correct: false },
+        { text: "Calls between components become faster than function calls", correct: false },
+        { text: "Fewer moving parts to deploy and monitor", correct: false },
+      ] },
+
+    { prompt: "Which is a genuine COST of microservices?",
+      options: [
+        { text: "Operational complexity and distributed failure — one slow service can stall its callers", correct: true },
+        { text: "You can no longer deploy services independently", correct: false },
+        { text: "You are forced to use a single programming language", correct: false },
+        { text: "The system can never be scaled horizontally", correct: false },
+      ] },
+
+    { prompt: "Why can't service A just hard-code service B's IP address?",
+      options: [
+        { text: "B's instances come and go with dynamic IPs (autoscaling, restarts, moves), so the address goes stale", correct: true },
+        { text: "IP addresses are secret and cannot be written in code", correct: false },
+        { text: "Hard-coding an IP is forbidden by TCP", correct: false },
+        { text: "Because B has no IP address at all", correct: false },
+      ] },
+
+    { prompt: "A service REGISTRY is…",
+      options: [
+        { text: "a live directory of which services exist and where their healthy instances are", correct: true },
+        { text: "a log of every request ever made", correct: false },
+        { text: "a cache of database query results", correct: false },
+        { text: "the API gateway's rate-limit counter", correct: false },
+      ] },
+
+    { prompt: "What happens when a registered instance stops sending heartbeats within its TTL?",
+      options: [
+        { text: "It is presumed dead and dropped from the registry, so it stops receiving traffic", correct: true },
+        { text: "The registry restarts it automatically", correct: false },
+        { text: "Its TTL is doubled and it stays listed forever", correct: false },
+        { text: "Every other instance is also removed", correct: false },
+      ] },
+
+    { prompt: "The difference between client-side and server-side discovery is…",
+      options: [
+        { text: "client-side: the caller queries the registry and picks an instance; server-side: a router/LB does it for a dumb client", correct: true },
+        { text: "client-side works only over UDP; server-side only over TCP", correct: false },
+        { text: "server-side discovery does not use a registry at all", correct: false },
+        { text: "they are two names for the same thing", correct: false },
+      ] },
+
+    { prompt: "What is the role of an API GATEWAY?",
+      options: [
+        { text: "A single front door for external traffic that routes to services and handles auth, rate limiting, TLS, etc.", correct: true },
+        { text: "A database shared by all services", correct: false },
+        { text: "The registry that tracks instance health", correct: false },
+        { text: "A cache placed on the user's device", correct: false },
+      ] },
+
+    { prompt: "Why is putting authentication in the API gateway useful?",
+      options: [
+        { text: "The caller's token is checked once at the edge, so internal services can trust it instead of each re-checking", correct: true },
+        { text: "It makes the internal network calls faster than function calls", correct: false },
+        { text: "It removes the need for a service registry", correct: false },
+        { text: "It guarantees exactly-once delivery", correct: false },
+      ] },
+
+    { prompt: "Why should every inter-service call have a TIMEOUT?",
+      options: [
+        { text: "So a dead or slow dependency becomes a prompt error instead of a hung thread tying up resources", correct: true },
+        { text: "Because timeouts make the call idempotent", correct: false },
+        { text: "Because the registry requires it", correct: false },
+        { text: "So the call is guaranteed to succeed on the second try", correct: false },
+      ] },
+
+    { prompt: "Why add JITTER (randomness) to retry delays?",
+      options: [
+        { text: "So many clients that failed at the same instant don't all retry at the same instant (a synchronized herd)", correct: true },
+        { text: "To make each retry wait exactly the same amount of time", correct: false },
+        { text: "To encrypt the retried request", correct: false },
+        { text: "Because jitter guarantees the retry will succeed", correct: false },
+      ] },
+
+    { prompt: "In the CLOSED state, a circuit breaker…",
+      options: [
+        { text: "lets calls pass through normally while counting failures", correct: true },
+        { text: "rejects every call instantly without trying", correct: false },
+        { text: "lets exactly one trial call through", correct: false },
+        { text: "is permanently disabled", correct: false },
+      ] },
+
+    { prompt: "What does a circuit breaker do in the OPEN state, and why?",
+      options: [
+        { text: "Fails fast — refuses to call the dependency — to give the sick service room to recover and save callers the wait", correct: true },
+        { text: "Retries the dependency as fast as possible to force it back up", correct: false },
+        { text: "Passes all calls through unchanged", correct: false },
+        { text: "Sends the calls to the API gateway instead", correct: false },
+      ] },
+
+    { prompt: "In the HALF-OPEN state, the breaker…",
+      options: [
+        { text: "lets a single trial call through: success → CLOSED, failure → OPEN again", correct: true },
+        { text: "lets all calls through with no limit", correct: false },
+        { text: "blocks all calls forever", correct: false },
+        { text: "randomly allows half of the calls", correct: false },
+      ] },
+
+    { prompt: "A 'retry storm' is…",
+      options: [
+        { text: "many callers timing out and retrying at once, doubling load on a struggling service and causing collapse", correct: true },
+        { text: "a burst of successful requests that overwhelms the cache", correct: false },
+        { text: "the registry losing all its entries simultaneously", correct: false },
+        { text: "a CDN edge fetching from the origin", correct: false },
+      ] },
+
+    { prompt: "What combination actually makes retries safe?",
+      options: [
+        { text: "Exponential backoff + jitter + a capped attempt count + a circuit breaker", correct: true },
+        { text: "Immediate retries with no delay, as many times as needed", correct: false },
+        { text: "Retrying only on a faster CPU", correct: false },
+        { text: "Retrying every call twice, always, regardless of outcome", correct: false },
+      ] },
+  ]);
+</script>

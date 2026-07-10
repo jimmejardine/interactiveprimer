@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Abstract Syntax Trees</primer-title>
+
+    <primer-card>
+      <p>
+        A <primer-ref to="computer-science/compiler-design/parsing/derivations-and-parse-trees">parse
+        tree</primer-ref> is an honest but exhausting witness. It records <em>every</em> grammar rule the parser
+        fired, every parenthesis it matched, every single-child chain it climbed through the precedence ladder.
+        For the expression <primer-math>a = b + c \times 2</primer-math> that is dozens of nodes, most of which
+        say nothing the rest of the compiler cares about. The <strong>abstract syntax tree</strong> (AST) is what
+        you get when you throw away the derivation bureaucracy and keep only the <em>structure</em>: which
+        operator applies to which operands, which statement contains which. It is the data structure on which
+        every later phase — type checking, optimisation, code generation — actually runs.
+      </p>
+      <p>
+        The word that matters is <strong>abstract</strong>. A concrete syntax tree (another name for the parse
+        tree) mirrors the grammar exactly, warts and all. An abstract syntax tree mirrors the <em>meaning</em>.
+        Two grammars that describe the same language — one factored to encode precedence, one using explicit
+        parentheses — should, and do, produce the <em>same</em> AST. The AST is the point in the pipeline where
+        the compiler stops caring how you wrote something and starts caring what you wrote.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What we throw away, and why</h2>
+      <p>
+        Compare the two trees for the humble arithmetic expression. A grammar that enforces precedence with the
+        classic <primer-math>E \to E + T \mid T</primer-math>, <primer-math>T \to T \times F \mid F</primer-math>,
+        <primer-math>F \to \mathbf{id} \mid ( E )</primer-math> forces the parser through a long chain of
+        <em>single-child</em> productions (<primer-math>E \to T \to F \to \mathbf{id}</primer-math>) every time a
+        leaf is just an identifier. The parse tree faithfully records all of them. The AST erases the whole chain
+        and keeps a single leaf.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Kept in the AST</th><th>Dropped from the AST</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>operators &amp; their operand structure</td><td>parentheses (structure already encodes grouping)</td></tr>
+            <tr><td>which node is the root of a subexpression</td><td>single-child "chain" productions (<primer-math>E{\to}T{\to}F</primer-math>)</td></tr>
+            <tr><td>literals, identifiers, their values</td><td>separators, semicolons, layout, comments</td></tr>
+            <tr><td>the shape that determines evaluation order</td><td>the particular grammar rules that were fired</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The payoff is not merely smaller trees — it is <em>uniformity</em>. Every downstream pass can assume that
+        a <code>Binary</code> node has exactly a left child, an operator, and a right child, with no interleaved
+        precedence scaffolding to skip over. The precedence work was done once, by the parser, and is now baked
+        silently into the tree's shape.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The collapse, drawn</h2>
+      <p>
+        Watch the concrete parse tree for <primer-math>a = b + c \times 2</primer-math> fold into its AST. On the
+        left, the full derivation, with its assignment, expression, term and factor levels and their single-child
+        chains. On the right, the same expression as an AST: an <code>=</code> at the root, a <code>+</code> and a
+        <code>×</code> beneath, and four leaves. Same meaning, a third of the nodes.
+      </p>
+      <primer-geometry scene="astCollapse"></primer-geometry>
+      <p>
+        Notice how the <code>×</code> sits <em>below</em> the <code>+</code> on the right subtree — precedence is
+        now purely positional. To evaluate, a post-order walk multiplies <primer-math>c \times 2</primer-math>
+        first (deeper), then adds <primer-math>b</primer-math>, then assigns to <primer-math>a</primer-math>. No
+        precedence table is consulted; the tree <em>is</em> the precedence.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Designing the node types</h2>
+      <p>
+        An AST is a family of node types, one variant per language construct. In a typed language the natural
+        encoding is a <strong>discriminated union</strong> (a "sum type"): a <code>tag</code> field says which
+        variant this is, and the rest of the fields are specific to that variant. Traversals switch on the tag;
+        the compiler's exhaustiveness checker then guarantees you handled every kind of node.
+      </p>
+      <primer-code>
+        // One variant per construct. The `kind` tag discriminates the union.
+        type Expr =
+          | { kind: "num"; value: number }
+          | { kind: "var"; name: string }
+          | { kind: "binary"; op: "+" | "-" | "*" | "/"; left: Expr; right: Expr }
+          | { kind: "assign"; target: string; value: Expr };
+      </primer-code>
+      <p>
+        Two design instincts guide the shape. First, <strong>make illegal states unrepresentable</strong>: a
+        binary node <em>always</em> has two operand fields, so you can never build a half-formed <code>+</code>.
+        Second, <strong>keep only semantic children</strong>: there is no field for the parentheses in
+        <primer-math>(b + c) \times 2</primer-math> because the tree's shape already records that the addition
+        happens first. Richer languages add variants — <code>if</code>, <code>while</code>, <code>call</code>,
+        <code>lambda</code> — and often a <code>span</code> field carrying the source line/column so later error
+        messages can point back at the original text.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Building the AST while parsing</h2>
+      <p>
+        You do not build the parse tree and then convert it — that would waste the very memory the AST exists to
+        save. Instead each parser routine <strong>returns an AST node directly</strong>. In a recursive-descent
+        parser this is delightfully natural: the function that recognises a term builds and returns a
+        <code>binary</code> node; the function that recognises a factor returns a <code>num</code> or a
+        <code>var</code>. The precedence encoded in the grammar becomes the nesting of the returned nodes — this
+        is a first taste of <primer-ref forward to="computer-science/compiler-design/semantics/syntax-directed-translation">syntax-directed
+        translation</primer-ref>, where semantic values flow up out of a parse.
+      </p>
+      <primer-code>
+        // Sketch: each routine returns an Expr, so precedence becomes nesting.
+        function parseExpr(): Expr {          // handles +, -   (lowest precedence)
+          let node = parseTerm();
+          while (peek() === "+" || peek() === "-") {
+            const op = next() as "+" | "-";
+            node = { kind: "binary", op, left: node, right: parseTerm() };
+          }
+          return node;                        // left-associative tree, no parse-tree scaffolding
+        }
+      </primer-code>
+      <p>
+        The loop makes the tree <em>left-leaning</em> for <primer-math>a - b - c</primer-math>, which is exactly
+        the left-associativity we want, and it does so without ever materialising an <primer-math>E \to E + T</primer-math>
+        node. A bottom-up (LR) parser does the same thing through <em>semantic actions</em> attached to each
+        reduction: reducing <primer-math>E \to E + T</primer-math> pops the two operand nodes off the value stack
+        and pushes a fresh <code>binary</code> node.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Walking the tree: the visitor pattern</h2>
+      <p>
+        Once you have an AST, nearly everything you do to it is a <em>traversal</em>. You will want to walk it many
+        times — to type-check, to constant-fold, to emit code, to pretty-print. Rather than scatter that recursion,
+        compilers centralise it in a <strong>visitor</strong>: one dispatch on the node's tag, one handler per
+        variant. New passes are new visitors; new node kinds add one case to each visitor (and the type checker
+        reminds you where).
+      </p>
+      <primer-code run>
+        type Expr =
+          | { kind: "num"; value: number }
+          | { kind: "var"; name: string }
+          | { kind: "binary"; op: "+" | "-" | "*" | "/"; left: Expr; right: Expr }
+          | { kind: "assign"; target: string; value: Expr };
+
+        // A recursive evaluator — a visitor that folds the tree to a number.
+        function evaluate(e: Expr, env: Record&lt;string, number&gt;): number {
+          switch (e.kind) {
+            case "num":    return e.value;
+            case "var":    return env[e.name] ?? 0;
+            case "binary": {
+              const l = evaluate(e.left, env), r = evaluate(e.right, env);
+              return e.op === "+" ? l + r : e.op === "-" ? l - r
+                   : e.op === "*" ? l * r : l / r;
+            }
+            case "assign": return (env[e.target] = evaluate(e.value, env));
+          }
+        }
+
+        // A second visitor — pretty-print with minimal, correctness-preserving parens.
+        function show(e: Expr): string {
+          switch (e.kind) {
+            case "num":    return String(e.value);
+            case "var":    return e.name;
+            case "binary": return `(${show(e.left)} ${e.op} ${show(e.right)})`;
+            case "assign": return `${e.target} = ${show(e.value)}`;
+          }
+        }
+
+        // AST for:  a = b + c * 2      (built as the parser would build it)
+        const ast: Expr = {
+          kind: "assign", target: "a",
+          value: {
+            kind: "binary", op: "+",
+            left:  { kind: "var", name: "b" },
+            right: { kind: "binary", op: "*",
+                     left: { kind: "var", name: "c" }, right: { kind: "num", value: 2 } },
+          },
+        };
+
+        console.log("pretty:", show(ast));
+        console.log("value: ", evaluate(ast, { b: 10, c: 3 }));  // a = 10 + 3*2 = 16
+      </primer-code>
+      <p>
+        Two visitors, one tree. The <em>same</em> structure that evaluated to <code>16</code> pretty-prints with
+        the multiplication correctly nested inside the addition — because the nesting <em>is</em> the precedence.
+        Add an <code>if</code> node tomorrow and TypeScript's exhaustiveness check will flag both switches until
+        you handle it. That safety is why discriminated unions are the AST representation of choice.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Is the AST really language-independent?">
+      <p>
+        Surprisingly close to it. Many production compilers define their AST as the boundary between a
+        language-specific <em>front end</em> and everything after. Clang builds a C/C++/Objective-C AST that its
+        analyses share; Rust and Swift both lower a surface AST into a simpler intermediate form. The trick that
+        makes this work is that the AST already discarded the <em>syntactic</em> quirks — commas, layout,
+        keyword spellings — and kept only the <em>semantic</em> skeleton, and skeletons across imperative
+        languages look remarkably alike. It is why "a expression tree with typed nodes" is one of the most reused
+        ideas in all of compiler engineering.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! An AST is not a parse tree with shorter names">
+      <p>
+        The classic misunderstanding is to think the AST is "the parse tree, tidied up" — same information, fewer
+        keystrokes. It is not. The AST <em>deliberately discards</em> information the parse tree carried: the exact
+        derivation, the single-child precedence chains, the parentheses. That is a feature, not a lossy accident.
+        What it must <strong>preserve</strong> is <em>structure</em> — which operator governs which operands, in
+        what order they nest. Get that backwards (drop a needed grouping, or keep the derivation "just in case")
+        and you have either a wrong program or a bloated one. The rule of thumb: <em>if two source texts mean the
+        same computation, they should produce the same AST; if they mean different computations, they must
+        not.</em>
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: AST vs parse tree, node design, visitors, building during parse. Bank of 13, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "astQuiz@1": {
+          "intro": "An AST keeps the semantic structure of a program and throws away derivation detail. It is the data structure later phases run on.",
+          "diffQ": "What is the essential difference between a parse tree and an AST?",
+          "dStruct": "the parse tree records the full derivation; the AST keeps only the semantic structure",
+          "dSame": "there is no difference — they are two names for the same tree",
+          "dBig": "the AST is always physically larger than the parse tree",
+          "dTokens": "the parse tree has no leaves; the AST has leaves",
+          "dropQ": "Which of these does an AST typically DROP?",
+          "drParen": "parentheses and single-child precedence chains",
+          "drOps": "the operators",
+          "drOperands": "the operands of each operator",
+          "drStruct": "the nesting structure that fixes evaluation order",
+          "keepQ": "Which of these must an AST PRESERVE?",
+          "kStruct": "which operator applies to which operands, and how they nest",
+          "kSemis": "the exact positions of semicolons",
+          "kWhite": "the source indentation",
+          "kChains": "the single-child E→T→F chains",
+          "encQ": "The idiomatic typed representation of AST nodes in this course is…",
+          "encUnion": "a discriminated union with a kind tag, one variant per construct",
+          "encArr": "a flat array of strings",
+          "encJson": "an untyped JSON blob with no tags",
+          "encInt": "a single integer id per node",
+          "buildQ": "When is the AST usually built?",
+          "buildDuring": "directly during parsing — each parse routine returns an AST node",
+          "buildAfter": "only after the whole parse tree is materialised, by a second conversion",
+          "buildLink": "at link time",
+          "buildRun": "at run time on demand",
+          "visitQ": "What is the visitor pattern used for on an AST?",
+          "viTrav": "centralising a traversal — one handler per node kind",
+          "viParse": "re-parsing the source text",
+          "viAlloc": "allocating memory for nodes",
+          "viTok": "tokenising the input",
+          "precQ": "In an AST, operator precedence is represented by…",
+          "prNest": "the nesting (shape) of the tree — deeper binds tighter",
+          "prTable": "a precedence table stored in each node",
+          "prParen": "explicit parenthesis nodes",
+          "prOrder": "the left-to-right order of the source characters",
+          "sameQ": "Two different grammars describe the same language, one with explicit parens and one factored for precedence. Their ASTs for the same input should be…",
+          "saSame": "the same — the AST reflects meaning, not the grammar used",
+          "saDiff": "always different, one per grammar",
+          "saParen": "different only if parentheses appear",
+          "saNone": "undefined — ASTs depend entirely on the grammar",
+          "assocQ": "A recursive-descent loop that folds b - c - d into ((b - c) - d) gives which associativity?",
+          "asLeft": "left-associative",
+          "asRight": "right-associative",
+          "asNone": "non-associative",
+          "asBoth": "both at once",
+          "illegalQ": "Encoding a binary node so it ALWAYS has two operand fields is an example of…",
+          "ilStates": "making illegal states unrepresentable",
+          "ilSpeed": "premature optimisation",
+          "ilLazy": "lazy evaluation",
+          "ilGc": "garbage collection",
+          "exhaustQ": "Why do compilers favour discriminated unions for AST nodes?",
+          "exExh": "adding a node kind makes the exhaustiveness checker flag every unhandled switch",
+          "exFast": "they run faster than any other representation",
+          "exSmall": "they use zero memory",
+          "exNoTag": "they need no tag field",
+          "spanQ": "Beyond structural children, an AST node often carries a source ${what} field so later error messages can point back at the original code.",
+          "spanA": "span",
+          "spanB": "colour",
+          "spanC": "hash",
+          "spanD": "priority",
+          "evalNumQ": "Evaluate the AST for  a = b + c*k  where b = ${b}, c = ${c}, k = ${k}. What integer is assigned to a?",
+          "eval2NumQ": "A post-order walk evaluates the AST for  (p - q) * r  with p = ${p}, q = ${q}, r = ${r}. What integer results?",
+          "evalOrderQ": "To evaluate a = b + c*2, a post-order walk computes which sub-result FIRST?",
+          "eoMul": "c * 2 (the deepest subexpression)",
+          "eoAssign": "the assignment to a",
+          "eoAdd": "b + (…) before the multiplication",
+          "eoVar": "the variable a"
+        }
+      }
+    </script>
+
+    <primer-quiz name="astQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/compiler-design/parsing/derivations-and-parse-trees"]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Minimal tree-drawing toolkit: labelled node boxes + parent→child edges, all theme-coloured.
+  function treeTools(board, colors) {
+    const node = (x, y, text, col) => {
+      board.create("circle", [[x, y], 0.52], {
+        strokeColor: col, strokeWidth: 2, fillColor: col, fillOpacity: 0.14,
+        fixed: true, highlight: false,
+      });
+      board.create("text", [x, y, text], {
+        anchorX: "middle", anchorY: "middle", fontSize: 14, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+      return [x, y];
+    };
+    const edge = (a, b, col) => {
+      const dx = b[0] - a[0], dy = b[1] - a[1], d = Math.hypot(dx, dy);
+      const ux = dx / d, uy = dy / d, r = 0.52;
+      board.create("segment", [[a[0] + ux * r, a[1] + uy * r], [b[0] - ux * r, b[1] - uy * r]], {
+        strokeColor: col, strokeWidth: 1.6, fixed: true, highlight: false,
+      });
+    };
+    const caption = (x, y, text, col) =>
+      board.create("text", [x, y, text], {
+        anchorX: "middle", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    return { node, edge, caption };
+  }
+
+  // Parse tree (left) collapsing to AST (right) for  a = b + c * 2.
+  registerGeometryScene("astCollapse", ({ board, step, colors }) => {
+    const T = treeTools(board, colors);
+    const g = colors.line;
+
+    step("Concrete parse tree: every production, including single-child chains.", () => {
+      T.caption(-6, 5.2, "parse tree", colors.cat[1]);
+      // Skeleton of a precedence grammar derivation for a = E ,  E -> E + T , T -> T * F ...
+      const asn = T.node(-6, 4.3, "=", colors.cat[1]);
+      const idA = T.node(-8, 3.1, "a", colors.cat[1]);
+      const E0  = T.node(-4.2, 3.1, "E", colors.cat[1]);
+      T.edge(asn, idA, g); T.edge(asn, E0, g);
+      const E1 = T.node(-6, 1.9, "E", colors.cat[1]);
+      const plus = T.node(-4.2, 1.9, "+", colors.cat[1]);
+      const T0 = T.node(-2.4, 1.9, "T", colors.cat[1]);
+      T.edge(E0, E1, g); T.edge(E0, plus, g); T.edge(E0, T0, g);
+      const Tb = T.node(-6, 0.7, "T", colors.cat[1]);
+      const Fb = T.node(-6, -0.5, "F", colors.cat[1]);
+      const idB = T.node(-6, -1.7, "b", colors.cat[1]);
+      T.edge(E1, Tb, g); T.edge(Tb, Fb, g); T.edge(Fb, idB, g);
+      const Tc = T.node(-3.4, 0.7, "T", colors.cat[1]);
+      const star = T.node(-2.4, 0.7, "*", colors.cat[1]);
+      const Ff = T.node(-1.4, 0.7, "F", colors.cat[1]);
+      T.edge(T0, Tc, g); T.edge(T0, star, g); T.edge(T0, Ff, g);
+      const Fc = T.node(-3.4, -0.5, "F", colors.cat[1]);
+      const idC = T.node(-3.4, -1.7, "c", colors.cat[1]);
+      const two = T.node(-1.4, -0.5, "2", colors.cat[1]);
+      T.edge(Tc, Fc, g); T.edge(Fc, idC, g); T.edge(Ff, two, g);
+    });
+
+    step("Collapse the chains: the AST keeps only operators and operands.", () => {
+      T.caption(4, 5.2, "abstract syntax tree", colors.cat[0]);
+      const asn = T.node(4, 4.3, "=", colors.cat[0]);
+      const idA = T.node(2.2, 3.1, "a", colors.cat[2]);
+      const plus = T.node(5.8, 3.1, "+", colors.cat[0]);
+      T.edge(asn, idA, g); T.edge(asn, plus, g);
+      const idB = T.node(4.2, 1.7, "b", colors.cat[2]);
+      const star = T.node(7.4, 1.7, "*", colors.cat[0]);
+      T.edge(plus, idB, g); T.edge(plus, star, g);
+      const idC = T.node(6.4, 0.3, "c", colors.cat[2]);
+      const two = T.node(8.4, 0.3, "2", colors.cat[3]);
+      T.edge(star, idC, g); T.edge(star, two, g);
+    });
+  }, {
+    boundingbox: [-9.5, 6, 9.5, -2.6], keepAspect: false,
+    title: "Parse tree  →  AST  for  a = b + c * 2",
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("astQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("diffQ"),
+      options: [
+        { text: () => sceneStrings("dStruct"), correct: true },
+        { text: () => sceneStrings("dSame"), correct: false },
+        { text: () => sceneStrings("dBig"), correct: false },
+        { text: () => sceneStrings("dTokens"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dropQ"),
+      options: [
+        { text: () => sceneStrings("drParen"), correct: true },
+        { text: () => sceneStrings("drOps"), correct: false },
+        { text: () => sceneStrings("drOperands"), correct: false },
+        { text: () => sceneStrings("drStruct"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("keepQ"),
+      options: [
+        { text: () => sceneStrings("kStruct"), correct: true },
+        { text: () => sceneStrings("kSemis"), correct: false },
+        { text: () => sceneStrings("kWhite"), correct: false },
+        { text: () => sceneStrings("kChains"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("encQ"),
+      options: [
+        { text: () => sceneStrings("encUnion"), correct: true },
+        { text: () => sceneStrings("encArr"), correct: false },
+        { text: () => sceneStrings("encJson"), correct: false },
+        { text: () => sceneStrings("encInt"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("buildQ"),
+      options: [
+        { text: () => sceneStrings("buildDuring"), correct: true },
+        { text: () => sceneStrings("buildAfter"), correct: false },
+        { text: () => sceneStrings("buildLink"), correct: false },
+        { text: () => sceneStrings("buildRun"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("visitQ"),
+      options: [
+        { text: () => sceneStrings("viTrav"), correct: true },
+        { text: () => sceneStrings("viParse"), correct: false },
+        { text: () => sceneStrings("viAlloc"), correct: false },
+        { text: () => sceneStrings("viTok"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("precQ"),
+      options: [
+        { text: () => sceneStrings("prNest"), correct: true },
+        { text: () => sceneStrings("prTable"), correct: false },
+        { text: () => sceneStrings("prParen"), correct: false },
+        { text: () => sceneStrings("prOrder"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sameQ"),
+      options: [
+        { text: () => sceneStrings("saSame"), correct: true },
+        { text: () => sceneStrings("saDiff"), correct: false },
+        { text: () => sceneStrings("saParen"), correct: false },
+        { text: () => sceneStrings("saNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("assocQ"),
+      options: [
+        { text: () => sceneStrings("asLeft"), correct: true },
+        { text: () => sceneStrings("asRight"), correct: false },
+        { text: () => sceneStrings("asNone"), correct: false },
+        { text: () => sceneStrings("asBoth"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("illegalQ"),
+      options: [
+        { text: () => sceneStrings("ilStates"), correct: true },
+        { text: () => sceneStrings("ilSpeed"), correct: false },
+        { text: () => sceneStrings("ilLazy"), correct: false },
+        { text: () => sceneStrings("ilGc"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("exhaustQ"),
+      options: [
+        { text: () => sceneStrings("exExh"), correct: true },
+        { text: () => sceneStrings("exFast"), correct: false },
+        { text: () => sceneStrings("exSmall"), correct: false },
+        { text: () => sceneStrings("exNoTag"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("evalOrderQ"),
+      options: [
+        { text: () => sceneStrings("eoMul"), correct: true },
+        { text: () => sceneStrings("eoAssign"), correct: false },
+        { text: () => sceneStrings("eoAdd"), correct: false },
+        { text: () => sceneStrings("eoVar"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("spanQ"),
+      answer: () => sceneStrings("spanA"),
+    },
+    {
+      // Post-order eval of a = b + c*k.
+      prompt: (v) => sceneStrings("evalNumQ", v),
+      variables: "b=[1:9] c=[1:9] k=[2:5]",
+      answer: (v) => v.b + v.c * v.k,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // (p - q) * r.
+      prompt: (v) => sceneStrings("eval2NumQ", v),
+      variables: "p=[5:12] q=[1:4] r=[2:6]",
+      answer: (v) => (v.p - v.q) * v.r,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

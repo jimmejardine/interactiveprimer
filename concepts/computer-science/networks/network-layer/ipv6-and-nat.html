@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>IPv6 and NAT</primer-title>
+
+    <primer-card>
+      <p>
+        In the early 1980s, <primer-math>2^{32}</primer-math> — 4.3 billion — IPv4 addresses felt like more than
+        the human race could ever need. Then came PCs, then phones, then a fridge with Wi-Fi. By the 2010s the
+        regional registries were literally <strong>handing out their last blocks</strong>; the free pool ran dry.
+        The Internet faced a genuine arithmetic crisis: more devices than addresses. Two responses emerged, and —
+        fascinatingly — both are still running side by side today. One is a clever, slightly grubby <em>stopgap</em>
+        that stretches the old addresses (<strong>NAT</strong>); the other is a clean, enormous
+        <em>replacement</em> that ends scarcity forever (<strong>IPv6</strong>). This page is about both, and
+        about why the "temporary" hack has outlived every prediction of its retirement.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>NAT: making one address look like hundreds</h2>
+      <p>
+        Look at your home. A laptop, two phones, a games console, a TV, a doorbell — a dozen devices, each with a
+        private
+        <primer-ref soft to="computer-science/networks/network-layer/ip-addressing-and-subnetting">RFC 1918</primer-ref>
+        address like <code>192.168.1.x</code>. Yet your ISP gave you exactly <strong>one</strong> public IPv4
+        address. How do a dozen devices share one public identity? <strong>Network Address Translation.</strong>
+      </p>
+      <p>
+        Your home router sits on the boundary. When an inside device opens a connection, the router
+        <strong>rewrites the packet</strong>: it swaps the private source IP <em>and source port</em> for its own
+        public IP and a freshly chosen port, and records the swap in a <strong>NAT translation table</strong>.
+        When the reply comes back to that public IP:port, the router looks up the table, rewrites the destination
+        back to the original private IP:port, and delivers it inside. The outside world sees only the router's
+        single public address; the multiplexing across dozens of devices is hidden entirely in that table. Because
+        it rewrites <em>ports</em> as well as addresses, this is often called <strong>NAPT</strong> (Network
+        Address <em>Port</em> Translation) or "PAT" — and the port is what makes many-to-one sharing possible.
+      </p>
+
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Inside (private) IP:port</th><th>Router public IP:port</th><th>Outside destination</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>192.168.1.10:52001</td><td>203.0.113.5:40001</td><td>93.184.216.34:443</td></tr>
+            <tr><td>192.168.1.23:52001</td><td>203.0.113.5:40002</td><td>93.184.216.34:443</td></tr>
+            <tr><td>192.168.1.10:52014</td><td>203.0.113.5:40003</td><td>142.250.72.14:80</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Notice the first two rows: two different inside devices both used source port <code>52001</code> and both
+        talked to the same server — a collision that would be ambiguous on the wire. NAT resolves it by giving
+        each a <em>distinct</em> public port (<code>40001</code> vs <code>40002</code>), so replies are never
+        confused. The demo below builds exactly this table.
+      </p>
+
+      <primer-code run>
+        // A minimal NAT (NAPT) box. It rewrites (privateIP, privatePort) to the
+        // router's single public IP with a unique public port, remembers the mapping,
+        // and can translate a reply back to the right inside host.
+        const PUBLIC_IP = "203.0.113.5";
+        let nextPort = 40001;
+        const table = new Map&lt;string, string&gt;(); // publicKey -&gt; "privIP:privPort"
+
+        function outbound(privIP: string, privPort: number, dst: string): string {
+          const pubPort = nextPort++;
+          table.set(`${PUBLIC_IP}:${pubPort}`, `${privIP}:${privPort}`);
+          console.log(`OUT  ${privIP}:${privPort} -&gt; ${dst}   rewritten as ${PUBLIC_IP}:${pubPort}`);
+          return `${PUBLIC_IP}:${pubPort}`;
+        }
+
+        function inbound(pubKey: string): void {
+          const inside = table.get(pubKey);
+          if (inside) console.log(`IN   reply to ${pubKey}  delivered inside to ${inside}`);
+          else console.log(`IN   reply to ${pubKey}  DROPPED (no table entry - unsolicited)`);
+        }
+
+        // Two inside hosts, both using source port 52001 to the same server:
+        const a = outbound("192.168.1.10", 52001, "93.184.216.34:443");
+        const b = outbound("192.168.1.23", 52001, "93.184.216.34:443");
+        outbound("192.168.1.10", 52014, "142.250.72.14:80");
+
+        console.log("--- replies come back ---");
+        inbound(a); // resolves to .10
+        inbound(b); // resolves to .23, NOT .10 - the ports disambiguate
+
+        // An UNSOLICITED packet from the outside (nobody asked for it):
+        inbound("203.0.113.5:55555"); // no mapping -&gt; dropped
+      </primer-code>
+
+      <p>
+        NAT solved the address crunch brilliantly — but it broke a founding principle of the Internet.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The cost: NAT breaks the end-to-end principle</h2>
+      <p>
+        The original Internet promised that <em>any</em> host could address <em>any</em> other host directly — the
+        <strong>end-to-end principle</strong>. NAT quietly revokes that promise. An inside device has no
+        publicly reachable address of its own; it exists, from the outside, only as a temporary row in a table
+        that appears when it <em>initiates</em> a connection and evaporates when idle. This has real consequences:
+      </p>
+      <ul>
+        <li>
+          <strong>Unsolicited inbound connections fail.</strong> Nobody outside can start a connection <em>to</em>
+          an inside host, because there is no table entry until the inside host reaches out first (you saw the
+          "DROPPED" line above). Running a server at home therefore needs manual <strong>port forwarding</strong>.
+        </li>
+        <li>
+          <strong>Peer-to-peer is hard.</strong> Two devices, each behind its own NAT, cannot simply dial each
+          other — both are "inside-only". Getting a video call or game to connect directly requires
+          <strong>NAT traversal</strong> tricks (STUN, TURN, ICE, "hole punching"): the two peers rendezvous via a
+          public server, learn each other's public IP:port, and simultaneously send outbound packets to punch
+          matching holes in both NATs.
+        </li>
+        <li>
+          <strong>Some protocols embed addresses in their payload</strong> (classic FTP, SIP), which NAT then has
+          to reach in and rewrite too — a layering violation that requires special "helpers".
+        </li>
+      </ul>
+
+      <primer-vignette title="Watch out! — NAT is not a firewall (it just looks like one)">
+        <p>
+          It is tempting to say "NAT protects me — outsiders can't reach my devices." There is a grain of truth:
+          because unsolicited inbound packets have no table entry, they <em>are</em> dropped, which incidentally
+          hides inside hosts. But that safety is a <strong>side effect, not a security design</strong>, and
+          leaning on it is dangerous:
+        </p>
+        <ul>
+          <li>
+            NAT makes <em>no security decisions</em> — it doesn't inspect content, block malware, or filter by
+            policy. It rewrites addresses. Any inside host that initiates a connection opens a two-way hole for
+            the duration.
+          </li>
+          <li>
+            Its "protection" vanishes the moment you add port forwarding, UPnP (which lets apps open holes
+            automatically), or NAT traversal — all common.
+          </li>
+          <li>
+            IPv6 often has <em>no</em> NAT at all, so a real, configured <strong>stateful firewall</strong> — not
+            NAT — must be the thing providing security in both worlds.
+          </li>
+        </ul>
+        <p>
+          The one-liner: <strong>NAT conserves addresses; a firewall enforces policy.</strong> Do not confuse an
+          accident of address translation for a deliberate security boundary.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>IPv6: end scarcity, don't manage it</h2>
+      <p>
+        IPv6 takes the opposite tack: instead of squeezing more life out of 32 bits, it moves to
+        <strong>128 bits</strong>. The number of addresses becomes <primer-math>2^{128}</primer-math> —
+        <primer-math>2^{128} \approx 3.4 \times 10^{38}</primer-math>, so vast that you could assign an address to
+        every atom on the surface of the Earth and barely dent it. Scarcity, and with it the <em>reason</em> for
+        NAT, simply disappears. Every device can once again have its own globally unique, directly reachable
+        address — the end-to-end principle restored.
+      </p>
+      <p>
+        128 bits are written as eight groups of four hex digits, separated by colons:
+      </p>
+      <primer-math display>\texttt{2001:0db8:0000:0000:0000:ff00:0042:8329}</primer-math>
+      <p>That is a mouthful, so IPv6 has two compression rules that shorten it dramatically:</p>
+      <ul>
+        <li>
+          <strong>Drop leading zeros</strong> in each group: <code>0db8 → db8</code>, <code>0042 → 42</code>,
+          <code>0000 → 0</code>.
+        </li>
+        <li>
+          <strong>Replace one run of all-zero groups with <code>::</code></strong> — and you may do this
+          <em>at most once</em> per address (otherwise it would be ambiguous where the zeros go).
+        </li>
+      </ul>
+      <p>Applying both, the address above collapses to:</p>
+      <primer-math display>\texttt{2001:db8::ff00:42:8329}</primer-math>
+      <p>
+        The <code>::</code> stands in for "however many all-zero groups it takes to make eight total". So
+        <code>::1</code> is the loopback (seven zero groups then <code>1</code>), and <code>::</code> alone is the
+        all-zeros address. Because you may use <code>::</code> only once, an address like
+        <code>2001:0:0:1:0:0:0:1</code> must choose <em>which</em> zero-run to collapse (the longer one), giving
+        <code>2001:0:0:1::1</code> — not <code>2001::1::1</code>, which is illegal and un-parseable.
+      </p>
+
+      <primer-theorem name="What IPv6 changes beyond size">
+        <ul>
+          <li>
+            <strong>Simplified, fixed-size header.</strong> IPv6 drops the header checksum and the in-network
+            fragmentation fields, giving routers a leaner, faster-to-process header. (Fragmentation, when needed,
+            is done only by the sender.)
+          </li>
+          <li>
+            <strong>Stateless address autoconfiguration (SLAAC).</strong> A host can generate its own address from
+            the network prefix a router advertises — no DHCP server required to get online.
+          </li>
+          <li>
+            <strong>No NAT needed.</strong> With addresses no longer scarce, hosts get globally unique addresses
+            and reach each other directly — end-to-end connectivity returns.
+          </li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The long crossover: dual stack and tunnelling</h2>
+      <p>
+        You cannot flip the whole Internet to IPv6 on a Tuesday — hundreds of millions of devices, routers and
+        services would have to change at once. So the transition has been gradual, and two mechanisms carry it:
+      </p>
+      <ul>
+        <li>
+          <strong>Dual stack</strong> — a host or router runs <em>both</em> IPv4 and IPv6 simultaneously, with two
+          addresses, and speaks whichever the other end supports. This is the dominant approach: your phone almost
+          certainly has both right now, quietly preferring IPv6 when the destination offers it.
+        </li>
+        <li>
+          <strong>Tunnelling</strong> — when an IPv6 packet must cross a stretch of IPv4-only network, it is
+          <em>encapsulated</em> inside an IPv4 packet (an IPv6 datagram tucked into an IPv4 payload), carried
+          across, and unwrapped at the far side. The IPv4 middle never knows it was carrying IPv6.
+        </li>
+      </ul>
+      <p>
+        The upshot is a strange, drawn-out coexistence: IPv6 adoption keeps climbing (past half of Google's
+        traffic in many countries), yet NAT'd IPv4 stubbornly persists. The "temporary" stopgap and its
+        replacement have shared the road for two decades — a reminder that on the Internet, nothing is more
+        permanent than a good temporary fix.
+      </p>
+
+      <primer-vignette title="Why did we skip straight from IPv4 to IPv6? What happened to IPv5?">
+        <p>
+          There <em>was</em> an "IPv5" — sort of. The version number 5 in the IP header was assigned to an
+          experimental 1979 protocol called ST (the Internet Stream Protocol), designed for real-time voice and
+          video. It never became a general-purpose successor to IPv4, but it had already claimed version number 5.
+          So when the next-generation IP was designed in the 1990s, it took the next free number: <strong>6</strong>.
+          There is no missing IPv5 conspiracy — just a version number quietly spent on a research protocol before
+          the real successor arrived.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "ipv6NatQuiz@1": { "instructions": "Check your grasp of address exhaustion, how NAT rewrites and its costs, IPv6 addressing and :: compression, and the dual-stack/tunnelling transition." } }
+    </script>
+    <primer-quiz name="ipv6NatQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/network-layer/ip-addressing-and-subnetting"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("ipv6NatQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "What fundamental problem prompted both NAT and IPv6?",
+      options: [
+        { text: "the exhaustion of the 32-bit IPv4 address space", correct: true },
+        { text: "IPv4 packets were too slow to route", correct: false },
+        { text: "TCP could not handle enough simultaneous connections", correct: false },
+        { text: "DNS names ran out of available words", correct: false },
+      ] },
+
+    { prompt: "What does a home NAT router rewrite as an inside packet leaves?",
+      options: [
+        { text: "the private source IP and source port, to the router's public IP and a chosen port", correct: true },
+        { text: "the destination IP and port to a private address", correct: false },
+        { text: "the TTL and protocol fields only", correct: false },
+        { text: "nothing — it merely forwards the packet unchanged", correct: false },
+      ] },
+
+    { prompt: "Why does NAT rewrite the PORT as well as the IP address?",
+      options: [
+        { text: "so many inside hosts can share one public IP without their connections colliding", correct: true },
+        { text: "because ports are encrypted and must be regenerated", correct: false },
+        { text: "to speed up the router's forwarding lookup", correct: false },
+        { text: "ports are never rewritten; only IPs are", correct: false },
+      ] },
+
+    { prompt: "An unsolicited packet arrives at the NAT's public address with no matching table entry. NAT…",
+      options: [
+        { text: "drops it — there is no mapping telling it which inside host to deliver to", correct: true },
+        { text: "broadcasts it to every inside host", correct: false },
+        { text: "creates a new entry and forwards it inside", correct: false },
+        { text: "replies with the router's own private address", correct: false },
+      ] },
+
+    { prompt: "How does NAT violate the Internet's end-to-end principle?",
+      options: [
+        { text: "inside hosts have no publicly reachable address; outsiders cannot initiate connections to them", correct: true },
+        { text: "it encrypts all traffic, hiding it from the endpoints", correct: false },
+        { text: "it forces every packet through a single global server", correct: false },
+        { text: "it renumbers the destination host on every hop", correct: false },
+      ] },
+
+    { prompt: "Why is peer-to-peer connectivity (e.g. a direct video call) hard when both peers are behind NAT?",
+      options: [
+        { text: "both are inside-only with no reachable address, so neither can initiate to the other without NAT traversal", correct: true },
+        { text: "NAT encrypts P2P traffic and drops the keys", correct: false },
+        { text: "peers behind NAT cannot use UDP at all", correct: false },
+        { text: "NAT forbids more than one connection per device", correct: false },
+      ] },
+
+    { prompt: "Techniques like STUN, TURN and 'hole punching' exist to…",
+      options: [
+        { text: "let two NAT'd peers discover each other's public IP:port and open matching holes to connect", correct: true },
+        { text: "compress IPv6 addresses", correct: false },
+        { text: "assign private addresses to inside hosts", correct: false },
+        { text: "encrypt the NAT translation table", correct: false },
+      ] },
+
+    { prompt: "Why is it wrong to treat NAT as a security firewall?",
+      options: [
+        { text: "hiding inside hosts is an incidental side effect; NAT makes no policy decisions and its 'protection' vanishes with port forwarding/UPnP", correct: true },
+        { text: "NAT actually inspects packet contents for malware", correct: false },
+        { text: "NAT blocks all outbound traffic by default", correct: false },
+        { text: "firewalls and NAT are exactly the same mechanism", correct: false },
+      ] },
+
+    { prompt: "How many bits is an IPv6 address?",
+      options: [
+        { text: "128", correct: true },
+        { text: "32", correct: false },
+        { text: "64", correct: false },
+        { text: "256", correct: false },
+      ] },
+
+    { prompt: "What are the two IPv6 text-compression rules?",
+      options: [
+        { text: "drop leading zeros in each group, and replace one run of all-zero groups with ::", correct: true },
+        { text: "drop trailing zeros, and replace any zeros with ::", correct: false },
+        { text: "convert to decimal, and remove all colons", correct: false },
+        { text: "use :: as many times as you like to remove every zero", correct: false },
+      ] },
+
+    { prompt: "How many times may :: appear in a single IPv6 address?",
+      options: [
+        { text: "at most once — more would make the zero-fill ambiguous", correct: true },
+        { text: "exactly twice, one at each end", correct: false },
+        { text: "as many times as there are zero groups", correct: false },
+        { text: "it is never allowed", correct: false },
+      ] },
+
+    { prompt: "Which is the correct compression of 2001:0db8:0000:0000:0000:ff00:0042:8329?",
+      options: [
+        { text: "2001:db8::ff00:42:8329", correct: true },
+        { text: "2001:db8:0:0:0:ff00:42:8329::", correct: false },
+        { text: "2001::db8::ff00:42:8329", correct: false },
+        { text: "21:db8::ff:42:8329", correct: false },
+      ] },
+
+    { prompt: "Which is a real change IPv6 makes to the header (beyond bigger addresses)?",
+      options: [
+        { text: "it drops the header checksum and in-network fragmentation fields for a leaner header", correct: true },
+        { text: "it adds a second, larger checksum over the payload", correct: false },
+        { text: "it makes the header variable-length and unbounded", correct: false },
+        { text: "it embeds the full routing table in every packet", correct: false },
+      ] },
+
+    { prompt: "'Dual stack' as a transition strategy means a host…",
+      options: [
+        { text: "runs both IPv4 and IPv6 at once and uses whichever the other end supports", correct: true },
+        { text: "keeps two copies of every packet in memory", correct: false },
+        { text: "tunnels all IPv4 inside IPv6 permanently", correct: false },
+        { text: "uses two NAT boxes back to back", correct: false },
+      ] },
+
+    { prompt: "IPv6 'tunnelling' across an IPv4-only stretch of network means…",
+      options: [
+        { text: "encapsulating the IPv6 packet inside an IPv4 packet, then unwrapping it at the far end", correct: true },
+        { text: "translating each IPv6 address to a private IPv4 address", correct: false },
+        { text: "dropping IPv6 packets until the network is upgraded", correct: false },
+        { text: "compressing the IPv6 header to fit IPv4's size", correct: false },
+      ] },
+
+    { prompt: "IPv6 removes the NEED for NAT because…",
+      options: [
+        { text: "addresses are no longer scarce, so every host can have its own globally unique, reachable address", correct: true },
+        { text: "it forbids private networks entirely", correct: false },
+        { text: "it runs NAT automatically inside every router", correct: false },
+        { text: "it makes all traffic broadcast", correct: false },
+      ] },
+  ]);
+</script>

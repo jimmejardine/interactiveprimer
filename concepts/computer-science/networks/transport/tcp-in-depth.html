@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>TCP in Depth</primer-title>
+
+    <primer-card>
+      <p>
+        Almost every byte you have ever read on the web arrived by TCP. When you loaded this page, two computers
+        performed a small, precise ceremony — a handshake to agree where to start counting, a stream of
+        numbered bytes flowing one way and acknowledgements flowing back, timers quietly watching for silence,
+        and finally a graceful goodbye. TCP is the workhorse of the internet, and having built up
+        <primer-ref soft to="computer-science/networks/transport/reliable-data-transfer">reliable data
+        transfer</primer-ref> from first principles, we can now see how the real protocol assembles those ideas
+        into a connection that lasts.
+      </p>
+      <p>
+        This page dissects TCP as it actually runs: the fields in its header, the three-way handshake and why
+        it takes three messages rather than two, how a connection is torn down (and the curious
+        <code>TIME_WAIT</code> pause at the end), the way ACKs count <em>bytes</em>, and how TCP measures the
+        round trip so it knows how long to wait before assuming a packet is lost.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The segment: sequence and ACK numbers count bytes</h2>
+      <p>
+        A TCP segment is a header (20 bytes without options) followed by application data. The two headline
+        fields are the <strong>sequence number</strong> and the <strong>acknowledgement number</strong>, and
+        the single most important thing to know about them is that they count <strong>bytes, not
+        packets</strong>.
+      </p>
+      <ul>
+        <li>
+          <strong>Sequence number</strong> — the byte-offset, within the whole stream, of the <em>first</em>
+          byte of data in this segment. If a segment carries bytes 5000–5999, its sequence number is 5000.
+        </li>
+        <li>
+          <strong>Acknowledgement number</strong> — the byte-offset the sender <em>next expects to receive</em>.
+          "ACK 6000" means "I have every byte up through 5999; send me 6000 next." These are
+          <strong>cumulative</strong>: one ACK confirms everything before it.
+        </li>
+      </ul>
+      <p>
+        Alongside them sit the control <strong>flags</strong> — single bits that change a segment's meaning:
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th>Flag</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td>SYN</td><td>Synchronise — open a connection, carrying the initial sequence number</td></tr>
+            <tr><td>ACK</td><td>The acknowledgement number field is valid (set on nearly every segment after the first)</td></tr>
+            <tr><td>FIN</td><td>Finish — this side has no more data to send; begin an orderly close</td></tr>
+            <tr><td>RST</td><td>Reset — abort the connection abruptly (e.g. segment for a connection that doesn't exist)</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The header also carries the source and destination <strong>ports</strong> (the demux
+        <primer-ref soft to="computer-science/networks/transport/multiplexing-and-sockets">4-tuple</primer-ref>),
+        a <strong>receive window</strong> for
+        <primer-ref todo to="computer-science/networks/transport/flow-control-and-the-sliding-window">flow
+        control</primer-ref>, and a <strong>checksum</strong> computed just like UDP's. The whole reliable,
+        ordered stream is choreographed by those byte-counting numbers.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The three-way handshake — and why three</h2>
+      <p>
+        Before any data flows, the two sides must agree on their starting sequence numbers. Each side chooses a
+        random <strong>initial sequence number (ISN)</strong> and must tell the other what it is <em>and</em>
+        confirm it heard the other's. That mutual agreement is what the three messages accomplish:
+      </p>
+      <ul>
+        <li><strong>SYN</strong> (client → server): "I want to open a connection; my ISN is <primer-math>x</primer-math>."</li>
+        <li><strong>SYN-ACK</strong> (server → client): "Got your <primer-math>x</primer-math> (ACK <primer-math>x+1</primer-math>); my ISN is <primer-math>y</primer-math>."</li>
+        <li><strong>ACK</strong> (client → server): "Got your <primer-math>y</primer-math> (ACK <primer-math>y+1</primer-math>). Let's go." — this one can already carry data.</li>
+      </ul>
+      <p>
+        Why not <em>two</em>? Because each direction of the connection needs its sequence number acknowledged,
+        and a two-message exchange can only confirm <em>one</em> direction. The third message is the client
+        confirming it received the server's ISN. Two messages would leave the server unsure whether the client
+        ever heard its chosen starting point — and, worse, would make the server vulnerable to
+        <strong>old, duplicate SYNs</strong>: a stray SYN from a long-dead connection could trick a two-way
+        server into opening a phantom connection. The three-way exchange lets each side confirm the other is
+        genuinely present and listening <em>now</em>, defeating those delayed duplicates.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "tcpLife": {
+            "title": "A TCP connection: three-way handshake, data, four-way teardown",
+            "clientCol": "CLIENT",
+            "serverCol": "SERVER",
+            "syn": "SYN, seq=x",
+            "synack": "SYN-ACK, seq=y, ack=x+1",
+            "ack": "ACK, ack=y+1 (data may ride along)",
+            "data": "data flows both ways (seq/ack count bytes)",
+            "fin1": "FIN — client done sending",
+            "ackfin1": "ACK of client's FIN",
+            "fin2": "FIN — server done sending",
+            "ackfin2": "ACK of server's FIN",
+            "timewait": "TIME_WAIT: client waits ~2·MSL before truly closing"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="tcpLife"
+        caption="A client/server timeline. The handshake runs SYN, SYN-ACK, ACK. Data then flows both ways. Teardown is four messages: the client's FIN, the server's ACK, the server's FIN, the client's ACK. The client then holds TIME_WAIT for roughly twice the maximum segment lifetime before fully closing."
+      ></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Teardown, and the point of TIME_WAIT</h2>
+      <p>
+        Closing is a <strong>four-way</strong> affair because each direction closes independently — TCP
+        connections are full-duplex, so each side sends its own <strong>FIN</strong> and gets its own
+        <strong>ACK</strong>. One side can finish sending (FIN) while still receiving, a "half-close." Once both
+        FINs are acknowledged, the connection is done — <em>almost</em>. The side that closed first (usually the
+        client) enters a state called <strong>TIME_WAIT</strong> and lingers there for roughly
+        <primer-math>2 \cdot \text{MSL}</primer-math> (twice the Maximum Segment Lifetime, often a minute or
+        two) before releasing the connection completely.
+      </p>
+
+      <primer-vignette title="Watch out! — TIME_WAIT is not a bug, a leak, or a thing to 'fix'">
+        <p>
+          Operators see thousands of sockets stuck in <code>TIME_WAIT</code> and panic — "my connections aren't
+          closing, something's leaking!" — and reach for hacks to kill it. That is a mistake.
+          <code>TIME_WAIT</code> is doing exactly its job, and it exists for two solid reasons:
+        </p>
+        <ul>
+          <li>
+            <strong>To absorb delayed duplicate segments.</strong> An old segment from this connection might
+            still be wandering the network. If the same 4-tuple were reused <em>immediately</em>, that straggler
+            could be mistaken for fresh data in the new connection. Waiting <primer-math>2 \cdot
+            \text{MSL}</primer-math> guarantees every old segment has died off first.
+          </li>
+          <li>
+            <strong>To protect the final ACK.</strong> The last ACK (of the peer's FIN) might be lost. If it is,
+            the peer will retransmit its FIN. Only by staying in <code>TIME_WAIT</code> can this side still be
+            around to re-ACK it; leave too early and the peer is stranded, unable to close cleanly.
+          </li>
+        </ul>
+        <p>
+          So <code>TIME_WAIT</code> is a <em>correctness feature</em>, not a leak. It is the side that initiated
+          the close that pays the cost — which is one reason high-throughput servers prefer to let
+          <em>clients</em> close first, so the <code>TIME_WAIT</code> burden lands on the many clients rather
+          than the one server.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Measuring the round trip: adaptive timeout</h2>
+      <p>
+        TCP's retransmission depends on a timeout, but what value? Too short and it retransmits needlessly; too
+        long and it dawdles after a real loss. And the right value <em>changes constantly</em> — the RTT to a
+        server varies with congestion and route. So TCP <strong>measures</strong> it continuously and adapts.
+      </p>
+      <p>
+        Each time a segment is acknowledged, TCP takes a <strong>SampleRTT</strong> (how long that segment took
+        to be ACKed) and folds it into a smoothed running average — an
+        <strong>exponentially weighted moving average (EWMA)</strong>:
+      </p>
+      <primer-math display>\text{EstimatedRTT} = (1-\alpha)\cdot\text{EstimatedRTT} + \alpha\cdot\text{SampleRTT}, \quad \alpha = 0.125</primer-math>
+      <p>
+        It also tracks how much the samples <em>jitter</em> — the deviation — because a variable link needs a
+        bigger safety margin than a steady one:
+      </p>
+      <primer-math display>\text{DevRTT} = (1-\beta)\cdot\text{DevRTT} + \beta\cdot|\text{SampleRTT}-\text{EstimatedRTT}|, \quad \beta = 0.25</primer-math>
+      <p>
+        The retransmission timeout is the estimate plus a generous margin proportional to that jitter:
+      </p>
+      <primer-math display>\text{RTO} = \text{EstimatedRTT} + 4\cdot\text{DevRTT}</primer-math>
+      <p>
+        The factor of four means a bursty, jittery path gets a comfortably longer timeout, avoiding spurious
+        retransmissions, while a rock-steady path gets a tight one that reacts to real loss quickly. The demo
+        runs the EWMA over a few noisy samples:
+      </p>
+
+      <primer-code run>
+        // TCP's adaptive timeout: EWMA of SampleRTT, plus a jitter-scaled margin.
+        const alpha = 0.125, beta = 0.25;
+        let est = 100;   // start EstimatedRTT at 100 ms
+        let dev = 20;    // start DevRTT at 20 ms
+
+        const samples = [100, 108, 95, 140, 102, 98, 210, 105, 99, 101]; // ms, note the spike
+        console.log("sample  Est     Dev     RTO");
+        for (const s of samples) {
+          est = (1 - alpha) * est + alpha * s;
+          dev = (1 - beta) * dev + beta * Math.abs(s - est);
+          const rto = est + 4 * dev;
+          console.log(
+            `${String(s).padStart(4)}   ${est.toFixed(1).padStart(6)}  ${dev.toFixed(1).padStart(6)}  ${rto.toFixed(1).padStart(6)} ms`,
+          );
+        }
+        console.log("\nThe 210 ms spike nudges Est up a little but bumps Dev a lot,");
+        console.log("so the RTO widens to avoid calling a merely-slow segment 'lost'.");
+      </primer-code>
+
+      <primer-vignette title="Karn's rule: don't sample a retransmitted segment">
+        <p>
+          There's a subtle trap in measuring RTT. Suppose you send a segment, time out, retransmit, and
+          <em>then</em> an ACK arrives. Was that ACK for the original or the retransmission? You can't tell — so
+          you can't know the true SampleRTT. <strong>Karn's algorithm</strong> says: simply
+          <em>don't take an RTT sample from any retransmitted segment.</em> To stay safe after a loss, TCP also
+          <strong>doubles the RTO</strong> on each timeout (exponential backoff) until a clean,
+          non-retransmitted ACK gives it a fresh sample to reset from. Ambiguous measurements are worse than no
+          measurement.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "tcpQuiz@1": { "instructions": "Check your grasp of TCP: segment fields and byte-counting seq/ack numbers, the three-way handshake, four-way teardown and TIME_WAIT, cumulative ACKs, and adaptive RTT estimation." } }
+    </script>
+    <primer-quiz name="tcpQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/transport/reliable-data-transfer",
+      "computer-science/networks/transport/multiplexing-and-sockets"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // Client/server timeline: 3-way handshake, data, 4-way teardown, then TIME_WAIT.
+  registerGeometryScene("tcpLife", ({ board, step, colors, sceneStrings }) => {
+    const CX = -3, SX = 3;
+    const header = (x, y, s, col) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 13, fixed: true,
+        highlight: false, strokeColor: col, color: col, cssStyle: "font-weight:700",
+      });
+    const note = (x, y, s, col, size = 11) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: size, fixed: true,
+        highlight: false, strokeColor: col, color: col,
+        cssStyle: "text-align:center; width:230px; display:inline-block",
+      });
+
+    header(CX, 6.3, sceneStrings("clientCol"), colors.cat[0]);
+    header(SX, 6.3, sceneStrings("serverCol"), colors.cat[1]);
+    board.create("segment", [[CX, 6], [CX, -6.5]], { strokeColor: colors.line, strokeOpacity: 0.3, fixed: true, highlight: false });
+    board.create("segment", [[SX, 6], [SX, -6.5]], { strokeColor: colors.line, strokeOpacity: 0.3, fixed: true, highlight: false });
+
+    const cToS = (y0, y1, label, col, dash = 0) => {
+      board.create("arrow", [[CX, y0], [SX, y1]], { strokeColor: col, strokeWidth: 2, dash, fixed: true, highlight: false });
+      note(0, (y0 + y1) / 2 + 0.28, label, colors.ink);
+    };
+    const sToC = (y0, y1, label, col, dash = 0) => {
+      board.create("arrow", [[SX, y0], [CX, y1]], { strokeColor: col, strokeWidth: 2, dash, fixed: true, highlight: false });
+      note(0, (y0 + y1) / 2 + 0.28, label, colors.ink);
+    };
+
+    step(sceneStrings("syn"),    () => cToS(5.4, 4.9, sceneStrings("syn"), colors.cat[0]));
+    step(sceneStrings("synack"), () => sToC(4.7, 4.2, sceneStrings("synack"), colors.cat[1]));
+    step(sceneStrings("ack"),    () => cToS(4.0, 3.5, sceneStrings("ack"), colors.cat[0]));
+
+    step(sceneStrings("data"), () => {
+      board.create("arrow", [[CX, 2.8], [SX, 2.5]], { strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false });
+      board.create("arrow", [[SX, 2.2], [CX, 1.9]], { strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false });
+      note(0, 2.7, sceneStrings("data"), colors.ink);
+    });
+
+    step(sceneStrings("fin1"),    () => cToS(1.2, 0.7, sceneStrings("fin1"), colors.cat[2]));
+    step(sceneStrings("ackfin1"), () => sToC(0.5, 0.0, sceneStrings("ackfin1"), colors.cat[1], 2));
+    step(sceneStrings("fin2"),    () => sToC(-0.6, -1.1, sceneStrings("fin2"), colors.cat[2]));
+    step(sceneStrings("ackfin2"), () => cToS(-1.3, -1.8, sceneStrings("ackfin2"), colors.cat[0], 2));
+
+    step(sceneStrings("timewait"), () => {
+      board.create("segment", [[CX - 0.3, -2.4], [CX - 0.3, -4.4]], { strokeColor: colors.cat[0], strokeWidth: 3, fixed: true, highlight: false });
+      note(CX - 2.0, -3.4, sceneStrings("timewait"), colors.cat[0]);
+    });
+  }, {
+    boundingbox: [-6.5, 6.8, 6.5, -5],
+    keepAspect: false,
+    title: () => makeStrings("tcpLife")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("tcpQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "TCP sequence and acknowledgement numbers count…",
+      options: [
+        { text: "bytes of the stream, not packets", correct: true },
+        { text: "whole packets, one per segment", correct: false },
+        { text: "milliseconds since the connection opened", correct: false },
+        { text: "the number of retransmissions so far", correct: false },
+      ] },
+
+    { prompt: "An acknowledgement number of 6000 means…",
+      options: [
+        { text: "I have every byte up through 5999; send byte 6000 next", correct: true },
+        { text: "I received exactly 6000 packets", correct: false },
+        { text: "byte 6000 was corrupted", correct: false },
+        { text: "the window is 6000 bytes", correct: false },
+      ] },
+
+    { prompt: "TCP ACKs are 'cumulative,' meaning one ACK…",
+      options: [
+        { text: "confirms every byte up to that number, not just one segment", correct: true },
+        { text: "must be sent for every single byte separately", correct: false },
+        { text: "acknowledges only the most recent packet", correct: false },
+        { text: "resets the sequence numbers", correct: false },
+      ] },
+
+    { prompt: "Which flag opens a connection and carries the initial sequence number?",
+      options: [
+        { text: "SYN", correct: true },
+        { text: "FIN", correct: false },
+        { text: "RST", correct: false },
+        { text: "ACK", correct: false },
+      ] },
+
+    { prompt: "The RST flag is used to…",
+      options: [
+        { text: "abruptly abort a connection (e.g. a segment for a non-existent connection)", correct: true },
+        { text: "gracefully finish sending data", correct: false },
+        { text: "acknowledge received bytes", correct: false },
+        { text: "resize the receive window", correct: false },
+      ] },
+
+    { prompt: "The three-way handshake is SYN, SYN-ACK, ACK. Why three messages, not two?",
+      options: [
+        { text: "each direction's initial sequence number must be acknowledged, and it defeats old duplicate SYNs", correct: true },
+        { text: "the third message carries the password", correct: false },
+        { text: "TCP always sends everything three times", correct: false },
+        { text: "one message is reserved for the checksum", correct: false },
+      ] },
+
+    { prompt: "In the handshake, if the client's ISN is x, the server's SYN-ACK acknowledges…",
+      options: [
+        { text: "x+1", correct: true },
+        { text: "x", correct: false },
+        { text: "0", correct: false },
+        { text: "the server's own ISN y", correct: false },
+      ] },
+
+    { prompt: "Connection teardown is a four-way exchange because…",
+      options: [
+        { text: "the connection is full-duplex, so each direction sends its own FIN and gets its own ACK", correct: true },
+        { text: "four messages are needed to erase the sequence numbers", correct: false },
+        { text: "TCP requires exactly four packets per connection", correct: false },
+        { text: "the checksum must be sent twice each way", correct: false },
+      ] },
+
+    { prompt: "TIME_WAIT exists primarily to…",
+      options: [
+        { text: "let delayed duplicate segments die out and allow re-ACK of a lost final ACK", correct: true },
+        { text: "slow the connection down to save bandwidth", correct: false },
+        { text: "leak sockets on purpose", correct: false },
+        { text: "renegotiate the window size", correct: false },
+      ] },
+
+    { prompt: "Thousands of sockets in TIME_WAIT usually indicate…",
+      options: [
+        { text: "normal, correct behaviour — not a bug or a leak to eliminate", correct: true },
+        { text: "a serious memory leak that must be patched", correct: false },
+        { text: "the connections never actually closed", correct: false },
+        { text: "a security breach", correct: false },
+      ] },
+
+    { prompt: "TIME_WAIT is entered by…",
+      options: [
+        { text: "the side that initiated the close (typically the client)", correct: true },
+        { text: "the side that received the first FIN", correct: false },
+        { text: "both sides simultaneously, always", correct: false },
+        { text: "whichever side has the higher sequence number", correct: false },
+      ] },
+
+    { prompt: "TCP estimates RTT with an EWMA: EstimatedRTT = (1−α)·EstimatedRTT + α·SampleRTT. The point of the EWMA is to…",
+      options: [
+        { text: "smoothly track a changing RTT, weighting recent samples", correct: true },
+        { text: "count the number of packets sent", correct: false },
+        { text: "guarantee the RTT never changes", correct: false },
+        { text: "compute the checksum", correct: false },
+      ] },
+
+    { prompt: "The retransmission timeout is RTO = EstimatedRTT + 4·DevRTT. DevRTT captures…",
+      options: [
+        { text: "the jitter (variability) of the samples, so a bursty path gets a bigger safety margin", correct: true },
+        { text: "the number of dropped packets", correct: false },
+        { text: "the raw bandwidth of the link", correct: false },
+        { text: "the size of the receive window", correct: false },
+      ] },
+
+    { prompt: "Karn's algorithm says that when measuring RTT you should…",
+      options: [
+        { text: "not sample from a retransmitted segment, since you can't tell which copy the ACK is for", correct: true },
+        { text: "always double the sample", correct: false },
+        { text: "sample only from retransmitted segments", correct: false },
+        { text: "ignore RTT entirely", correct: false },
+      ] },
+
+    { prompt: "On a timeout, TCP also applies exponential backoff, which means it…",
+      options: [
+        { text: "doubles the RTO on each successive timeout until a clean ACK resets it", correct: true },
+        { text: "halves the RTO to react faster", correct: false },
+        { text: "resets the sequence number", correct: false },
+        { text: "sends the segment on a different port", correct: false },
+      ] },
+  ]);
+</script>

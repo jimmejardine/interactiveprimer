@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Just-in-Time Compilation</primer-title>
+
+    <primer-card>
+      <p>
+        An
+        <primer-ref to="computer-science/compiler-design/foundations/compiler-interpreter-and-jit">ahead-of-time compiler</primer-ref>
+        translates the whole program once, before it runs, knowing nothing about the inputs it will see. A
+        <strong>just-in-time (JIT)</strong> compiler does the opposite: it starts by <em>interpreting</em>, and
+        compiles code to native machine instructions <em>while the program is already running</em> — armed with
+        something an AOT compiler can only dream of: <strong>live profile data</strong> about what this
+        particular execution actually does. Which branch is taken 99% of the time? What concrete type flows
+        through this polymorphic call? Which loop is hot? The JIT sees it happen and compiles for the
+        <em>observed</em> reality, not the worst case.
+      </p>
+      <p>
+        This is the engine behind Java's HotSpot, JavaScript's V8, .NET's CLR, LuaJIT and PyPy. It is why a
+        dynamically-typed language, seemingly doomed to slow interpretation, can approach the speed of C on hot
+        code. The whole design is a bet: <em>spend compilation effort only where it pays off, speculate on what
+        you have observed, and keep an escape hatch for when the speculation turns out wrong.</em>
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Hot-path detection: don't compile what you won't rerun</h2>
+      <p>
+        Compiling costs time <em>now</em> to save time <em>later</em> — so it only pays for code that runs many
+        times. A JIT therefore begins every method in a cheap <strong>bytecode interpreter</strong> and attaches
+        <strong>counters</strong>: increment on each method entry and each loop back-edge. When a counter crosses
+        a threshold, that method or loop is declared <em>hot</em> and handed to the compiler. The 90/10 rule —
+        most time in a small fraction of the code — is what makes this profitable: you interpret the cold 90% of
+        methods essentially for free and lavish optimisation on the hot 10%.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Tiered compilation: a ladder of effort</h2>
+      <p>
+        A single "interpret vs compile" switch is too blunt. Modern engines use <strong>tiered
+        compilation</strong>: several execution modes of increasing quality and increasing compile cost, and
+        code climbs the ladder as it proves itself hot. HotSpot and V8 both do this.
+      </p>
+      <primer-geometry scene="tierPipeline"></primer-geometry>
+      <ul>
+        <li><strong>Tier 0 — interpreter.</strong> Starts instantly, runs slowly, gathers profile data.</li>
+        <li><strong>Tier 1 — baseline JIT.</strong> Compiles fast, optimises little; gets hot code off the interpreter quickly and keeps collecting profiles.</li>
+        <li><strong>Tier 2 — optimising JIT.</strong> Slow to compile, produces excellent code, using the accumulated profile to speculate aggressively (inlining, type specialisation, unboxing).</li>
+      </ul>
+      <p>
+        The ladder balances two opposing costs. Jumping straight to the optimising tier would stall startup on
+        code that turns out cold; staying in the interpreter forever would leave peak performance on the table.
+        Tiering gives fast startup <em>and</em> high peak throughput by moving each piece of code only as far up
+        the ladder as its hotness justifies.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Speculation, deoptimisation and OSR</h2>
+      <p>
+        The optimising tier's power comes from <strong>profile-guided speculation</strong>: it compiles code
+        that is correct only <em>if</em> an assumption observed so far continues to hold. "This variable has
+        always been an integer, so compile integer arithmetic." "This call site has only ever targeted
+        <code>Cat.speak</code>, so inline it." These assumptions let it generate code as tight as a statically
+        typed language's — but they might be <em>wrong</em> on a future iteration.
+      </p>
+      <p>
+        So every speculation is protected by a cheap <strong>guard</strong>: a quick check (is it still an int?
+        is the receiver still a <code>Cat</code>?). If a guard fails, the engine performs
+        <strong>deoptimisation</strong> — it discards the optimised code and reconstructs the exact interpreter
+        state (all the locals and the operand stack) at that program point, then resumes in the interpreter as
+        if the fast code had never run. The dual manoeuvre is <strong>on-stack replacement (OSR)</strong>:
+        swapping a running activation from one tier to another <em>mid-execution</em> — crucial for a long-running
+        loop that becomes hot while it is still spinning, since you cannot wait for it to return to upgrade it.
+      </p>
+      <primer-theorem name="The speculation contract">
+        <ul>
+          <li>Compile under an assumption; protect it with a guard that is cheaper than the code it enables.</li>
+          <li>On guard failure, <strong>deoptimise</strong>: reconstruct interpreter state and fall back — never miscompute.</li>
+          <li>Use <strong>OSR</strong> to switch tiers in the middle of a running frame (e.g. a hot loop) without waiting for it to return.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Inline caches: making dynamic dispatch cheap</h2>
+      <p>
+        In a dynamic language, <code>x.foo()</code> must look up which <code>foo</code> to call based on
+        <code>x</code>'s runtime type — a hash-map lookup on every call, murderous in a loop. The classic cure
+        is the <strong>inline cache (IC)</strong>: cache the result of the lookup <em>at the call site</em>. The
+        first time, do the full lookup and remember "type <primer-math>T</primer-math> → method
+        <primer-math>m</primer-math>" right there in the code. Next time, if the receiver is still
+        <primer-math>T</primer-math> (a one-word guard), jump straight to <primer-math>m</primer-math>.
+      </p>
+      <ul>
+        <li>A <strong>monomorphic</strong> IC caches one type — perfect when a site always sees the same type.</li>
+        <li>A <strong>polymorphic</strong> IC (PIC) caches a handful, checking each in turn.</li>
+        <li>A site that sees too many types goes <strong>megamorphic</strong> and falls back to the full lookup.</li>
+      </ul>
+      <p>
+        Inline caches are also a profile source: a call site that stayed monomorphic is a golden signal to the
+        optimising tier that it can safely <em>inline</em> that one target under a type guard.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Method JITs vs trace JITs</h2>
+      <p>
+        Two philosophies for choosing the <em>unit</em> of compilation:
+      </p>
+      <ul>
+        <li>
+          <strong>Method JITs</strong> (HotSpot, V8) compile whole methods, following the control-flow graph and
+          speculating with profiles. This is the mainstream design.
+        </li>
+        <li>
+          <strong>Trace JITs</strong> (early TraceMonkey, PyPy, LuaJIT) compile a single hot <em>trace</em> — the
+          actual straight-line path taken through a loop iteration, across method boundaries — turning it into
+          branch-free code with side-exit guards. Traces inline naturally and expose enormous optimisation on
+          the hot path, but suffer when control flow is irregular (trace explosion) and pay for many side exits.
+        </li>
+      </ul>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th></th><th>AOT compiler</th><th>JIT compiler</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>When it compiles</td><td>before running, once</td><td>during execution, on demand</td></tr>
+            <tr><td>Startup latency</td><td>none (already native)</td><td>warm-up cost (interpret first)</td></tr>
+            <tr><td>Profile knowledge</td><td>none (static guesses / PGO from a prior run)</td><td>this run's live profile</td></tr>
+            <tr><td>Speculation</td><td>must be conservative</td><td>aggressive, guarded, deoptimisable</td></tr>
+            <tr><td>Compile time counts as</td><td>build time (free at runtime)</td><td>runtime (competes with the program)</td></tr>
+            <tr><td>Peak on hot code</td><td>good, fixed</td><td>can exceed AOT (specialised to reality)</td></tr>
+            <tr><td>Memory / complexity</td><td>lower runtime footprint</td><td>compiler + profiles resident in-process</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-card>
+      <h2>Hotness and tiering, in code</h2>
+      <p>
+        A toy tier controller: run methods through counters and promote them across tiers as they heat up. It
+        models the essential policy — cheap first, expensive only when earned.
+      </p>
+      <primer-code run>
+        const TIERS = ["interpreter", "baseline", "optimising"] as const;
+        type Tier = typeof TIERS[number];
+
+        class TierController {
+          private count = new Map&lt;string, number&gt;();
+          private tier = new Map&lt;string, number&gt;();     // index into TIERS
+          // thresholds to CLIMB to baseline (1) and to optimising (2)
+          constructor(private readonly promote = [10, 100]) {}
+
+          onCall(method: string): Tier {
+            const n = (this.count.get(method) ?? 0) + 1;
+            this.count.set(method, n);
+            let t = this.tier.get(method) ?? 0;
+            while (t &lt; 2 &amp;&amp; n &gt;= this.promote[t]) {
+              t++;
+              console.log(`  ${method} promoted to ${TIERS[t]} at call #${n}`);
+            }
+            this.tier.set(method, t);
+            return TIERS[t];
+          }
+        }
+
+        const jit = new TierController();
+        // "hot" is called in a tight loop; "cold" only twice.
+        for (let i = 0; i &lt; 120; i++) jit.onCall("hot");
+        jit.onCall("cold");
+        jit.onCall("cold");
+        console.log("hot  finishes in : " + jit.onCall("hot"));
+        console.log("cold finishes in : " + jit.onCall("cold"));
+      </primer-code>
+      <p>
+        <code>hot</code> climbs to the optimising tier once its counter passes 100; <code>cold</code> never
+        leaves the interpreter — precisely the effort-where-it-pays discipline every real JIT enforces.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="What do HotSpot, V8 TurboFan and PyPy actually do differently?">
+      <p>
+        <strong>HotSpot</strong> (Java) pioneered the tiered method-JIT with two optimising compilers, C1
+        (baseline) and C2 (aggressive), plus a modern rewrite, Graal. <strong>V8</strong> (Chrome/Node) runs the
+        Ignition interpreter, a fast baseline compiler (Sparkplug), and the optimising TurboFan, deoptimising on
+        "hidden class" (shape) guard failures — its inline caches key on object shapes. <strong>PyPy</strong>
+        takes the trace-JIT road with a twist: it is a <em>meta-tracing</em> JIT that traces the <em>interpreter
+        loop</em>, so you get a JIT for a language almost for free by writing its interpreter in RPython. Three
+        different bets — method vs trace, one optimiser vs several — all converging on the same core idea:
+        interpret, profile, speculate, guard, deoptimise.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Speculation is only safe if it is guarded and deoptimisable">
+      <p>
+        The cardinal sin of JIT design is to speculate <em>without a guard</em> or without a working
+        deoptimisation path. If you compile "assume <code>x</code> is an int" and never check, then the day
+        <code>x</code> arrives as a string you don't get a slowdown — you get a <em>wrong answer</em> or a crash.
+        Every assumption must have (a) a cheap runtime guard, and (b) a correct deopt that rebuilds the exact
+        interpreter state so execution can resume as though the optimised code never existed. The other trap is
+        forgetting that JITs pay a <strong>warm-up cost</strong>: short-lived programs and benchmarks that don't
+        run long enough may finish before the optimising tier ever kicks in, so a JIT can look <em>slower</em>
+        than an interpreter on a cold, brief workload. Peak throughput and startup latency are in genuine
+        tension — that tension is the whole reason tiering exists.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "jitQuiz@1": {
+          "intro": "A JIT interprets first, then compiles hot code at runtime using live profiles, speculating under guards. Numbers change every attempt.",
+          "advQ": "The key advantage a JIT has over an AOT compiler is…",
+          "aProfile": "live profile data about what this execution actually does",
+          "aClock": "a faster clock",
+          "aRam": "more RAM",
+          "aTypes": "it never needs type information",
+          "hotQ": "How does a JIT decide which code is 'hot' enough to compile?",
+          "hCount": "counters on method entries and loop back-edges crossing a threshold",
+          "hRand": "it picks methods at random",
+          "hAlpha": "alphabetically by name",
+          "hAll": "it always compiles everything immediately",
+          "tierQ": "Tiered compilation exists to…",
+          "tBoth": "get fast startup AND high peak throughput by compiling each piece only as far as its hotness justifies",
+          "tSlow": "make every method as slow as possible",
+          "tNoInt": "eliminate the interpreter entirely",
+          "tRam": "reduce RAM to zero",
+          "specQ": "Profile-guided speculation compiles code that is correct only if…",
+          "sAssume": "an observed assumption (e.g. a type) keeps holding — and it is protected by a guard",
+          "sAlways": "the program never uses pointers",
+          "sStatic": "all types were declared statically",
+          "sNoLoop": "there are no loops",
+          "deoptQ": "When a speculation's guard fails, deoptimisation…",
+          "dRebuild": "discards the optimised code and reconstructs interpreter state to resume safely",
+          "dCrash": "crashes the program deliberately",
+          "dIgnore": "ignores the failure and continues with wrong values",
+          "dRestart": "restarts the whole program from main",
+          "osrQ": "On-stack replacement (OSR) is used to…",
+          "oSwitch": "switch a running activation between tiers mid-execution, e.g. a loop that got hot",
+          "oAlloc": "allocate memory on the stack",
+          "oGC": "run the garbage collector",
+          "oParse": "parse the source code",
+          "icQ": "An inline cache speeds up dynamic dispatch by…",
+          "icCache": "caching the type→method lookup at the call site, guarded by a type check",
+          "icSkip": "skipping the method call entirely",
+          "icClock": "raising the clock speed",
+          "icStatic": "forcing all types to be static",
+          "traceQ": "A trace JIT compiles…",
+          "trPath": "a single hot straight-line path (trace) through a loop, with side-exit guards",
+          "trWhole": "the entire program up front",
+          "trMethod": "always exactly one whole method",
+          "trNothing": "nothing — it only interprets",
+          "warmQ": "Why can a JIT look SLOWER than an interpreter on a short program?",
+          "wWarm": "warm-up cost — the program may finish before the optimising tier kicks in",
+          "wBug": "JITs always have bugs",
+          "wRam": "interpreters use no memory",
+          "wNever": "it never can",
+          "promoteQ": "A method is promoted to the optimising tier at {t} calls. It has been called {c} times. Has it been promoted yet? Enter 1 for yes, 0 for no.",
+          "picQ": "A polymorphic inline cache holds up to {k} cached types before a site is considered megamorphic. How many types can it cache?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="jitQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/foundations/compiler-interpreter-and-jit",
+      "computer-science/compiler-design/ir/static-single-assignment-form"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  function pipeTools(board, colors) {
+    const box = (cx, cy, w, h, col, name) => {
+      board.create("polygon", [
+        [cx - w / 2, cy - h / 2], [cx + w / 2, cy - h / 2],
+        [cx + w / 2, cy + h / 2], [cx - w / 2, cy + h / 2],
+      ], { strokeColor: col, strokeWidth: 2, fillColor: col, fillOpacity: 0.12, fixed: true, highlight: false,
+           vertices: { visible: false }, borders: { strokeColor: col } });
+      board.create("text", [cx, cy, name], {
+        anchorX: "middle", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    const arrow = (a, b, col, text) => {
+      board.create("arrow", [a, b], { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false });
+      if (text) board.create("text", [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2 + 0.4, text], {
+        anchorX: "middle", fontSize: 11, fixed: true, highlight: false, strokeColor: col, color: col,
+      });
+    };
+    return { box, arrow };
+  }
+
+  registerGeometryScene("tierPipeline", ({ board, step, colors }) => {
+    const T = pipeTools(board, colors);
+    const w = 2.6, h = 1.2;
+    const interp = [-6, 0], base = [-1, 0], opt = [4, 0];
+
+    step("Tier 0 — the interpreter: instant start, gathers profile.", () => {
+      T.box(interp[0], interp[1], w, h, colors.cat[0], "interpreter");
+    });
+    step("Hot counter fires → Tier 1 baseline JIT: quick native code.", () => {
+      T.box(base[0], base[1], w, h, colors.cat[1], "baseline JIT");
+      T.arrow([interp[0] + w / 2, 0], [base[0] - w / 2, 0], colors.cat[1], "hot");
+    });
+    step("Hotter still → Tier 2 optimising JIT: aggressive, profile-guided.", () => {
+      T.box(opt[0], opt[1], w, h, colors.cat[2], "optimising JIT");
+      T.arrow([base[0] + w / 2, 0], [opt[0] - w / 2, 0], colors.cat[2], "hotter");
+    });
+    step("Guard fails → deoptimise back down to the interpreter.", () => {
+      board.create("arrow", [[opt[0], -h / 2], [interp[0], -h / 2 - 1.4]], {
+        strokeColor: colors.cat[3], strokeWidth: 2, fixed: true, highlight: false,
+        lastArrow: { size: 6 },
+      });
+      board.create("text", [-1, -2.2, "deoptimise (guard failed)"], {
+        anchorX: "middle", fontSize: 12, fixed: true, highlight: false, strokeColor: colors.cat[3], color: colors.cat[3],
+      });
+    });
+  }, { boundingbox: [-8, 2.4, 6, -3], keepAspect: false, title: "The tiered-JIT pipeline: interpret → baseline → optimise, with deopt" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("jitQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("advQ"),
+      options: [
+        { text: () => sceneStrings("aProfile"), correct: true },
+        { text: () => sceneStrings("aClock"), correct: false },
+        { text: () => sceneStrings("aRam"), correct: false },
+        { text: () => sceneStrings("aTypes"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hotQ"),
+      options: [
+        { text: () => sceneStrings("hCount"), correct: true },
+        { text: () => sceneStrings("hRand"), correct: false },
+        { text: () => sceneStrings("hAlpha"), correct: false },
+        { text: () => sceneStrings("hAll"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tierQ"),
+      options: [
+        { text: () => sceneStrings("tBoth"), correct: true },
+        { text: () => sceneStrings("tSlow"), correct: false },
+        { text: () => sceneStrings("tNoInt"), correct: false },
+        { text: () => sceneStrings("tRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("specQ"),
+      options: [
+        { text: () => sceneStrings("sAssume"), correct: true },
+        { text: () => sceneStrings("sAlways"), correct: false },
+        { text: () => sceneStrings("sStatic"), correct: false },
+        { text: () => sceneStrings("sNoLoop"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("deoptQ"),
+      options: [
+        { text: () => sceneStrings("dRebuild"), correct: true },
+        { text: () => sceneStrings("dCrash"), correct: false },
+        { text: () => sceneStrings("dIgnore"), correct: false },
+        { text: () => sceneStrings("dRestart"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("osrQ"),
+      options: [
+        { text: () => sceneStrings("oSwitch"), correct: true },
+        { text: () => sceneStrings("oAlloc"), correct: false },
+        { text: () => sceneStrings("oGC"), correct: false },
+        { text: () => sceneStrings("oParse"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("icQ"),
+      options: [
+        { text: () => sceneStrings("icCache"), correct: true },
+        { text: () => sceneStrings("icSkip"), correct: false },
+        { text: () => sceneStrings("icClock"), correct: false },
+        { text: () => sceneStrings("icStatic"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("traceQ"),
+      options: [
+        { text: () => sceneStrings("trPath"), correct: true },
+        { text: () => sceneStrings("trWhole"), correct: false },
+        { text: () => sceneStrings("trMethod"), correct: false },
+        { text: () => sceneStrings("trNothing"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("warmQ"),
+      options: [
+        { text: () => sceneStrings("wWarm"), correct: true },
+        { text: () => sceneStrings("wBug"), correct: false },
+        { text: () => sceneStrings("wRam"), correct: false },
+        { text: () => sceneStrings("wNever"), correct: false },
+      ],
+    },
+    {
+      // promoted iff calls >= threshold.
+      prompt: (v) => sceneStrings("promoteQ", v),
+      variables: "t=[50:150] c=[10:200]",
+      answer: (v) => (v.c >= v.t ? 1 : 0),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // PIC caches k types.
+      prompt: (v) => sceneStrings("picQ", v),
+      variables: "k=[2:6]",
+      answer: (v) => v.k,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Multiprocessor Scheduling</primer-title>
+
+    <primer-card>
+      <p>
+        Everything so far — <primer-ref to="computer-science/advanced-operating-systems/scheduling/scheduling-metrics-and-mlfq">MLFQ</primer-ref>,
+        <primer-ref to="computer-science/advanced-operating-systems/scheduling/proportional-share-lottery-and-stride">stride</primer-ref>,
+        <primer-ref to="computer-science/advanced-operating-systems/scheduling/the-completely-fair-scheduler">CFS</primer-ref> —
+        answered "who runs <em>next</em>?" for a single CPU. Now there are dozens of them. A modern server has 64,
+        128, or more hardware threads, and the scheduler must decide not just <em>when</em> a task runs but
+        <em>where</em>. Two facts, both from
+        <primer-ref to="computer-science/computer-architecture/multicore/shared-memory-uma-and-numa">shared-memory
+        architecture</primer-ref>, dominate every decision: cores do <strong>not</strong> share caches all the way
+        down, and a lock that every core must grab is a scalability disaster. Multiprocessor scheduling is the art
+        of respecting both.
+      </p>
+      <p>
+        The first and most consequential choice is the shape of the run queue: <strong>one global queue</strong>
+        shared by all cores, or <strong>one run queue per CPU</strong>. It sounds like a minor implementation
+        detail. It is the whole ball game.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Single global queue versus per-CPU queues</h2>
+      <p>
+        A <strong>single global queue</strong> (SQMS — single-queue multiprocessor scheduling) is trivially fair
+        and load-balanced: every idle core just grabs the next task off the one shared list. But that list is shared
+        <em>mutable</em> state, so every scheduling decision on every core must take the <em>same lock</em>. With
+        <primer-math>N</primer-math> cores hammering one lock, contention grows roughly with
+        <primer-math>N</primer-math> and the scheduler stops scaling — the cores spend their time waiting for each
+        other instead of running work. Worse, a task bounces from core to core on successive quanta, trashing
+        <strong>cache affinity</strong> every time.
+      </p>
+      <p>
+        So real kernels — Linux, Windows, FreeBSD — use <strong>per-CPU run queues</strong> (MQMS). Each core has
+        its own queue and its own lock, so scheduling decisions are almost entirely <em>local</em> and
+        contention-free, and a task tends to stay on one core and keep its cache warm. The price is that the queues
+        drift out of balance — one core piled high while another sits idle — which the kernel must actively correct
+        by <strong>migrating</strong> tasks. The diagram shows the layout and the migration that rebalances it.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the per-CPU run queue + migration diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "percpu": {
+          "title": "Per-CPU run queues — each core schedules locally; the balancer migrates a task to an idle core",
+          "cpu0": "CPU 0", "cpu1": "CPU 1", "cpu2": "CPU 2",
+          "busy": "overloaded", "idle": "idle",
+          "migrate": "load-balance / work-steal → migrate a task (cache goes cold)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Per-CPU queues and migration</h2>
+      <primer-geometry scene="percpu"></primer-geometry>
+      <p>
+        Balancing happens two ways. In <strong>push</strong> migration a periodic balancer notices CPU 0 is
+        overloaded and shoves a task onto idle CPU 2. In <strong>pull</strong> migration — Linux calls it
+        <em>work stealing</em> — an about-to-go-idle core reaches into a busier core's queue and takes work for
+        itself. Both fix imbalance, but both pay the <strong>migration cost</strong>: the task arrives on its new
+        core with a <em>cold</em> cache and must refetch its working set from a shared cache or memory. A migration
+        can cost thousands of cycles of cache misses, so the balancer is deliberately <em>reluctant</em> — it
+        migrates only when the imbalance is worth the reload, and it respects <strong>affinity</strong> by
+        preferring to keep tasks where their data already is.
+      </p>
+      <primer-theorem name="Multiprocessor scheduling — the core tensions">
+        <ul>
+          <li><strong>Global queue</strong>: perfect load balance, but one lock ⇒ contention that grows with core
+            count, and poor cache affinity;</li>
+          <li><strong>Per-CPU queues</strong>: local, scalable, cache-friendly, but must be <em>rebalanced</em> by
+            migration (push, or pull/work-stealing);</li>
+          <li><strong>Cache affinity</strong>: keep a task on the core whose cache holds its data — migration
+            throws that away and pays a cold-cache reload;</li>
+          <li><strong>NUMA</strong>: migrating <em>across memory nodes</em> is worse still — the task's memory is
+            now remote — so the balancer prefers to move within a node;</li>
+          <li><strong>Gang scheduling</strong>: co-schedule all threads of one parallel job at once, so they can
+            communicate without waiting on a descheduled peer.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>A load balancer in code</h2>
+      <p>
+        Here is the essence of work stealing: an idle core finds the busiest core and pulls half its backlog.
+        Halving (rather than taking one task) is what real stealers do — it minimises how <em>often</em> you have
+        to steal, amortising the migration cost.
+      </p>
+      <primer-code run>
+        // Per-CPU run queues; an idle core steals HALF of the busiest core's backlog.
+        const queues: number[][] = [
+          [1, 2, 3, 4, 5, 6], // CPU 0: overloaded
+          [7, 8],             // CPU 1
+          [],                 // CPU 2: idle — will steal
+        ];
+        const load = () =&gt; queues.map((q) =&gt; q.length);
+        console.log("before:      loads = [" + load().join(", ") + "]");
+
+        // CPU 2 is idle: find the busiest queue and take half of it.
+        const idle = 2;
+        let busiest = 0;
+        for (let i = 0; i &lt; queues.length; i++) if (queues[i].length &gt; queues[busiest].length) busiest = i;
+
+        const steal = Math.floor(queues[busiest].length / 2);
+        const taken = queues[busiest].splice(0, steal); // migrate these tasks (their caches go cold)
+        queues[idle].push(...taken);
+        console.log(`CPU ${idle} stole ${steal} tasks from CPU ${busiest}: [${taken.join(", ")}]`);
+        console.log("after steal: loads = [" + load().join(", ") + "]");
+
+        const avg = load().reduce((s, n) =&gt; s + n, 0) / queues.length;
+        console.log("average load per CPU = " + avg.toFixed(2) + " (perfect balance would be this on every core)");
+      </primer-code>
+    </primer-card>
+
+    <!-- Strings for the scalability chart. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "scale": {
+          "title": "Scheduler throughput vs cores — a global lock saturates; per-CPU queues scale linearly",
+          "kc": "Global-lock cost per contender",
+          "legPer": "per-CPU queues (linear)",
+          "legGlobal": "single global lock"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Why the lock decides scalability</h2>
+      <p>
+        Model it simply. With per-CPU queues, adding a core adds a core's worth of scheduling throughput — the line
+        is straight, <primer-math>y = N</primer-math>. With a single global lock, each of the
+        <primer-math>N</primer-math> contenders slows every decision, so useful throughput behaves like
+        <primer-math>N/(1 + k(N-1))</primer-math> and <em>saturates</em> — beyond some point, more cores make
+        things <em>worse</em>, not better. Drag the lock-cost slider and watch the global-queue curve peel away from
+        the ideal line. This is exactly why the industry moved from "big kernel lock" designs to fine-grained,
+        per-CPU state.
+      </p>
+      <primer-chart scene="scale"></primer-chart>
+      <primer-chart-sliders name="scale"></primer-chart-sliders>
+    </primer-card>
+
+    <primer-vignette title="Why does a video call stutter when the machine is barely 30% busy?">
+      <p>
+        Meet <strong>gang scheduling</strong>'s reason for existing. A parallel job whose threads constantly
+        communicate — barrier synchronisation, a producer/consumer pipeline, an MPI collective — grinds to a halt if
+        even <em>one</em> of its threads is descheduled while the others try to talk to it. Thread A spins waiting
+        on a message from thread B, but B is not currently on any core, so A wastes its entire quantum spinning.
+        With hundreds of such micro-stalls a second the job crawls even though CPUs sit idle. Gang scheduling
+        co-schedules all the job's threads in the <em>same</em> time slice across cores, so they are all present to
+        talk to each other. HPC schedulers and hypervisors (which must avoid descheduling one vCPU of a guest that
+        holds a spinlock — "lock-holder preemption") care about this intensely.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Perfect load balance is NOT the goal — the fewest migrations that keep the system busy is">
+      <p>
+        It is tempting to balance queues to exactly equal length at every tick. That is a trap. Each migration
+        costs a cold-cache reload (and, across NUMA nodes, remote-memory penalties on <em>every</em> subsequent
+        access until the pages migrate too). A scheduler that chases perfect balance migrates constantly and spends
+        more on cache misses than it saves in idle time. Real balancers are <em>hysteretic</em> and lazy: they
+        tolerate mild imbalance, migrate only when a core would otherwise <em>idle</em> or the imbalance crosses a
+        threshold, and prefer moving a task that is not "cache-hot". The right objective is <em>keep every core
+        usefully busy at the least migration cost</em>, not equal queue lengths.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The shape of the whole problem</h2>
+      <p>
+        Multiprocessor scheduling layers a <em>placement</em> problem on top of the single-core <em>ordering</em>
+        problem, and every knob trades the same two currencies: <strong>locality</strong> (keep a task's data close
+        and its cache warm) versus <strong>utilisation</strong> (keep every core busy). Linux's CFS/EEVDF runs a
+        per-CPU red-black tree with a hierarchical, NUMA-aware balancer that walks <em>scheduling domains</em>
+        (SMT siblings, then a socket, then across sockets), migrating reluctantly and locally first. The last
+        scheduling frontier is tasks with <em>deadlines</em> rather than mere fairness —
+        <primer-ref forward to="computer-science/advanced-operating-systems/scheduling/real-time-scheduling">real-time
+        scheduling</primer-ref> — where being late is not just slow but <em>wrong</em>.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: SQMS vs MQMS, affinity, migration, work stealing, gang, NUMA, lock scaling + numeric. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "mpQuiz@1": {
+          "intro": "Global queue vs per-CPU queues; affinity, migration cost, work stealing, gang scheduling, NUMA, lock scalability.",
+          "globalQ": "The main drawback of a single GLOBAL run queue on many cores is…",
+          "globalRight": "lock contention that grows with the core count, plus poor cache affinity",
+          "globalWrong1": "it cannot balance load",
+          "globalWrong2": "it needs more memory per core",
+          "globalWrong3": "it only works on one core",
+          "percpuQ": "Per-CPU run queues improve scalability chiefly because…",
+          "percpuRight": "scheduling decisions are local — each core uses its own queue and lock",
+          "percpuWrong1": "they remove the need for any scheduler",
+          "percpuWrong2": "they share one lock more efficiently",
+          "percpuWrong3": "they eliminate context switches",
+          "affinityQ": "Cache affinity means the scheduler prefers to…",
+          "affinityRight": "keep a task on the core whose cache already holds its data",
+          "affinityWrong1": "move a task to a new core each quantum",
+          "affinityWrong2": "run every task on core 0",
+          "affinityWrong3": "disable caching for fairness",
+          "migCostQ": "The main cost of migrating a task to another core is…",
+          "migCostRight": "a cold cache on the new core — its working set must be refetched",
+          "migCostWrong1": "the task loses its priority",
+          "migCostWrong2": "the task is duplicated",
+          "migCostWrong3": "nothing — migration is free",
+          "stealQ": "Work stealing (pull migration) is when…",
+          "stealRight": "an about-to-idle core pulls tasks from a busier core's queue",
+          "stealWrong1": "a busy core forces work onto an idle one",
+          "stealWrong2": "a core deletes another core's tasks",
+          "stealWrong3": "the global lock is taken twice",
+          "gangQ": "Gang scheduling co-schedules all threads of a parallel job so that…",
+          "gangRight": "communicating threads are all running and need not wait on a descheduled peer",
+          "gangWrong1": "the job uses only one core",
+          "gangWrong2": "threads never share memory",
+          "gangWrong3": "the scheduler can ignore fairness",
+          "numaQ": "Migrating a task ACROSS a NUMA node is especially costly because…",
+          "numaRight": "the task's memory is now remote, so every access is slower until pages migrate too",
+          "numaWrong1": "NUMA machines have no caches",
+          "numaWrong2": "it always crashes the task",
+          "numaWrong3": "NUMA forbids migration",
+          "balanceQ": "A good load balancer aims to…",
+          "balanceRight": "keep every core usefully busy at the least migration cost, tolerating mild imbalance",
+          "balanceWrong1": "make every queue exactly equal length every tick",
+          "balanceWrong2": "migrate as often as possible",
+          "balanceWrong3": "never migrate under any circumstances",
+          "pushQ": "In PUSH migration, the balancer…",
+          "pushRight": "moves a task off an overloaded core onto a less-loaded one",
+          "pushWrong1": "pulls a task onto an idle core",
+          "pushWrong2": "reboots the overloaded core",
+          "pushWrong3": "raises the task's priority",
+          "domainQ": "Linux migrates within 'scheduling domains' (SMT sibling, then socket, then across sockets) in order to…",
+          "domainRight": "prefer cheap, nearby migrations before costly distant ones",
+          "domainWrong1": "make migration as expensive as possible",
+          "domainWrong2": "avoid using more than one core",
+          "domainWrong3": "randomise task placement",
+          "balNumQ": "{tasksT} runnable tasks are spread over {pcpu} per-CPU queues. After perfect balancing, about how many tasks per core? (round to nearest whole)",
+          "stealNumQ": "A core's queue holds {qlen} tasks and an idle core steals HALF (floor). How many tasks does it steal?",
+          "scaleNumQ": "Modelling a global lock, throughput is N/(1 + k(N−1)). With N = {ncore} cores and k = 0.{kc}, what is the throughput? (2 d.p.)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="mpQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/scheduling/the-completely-fair-scheduler",
+      "computer-science/computer-architecture/multicore/shared-memory-uma-and-numa"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Per-CPU run-queue diagram: three CPU columns, each a header box + a stack of task cells
+     (CPU0 overloaded, CPU2 idle), with a curved migration arrow CPU0 -> CPU2. Plus a
+     scalability chart (per-CPU linear vs global-lock saturating) and the randomised quiz.
+     All colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerCharts, registerChartSliders, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "percpu",
+    ({ board, colors, sceneStrings }) => {
+      const cols = [
+        { x: 1.0, key: "cpu0", tasks: 4, tag: "busy" },
+        { x: 4.0, key: "cpu1", tasks: 2, tag: "" },
+        { x: 7.0, key: "cpu2", tasks: 0, tag: "idle" },
+      ];
+      const w = 1.8, cellH = 0.5, headY = 4.4, headH = 0.7;
+      cols.forEach((c, i) => {
+        // CPU header box.
+        board.create("polygon", [[c.x, headY], [c.x + w, headY], [c.x + w, headY + headH], [c.x, headY + headH]], {
+          fillColor: colors.cat[i % 3], fillOpacity: 0.3,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [c.x + w / 2, headY + headH / 2, sceneStrings(c.key)], {
+          strokeColor: colors.ink, fontSize: 13, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:600",
+        });
+        // Run-queue task cells stacked below.
+        for (let k = 0; k < c.tasks; k++) {
+          const yTop = headY - 0.15 - k * cellH;
+          board.create("polygon", [[c.x + 0.2, yTop - cellH + 0.08], [c.x + w - 0.2, yTop - cellH + 0.08],
+            [c.x + w - 0.2, yTop], [c.x + 0.2, yTop]], {
+            fillColor: colors.cat[0], fillOpacity: 0.18,
+            borders: { strokeColor: colors.line, strokeWidth: 1, highlight: false },
+            vertices: { visible: false }, fixed: true, highlight: false,
+          });
+        }
+        if (c.tag) {
+          board.create("text", [c.x + w / 2, headY + headH + 0.35, sceneStrings(c.tag)], {
+            strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+          });
+        }
+      });
+
+      // Migration arrow: from CPU0's queue over to idle CPU2.
+      board.create("arrow", [[cols[0].x + w, 2.6], [cols[2].x, 3.9]], {
+        strokeColor: colors.cat[2], strokeWidth: 2.5, lastArrow: { type: 2, size: 7 }, highlight: false, fixed: true,
+      });
+      board.create("text", [4.4, 1.6, sceneStrings("migrate")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        cssStyle: "max-width:320px",
+      });
+    },
+    {
+      boundingbox: [-0.4, 5.6, 9.4, 1.0],
+      keepAspect: false,
+      title: () => makeStrings("percpu")("title"),
+    },
+  );
+
+  const sc = makeStrings("scale");
+  registerChartSliders("scale", [
+    { name: "kc", label: () => sc("kc"), min: 0.02, max: 0.4, step: 0.02, value: 0.1, anchors: [0.02, 0.1, 0.2, 0.4] },
+  ]);
+  registerCharts(
+    [{
+      name: "scale",
+      f: [
+        (n) => n,                              // per-CPU queues: linear
+        (n, s) => n / (1 + s.kc * (n - 1)),    // single global lock: saturates
+      ],
+      line: (colors, i) =>
+        i === 0
+          ? { strokeColor: colors.line, strokeWidth: 2, dash: 2 }
+          : { strokeColor: colors.cat[0], strokeWidth: 4 },
+      legend: [() => sc("legPer"), () => sc("legGlobal")],
+    }],
+    {
+      id: "scale",
+      title: () => sc("title"),
+      xmin: 1, xmax: 32, xticks: 4,
+      ymin: 0, ymax: 32, yticks: 8,
+      xaxisname: "cores N", yaxisname: "scheduler throughput",
+    },
+    "scale",
+  );
+
+  registerQuiz("mpQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("globalQ"),
+      options: [
+        { text: () => sceneStrings("globalRight"), correct: true },
+        { text: () => sceneStrings("globalWrong1"), correct: false },
+        { text: () => sceneStrings("globalWrong2"), correct: false },
+        { text: () => sceneStrings("globalWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("percpuQ"),
+      options: [
+        { text: () => sceneStrings("percpuRight"), correct: true },
+        { text: () => sceneStrings("percpuWrong1"), correct: false },
+        { text: () => sceneStrings("percpuWrong2"), correct: false },
+        { text: () => sceneStrings("percpuWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("affinityQ"),
+      options: [
+        { text: () => sceneStrings("affinityRight"), correct: true },
+        { text: () => sceneStrings("affinityWrong1"), correct: false },
+        { text: () => sceneStrings("affinityWrong2"), correct: false },
+        { text: () => sceneStrings("affinityWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("migCostQ"),
+      options: [
+        { text: () => sceneStrings("migCostRight"), correct: true },
+        { text: () => sceneStrings("migCostWrong1"), correct: false },
+        { text: () => sceneStrings("migCostWrong2"), correct: false },
+        { text: () => sceneStrings("migCostWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("stealQ"),
+      options: [
+        { text: () => sceneStrings("stealRight"), correct: true },
+        { text: () => sceneStrings("stealWrong1"), correct: false },
+        { text: () => sceneStrings("stealWrong2"), correct: false },
+        { text: () => sceneStrings("stealWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gangQ"),
+      options: [
+        { text: () => sceneStrings("gangRight"), correct: true },
+        { text: () => sceneStrings("gangWrong1"), correct: false },
+        { text: () => sceneStrings("gangWrong2"), correct: false },
+        { text: () => sceneStrings("gangWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("numaQ"),
+      options: [
+        { text: () => sceneStrings("numaRight"), correct: true },
+        { text: () => sceneStrings("numaWrong1"), correct: false },
+        { text: () => sceneStrings("numaWrong2"), correct: false },
+        { text: () => sceneStrings("numaWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("balanceQ"),
+      options: [
+        { text: () => sceneStrings("balanceRight"), correct: true },
+        { text: () => sceneStrings("balanceWrong1"), correct: false },
+        { text: () => sceneStrings("balanceWrong2"), correct: false },
+        { text: () => sceneStrings("balanceWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pushQ"),
+      options: [
+        { text: () => sceneStrings("pushRight"), correct: true },
+        { text: () => sceneStrings("pushWrong1"), correct: false },
+        { text: () => sceneStrings("pushWrong2"), correct: false },
+        { text: () => sceneStrings("pushWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("domainQ"),
+      options: [
+        { text: () => sceneStrings("domainRight"), correct: true },
+        { text: () => sceneStrings("domainWrong1"), correct: false },
+        { text: () => sceneStrings("domainWrong2"), correct: false },
+        { text: () => sceneStrings("domainWrong3"), correct: false },
+      ],
+    },
+    {
+      // Balanced tasks per core.
+      prompt: (v) => sceneStrings("balNumQ", v),
+      variables: "tasksT=[12:64] pcpu=[2,4,8]",
+      answer: (v) => Math.round(v.tasksT / v.pcpu),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Steal half (floor).
+      prompt: (v) => sceneStrings("stealNumQ", v),
+      variables: "qlen=[4:16]",
+      answer: (v) => Math.floor(v.qlen / 2),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Global-lock throughput N/(1 + k(N-1)), k = kc/100.
+      prompt: (v) => sceneStrings("scaleNumQ", v),
+      variables: "ncore=[4,8,16,32] kc=[5:30]",
+      answer: (v) => Math.round((v.ncore / (1 + (v.kc / 100) * (v.ncore - 1))) * 100) / 100,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

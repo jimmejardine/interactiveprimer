@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Peer-to-Peer and Distributed Hash Tables</primer-title>
+
+    <primer-card>
+      <p>
+        In 1999 a college freshman called Shawn Fanning released Napster, and within a year tens of millions of
+        people were trading music files with each other. There was no giant server farm holding the songs — the
+        songs lived on the users' own machines. Each laptop that downloaded a track immediately became a place
+        others could download it <em>from</em>. The more people joined, the more capacity the system had. This
+        was the mainstream world's first taste of an idea that quietly powers BitTorrent, IPFS and every
+        blockchain today: the <strong>peer-to-peer</strong> (P2P) network, where there is no "the server" — every
+        node is a server <em>and</em> a client at once.
+      </p>
+      <p>
+        The <primer-ref soft to="computer-science/networks/client-server-and-the-web">client–server</primer-ref>
+        model you already know draws a hard line: clients ask, the server answers, and the server is the sole
+        keeper of the data. It is simple and it works — until the server is the bottleneck, the single point of
+        failure, and the bill. P2P erases that line. This page is about <em>why</em> that erasure is powerful,
+        the one hard problem it creates — <strong>how do you find who has what, with no central index?</strong> —
+        and the elegant data structure, the <strong>Distributed Hash Table</strong>, that answers it in roughly
+        <primer-math>\log_2 N</primer-math> hops across a million machines.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Client–server vs peer-to-peer</h2>
+      <p>
+        The contrast is worth drawing sharply, because it explains both what P2P buys you and what it costs.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th></th><th>Client–server</th><th>Peer-to-peer</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Roles</td><td>fixed: clients ask, server answers</td><td>symmetric: every node is both</td></tr>
+            <tr><td>Data lives</td><td>on the server</td><td>spread across the peers</td></tr>
+            <tr><td>Adding users</td><td>adds load, not capacity</td><td>adds capacity <em>and</em> load</td></tr>
+            <tr><td>Failure of one node</td><td>server down → everything down</td><td>one peer down → barely noticed</td></tr>
+            <tr><td>Who pays for bandwidth</td><td>the operator</td><td>the peers themselves</td></tr>
+            <tr><td>Hard part</td><td>scaling the server</td><td>coordination with no boss</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The killer property is the third row. In client–server, ten thousand new users are ten thousand new
+        <em>demands</em> on one machine. In P2P, each new peer arrives carrying its own upload bandwidth, disk and
+        CPU, so the system's total capacity grows <em>with</em> its popularity. This is why a wildly popular
+        BitTorrent file downloads <em>faster</em> when more people want it — the opposite of a website buckling
+        under a traffic spike. P2P is <strong>self-scaling</strong>.
+      </p>
+      <p>
+        But erasing the central server also erases the central <em>directory</em>. On the web, you ask one known
+        machine "give me this page" and it just knows. In a swarm of a million equal peers with no boss, when you
+        want the file with a given name, <strong>who do you even ask?</strong> That is the lookup problem, and it
+        is the whole game.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The lookup problem: two bad answers and one good one</h2>
+      <p>
+        Suppose the network holds a key <em>k</em> (say the hash of a file) somewhere, on one of <em>N</em> peers,
+        and you want to fetch it. With no central index, how do you locate the peer that holds it? History tried
+        three answers.
+      </p>
+      <ul>
+        <li>
+          <strong>A central index (Napster).</strong> The <em>files</em> are P2P but a central server keeps the
+          catalogue of who-has-what. Fast lookups — one question — but the index is a single point of failure and,
+          famously, a single point of <em>lawsuit</em>. Napster was shut down by suing one machine.
+        </li>
+        <li>
+          <strong>Flooding an unstructured overlay (Gnutella).</strong> No index at all. To find a key you
+          <em>ask your neighbours</em>, who ask <em>their</em> neighbours, out to some hop limit (a "time to
+          live"). It is fully decentralised and robust, but the cost is brutal: a single search can touch a large
+          fraction of the network — <primer-math>O(N)</primer-math> messages — and popular queries drown the links
+          while rare items may never be found within the TTL. It does not scale.
+        </li>
+        <li>
+          <strong>A structured overlay: the Distributed Hash Table.</strong> Give every peer <em>and</em> every
+          key a position in the same address space, by a rule everyone agrees on, so that from a key you can
+          <em>compute</em> which peer should hold it and walk there deliberately in a handful of hops — no index,
+          no flooding. This is the winning idea, and the rest of the page builds it.
+        </li>
+      </ul>
+      <p>
+        <strong>Unstructured</strong> overlays (Gnutella, early Kazaa) wire peers together arbitrarily and search
+        by broadcast: simple, resilient to churn, great for fuzzy "who has something <em>like</em> this" queries,
+        terrible at scaling exact lookups. <strong>Structured</strong> overlays (Chord, Kademlia, Pastry) impose a
+        precise geometry on the peers so that exact-key lookup becomes a short, guided walk. The DHT is the
+        structured answer.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The Distributed Hash Table, built on a ring</h2>
+      <p>
+        A hash table on one machine maps a key to a bucket by hashing. A <strong>Distributed</strong> hash table
+        does the same thing across thousands of machines: it maps every key to the <em>peer</em> responsible for
+        it, and lets any peer find that responsible peer quickly. The cleanest concrete design is
+        <strong>Chord</strong> (MIT, 2001), and its heart is a circle.
+      </p>
+      <p>
+        Take an <em>m</em>-bit hash function (Chord used SHA-1, so <primer-math>m = 160</primer-math>) and imagine
+        its <primer-math>2^m</primer-math> possible outputs laid around a ring, <primer-math>0</primer-math> at the
+        top wrapping back to <primer-math>2^m - 1</primer-math>. Now hash two different kinds of thing onto that
+        <em>same</em> ring:
+      </p>
+      <ul>
+        <li>each <strong>peer</strong>, by hashing its IP address → a point on the ring (its <em>node ID</em>);</li>
+        <li>each <strong>key</strong>, by hashing the key → a point on the ring.</li>
+      </ul>
+      <p>
+        The assignment rule is then breathtakingly simple: <strong>a key is stored on the first peer whose ID is
+        equal to or clockwise-after the key's position.</strong> That peer is the key's <em>successor</em>,
+        written <primer-math>\text{successor}(k)</primer-math>. Every key belongs to exactly one peer, every peer
+        owns the arc of the ring leading up to it, and there is no central table saying so — you just hash and walk
+        clockwise. This is <strong>consistent hashing</strong>, and its great virtue is what happens when peers
+        come and go.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "chordRing": {
+            "title": "A Chord ring: peers and keys hashed onto the same circle",
+            "circle": "The identifier ring — all 2^m hash values laid around a circle, 0 at top.",
+            "nodes": "Peers hash to positions on the ring (N1, N8, N14, N21, N32, N38, N42, N48, N51, N56).",
+            "key24": "Key 24 hashes to this spot; its successor — the first peer clockwise — is N32, so N32 stores it.",
+            "key54": "Key 54's successor is N56, so N56 stores it.",
+            "arc": "Each peer owns the arc of keys leading clockwise up to it."
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="chordRing"
+        caption="A circle representing the Chord identifier ring with 0 at the top. Ten peers (N1, N8, N14, N21, N32, N38, N42, N48, N51, N56) sit at points around it. Key 24 sits between N21 and N32; an arrow shows it is stored at its successor N32. Key 54 sits between N51 and N56 and is stored at N56."
+      ></primer-geometry>
+
+      <p>
+        When a peer <strong>joins</strong>, it hashes to a spot and takes over just the slice of keys between it
+        and its predecessor — only its immediate neighbour has to hand over a few keys; the rest of the ring is
+        untouched. When a peer <strong>leaves</strong> (or crashes), its keys fall to its successor. Compare that
+        to a naïve "key mod N" scheme, where changing <em>N</em> by one reshuffles <em>almost every</em> key.
+        Consistent hashing moves only <primer-math>O(1/N)</primer-math> of the keys per join or leave — that is
+        the property that makes a DHT survive constant membership change.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Finger tables: why lookup is <primer-math>O(\log N)</primer-math></h2>
+      <p>
+        Storing keys at successors is only half the design. The other half is <em>finding</em> the successor of a
+        key quickly from anywhere on the ring. If every peer knew only its immediate clockwise neighbour, a lookup
+        would have to shuffle one peer at a time — up to <primer-math>N</primer-math> hops around the circle.
+        Useless at scale.
+      </p>
+      <p>
+        Chord's trick is the <strong>finger table</strong>: each peer keeps <primer-math>m</primer-math> shortcuts,
+        where finger <em>i</em> points to the successor of the position <strong>halfway, a quarter, an eighth …</strong>
+        around the ring from itself — that is, the successor of <primer-math>(n + 2^{i}) \bmod 2^m</primer-math>
+        for <primer-math>i = 0, 1, \dots, m-1</primer-math>. The fingers reach exponentially further around the
+        circle. To look up a key, a peer forwards the query to the finger that lands <em>closest to, without
+        overshooting,</em> the key's position. Each hop at least <strong>halves</strong> the remaining distance to
+        the target — exactly like binary search — so the whole lookup finishes in:
+      </p>
+      <primer-theorem name="Chord lookup cost">
+        <ul>
+          <li>
+            A lookup resolves in <primer-math display>O(\log_2 N)</primer-math> hops with high probability, where
+            <primer-math>N</primer-math> is the number of peers.
+          </li>
+          <li>
+            Each peer stores only <primer-math>O(\log_2 N)</primer-math> finger entries — routing state grows
+            logarithmically, not linearly, in the size of the network.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Put numbers on it: across a <em>million</em> peers, <primer-math>\log_2(10^6) \approx 20</primer-math>. A
+        key anywhere in a million-machine network is found in about <strong>twenty hops</strong>, with each peer
+        remembering only about twenty others. That is the payoff — global reach from tiny local knowledge.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Walk the ring yourself</h2>
+      <p>
+        The demo below builds a small Chord-style ring in pure logic — no network needed. It hashes some peers
+        onto a ring of size <primer-math>2^6 = 64</primer-math>, places keys at their successor, then does two
+        kinds of lookup from a starting peer: a plain <em>one-hop-at-a-time</em> walk around the successors, and a
+        <em>finger-table</em> walk that jumps in halving strides. Watch the hop counts diverge as the ring grows.
+      </p>
+
+      <primer-code run>
+        // ---- A tiny Chord ring, ring size 2^m = 64 ----
+        const M = 6;
+        const RING = 1 &lt;&lt; M;                        // 64 identifier slots
+
+        // Our peers' IDs (in a real system these come from hashing IPs).
+        const nodes = [1, 8, 14, 21, 32, 38, 42, 48, 51, 56].sort((a, b) =&gt; a - b);
+
+        // successor(k): first node clockwise at-or-after position k (wrapping).
+        function successor(k) {
+          for (const n of nodes) if (n &gt;= k) return n;
+          return nodes[0];                          // wrapped past the top -> first node
+        }
+
+        // Where does each key live? Key = its successor node.
+        for (const key of [24, 54, 5, 39]) {
+          console.log(`key ${key} is stored on node N${successor(key)}`);
+        }
+
+        // ---- Lookup 1: naive, one successor hop at a time ----
+        function naiveHops(start, key) {
+          const target = successor(key);
+          let cur = start, hops = 0;
+          while (cur !== target) {
+            const i = nodes.indexOf(cur);
+            cur = nodes[(i + 1) % nodes.length];    // step to the next node clockwise
+            hops++;
+          }
+          return hops;
+        }
+
+        // ---- Lookup 2: finger table, jumping in halving strides ----
+        // finger[i] of node n = successor(n + 2^i) mod RING, for i = 0..M-1.
+        function fingers(n) {
+          return Array.from({ length: M }, (_, i) =&gt; successor((n + (1 &lt;&lt; i)) % RING));
+        }
+        function fingerHops(start, key) {
+          const target = successor(key);
+          let cur = start, hops = 0;
+          while (cur !== target) {
+            const f = fingers(cur);
+            // pick the finger that gets closest to the key without passing it
+            const dist = (x) =&gt; (successor(key) - x + RING) % RING;
+            let best = successor((cur + 1) % RING);           // fall back to immediate successor
+            for (const cand of f) if (dist(cand) &lt; dist(best)) best = cand;
+            cur = best;
+            hops++;
+            if (hops &gt; nodes.length) break;         // safety
+          }
+          return hops;
+        }
+
+        console.log("\nLooking up key 54 starting from node N1:");
+        console.log(`  naive successor walk: ${naiveHops(1, 54)} hops`);
+        console.log(`  finger-table walk:    ${fingerHops(1, 54)} hops`);
+
+        console.log("\nLooking up key 39 starting from node N1:");
+        console.log(`  naive successor walk: ${naiveHops(1, 39)} hops`);
+        console.log(`  finger-table walk:    ${fingerHops(1, 39)} hops`);
+
+        console.log(`\nWith ${nodes.length} peers, log2(N) is about ${Math.log2(nodes.length).toFixed(1)} — the finger walk stays near that.`);
+      </primer-code>
+
+      <p>
+        The finger walk reaches the target in a couple of jumps where the naïve walk trudges around most of the
+        ring. Scale the ring to a million peers and the gap becomes <strong>20 hops versus 500,000</strong> — the
+        difference between usable and hopeless.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Where DHTs actually run</h2>
+      <p>
+        This is not a museum piece — DHTs are load-bearing infrastructure across the modern internet:
+      </p>
+      <ul>
+        <li>
+          <strong>BitTorrent's "trackerless" mode</strong> uses a DHT (based on <strong>Kademlia</strong>) so
+          peers can find each other with no central tracker at all — the swarm coordinates itself.
+        </li>
+        <li>
+          <strong>IPFS</strong> (the InterPlanetary File System) addresses content by its hash and uses a DHT to
+          locate which peers hold each block, turning the web into content-addressed P2P storage.
+        </li>
+        <li>
+          <strong>Kademlia</strong> — the most deployed DHT design — underlies BitTorrent's DHT, IPFS, and the
+          peer-discovery layer of <primer-ref soft to="computer-science/distributed-systems/replication-and-consistency">Ethereum</primer-ref>
+          and many blockchains. It uses XOR distance instead of a ring, but the <primer-math>O(\log N)</primer-math>
+          idea is the same.
+        </li>
+        <li>
+          <strong>Amazon's Dynamo</strong> and its descendants (Cassandra, Riak) borrowed consistent hashing —
+          the ring — to spread data across storage nodes with minimal reshuffling as the cluster grows and
+          shrinks.
+        </li>
+      </ul>
+
+      <primer-vignette title="Watch out! — P2P removes the central server, not the central problems">
+        <p>
+          It is tempting to read "no central server" as "no hard problems left." The opposite is true: erasing the
+          server just <em>relocates</em> the difficulty into three chronic headaches you now own.
+        </p>
+        <ul>
+          <li>
+            <strong>Churn.</strong> Peers are ordinary people's laptops and phones — they join and vanish
+            constantly, far more than a data-centre server ever would. The DHT must continuously repair finger
+            tables and hand off keys as membership changes, or lookups start failing. A big chunk of real DHT
+            engineering is just <em>coping with churn</em>.
+          </li>
+          <li>
+            <strong>Free-riders.</strong> When every peer is supposed to contribute upload bandwidth, some
+            selfishly take without giving. BitTorrent had to invent tit-for-tat "choking" to punish leechers —
+            incentive design becomes a core part of the protocol.
+          </li>
+          <li>
+            <strong>Lookup latency.</strong> A DHT lookup is <strong>many hops</strong>, not the single request of
+            client–server. <primer-math>O(\log N)</primer-math> is wonderful asymptotically, but twenty
+            round-trips across the planet is real wall-clock time. Never picture a DHT lookup as "instant like a
+            hash table" — it is a guided tour across the network.
+          </li>
+        </ul>
+      </primer-vignette>
+
+      <primer-vignette title="Why hash the peers too, instead of just numbering them 1…N?">
+        <p>
+          You might ask: why not simply number the peers 0, 1, 2, … and store key <em>k</em> on peer
+          <em>k</em> mod <em>N</em>? Because the moment one peer joins or leaves, <em>N</em> changes, and
+          <em>almost every</em> key's <em>k</em> mod <em>N</em> now points somewhere else — the whole network would
+          have to reshuffle its data on every membership change, which in a churning P2P swarm is constant chaos.
+          Hashing peers onto the <em>same fixed ring</em> as the keys is precisely what avoids this: adding a peer
+          disturbs only the one arc it slots into. That single design choice — <strong>consistent hashing</strong>
+          — is why DHTs are stable enough to exist at all, and it is why the same trick shows up in load balancers
+          and sharded databases far from any P2P context.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "p2pQuiz@1": { "instructions": "Check your grasp of peer-to-peer networks, the lookup problem, consistent hashing, and how a Chord DHT achieves O(log N) lookups." } }
+    </script>
+    <primer-quiz name="p2pQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/distributed-systems/replication-and-consistency",
+      "computer-science/networks/client-server-and-the-web"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // A Chord identifier ring: a circle with 0 at the top, peers at points around it,
+  // and two keys shown routing clockwise to their successor node.
+  registerGeometryScene("chordRing", ({ board, step, colors, sceneStrings }) => {
+    const R = 3;                        // ring radius
+    const RING = 64;                    // 2^6 identifier slots
+    // angle so that id 0 is at the top and ids increase clockwise
+    const ang = (id) => Math.PI / 2 - (2 * Math.PI * id) / RING;
+    const pos = (id, r = R) => [r * Math.cos(ang(id)), r * Math.sin(ang(id))];
+
+    const nodes = [1, 8, 14, 21, 32, 38, 42, 48, 51, 56];
+
+    // base content: the ring circle
+    board.create("circle", [[0, 0], R], {
+      strokeColor: colors.line, strokeWidth: 2, fillOpacity: 0,
+      fixed: true, highlight: false,
+    });
+    // "0" marker at top
+    board.create("text", [0, R + 0.4, "0"], {
+      anchorX: "middle", anchorY: "bottom", fontSize: 13, fixed: true,
+      highlight: false, strokeColor: colors.ink, color: colors.ink,
+    });
+
+    // base content: the peers
+    for (const id of nodes) {
+      const [x, y] = pos(id);
+      board.create("point", [x, y], {
+        name: "", size: 4, fixed: true, highlight: false,
+        fillColor: colors.cat[0], strokeColor: colors.cat[0],
+      });
+      const [lx, ly] = pos(id, R + 0.55);
+      board.create("text", [lx, ly, "N" + id], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true,
+        highlight: false, strokeColor: colors.ink, color: colors.ink,
+        cssStyle: "font-weight:600",
+      });
+    }
+
+    step(sceneStrings("nodes"), () => {}); // first reveal just narrates the peers
+
+    // Key 24 -> successor N32
+    step(sceneStrings("key24"), () => {
+      const [kx, ky] = pos(24, R);
+      board.create("point", [kx, ky], {
+        name: "k24", size: 3, fixed: true, highlight: false, label: { offset: [6, 10] },
+        fillColor: colors.cat[1], strokeColor: colors.cat[1],
+      });
+      const [nx, ny] = pos(32, R);
+      board.create("arrow", [[kx, ky], [nx, ny]], {
+        strokeColor: colors.cat[1], strokeWidth: 2, fixed: true, highlight: false,
+      });
+    });
+
+    // Key 54 -> successor N56
+    step(sceneStrings("key54"), () => {
+      const [kx, ky] = pos(54, R);
+      board.create("point", [kx, ky], {
+        name: "k54", size: 3, fixed: true, highlight: false, label: { offset: [6, 10] },
+        fillColor: colors.cat[2], strokeColor: colors.cat[2],
+      });
+      const [nx, ny] = pos(56, R);
+      board.create("arrow", [[kx, ky], [nx, ny]], {
+        strokeColor: colors.cat[2], strokeWidth: 2, fixed: true, highlight: false,
+      });
+    });
+  }, {
+    boundingbox: [-5, 5, 5, -5],
+    keepAspect: true,
+    title: () => makeStrings("chordRing")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("p2pQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "The defining feature of a peer-to-peer network is that…",
+      options: [
+        { text: "every node acts as both a client and a server — there is no dedicated central server", correct: true },
+        { text: "one powerful server handles all requests from many clients", correct: false },
+        { text: "nodes may only download, never upload", correct: false },
+        { text: "all data is stored on a single trusted machine", correct: false },
+      ] },
+
+    { prompt: "Why is a P2P network described as 'self-scaling'?",
+      options: [
+        { text: "each new peer brings its own bandwidth, disk and CPU, so total capacity grows with usage", correct: true },
+        { text: "the central server automatically buys more hardware", correct: false },
+        { text: "peers are forbidden from making requests, only answering", correct: false },
+        { text: "the protocol compresses data as more users join", correct: false },
+      ] },
+
+    { prompt: "The core 'lookup problem' in a P2P network is…",
+      options: [
+        { text: "finding which peer holds a given key when there is no central index", correct: true },
+        { text: "choosing a strong password for each peer", correct: false },
+        { text: "deciding which TCP port to listen on", correct: false },
+        { text: "compressing files before sending them", correct: false },
+      ] },
+
+    { prompt: "How does an UNSTRUCTURED overlay like Gnutella find a key?",
+      options: [
+        { text: "by flooding the query to neighbours (and their neighbours) up to a hop limit", correct: true },
+        { text: "by computing the exact peer from the key and walking there", correct: false },
+        { text: "by asking a central index server", correct: false },
+        { text: "by broadcasting to every machine on the internet at once", correct: false },
+      ] },
+
+    { prompt: "The main weakness of flooding-based lookup is that…",
+      options: [
+        { text: "a single search can touch O(N) peers, so it does not scale", correct: true },
+        { text: "it requires a central server that can be sued", correct: false },
+        { text: "it always finds keys in exactly one hop", correct: false },
+        { text: "it cannot tolerate any peer failures", correct: false },
+      ] },
+
+    { prompt: "A Distributed Hash Table (DHT) is a STRUCTURED overlay because it…",
+      options: [
+        { text: "assigns peers and keys positions in one shared address space so lookups are a guided walk", correct: true },
+        { text: "keeps a full copy of the index on every peer", correct: false },
+        { text: "floods every query to all neighbours", correct: false },
+        { text: "relies on a central catalogue server", correct: false },
+      ] },
+
+    { prompt: "In a Chord ring, where is a key k stored?",
+      options: [
+        { text: "on its successor — the first peer whose ID is equal to or clockwise-after k", correct: true },
+        { text: "on the peer with the numerically smallest ID", correct: false },
+        { text: "on every peer simultaneously", correct: false },
+        { text: "on whichever peer currently has the least load", correct: false },
+      ] },
+
+    { prompt: "What does 'consistent hashing' buy a DHT when peers join or leave?",
+      options: [
+        { text: "only O(1/N) of the keys move — a join or leave disturbs just one arc of the ring", correct: true },
+        { text: "every key is reassigned to a new peer on each change", correct: false },
+        { text: "the ring must be rebuilt from scratch each time", correct: false },
+        { text: "keys are never moved, even when their owner crashes", correct: false },
+      ] },
+
+    { prompt: "Why does a naïve 'key mod N' assignment scheme behave badly under churn?",
+      options: [
+        { text: "changing N by one remaps almost every key, forcing a huge reshuffle", correct: true },
+        { text: "it stores every key on the same overloaded peer", correct: false },
+        { text: "it cannot hash strings, only numbers", correct: false },
+        { text: "it needs a central server to compute the modulus", correct: false },
+      ] },
+
+    { prompt: "What is a Chord 'finger table'?",
+      options: [
+        { text: "a set of shortcuts pointing to peers exponentially further around the ring", correct: true },
+        { text: "a list of every peer in the whole network", correct: false },
+        { text: "a cache of recently downloaded files", correct: false },
+        { text: "the central index of who holds what", correct: false },
+      ] },
+
+    { prompt: "Thanks to finger tables, a Chord lookup takes about how many hops among N peers?",
+      options: [
+        { text: "O(log N)", correct: true },
+        { text: "O(N)", correct: false },
+        { text: "O(1) — always exactly one", correct: false },
+        { text: "O(N squared)", correct: false },
+      ] },
+
+    { prompt: "Roughly how many hops to find a key in a Chord network of one million peers?",
+      options: [
+        { text: "about 20 (log2 of a million)", correct: true },
+        { text: "about 1,000", correct: false },
+        { text: "about 500,000", correct: false },
+        { text: "exactly 1", correct: false },
+      ] },
+
+    { prompt: "Each Chord peer stores routing state (finger entries) of size…",
+      options: [
+        { text: "O(log N) — it knows about only a logarithmic number of other peers", correct: true },
+        { text: "O(N) — it must know every other peer", correct: false },
+        { text: "O(1) — just its immediate successor", correct: false },
+        { text: "O(N squared)", correct: false },
+      ] },
+
+    { prompt: "Which real system uses a DHT (Kademlia) for trackerless peer discovery?",
+      options: [
+        { text: "BitTorrent", correct: true },
+        { text: "a classic single-server SQL database", correct: false },
+        { text: "a static HTML website on one host", correct: false },
+        { text: "the DNS root name servers", correct: false },
+      ] },
+
+    { prompt: "Which of these is NOT solved simply by removing the central server in P2P?",
+      options: [
+        { text: "churn, free-riding and lookup latency all remain as real problems", correct: true },
+        { text: "the operator's hardware bill is eliminated entirely and forever", correct: false },
+        { text: "there is provably no way for a lookup to fail", correct: false },
+        { text: "every lookup becomes a single instant hash-table access", correct: false },
+      ] },
+
+    { prompt: "A DHT lookup differs from a client–server request in that it…",
+      options: [
+        { text: "takes many hops across peers, not a single round-trip to one server", correct: true },
+        { text: "is always faster than one request to a known server", correct: false },
+        { text: "never involves the network at all", correct: false },
+        { text: "requires the client to know every peer in advance", correct: false },
+      ] },
+  ]);
+</script>

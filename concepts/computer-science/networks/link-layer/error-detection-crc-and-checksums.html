@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Error Detection: Parity, Checksums and CRC</primer-title>
+
+    <primer-card>
+      <p>
+        A wire is not a promise. When your network card pushes a frame onto a copper pair, a fibre, or a
+        burst of radio, it is really just wiggling a physical quantity — a voltage, a light level, an
+        electromagnetic field — and <em>hoping</em> the far end reads the same wiggles back. But the physical
+        world is noisy. A nearby motor spikes the voltage, a splice reflects the light, a microwave oven
+        splashes energy across the 2.4&nbsp;GHz band, a cosmic ray clips a sample. The receiver samples at the
+        wrong instant and reads a <strong>1</strong> where you sent a <strong>0</strong>. The bit has
+        <em>flipped</em>, and nothing about the bit itself announces that it is now wrong.
+      </p>
+      <p>
+        The link layer's job is to hand the layer above it frames it can <em>trust</em>, so it must somehow
+        notice when the wire has lied. It cannot re-examine the physics — by the time the bytes arrive, the
+        noise is long gone. Its only tool is <strong>redundancy</strong>: send a few extra bits, computed from
+        the data, so that a corrupted frame becomes <em>arithmetically inconsistent</em> and gives itself away.
+        This page walks up three rungs of that ladder — <strong>parity</strong>, the <strong>Internet
+        checksum</strong>, and the <strong>cyclic redundancy check (CRC)</strong> — each one catching errors
+        the rung below it lets slip.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Rung 1 — parity: one bit of conscience</h2>
+      <p>
+        The cheapest scheme adds a single <strong>parity bit</strong>. Count the 1s in your data; set the
+        parity bit so the <em>total</em> number of 1s is even (that is <strong>even parity</strong>; odd
+        parity is the mirror image). The receiver recounts. If the parity no longer matches, at least one bit
+        flipped in flight.
+      </p>
+      <p>
+        For the byte <primer-math>1011001</primer-math> there are four 1s — already even — so the even-parity
+        bit is <primer-math>0</primer-math>, and we transmit <primer-math>10110010</primer-math>. Flip any
+        single bit and the count becomes odd; the receiver notices. But flip <em>two</em> bits and the count
+        is even again — the error is <strong>invisible</strong>. Single parity detects all odd numbers of bit
+        errors and misses all even numbers, and it can never tell you <em>which</em> bit was wrong. It is a
+        smoke alarm with no map.
+      </p>
+      <p>
+        <strong>Two-dimensional parity</strong> is a clever upgrade. Lay the data out as a grid of rows and
+        columns, and compute a parity bit for every row <em>and</em> every column. Now a single flipped bit
+        breaks the parity of exactly one row and exactly one column — their intersection <em>pinpoints</em> the
+        culprit, and you can <strong>correct</strong> it by flipping it back. This is the germinal idea behind
+        error-correcting codes: enough structured redundancy to locate a fault, not merely sense it.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "parity2d": {
+            "title": "Two-dimensional parity locates a single flipped bit",
+            "grid": "A 4×4 block of data bits, with a parity bit added to each row and each column.",
+            "flip": "One data bit flips in transit (highlighted).",
+            "rowcol": "Its row parity and its column parity now both fail — their crossing point names the bad bit."
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="parity2d"
+        caption="A 4-by-4 grid of data bits with an extra parity column on the right and an extra parity row along the bottom. One interior bit is highlighted as flipped; the parity cell at the end of its row and the parity cell at the foot of its column are both marked as failing, and lines from them cross exactly on the flipped bit — showing that 2-D parity both detects and locates a single-bit error."
+      ></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Rung 2 — the Internet checksum: add it all up</h2>
+      <p>
+        Parity treats the frame as a bag of bits. The <strong>Internet checksum</strong> — used by
+        <primer-ref soft to="computer-science/networks/protocol-stacks-and-the-osi-model">IP, UDP and
+        TCP</primer-ref> — instead treats it as a sequence of numbers and adds them together. Chop the data
+        into 16-bit words, sum them using <strong>one's-complement arithmetic</strong> (any carry out of the
+        top bit is <em>wrapped around</em> and added back into the bottom), then send the <em>complement</em>
+        (bitwise NOT) of that running sum as the checksum field.
+      </p>
+      <p>
+        The magic is at the receiver: it adds up <em>all</em> the words <em>including</em> the checksum. If
+        nothing was corrupted, the data sum and its own complement cancel, and the result is a word of all
+        ones — <primer-math>\texttt{0xFFFF}</primer-math>. Any other result means the frame is damaged. In
+        symbols, with words <primer-math>w_1,\dots,w_n</primer-math> and checksum
+        <primer-math>c=\overline{\bigoplus_{i} w_i}</primer-math> (⊕ here being the wrap-around one's-complement
+        sum), a clean frame satisfies:
+      </p>
+      <primer-math display>w_1 \oplus w_2 \oplus \cdots \oplus w_n \oplus c \;=\; \texttt{0xFFFF}.</primer-math>
+      <p>
+        Why one's complement and not an ordinary sum? Because it is endian-agnostic and can be computed
+        incrementally, but mostly because it is <em>fast</em> and <em>simple</em> — it was designed in an era
+        when every router cycle counted, and it can be updated as a packet's header fields change hop by hop
+        without recomputing from scratch. The trade is bluntness: it is far weaker than a CRC, as we are about
+        to see.
+      </p>
+
+      <primer-code run>
+        // The Internet checksum (RFC 1071) over a list of 16-bit words.
+        // one's-complement sum: fold any carry-out back into the low 16 bits.
+        function onesComplementSum(words: number[]): number {
+          let sum = 0;
+          for (const w of words) {
+            sum += w;
+            sum = (sum &amp; 0xffff) + (sum &gt;&gt;&gt; 16); // wrap the carry around
+          }
+          return sum &amp; 0xffff;
+        }
+
+        function checksum(words: number[]): number {
+          return (~onesComplementSum(words)) &amp; 0xffff; // send the complement
+        }
+
+        const data = [0x4500, 0x003c, 0x1c46, 0x4000, 0x4006];
+        const c = checksum(data);
+        console.log("checksum = 0x" + c.toString(16).padStart(4, "0"));
+
+        // Receiver: sum the data AND the checksum -> should be all ones (0xFFFF).
+        const verify = onesComplementSum([...data, c]);
+        console.log("receiver sum = 0x" + verify.toString(16));
+        console.log("intact? " + (verify === 0xffff));
+
+        // Now corrupt one word and re-check: the sum is no longer 0xFFFF.
+        const corrupt = [...data];
+        corrupt[2] ^= 0x0001; // flip a single bit
+        const bad = onesComplementSum([...corrupt, c]);
+        console.log("after 1-bit flip: 0x" + bad.toString(16) + " intact? " + (bad === 0xffff));
+      </primer-code>
+
+      <p>
+        Run it: the intact frame folds to <primer-math>\texttt{0xFFFF}</primer-math>, and a single flipped bit
+        breaks it. But the checksum has a soft underbelly — swap two 16-bit words and the sum is
+        <em>identical</em>, because addition doesn't care about order. Reordering, and certain paired errors
+        that cancel, sail straight through. That is the price of cheapness.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Rung 3 — CRC: division, not addition</h2>
+      <p>
+        The <strong>cyclic redundancy check</strong> is the workhorse of the link layer — Ethernet, Wi-Fi,
+        disk sectors, ZIP files, and countless buses all lean on it. Its trick is to stop <em>adding</em> and
+        start <em>dividing</em>. Interpret a string of bits as the coefficients of a polynomial over the
+        finite field <primer-math>\mathrm{GF}(2)</primer-math> — the integers mod 2, where the only elements
+        are 0 and 1 and, crucially, <strong>addition and subtraction are both just XOR</strong> (no carries,
+        ever). The bitstring <primer-math>1101</primer-math> <em>is</em> the polynomial
+        <primer-math>x^3 + x^2 + 1</primer-math>.
+      </p>
+      <p>
+        Sender and receiver agree on a fixed <strong>generator polynomial</strong>
+        <primer-math>G(x)</primer-math> of degree <primer-math>r</primer-math>. To protect a message
+        <primer-math>M(x)</primer-math>, you append <primer-math>r</primer-math> zero bits (i.e. form
+        <primer-math>x^r M(x)</primer-math>), divide by <primer-math>G(x)</primer-math> using polynomial long
+        division in <primer-math>\mathrm{GF}(2)</primer-math>, and keep the <strong>remainder</strong>
+        <primer-math>R(x)</primer-math>. Those <primer-math>r</primer-math> remainder bits are the CRC. What you
+        actually transmit is <primer-math>x^r M(x) - R(x)</primer-math>, which — because subtraction is XOR —
+        is exactly the message with the CRC bits filling the zeros you appended:
+      </p>
+      <primer-math display>T(x) \;=\; x^r M(x) \;\oplus\; R(x), \qquad R(x) \;=\; x^r M(x) \bmod G(x).</primer-math>
+      <p>
+        By construction <primer-math>T(x)</primer-math> is exactly divisible by
+        <primer-math>G(x)</primer-math>. So the receiver simply divides the whole received frame by
+        <primer-math>G(x)</primer-math>: a <strong>zero remainder means intact</strong>, and any non-zero
+        remainder means the frame was mangled. No addition tables, no wrap-around — just repeated XOR-and-shift.
+      </p>
+
+      <primer-code run>
+        // CRC as binary long division over GF(2): subtraction is XOR, no carries.
+        // We divide the (message + r zero bits) by the generator, bit by bit.
+        function crcRemainder(message: string, generator: string): string {
+          const r = generator.length - 1;
+          const bits = (message + "0".repeat(r)).split("").map(Number);
+          const gen = generator.split("").map(Number);
+
+          // slide across the augmented message, XOR-ing the generator in
+          // wherever the leading bit is a 1 (that's one long-division step).
+          for (let i = 0; i &lt; message.length; i++) {
+            if (bits[i] === 1) {
+              for (let j = 0; j &lt; gen.length; j++) {
+                bits[i + j] ^= gen[j];   // XOR = subtract in GF(2)
+              }
+            }
+          }
+          // the last r bits are the remainder — the CRC.
+          return bits.slice(bits.length - r).join("");
+        }
+
+        const M = "11010011101100";
+        const G = "1011";               // x^3 + x + 1, degree 3
+        const R = crcRemainder(M, G);
+        console.log("message   : " + M);
+        console.log("generator : " + G + "  (degree " + (G.length - 1) + ")");
+        console.log("CRC (R)   : " + R);
+
+        const frame = M + R;            // transmitted codeword
+        console.log("frame     : " + frame);
+
+        // Receiver divides the whole frame: an intact frame leaves remainder 0.
+        console.log("recv rem (clean) : " + crcRemainder(frame, G));
+
+        // Flip one bit and the remainder is no longer zero -> error caught.
+        const flipped = frame.split("");
+        flipped[5] = flipped[5] === "1" ? "0" : "1";
+        console.log("recv rem (1 flip): " + crcRemainder(flipped.join(""), G));
+      </primer-code>
+
+      <p>
+        Notice the receiver runs the <em>same</em> division routine on the whole frame; the intact case yields
+        all zeros, the corrupted case does not. This is the entire algorithm — a shift register that XORs in
+        the generator whenever a 1 falls off the top, which is why CRCs are trivial to build in hardware and
+        run at line rate.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why CRC catches every burst up to its degree</h2>
+      <p>
+        CRCs earn their keep because real link errors are rarely lonely single bits — noise comes in
+        <strong>bursts</strong>, a contiguous run of corrupted bits from a scratch, a spark, or a fade. A CRC
+        with a well-chosen degree-<primer-math>r</primer-math> generator gives a <em>guarantee</em> here, not
+        a probability.
+      </p>
+      <p>
+        An error is a pattern <primer-math>E(x)</primer-math> XOR-ed onto the frame; the receiver misses it
+        only if <primer-math>E(x)</primer-math> is divisible by <primer-math>G(x)</primer-math>. A burst of
+        length <primer-math>L</primer-math> is <primer-math>E(x) = x^k \cdot B(x)</primer-math>, where
+        <primer-math>B(x)</primer-math> has degree <primer-math>L-1</primer-math> and the leading factor
+        <primer-math>x^k</primer-math> just shifts it into place. If <primer-math>G(x)</primer-math> has a
+        non-zero constant term, it shares no factor of <primer-math>x</primer-math>, so it can only divide
+        <primer-math>B(x)</primer-math> — but when <primer-math>L \le r</primer-math>,
+        <primer-math>B(x)</primer-math> has <em>lower degree</em> than <primer-math>G(x)</primer-math> and
+        cannot be a multiple of it (except the all-zero non-error). Hence:
+      </p>
+
+      <primer-theorem name="CRC burst-error detection">
+        <ul>
+          <li>
+            A degree-<primer-math>r</primer-math> CRC detects <strong>every</strong> burst error of length
+            <primer-math>r</primer-math> or fewer bits.
+          </li>
+          <li>
+            It also detects every error that flips an <strong>odd</strong> number of bits, provided
+            <primer-math>G(x)</primer-math> contains the factor <primer-math>(x+1)</primer-math>.
+          </li>
+          <li>
+            Longer bursts slip through only with probability about
+            <primer-math>2^{-r}</primer-math> — e.g. <primer-math>\approx 2^{-32}</primer-math> for the
+            32-bit CRC in Ethernet, roughly one in four billion.
+          </li>
+        </ul>
+      </primer-theorem>
+
+      <p>
+        That is a remarkable amount of protection for <primer-math>r</primer-math> extra bits, and it is why
+        the choice of generator polynomial is a small branch of engineering folklore. Ethernet's CRC-32,
+        CRC-16 in many buses, and CRC-8 in tiny sensors are all published, hard-won constants selected for
+        exactly these divisibility properties.
+      </p>
+
+      <primer-vignette title="Where do the &quot;magic&quot; generator polynomials come from?">
+        <p>
+          You cannot pick a generator at random — a bad one leaves whole classes of errors undetected.
+          Standard CRCs use polynomials proven to maximise the <strong>Hamming distance</strong> of the code
+          over a range of message lengths, so that not only every short burst but also every 2-bit and
+          3-bit error is caught. CRC-32 (used by Ethernet, gzip and PNG) is
+          <primer-math>x^{32}+x^{26}+x^{23}+\cdots+x^{2}+x+1</primer-math>, a specific 33-bit constant chosen
+          in the 1970s–80s and re-analysed ever since. Including the factor
+          <primer-math>(x+1)</primer-math> is the trick that also nets every odd-weight error for free —
+          which is why virtually every real-world generator has it.
+        </p>
+      </primer-vignette>
+
+      <primer-vignette title="Watch out! — detection is not correction, and checksums are only a bet">
+        <p>
+          Two traps snare almost everyone. First: <strong>error <em>detection</em> is not error
+          <em>correction</em>.</strong> A CRC (and a checksum, and single parity) tells you <em>that</em>
+          something broke — it does not tell you <em>what</em> the original bits were, and it cannot fix them.
+          When Ethernet's CRC fails, the frame is simply <strong>discarded</strong>; recovery is somebody
+          else's job — a higher layer must notice the gap and
+          <primer-ref soft to="computer-science/networks/packet-switching">retransmit</primer-ref>. Correcting
+          on the spot needs a genuinely different, heavier tool (an error-<em>correcting</em> code like
+          Hamming or Reed–Solomon, which spends far more redundant bits).
+        </p>
+        <p>
+          Second: <strong>no checksum or CRC is a proof of integrity — only a very good bet.</strong> Every
+          scheme maps many possible frames onto the same check value, so <em>some</em> corruptions will always
+          collide with the correct one and pass undetected. Parity misses all even-bit errors; the Internet
+          checksum misses word swaps and cancelling pairs; even CRC-32 lets roughly one in
+          <primer-math>2^{32}</primer-math> long bursts through. These are <em>probabilistic</em> guarantees,
+          engineered to make undetected error astronomically unlikely — not impossible. Treat a passing check
+          as "almost certainly fine," never as "provably perfect."
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Putting the three side by side</h2>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Scheme</th><th>Extra bits</th><th>Detects</th><th>Misses</th><th>Cost</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Single parity</td>
+              <td>1</td>
+              <td>any odd number of bit errors</td>
+              <td>all even-bit errors; no location</td>
+              <td>trivial</td>
+            </tr>
+            <tr>
+              <td>2-D parity</td>
+              <td>rows + cols</td>
+              <td>and <em>corrects</em> any single-bit error</td>
+              <td>some multi-bit patterns</td>
+              <td>low</td>
+            </tr>
+            <tr>
+              <td>Internet checksum</td>
+              <td>16</td>
+              <td>most random bit errors</td>
+              <td>word swaps, cancelling pairs</td>
+              <td>very low (software)</td>
+            </tr>
+            <tr>
+              <td>CRC-32</td>
+              <td>32</td>
+              <td>all bursts ≤ 32 bits; all odd errors</td>
+              <td>~1 in 2³² long bursts</td>
+              <td>low (hardware shift register)</td>
+            </tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The pattern up the ladder is: spend a few more redundant bits and a little more arithmetic, and buy a
+        much stronger guarantee. The link layer picks the rung that matches the medium — a pristine
+        fibre needs less than a fading radio link — but on modern Ethernet and Wi-Fi, the choice is
+        overwhelmingly <strong>CRC</strong>.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "errorDetectQuiz@1": { "instructions": "Check your grasp of parity, the Internet checksum, and CRC — how each is computed, what it guarantees, and where it fails." } }
+    </script>
+    <primer-quiz name="errorDetectQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/packet-switching",
+      "computer-science/networks/protocol-stacks-and-the-osi-model"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // A 4x4 data grid with a parity column and parity row. One interior bit flips;
+  // its row-parity and column-parity both fail and their crossing lines meet on
+  // the culprit — showing 2-D parity detects AND locates a single-bit error.
+  registerGeometryScene("parity2d", ({ board, step, colors, sceneStrings }) => {
+    const n = 4;               // 4x4 data block
+    const x0 = 0, yTop = 4;     // top-left cell centre
+    const cx = (c) => x0 + c;   // column -> x
+    const cy = (r) => yTop - r; // row -> y
+
+    const cell = (r, c, s, col) =>
+      board.create("text", [cx(c), cy(r), s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 15, fixed: true,
+        highlight: false, strokeColor: col, color: col, cssStyle: "font-weight:600",
+      });
+
+    // fixed data block (base content, always visible)
+    const data = [
+      [1, 0, 1, 1],
+      [0, 1, 1, 0],
+      [1, 1, 0, 1],
+      [0, 0, 1, 1],
+    ];
+    for (let r = 0; r < n; r++)
+      for (let c = 0; c < n; c++) cell(r, c, String(data[r][c]), colors.ink);
+
+    // parity column (index 4) and parity row (index 4) as base content
+    for (let r = 0; r < n; r++) {
+      const p = data[r].reduce((a, b) => a ^ b, 0);
+      cell(r, n, String(p), colors.cat[0]);
+    }
+    for (let c = 0; c < n; c++) {
+      let p = 0;
+      for (let r = 0; r < n; r++) p ^= data[r][c];
+      cell(n, c, String(p), colors.cat[0]);
+    }
+    // corner parity-of-parities
+    cell(n, n, "0", colors.cat[0]);
+
+    // label the parity strips
+    board.create("text", [cx(n), cy(-0.9), sceneStrings("grid")], {
+      anchorX: "middle", fontSize: 11, fixed: true, highlight: false,
+      strokeColor: colors.line, color: colors.line, visible: false,
+    });
+
+    // STEP 1: flip one data bit (row 1, col 2) — highlight it
+    const fr = 1, fc = 2;
+    step(sceneStrings("flip"), () => {
+      board.create("point", [cx(fc), cy(fr)], {
+        size: 12, face: "o", strokeColor: colors.cat[1], fillColor: colors.bg,
+        fillOpacity: 0, strokeWidth: 2, fixed: true, highlight: false, name: "",
+      });
+    });
+
+    // STEP 2: mark the failing row-parity and column-parity, draw crossing lines
+    step(sceneStrings("rowcol"), () => {
+      board.create("point", [cx(n), cy(fr)], {
+        size: 10, face: "[]", strokeColor: colors.cat[1], fillColor: colors.bg,
+        fillOpacity: 0, strokeWidth: 2, fixed: true, highlight: false, name: "",
+      });
+      board.create("point", [cx(fc), cy(n)], {
+        size: 10, face: "[]", strokeColor: colors.cat[1], fillColor: colors.bg,
+        fillOpacity: 0, strokeWidth: 2, fixed: true, highlight: false, name: "",
+      });
+      board.create("segment", [[cx(fc), cy(fr)], [cx(n), cy(fr)]], {
+        strokeColor: colors.cat[1], strokeWidth: 2, dash: 2, fixed: true, highlight: false,
+        straightFirst: false, straightLast: false,
+      });
+      board.create("segment", [[cx(fc), cy(fr)], [cx(fc), cy(n)]], {
+        strokeColor: colors.cat[1], strokeWidth: 2, dash: 2, fixed: true, highlight: false,
+        straightFirst: false, straightLast: false,
+      });
+    });
+  }, {
+    boundingbox: [-1.2, 5.4, 6.2, -1.4],
+    keepAspect: true,
+    title: () => makeStrings("parity2d")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("errorDetectQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "Why does a physical link need error detection at all?",
+      options: [
+        { text: "Noise on the medium can flip transmitted bits, and a flipped bit does not announce itself", correct: true },
+        { text: "Routers deliberately corrupt frames to save bandwidth", correct: false },
+        { text: "TCP requires every frame to be encrypted", correct: false },
+        { text: "The receiver runs at a different clock speed, guaranteeing errors", correct: false },
+      ] },
+
+    { prompt: "A single (even) parity bit can detect…",
+      options: [
+        { text: "any odd number of flipped bits, but no even number", correct: true },
+        { text: "any number of flipped bits, and correct them", correct: false },
+        { text: "only exactly two flipped bits", correct: false },
+        { text: "nothing — parity is for alignment, not errors", correct: false },
+      ] },
+
+    { prompt: "What can two-dimensional parity do that single parity cannot?",
+      options: [
+        { text: "Locate and correct a single flipped bit via its failing row and column", correct: true },
+        { text: "Detect every possible multi-bit error with certainty", correct: false },
+        { text: "Compress the data as well as protect it", correct: false },
+        { text: "Encrypt the block against eavesdroppers", correct: false },
+      ] },
+
+    { prompt: "The Internet checksum (used by IP/UDP/TCP) works by…",
+      options: [
+        { text: "one's-complement summing 16-bit words and sending the complement of the sum", correct: true },
+        { text: "dividing the data by a generator polynomial", correct: false },
+        { text: "XOR-ing every byte together into a single parity byte", correct: false },
+        { text: "hashing the data with SHA-256", correct: false },
+      ] },
+
+    { prompt: "When a receiver adds the data words AND the Internet checksum together, an intact frame yields…",
+      options: [
+        { text: "a word of all ones (0xFFFF)", correct: true },
+        { text: "exactly zero", correct: false },
+        { text: "the original first word", correct: false },
+        { text: "a random value each time", correct: false },
+      ] },
+
+    { prompt: "A known weakness of the Internet checksum is that it…",
+      options: [
+        { text: "cannot detect swapped 16-bit words, since addition ignores order", correct: true },
+        { text: "fails on any single-bit error", correct: false },
+        { text: "requires special hardware to compute", correct: false },
+        { text: "can only protect exactly 16 bits of data", correct: false },
+      ] },
+
+    { prompt: "In a CRC, the data bits are interpreted as…",
+      options: [
+        { text: "coefficients of a polynomial over GF(2), where add/subtract are both XOR", correct: true },
+        { text: "a decimal integer to be divided normally", correct: false },
+        { text: "a floating-point number", correct: false },
+        { text: "an ASCII string to be hashed", correct: false },
+      ] },
+
+    { prompt: "To compute a CRC with a degree-r generator G(x), the sender…",
+      options: [
+        { text: "appends r zero bits, divides by G(x), and uses the remainder as the CRC", correct: true },
+        { text: "multiplies the message by G(x) and sends the product", correct: false },
+        { text: "adds G(x) to the message using ordinary arithmetic", correct: false },
+        { text: "counts the 1 bits modulo r", correct: false },
+      ] },
+
+    { prompt: "The receiver decides a CRC-protected frame is intact when…",
+      options: [
+        { text: "dividing the whole frame by G(x) leaves a remainder of zero", correct: true },
+        { text: "the remainder equals the generator polynomial", correct: false },
+        { text: "the sum of the bits is even", correct: false },
+        { text: "the first r bits are all zero", correct: false },
+      ] },
+
+    { prompt: "A degree-r CRC is guaranteed to detect every burst error of length…",
+      options: [
+        { text: "r bits or fewer", correct: true },
+        { text: "up to 2^r bits", correct: false },
+        { text: "exactly r+1 bits", correct: false },
+        { text: "any length at all, with certainty", correct: false },
+      ] },
+
+    { prompt: "Why does including the factor (x+1) in the generator help?",
+      options: [
+        { text: "It makes the CRC catch every error that flips an odd number of bits", correct: true },
+        { text: "It halves the number of CRC bits needed", correct: false },
+        { text: "It lets the CRC correct as well as detect errors", correct: false },
+        { text: "It encrypts the frame contents", correct: false },
+      ] },
+
+    { prompt: "Roughly what fraction of long random bursts slips past Ethernet's 32-bit CRC?",
+      options: [
+        { text: "about 1 in 2^32 (~one in four billion)", correct: true },
+        { text: "about 1 in 32", correct: false },
+        { text: "exactly 0 — CRC-32 detects everything", correct: false },
+        { text: "about half of them", correct: false },
+      ] },
+
+    { prompt: "The single most important limitation shared by parity, checksums and CRC is that they…",
+      options: [
+        { text: "detect that corruption happened but cannot correct it — recovery needs retransmission", correct: true },
+        { text: "correct any error automatically without extra bits", correct: false },
+        { text: "only work on wired links, never wireless", correct: false },
+        { text: "make retransmission unnecessary", correct: false },
+      ] },
+
+    { prompt: "When Ethernet's frame-check CRC fails, the hardware…",
+      options: [
+        { text: "discards the frame; a higher layer must notice and retransmit", correct: true },
+        { text: "reconstructs the original bits from the CRC", correct: false },
+        { text: "flips the suspected bit back automatically", correct: false },
+        { text: "forwards the frame anyway and logs a warning", correct: false },
+      ] },
+
+    { prompt: "Why is a passing CRC only a 'very good bet' rather than a proof of integrity?",
+      options: [
+        { text: "Many frames map to the same check value, so some corruptions collide with the correct one", correct: true },
+        { text: "The CRC is sometimes not actually transmitted", correct: false },
+        { text: "Routers ignore CRCs entirely", correct: false },
+        { text: "CRCs only cover the header, never the payload", correct: false },
+      ] },
+
+    { prompt: "Correcting an error on the spot (not just detecting it) requires…",
+      options: [
+        { text: "a heavier error-CORRECTING code such as Hamming or Reed–Solomon, spending more redundant bits", correct: true },
+        { text: "simply recomputing the same CRC twice", correct: false },
+        { text: "a second parity bit", correct: false },
+        { text: "switching from XOR to ordinary addition", correct: false },
+      ] },
+  ]);
+</script>

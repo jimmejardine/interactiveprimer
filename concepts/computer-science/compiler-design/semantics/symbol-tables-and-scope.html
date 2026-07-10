@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Symbol Tables and Scope</primer-title>
+
+    <primer-card>
+      <p>
+        When the compiler meets the name <code>x</code> for the second time, it faces a deceptively hard question:
+        <em>which</em> <code>x</code>? The one declared in this block, the parameter of the enclosing function, a
+        global, or an error because there is none? Answering it — turning every <em>use</em> of a name into a
+        reference to the exact <em>declaration</em> it denotes — is the job of the <strong>symbol table</strong>,
+        the compiler's memory of "what names exist and what does each one mean." Every later phase leans on it:
+        <primer-ref forward to="computer-science/compiler-design/semantics/type-checking">type checking</primer-ref>
+        asks it for a name's type, code generation asks it for a name's storage location.
+      </p>
+      <p>
+        A symbol table is, at heart, a dictionary from a name to its <strong>attributes</strong>. What makes it
+        interesting is <strong>scope</strong>: the same name can denote different things in different regions of the
+        program, and the table must model exactly which declaration is "in view" at each point. Get the structure
+        right and name resolution is a two-line lookup; get it wrong and the compiler cheerfully binds a use to the
+        wrong declaration, a bug that survives all the way to a mysterious runtime.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What a symbol carries</h2>
+      <p>
+        Each entry — one per declaration — records everything later phases will ask for. The <em>name</em> is only
+        the key; the value is a small record:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Field</th><th>Meaning</th><th>Used by</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>name</strong></td><td>the identifier (the lookup key)</td><td>the resolver</td></tr>
+            <tr><td><strong>kind</strong></td><td>variable, function, type, parameter, constant…</td><td>semantic checks</td></tr>
+            <tr><td><strong>type</strong></td><td>the declared or inferred type</td><td>type checking</td></tr>
+            <tr><td><strong>scope / level</strong></td><td>the region it belongs to (nesting depth)</td><td>resolution, shadowing</td></tr>
+            <tr><td><strong>offset / address</strong></td><td>storage location (stack offset, register, label)</td><td>code generation</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The container is almost always a <strong>hash table</strong>: name resolution is the hottest operation in a
+        compiler, and hashing gives expected <primer-math>O(1)</primer-math> insert and lookup. One hash table per
+        scope, chained together, is the workhorse structure — and the chaining is exactly what models nesting.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Nested scopes: a stack of tables</h2>
+      <p>
+        Blocks nest, so scopes nest, so the tables nest. The classic organisation is a <strong>stack of hash
+        tables</strong> (equivalently, a chain of <em>environments</em>, each pointing at its enclosing one). When
+        the compiler <strong>enters</strong> a block it pushes a fresh empty table; declarations in that block go
+        into the top table; when it <strong>leaves</strong> the block it pops that table, and every local name
+        vanishes at once. Look-up walks the chain <em>outward</em>: search the top table, then its parent, then its
+        parent, until the name is found or the chain runs out.
+      </p>
+      <primer-geometry scene="scopeStack"></primer-geometry>
+      <p>
+        Because look-up always starts at the innermost table and moves outward, the <em>nearest</em> declaration
+        wins automatically — no special case needed. That single rule is the whole mechanism behind
+        <strong>shadowing</strong>: an inner <code>x</code> hides an outer <code>x</code> simply because the inner
+        table is searched first. Pop the inner scope and the outer <code>x</code> is visible again, untouched.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Lexical scope vs dynamic scope</h2>
+      <p>
+        There are two rival answers to "which declaration does a name refer to," and the difference is one of the
+        deepest in language design.
+      </p>
+      <ul>
+        <li>
+          <strong>Lexical (static) scope</strong>: a name refers to the declaration that <em>textually</em> encloses
+          its use, decided by reading the source. The chain of tables above follows the program's block structure,
+          so resolution is fixed at <em>compile time</em>. Nearly every modern language — C, Java, Python, Rust,
+          JavaScript — is lexically scoped.
+        </li>
+        <li>
+          <strong>Dynamic scope</strong>: a name refers to the most recent binding still live on the <em>call
+          stack</em> at run time — who <em>called</em> you, not who <em>encloses</em> you textually. The resolution
+          can differ from call to call. Older Lisps, some shells, and Emacs Lisp's classic default used it.
+        </li>
+      </ul>
+      <p>
+        The contrast is stark: under lexical scope a function's free variables are pinned by <em>where it is
+        written</em>; under dynamic scope, by <em>where it is called from</em>. Lexical scope is what makes
+        closures and modular reasoning possible — you can understand a function by reading it, not by tracing every
+        caller. It is why the symbol-table chain mirrors the <em>syntax</em> tree, not the call sequence.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A scoped symbol table, in code</h2>
+      <p>
+        The full mechanism is short: a stack of maps, four operations (<code>enterScope</code>,
+        <code>exitScope</code>, <code>declare</code>, <code>lookup</code>), and the outward-walking search. Watch
+        shadowing and restoration fall out for free.
+      </p>
+      <primer-code run>
+        type Sym = { name: string; type: string; level: number };
+
+        class SymbolTable {
+          private scopes: Map&lt;string, Sym&gt;[] = [new Map()];   // scope 0 = global
+
+          enterScope(): void { this.scopes.push(new Map()); }
+          exitScope():  void { this.scopes.pop(); }             // locals vanish at once
+
+          // Declare in the CURRENT (innermost) scope. Redeclaring here is an error.
+          declare(name: string, type: string): void {
+            const top = this.scopes[this.scopes.length - 1];
+            if (top.has(name)) throw new Error(`duplicate declaration of '${name}' in this scope`);
+            top.set(name, { name, type, level: this.scopes.length - 1 });
+          }
+
+          // Look up: innermost scope first, then outward. Nearest declaration wins.
+          lookup(name: string): Sym | undefined {
+            for (let i = this.scopes.length - 1; i &gt;= 0; i--) {
+              const found = this.scopes[i].get(name);
+              if (found) return found;
+            }
+            return undefined;                                   // unresolved name
+          }
+        }
+
+        const st = new SymbolTable();
+        st.declare("x", "int");                       // global x : int
+        console.log("outer x ->", st.lookup("x")?.type, "at level", st.lookup("x")?.level);
+
+        st.enterScope();
+        st.declare("x", "string");                    // inner x SHADOWS the global
+        console.log("inner x ->", st.lookup("x")?.type, "at level", st.lookup("x")?.level);
+        st.exitScope();
+
+        console.log("after exit, x ->", st.lookup("x")?.type);  // outer int is back
+        console.log("unknown y ->", st.lookup("y"));            // undefined: unresolved
+      </primer-code>
+      <p>
+        The output tells the whole story: the inner <code>string x</code> shadows the global <code>int x</code>
+        while the scope is open, and the instant we <code>exitScope</code> the global is visible again, unharmed.
+        Redeclaring <code>x</code> in the <em>same</em> scope, by contrast, throws — that is a duplicate
+        declaration, a genuine error, not shadowing.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Forward references and two-pass resolution</h2>
+      <p>
+        One wrinkle breaks the tidy "declare before use" story: <strong>forward references</strong>. A method may
+        call another method declared <em>later</em> in the same class; two functions may be mutually recursive.
+        A single left-to-right pass would reach the use before the declaration exists in the table. Compilers solve
+        this with a <strong>two-pass</strong> approach over each scope that permits forward references: first
+        <em>collect</em> all declarations of the scope into the table, then <em>resolve</em> every use against the
+        now-complete table. C, by contrast, historically required a forward <em>prototype</em> precisely because
+        its one-pass model would otherwise not know the callee yet.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why does one hash table per scope beat one big table?">
+      <p>
+        You <em>could</em> keep a single global hash table and tag every entry with its scope level, popping entries
+        as scopes close. Some classic compilers did exactly that, threading a per-name list of declarations with the
+        most recent at the front. But a stack-of-tables has two quiet virtues: <strong>exitScope is
+        <primer-math>O(1)</primer-math></strong> — pop one table and every local dies together, with no scan to
+        evict individual entries — and the structure <em>is</em> the scope chain, so lookup and closure-capture read
+        straight off it. The trade is a little more memory for many tiny tables; in practice the clarity and the
+        cheap scope-exit win handily, which is why the chained-environment design is the textbook default.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Shadowing is not redefinition — and resolve at the right scope">
+      <p>
+        Two mistakes look alike and are opposites. <strong>Shadowing</strong> declares a name in an <em>inner</em>
+        scope that already exists in an <em>outer</em> one — perfectly legal, and it simply hides the outer name for
+        the duration of the inner block. <strong>Redefinition</strong> declares the <em>same</em> name twice in the
+        <em>same</em> scope — an error, because there is now no way to say which one a use means. The rule is about
+        <em>which</em> scope, not merely whether the name already exists: check for a clash <em>only in the current
+        table</em>, never in the whole chain.
+      </p>
+      <p>
+        The dual error is resolving at the wrong scope: binding a use to a declaration that is textually visible but
+        not the nearest one, or to one that has already been popped. Always resolve <em>innermost-first</em>, and
+        remember that a name declared later in a forward-reference scope is still in that scope — miss it and you
+        will wrongly report an undefined name, or bind to a stale outer one. Name resolution is precise or it is
+        wrong; there is no "close enough."
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: symbol-table structure, scope stack, lexical vs dynamic, shadowing vs redefinition. Bank of 13, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "symQuiz@1": {
+          "intro": "A symbol table maps names to their attributes; nested scopes form a stack of tables searched innermost-first. Numbers change every attempt.",
+          "purposeQ": "The core job of a symbol table is to…",
+          "puBind": "bind each USE of a name to the correct DECLARATION and its attributes",
+          "puParse": "parse the source into a tree",
+          "puTok": "split the input into tokens",
+          "puEmit": "emit machine code",
+          "structQ": "The container used for each scope is almost always a…",
+          "stHash": "hash table, for expected O(1) insert and lookup",
+          "stList": "sorted linked list, for O(n) lookup",
+          "stTree": "balanced tree, required by the standard",
+          "stStack": "single global array indexed by line number",
+          "nestQ": "Nested scopes are commonly modelled as…",
+          "neStack": "a stack of tables (a chain of environments), each linked to its enclosing scope",
+          "neOne": "one flat table with no structure",
+          "neGraph": "a cyclic graph of every name",
+          "neNone": "no structure — names are global",
+          "lookupQ": "To resolve a name, look-up searches…",
+          "loIn": "the innermost scope first, then outward along the chain",
+          "loOut": "the outermost (global) scope first, then inward",
+          "loAll": "all scopes simultaneously and picks at random",
+          "loTop": "only the global scope",
+          "enterQ": "On ENTERING a block, the symbol table…",
+          "enPush": "pushes a fresh empty table for the new scope",
+          "enPop": "pops the current table",
+          "enClear": "clears every table",
+          "enNothing": "does nothing",
+          "exitQ": "On LEAVING a block, popping its table causes…",
+          "exVanish": "all of that block's local names to vanish at once (O(1))",
+          "exStay": "the locals to persist globally",
+          "exGlobal": "the global scope to be deleted",
+          "exScan": "a scan of every entry to relabel it",
+          "lexQ": "Under LEXICAL (static) scope, a name refers to the declaration that…",
+          "lexEncl": "textually encloses its use, fixed at compile time",
+          "lexCall": "is most recent on the call stack at run time",
+          "lexGlobal": "is global, always",
+          "lexRand": "the loader chooses",
+          "dynQ": "Under DYNAMIC scope, a name refers to the binding…",
+          "dyCall": "most recently established on the call stack at run time",
+          "dyText": "that textually encloses the use",
+          "dyGlobal": "in the global scope only",
+          "dyFirst": "declared first in the file",
+          "shadowQ": "An inner declaration of x that hides an outer x is called…",
+          "shShadow": "shadowing — legal; the outer x reappears when the inner scope ends",
+          "shRedef": "redefinition — an error",
+          "shForward": "a forward reference",
+          "shDyn": "dynamic scoping",
+          "redefQ": "Declaring the same name twice in the SAME scope is…",
+          "reErr": "a duplicate-declaration error",
+          "reOk": "legal shadowing",
+          "reForward": "a forward reference",
+          "reClosure": "a closure",
+          "forwardQ": "Mutually recursive functions in one scope are resolved by…",
+          "fwTwo": "two passes: collect all declarations first, then resolve every use",
+          "fwErr": "always reporting an undefined-name error",
+          "fwDyn": "switching to dynamic scope",
+          "fwOne": "one strict left-to-right pass with no collection",
+          "levelNumQ": "You enter ${e} nested blocks from the global scope, then exit ${x} of them (x ≤ e). How many tables are now on the scope stack, counting the global scope?",
+          "walkNumQ": "A use of x sits in a block nested ${d} levels deep, but x is declared only in the GLOBAL scope. How many tables does look-up inspect before it finds x? (count the innermost and global)",
+          "declCountNumQ": "A single scope declares ${a} variables and ${b} functions, all distinct names. How many entries does its table hold?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="symQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/compiler-design/semantics/abstract-syntax-trees"]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Scope stack: nested rectangles (scopes) + entries, lookup walking outward.
+  registerGeometryScene("scopeStack", ({ board, step, colors }) => {
+    const rect = (x0, y0, x1, y1, col, labelText) => {
+      board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+        borders: { strokeColor: col, strokeWidth: 2 }, fillColor: col, fillOpacity: 0.08,
+        vertices: { visible: false }, fixed: true, highlight: false,
+      });
+      board.create("text", [x0 + 0.15, y1 - 0.32, labelText], {
+        anchorX: "left", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    };
+    const entry = (x, y, text, col) =>
+      board.create("text", [x, y, text], {
+        anchorX: "left", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    const g = colors.line;
+
+    // Three nested scopes drawn as concentric boxes.
+    step("Global scope holds x and print.", () => {
+      rect(-6, -3.4, 6, 3.4, colors.cat[0], "global scope (level 0)");
+      entry(-5.6, 2.7, "x : int", colors.ink);
+      entry(-5.6, 2.1, "print : fn", colors.ink);
+    });
+    step("Entering a function pushes a new table: y and a shadowing x.", () => {
+      rect(-4.6, -2.6, 4.6, 1.6, colors.cat[2], "function f (level 1)");
+      entry(-4.2, 0.9, "y : int", colors.ink);
+      entry(-4.2, 0.3, "x : string   ← shadows global x", colors.cat[1]);
+    });
+    step("A nested block pushes another table: z.", () => {
+      rect(-3.2, -1.9, 3.2, -0.2, colors.cat[3], "block (level 2)");
+      entry(-2.8, -1.05, "z : bool", colors.ink);
+    });
+    step("Looking up 'x' from the block: miss level 2, HIT the string x at level 1 (nearest wins).", () => {
+      board.create("arrow", [[0, -1.0], [0, 0.25]], {
+        strokeColor: colors.cat[1], strokeWidth: 2.4, fixed: true, highlight: false, dash: 2,
+      });
+      entry(0.3, 0.55, "found here", colors.cat[1]);
+    });
+    step("Looking up 'print': miss levels 2 and 1, reach the global scope.", () => {
+      board.create("arrow", [[1.6, -1.0], [1.6, 2.0]], {
+        strokeColor: colors.cat[0], strokeWidth: 2.4, fixed: true, highlight: false, dash: 2,
+      });
+      entry(1.9, 2.35, "resolved global", colors.cat[0]);
+    });
+  }, {
+    boundingbox: [-7, 4, 7, -4], keepAspect: false,
+    title: "Scope stack: look-up walks innermost → outermost",
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("symQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("purposeQ"),
+      options: [
+        { text: () => sceneStrings("puBind"), correct: true },
+        { text: () => sceneStrings("puParse"), correct: false },
+        { text: () => sceneStrings("puTok"), correct: false },
+        { text: () => sceneStrings("puEmit"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("structQ"),
+      options: [
+        { text: () => sceneStrings("stHash"), correct: true },
+        { text: () => sceneStrings("stList"), correct: false },
+        { text: () => sceneStrings("stTree"), correct: false },
+        { text: () => sceneStrings("stStack"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("nestQ"),
+      options: [
+        { text: () => sceneStrings("neStack"), correct: true },
+        { text: () => sceneStrings("neOne"), correct: false },
+        { text: () => sceneStrings("neGraph"), correct: false },
+        { text: () => sceneStrings("neNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lookupQ"),
+      options: [
+        { text: () => sceneStrings("loIn"), correct: true },
+        { text: () => sceneStrings("loOut"), correct: false },
+        { text: () => sceneStrings("loAll"), correct: false },
+        { text: () => sceneStrings("loTop"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("enterQ"),
+      options: [
+        { text: () => sceneStrings("enPush"), correct: true },
+        { text: () => sceneStrings("enPop"), correct: false },
+        { text: () => sceneStrings("enClear"), correct: false },
+        { text: () => sceneStrings("enNothing"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("exitQ"),
+      options: [
+        { text: () => sceneStrings("exVanish"), correct: true },
+        { text: () => sceneStrings("exStay"), correct: false },
+        { text: () => sceneStrings("exGlobal"), correct: false },
+        { text: () => sceneStrings("exScan"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lexQ"),
+      options: [
+        { text: () => sceneStrings("lexEncl"), correct: true },
+        { text: () => sceneStrings("lexCall"), correct: false },
+        { text: () => sceneStrings("lexGlobal"), correct: false },
+        { text: () => sceneStrings("lexRand"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dynQ"),
+      options: [
+        { text: () => sceneStrings("dyCall"), correct: true },
+        { text: () => sceneStrings("dyText"), correct: false },
+        { text: () => sceneStrings("dyGlobal"), correct: false },
+        { text: () => sceneStrings("dyFirst"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("shadowQ"),
+      options: [
+        { text: () => sceneStrings("shShadow"), correct: true },
+        { text: () => sceneStrings("shRedef"), correct: false },
+        { text: () => sceneStrings("shForward"), correct: false },
+        { text: () => sceneStrings("shDyn"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("redefQ"),
+      options: [
+        { text: () => sceneStrings("reErr"), correct: true },
+        { text: () => sceneStrings("reOk"), correct: false },
+        { text: () => sceneStrings("reForward"), correct: false },
+        { text: () => sceneStrings("reClosure"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("forwardQ"),
+      options: [
+        { text: () => sceneStrings("fwTwo"), correct: true },
+        { text: () => sceneStrings("fwErr"), correct: false },
+        { text: () => sceneStrings("fwDyn"), correct: false },
+        { text: () => sceneStrings("fwOne"), correct: false },
+      ],
+    },
+    {
+      // tables remaining = 1 (global) + (e - x)
+      prompt: (v) => sceneStrings("levelNumQ", v),
+      variables: "e=[2:6] x=[1:2]",
+      answer: (v) => 1 + (v.e - v.x),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // inspects d local tables + global = d + 1
+      prompt: (v) => sceneStrings("walkNumQ", v),
+      variables: "d=[1:6]",
+      answer: (v) => v.d + 1,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // entries = a + b
+      prompt: (v) => sceneStrings("declCountNumQ", v),
+      variables: "a=[1:9] b=[1:9]",
+      answer: (v) => v.a + v.b,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

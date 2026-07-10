@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Containers vs Virtual Machines</primer-title>
+
+    <primer-card>
+      <p>
+        Two technologies both promise to run "someone else's software, isolated, on my machine": the
+        <strong>virtual machine</strong> and the <strong>container</strong>. From a distance they look
+        interchangeable — both give you a fresh Linux you can install things into, both are spun up by clouds by
+        the million. But they solve the problem at opposite ends of the stack, and the difference decides your
+        startup time, your density, your overhead, and — most importantly — how strong your isolation really is.
+      </p>
+      <p>
+        You already know both halves of the answer. A container, from the
+        <primer-ref to="computer-science/advanced-operating-systems/containers/namespaces-and-cgroups">last
+        lesson</primer-ref>, is a process sharing the host kernel through namespaces and cgroups. A virtual
+        machine, from the virtualization module, is a guest operating system running on emulated or
+        hardware-assisted virtual hardware under a hypervisor. Here is the whole distinction in one line:
+        <strong>a VM virtualizes the hardware; a container virtualizes the operating-system interface.</strong>
+        Everything else — the milliseconds, the megabytes, the attack surface — falls out of that one choice about
+        <em>where the boundary is drawn</em>.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the side-by-side stack figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "stacks": {
+          "title": "Where the boundary sits — a VM virtualizes hardware; a container virtualizes the OS interface",
+          "vmTitle": "Virtual machines",
+          "ctTitle": "Containers",
+          "hw": "physical hardware",
+          "hostkern": "host kernel",
+          "hyper": "hypervisor (KVM / Xen / ESXi)",
+          "guest1": "guest kernel + OS",
+          "guest2": "guest kernel + OS",
+          "gapp1": "app A",
+          "gapp2": "app B",
+          "engine": "container runtime (namespaces + cgroups)",
+          "capp1": "app A",
+          "capp2": "app B",
+          "capp3": "app C",
+          "vmnote": "each VM carries a FULL guest kernel",
+          "ctnote": "all containers SHARE the one host kernel"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Two stacks, side by side</h2>
+      <p>
+        Line the layers up and the story tells itself. On the left, each VM is a tall tower: on top of the
+        hypervisor sits a <em>complete</em> guest operating system — its own kernel, its own drivers, its own
+        <primer-math>\texttt{init}</primer-math>, its own page cache — and only then your app. On the right, the
+        host kernel is shared; the runtime carves it into isolated views, and each container is <em>just the app
+        and its files</em>. The tall repeated block on the left — the guest kernel — is precisely what the
+        container omits.
+      </p>
+      <primer-geometry scene="stacks"></primer-geometry>
+      <p>
+        Count the kernels. Ten VMs on a host means eleven kernels running (one host — well, the hypervisor — plus
+        ten guests). Ten containers means <strong>one</strong> kernel, shared. That single fact drives every
+        number in the trade-off table below.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The trade-off, quantified</h2>
+      <p>
+        Because a container skips the guest kernel, it skips guest boot, guest memory, and the hypervisor's
+        world-switch overhead. Because a VM keeps the guest kernel, it keeps a hard hardware-enforced boundary
+        the guest cannot see past. Neither is "better"; they trade the <em>same</em> axis in opposite directions
+        — <strong>overhead versus isolation</strong>, the theme that has run through this entire course.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Dimension</th><th>Virtual machine</th><th>Container</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Virtualizes</td><td>the hardware</td><td>the OS interface</td></tr>
+            <tr><td>Guest kernel</td><td>yes — a full one per VM</td><td>none — shares the host kernel</td></tr>
+            <tr><td>Startup</td><td>seconds (full OS boot)</td><td>milliseconds (just <primer-math>\texttt{exec}</primer-math> a process)</td></tr>
+            <tr><td>Memory footprint</td><td>hundreds of MB (kernel + OS baseline)</td><td>megabytes (only the app)</td></tr>
+            <tr><td>Density per host</td><td>tens</td><td>hundreds to thousands</td></tr>
+            <tr><td>Runtime overhead</td><td>a few % (hardware-assisted)</td><td>near zero — native syscalls</td></tr>
+            <tr><td>Isolation boundary</td><td>strong — hardware-enforced, own kernel</td><td>weaker — shared kernel = larger attack surface</td></tr>
+            <tr><td>Kernel choice</td><td>any guest OS (even Windows on Linux)</td><td>host kernel only (Linux on Linux)</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Read the last two rows together. A VM's strength (a private guest kernel) is exactly the source of its
+        cost (booting and carrying that kernel); a container's strength (sharing one kernel) is exactly the source
+        of its weakness (one kernel bug can breach every container). The engineering question is never "which is
+        better?" but "for <em>this</em> workload and <em>this</em> threat model, which side of the axis do I
+        want?"
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Density and boot, with real numbers</h2>
+      <p>
+        Make it concrete. Suppose a host has <primer-math>64</primer-math> GB of RAM. A minimal Linux VM needs a
+        baseline of maybe <primer-math>256</primer-math> MB just for its guest kernel and OS before your app uses
+        a byte; a container adds essentially only the app's own footprint, say <primer-math>20</primer-math> MB.
+        The simulation computes how many of each fit, and how the boot budget compares.
+      </p>
+      <primer-code run>
+        // Density & boot: how the shared-kernel choice pays off in RAM and startup time.
+        const hostRamMB = 64 * 1024;   // 64 GB host
+
+        // Per-instance memory: a VM carries a whole guest OS; a container carries only the app.
+        const vmBaselineMB = 256;      // guest kernel + OS baseline
+        const ctBaselineMB = 20;       // just the app's own working set
+
+        // Per-instance startup: VM boots a kernel; a container just exec()s a process.
+        const vmBootMs = 2500;         // full guest boot
+        const ctBootMs = 30;           // fork/exec into namespaces
+
+        const vmFit = Math.floor(hostRamMB / vmBaselineMB);
+        const ctFit = Math.floor(hostRamMB / ctBaselineMB);
+
+        console.log(`Host RAM: ${hostRamMB} MB\n`);
+        console.log(`VMs that fit:        ${vmFit}   (@ ${vmBaselineMB} MB each)`);
+        console.log(`Containers that fit: ${ctFit}   (@ ${ctBaselineMB} MB each)`);
+        console.log(`=> ${(ctFit / vmFit).toFixed(1)}x higher density with containers\n`);
+
+        console.log(`Cold start 100 instances:`);
+        console.log(`  VMs:        ${(100 * vmBootMs / 1000).toFixed(0)} s of boot`);
+        console.log(`  Containers: ${(100 * ctBootMs / 1000).toFixed(1)} s`);
+        console.log(`=> containers start ~${Math.round(vmBootMs / ctBootMs)}x faster — this is why serverless loves them`);
+        console.log(`\nThe catch: all ${ctFit} containers trust the SAME kernel. One kernel bug = everyone's problem.`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The design law</h2>
+      <primer-theorem name="Containers vs VMs">
+        <ul>
+          <li>A <strong>VM virtualizes the hardware</strong>: a hypervisor gives each guest virtual CPUs, memory,
+            and devices, and every guest runs its <em>own full kernel</em>.</li>
+          <li>A <strong>container virtualizes the OS interface</strong>: processes share the <em>one host
+            kernel</em>, isolated only by namespaces and cgroups.</li>
+          <li>Containers win on <strong>speed and density</strong> — millisecond starts, MB footprints,
+            near-zero runtime overhead — by <em>not</em> carrying a guest kernel.</li>
+          <li>VMs win on <strong>isolation</strong> — a hardware-enforced boundary and a separate kernel — because
+            they <em>do</em> carry it. A shared kernel is a larger attack surface.</li>
+          <li>It is one axis, two directions: <strong>overhead traded against isolation.</strong></li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="If containers are so light, why did AWS build Firecracker to put them back in tiny VMs?">
+      <p>
+        Because clouds run <em>your</em> code next to a <em>stranger's</em> code, and "weaker isolation" stops
+        being an abstraction when the neighbour is hostile. Multi-tenant serverless (AWS Lambda, Fargate) needs
+        container-like millisecond starts <em>and</em> VM-grade isolation — seemingly a contradiction. The answer,
+        which the last lesson of this module explores, is the <strong>microVM</strong>: a radically stripped
+        hypervisor (Firecracker) that boots a minimal guest kernel in around
+        <primer-math>125</primer-math> ms with a tiny device model, giving each function its own real kernel
+        without the multi-second, hundreds-of-MB tax of a general-purpose VM. The industry's verdict was
+        essentially: "containers for packaging and speed, a thin VM for the isolation." You do not always have to
+        pick one end of the axis — sometimes you engineer a new point on it.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A container is not 'a lightweight VM'">
+      <p>
+        The single most common misconception, repeated in a thousand blog posts: "a container is just a
+        lightweight virtual machine." It is not lightweight <em>because it is a small VM</em> — it is lightweight
+        because it is <strong>not a VM at all</strong>. There is no guest kernel to be light or heavy; there is no
+        virtual hardware; the hypervisor is absent. It is a <em>process</em>. Getting this wrong leads to real
+        errors: people assume a container isolates them from a kernel exploit the way a VM does (it does not),
+        assume they can run a Windows container on a Linux kernel (they cannot — the kernel is shared, so a
+        "Windows container" needs a Windows host or a hidden VM), and assume container escape and VM escape are
+        equally hard (they are not — the container shares the kernel it must escape <em>through</em>). Say it
+        precisely: a container is an isolated process; a VM is an emulated computer.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: the core distinction, the numbers, isolation, kernel sharing. Bank of 12, draws 5.
+         Variable names avoid evaluator collisions (vm, ct, ram, ...). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "cvmQuiz@1": {
+          "intro": "One axis, two directions: a VM virtualizes hardware (strong isolation, seconds to boot); a container virtualizes the OS interface (near-zero overhead, milliseconds).",
+          "coreQ": "The fundamental difference between a container and a VM is that…",
+          "coreRight": "a VM virtualizes the hardware and runs a full guest kernel; a container shares the host kernel and virtualizes the OS interface",
+          "coreWrong1": "a container is a smaller virtual machine with a tiny guest kernel",
+          "coreWrong2": "a VM shares the host kernel and a container has its own",
+          "coreWrong3": "there is no real difference — they are the same technology",
+          "kernQ": "How many kernels are running when you have 5 containers on one Linux host?",
+          "kernRight": "one — the shared host kernel",
+          "kernWrong1": "five — one guest kernel per container",
+          "kernWrong2": "six — a host kernel plus one per container",
+          "kernWrong3": "zero — containers need no kernel",
+          "startQ": "Compared with a VM, a container's typical startup time is…",
+          "startRight": "milliseconds vs seconds — no guest OS to boot",
+          "startWrong1": "seconds vs milliseconds — containers are slower",
+          "startWrong2": "identical to a VM",
+          "startWrong3": "always exactly one second",
+          "isoQ": "Which has the STRONGER isolation boundary, and why?",
+          "isoRight": "the VM — a hardware-enforced boundary and its own guest kernel",
+          "isoWrong1": "the container — because it has fewer files",
+          "isoWrong2": "they are identical in isolation strength",
+          "isoWrong3": "the container — because it shares the kernel",
+          "attackQ": "Why is a container's attack surface larger than a VM's?",
+          "attackRight": "all containers share the one host kernel, so a single kernel bug can breach any of them",
+          "attackWrong1": "containers use more RAM",
+          "attackWrong2": "containers cannot use a firewall",
+          "attackWrong3": "containers run older software",
+          "overQ": "A container's runtime CPU overhead versus running the app on bare metal is…",
+          "overRight": "near zero — its syscalls hit the host kernel natively",
+          "overWrong1": "around 50%",
+          "overWrong2": "always higher than a VM's",
+          "overWrong3": "impossible to measure",
+          "denseQ": "Why can a host pack far more containers than VMs?",
+          "denseRight": "containers skip the per-instance guest-kernel/OS memory baseline",
+          "denseWrong1": "containers compress their code more",
+          "denseWrong2": "VMs are not allowed to share a host",
+          "denseWrong3": "containers run on the GPU",
+          "winQ": "Which workload most favours a VM over a container?",
+          "winRight": "running mutually untrusting tenants that each need a hard isolation boundary",
+          "winWrong1": "packing thousands of short-lived tasks for maximum density",
+          "winWrong2": "a serverless function that must cold-start in milliseconds",
+          "winWrong3": "a stateless microservice you scale up and down constantly",
+          "winCtQ": "Which workload most favours a container over a VM?",
+          "winCtRight": "high-density, fast-scaling microservices you trust to share a kernel",
+          "winCtWrong1": "running an untrusted Windows OS on a Linux host",
+          "winCtWrong2": "a workload that must survive a host-kernel exploit unharmed",
+          "winCtWrong3": "emulating a completely different CPU architecture",
+          "hyperQ": "A hypervisor is to a VM as ______ is to a container.",
+          "hyperRight": "the container runtime (namespaces + cgroups)",
+          "hyperWrong1": "the guest kernel",
+          "hyperWrong2": "the BIOS",
+          "hyperWrong3": "the compiler",
+          "winOsQ": "Can you run a Windows container directly on a stock Linux kernel?",
+          "winOsRight": "no — containers share the host kernel, so it needs a Windows host or a hidden VM",
+          "winOsWrong1": "yes — the container brings its own Windows kernel",
+          "winOsWrong2": "yes — Linux emulates Windows automatically",
+          "winOsWrong3": "only if the container is larger than 1 GB",
+          "ramQ": "A host has ${ram}$ GB of RAM. VMs need ${vm}$ MB baseline each; containers ${ct}$ MB each. Roughly how many MORE containers than VMs fit? (integer)",
+          "bootQ": "A VM boots in ${vmb}$ ms; a container in ${ctb}$ ms. How many times faster does the container start? (round to nearest integer)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="cvmQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/containers/namespaces-and-cgroups"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Side-by-side layer stacks: LEFT two VM towers (hardware -> hypervisor -> guest kernel -> app),
+     RIGHT container stack (hardware -> host kernel -> runtime -> app boxes). keepAspect false, wide.
+     Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "stacks",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, text, ci, opacity, weight) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[ci], fillOpacity: opacity,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, text], {
+          strokeColor: colors.ink, fontSize: 10.5, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: `text-align:center; white-space:pre-line; ${weight ? "font-weight:700;" : ""} max-width:150px`,
+        });
+      };
+      const caption = (x, y, text, weight, size) =>
+        board.create("text", [x, y, text], {
+          strokeColor: colors.ink, fontSize: size || 11.5, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: (weight ? "font-weight:700;" : "") + "max-width:260px",
+        });
+
+      const Lx0 = 0.2, Lx1 = 5.2;   // VM column
+      const Rx0 = 6.0, Rx1 = 11.0;  // container column
+
+      caption((Lx0 + Lx1) / 2, 9.4, sceneStrings("vmTitle"), true);
+      caption((Rx0 + Rx1) / 2, 9.4, sceneStrings("ctTitle"), true);
+
+      // LEFT — VM stack. Shared bottom (hardware, hypervisor), two guest towers.
+      step(sceneStrings("vmTitle"), () => {
+        box(Lx0, 0.2, Lx1, 1.1, sceneStrings("hw"), 2, 0.18, false);
+        box(Lx0, 1.3, Lx1, 2.2, sceneStrings("hyper"), 2, 0.30, true);
+        // two guest towers
+        const midGap = 0.3;
+        const gw = (Lx1 - Lx0 - midGap) / 2;
+        const g1x1 = Lx0 + gw, g2x0 = g1x1 + midGap;
+        box(Lx0, 2.4, g1x1, 4.0, sceneStrings("guest1"), 1, 0.28, true);
+        box(Lx0, 4.2, g1x1, 5.1, sceneStrings("gapp1"), 0, 0.22, false);
+        box(g2x0, 2.4, Lx1, 4.0, sceneStrings("guest2"), 1, 0.28, true);
+        box(g2x0, 4.2, Lx1, 5.1, sceneStrings("gapp2"), 0, 0.22, false);
+        caption((Lx0 + Lx1) / 2, 5.7, sceneStrings("vmnote"), false, 10.5);
+      });
+
+      // RIGHT — container stack. Shared hardware + host kernel + runtime, then three app boxes.
+      step(sceneStrings("ctTitle"), () => {
+        box(Rx0, 0.2, Rx1, 1.1, sceneStrings("hw"), 2, 0.18, false);
+        box(Rx0, 1.3, Rx1, 2.2, sceneStrings("hostkern"), 1, 0.30, true);
+        box(Rx0, 2.4, Rx1, 3.2, sceneStrings("engine"), 2, 0.30, true);
+        const g = 0.25;
+        const cw = (Rx1 - Rx0 - 2 * g) / 3;
+        box(Rx0, 3.5, Rx0 + cw, 5.1, sceneStrings("capp1"), 0, 0.22, false);
+        box(Rx0 + cw + g, 3.5, Rx0 + 2 * cw + g, 5.1, sceneStrings("capp2"), 0, 0.22, false);
+        box(Rx0 + 2 * cw + 2 * g, 3.5, Rx1, 5.1, sceneStrings("capp3"), 0, 0.22, false);
+        caption((Rx0 + Rx1) / 2, 5.7, sceneStrings("ctnote"), false, 10.5);
+      });
+    },
+    {
+      boundingbox: [-0.6, 10.0, 11.8, -0.4],
+      keepAspect: false,
+      title: () => makeStrings("stacks")("title"),
+    },
+  );
+
+  registerQuiz("cvmQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("coreQ"), options: [
+      { text: () => sceneStrings("coreRight"), correct: true },
+      { text: () => sceneStrings("coreWrong1"), correct: false },
+      { text: () => sceneStrings("coreWrong2"), correct: false },
+      { text: () => sceneStrings("coreWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("kernQ"), options: [
+      { text: () => sceneStrings("kernRight"), correct: true },
+      { text: () => sceneStrings("kernWrong1"), correct: false },
+      { text: () => sceneStrings("kernWrong2"), correct: false },
+      { text: () => sceneStrings("kernWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("startQ"), options: [
+      { text: () => sceneStrings("startRight"), correct: true },
+      { text: () => sceneStrings("startWrong1"), correct: false },
+      { text: () => sceneStrings("startWrong2"), correct: false },
+      { text: () => sceneStrings("startWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("isoQ"), options: [
+      { text: () => sceneStrings("isoRight"), correct: true },
+      { text: () => sceneStrings("isoWrong1"), correct: false },
+      { text: () => sceneStrings("isoWrong2"), correct: false },
+      { text: () => sceneStrings("isoWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("attackQ"), options: [
+      { text: () => sceneStrings("attackRight"), correct: true },
+      { text: () => sceneStrings("attackWrong1"), correct: false },
+      { text: () => sceneStrings("attackWrong2"), correct: false },
+      { text: () => sceneStrings("attackWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("overQ"), options: [
+      { text: () => sceneStrings("overRight"), correct: true },
+      { text: () => sceneStrings("overWrong1"), correct: false },
+      { text: () => sceneStrings("overWrong2"), correct: false },
+      { text: () => sceneStrings("overWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("denseQ"), options: [
+      { text: () => sceneStrings("denseRight"), correct: true },
+      { text: () => sceneStrings("denseWrong1"), correct: false },
+      { text: () => sceneStrings("denseWrong2"), correct: false },
+      { text: () => sceneStrings("denseWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("winQ"), options: [
+      { text: () => sceneStrings("winRight"), correct: true },
+      { text: () => sceneStrings("winWrong1"), correct: false },
+      { text: () => sceneStrings("winWrong2"), correct: false },
+      { text: () => sceneStrings("winWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("winCtQ"), options: [
+      { text: () => sceneStrings("winCtRight"), correct: true },
+      { text: () => sceneStrings("winCtWrong1"), correct: false },
+      { text: () => sceneStrings("winCtWrong2"), correct: false },
+      { text: () => sceneStrings("winCtWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("hyperQ"), options: [
+      { text: () => sceneStrings("hyperRight"), correct: true },
+      { text: () => sceneStrings("hyperWrong1"), correct: false },
+      { text: () => sceneStrings("hyperWrong2"), correct: false },
+      { text: () => sceneStrings("hyperWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("winOsQ"), options: [
+      { text: () => sceneStrings("winOsRight"), correct: true },
+      { text: () => sceneStrings("winOsWrong1"), correct: false },
+      { text: () => sceneStrings("winOsWrong2"), correct: false },
+      { text: () => sceneStrings("winOsWrong3"), correct: false },
+    ] },
+    {
+      // extra containers vs VMs: floor(ram*1024/ct) - floor(ram*1024/vm).
+      prompt: (v) => sceneStrings("ramQ", v),
+      variables: "ram=[16,32,64] vm=[200,256,512] ct=[16,20,32]",
+      answer: (v) => Math.floor((v.ram * 1024) / v.ct) - Math.floor((v.ram * 1024) / v.vm),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // boot speedup: round(vmb/ctb).
+      prompt: (v) => sceneStrings("bootQ", v),
+      variables: "vmb=[1500,2000,2500,3000] ctb=[20,30,50]",
+      answer: (v) => Math.round(v.vmb / v.ctb),
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

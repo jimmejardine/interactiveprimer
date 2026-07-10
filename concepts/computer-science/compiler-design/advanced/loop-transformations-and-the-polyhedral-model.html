@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Loop Transformations and the Polyhedral Model</primer-title>
+
+    <primer-card>
+      <p>
+        Programs spend most of their time in loops, so loops are where an optimising compiler earns its keep.
+        <primer-ref to="computer-science/compiler-design/optimization/loop-invariant-code-motion">Hoisting invariant code</primer-ref>
+        out of a loop was a first taste; the transforms on this page are far more dramatic. They <em>reshape the
+        loop nest itself</em> — swapping which loop is inner, chopping the iteration space into cache-sized
+        blocks, welding two loops into one — to win locality and parallelism, all while computing exactly the
+        same values. The governing question, always, is: <strong>which reshapings preserve the program's
+        meaning?</strong> The answer is the theory of <em>data dependence</em>, and its most powerful modern
+        expression is the <strong>polyhedral model</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The catalogue of loop-nest transforms</h2>
+      <p>
+        A handful of transformations recur throughout every optimising compiler. Each targets a specific enemy —
+        poor cache behaviour, loop overhead, or hidden parallelism:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Transform</th><th>What it does</th><th>Chiefly buys</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Interchange</strong></td><td>swaps the order of two loops in a nest</td><td>stride-1 access → cache locality; exposes parallelism</td></tr>
+            <tr><td><strong>Tiling (blocking)</strong></td><td>splits a loop into blocks that fit in cache, iterating block-by-block</td><td>temporal locality — reuse data before it is evicted</td></tr>
+            <tr><td><strong>Fusion</strong></td><td>merges two adjacent loops into one body</td><td>reuse across loops; less loop overhead</td></tr>
+            <tr><td><strong>Fission (distribution)</strong></td><td>splits one loop into two</td><td>separates a parallel part from a serial one; helps vectorization</td></tr>
+            <tr><td><strong>Unrolling</strong></td><td>replicates the body <primer-math>u</primer-math> times, stepping by <primer-math>u</primer-math></td><td>less branch/counter overhead; more ILP to schedule</td></tr>
+            <tr><td><strong>Skewing</strong></td><td>reshapes the iteration space (adds one index to another) to make dependences march diagonally</td><td>exposes a parallel wavefront in otherwise-serial nests</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        <strong>Tiling</strong> deserves a second look because it is the great locality win. Matrix multiply
+        over large <primer-math>N</primer-math> streams a whole row and column per output element; by the time
+        you revisit a cache line it has long been evicted. Tiling restructures the triple loop to work on
+        <primer-math>b\times b</primer-math> sub-blocks that fit in cache, turning
+        <primer-math>O(N^3)</primer-math> cache misses into a small fraction of that — often a several-fold
+        speedup with <em>zero</em> change to the arithmetic.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Data dependence: the law every transform must obey</h2>
+      <p>
+        Two statement instances are <strong>dependent</strong> if they access the same memory location and at
+        least one writes. Three flavours matter:
+      </p>
+      <primer-theorem name="The three dependences">
+        <ul>
+          <li><strong>Flow (true) dependence</strong> — write then read (RAW). The read needs the written value; this is a real data flow you cannot reorder away.</li>
+          <li><strong>Anti-dependence</strong> — read then write (WAR). The write must wait until the read has happened.</li>
+          <li><strong>Output dependence</strong> — write then write (WAW). The final value must be the later write's.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        For a loop, we summarise a dependence by a <strong>distance vector</strong>
+        <primer-math>\vec{d} = \vec{i}_{\text{sink}} - \vec{i}_{\text{source}}</primer-math>: how many iterations
+        apart (per loop level) the two accessing iterations are. In <code>A[i] = A[i-1] + 1</code>, iteration
+        <primer-math>i</primer-math> reads what iteration <primer-math>i-1</primer-math> wrote, so the distance
+        is <primer-math>d = 1</primer-math> — a <em>loop-carried</em> dependence. When only the sign matters we
+        write a <strong>direction vector</strong> with entries <primer-math>(&lt;, =, &gt;)</primer-math>. The
+        golden rule:
+      </p>
+      <primer-theorem name="Legality of a loop transformation">
+        <ul>
+          <li>A reordering transformation is <strong>legal</strong> if and only if it preserves the relative order of every pair of dependent iterations — i.e. every dependence distance vector stays <em>lexicographically positive</em> (the source still executes before the sink) under the transformed schedule.</li>
+          <li>Equivalently: no transform may make a sink iteration run before the source it depends on.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Seeing the iteration space</h2>
+      <p>
+        The clearest way to picture all this is to plot the <strong>iteration space</strong>: one point per
+        loop iteration, arranged on the integer grid, with an arrow drawn for each dependence. Below is the
+        classic stencil <code>A[i][j] = A[i-1][j] + A[i][j-1]</code>: each point depends on its west and south
+        neighbours, giving distance vectors <primer-math>(1,0)</primer-math> and <primer-math>(0,1)</primer-math>.
+      </p>
+      <primer-geometry scene="iterSpace"></primer-geometry>
+      <p>
+        Both distance vectors are lexicographically positive, so the loops <em>could</em> legally be
+        interchanged; but notice that no arrow is purely along one axis in the <em>skewed</em> sense — points on
+        an anti-diagonal <primer-math>i+j = \text{const}</primer-math> have no arrows between them, so an entire
+        anti-diagonal can execute <strong>in parallel</strong> as a wavefront. Reading legality and parallelism
+        straight off the arrows is the whole art.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The polyhedral model: geometry as the unifying framework</h2>
+      <p>
+        The ad-hoc catalogue above hides a deep unity. In the <strong>polyhedral model</strong>, a loop nest
+        with affine bounds and affine array subscripts is described exactly by three mathematical objects:
+      </p>
+      <ul>
+        <li>
+          the <strong>iteration domain</strong> — the set of iteration vectors, a <em>polytope</em> carved out
+          of <primer-math>\mathbb{Z}^n</primer-math> by the loop bounds (e.g.
+          <primer-math>\{(i,j) : 0 \le i &lt; N,\; 0 \le j \le i\}</primer-math>);
+        </li>
+        <li>
+          <strong>access functions</strong> — affine maps from iteration vector to the array element touched
+          (e.g. <primer-math>(i,j)\mapsto A[i+j]</primer-math>);
+        </li>
+        <li>
+          a <strong>schedule</strong> — an affine map assigning each iteration a logical timestamp, which
+          <em>defines the execution order</em>.
+        </li>
+      </ul>
+      <p>
+        The magic: <em>every</em> classical transform — interchange, tiling, fusion, skewing, and arbitrary
+        compositions of them — is just a different choice of affine <strong>schedule</strong> applied to the
+        same domain. Legality becomes a single question — does the new schedule keep every dependence
+        lexicographically positive? — that reduces to integer linear feasibility. Optimisers such as
+        <strong>Pluto</strong> and LLVM/GCC's <strong>Polly/Graphite</strong> search the space of legal affine
+        schedules for one that maximises locality and parallelism, unifying the entire catalogue into one
+        optimisation problem.
+      </p>
+      <primer-math display>\text{transform} \;=\; \text{new affine schedule } \theta \quad\text{legal} \iff \theta(\vec{i}_{\text{sink}}) \succ \theta(\vec{i}_{\text{source}}) \text{ for every dependence.}</primer-math>
+    </primer-card>
+
+    <primer-card>
+      <h2>Testing legality of interchange, in code</h2>
+      <p>
+        Given the distance vectors of a 2-deep loop nest, loop interchange (swapping the two loops) is legal
+        exactly when swapping the two components of every distance vector keeps it lexicographically positive.
+        The one thing interchange <em>cannot</em> survive is a distance vector like <primer-math>(1,-1)</primer-math>:
+        swap it to <primer-math>(-1,1)</primer-math> and it becomes lexicographically negative — the sink would
+        run before its source.
+      </p>
+      <primer-code run>
+        type Vec = [number, number];
+
+        // Lexicographically positive: first non-zero component is &gt; 0.
+        function lexPositive(v: Vec): boolean {
+          for (const c of v) { if (c &gt; 0) return true; if (c &lt; 0) return false; }
+          return false; // all zero: not a real cross-iteration dependence
+        }
+
+        // Interchange swaps the two loop levels, i.e. swaps the two components of every distance vector.
+        function interchangeLegal(deps: Vec[]): boolean {
+          return deps.every((d) =&gt; lexPositive([d[1], d[0]]));
+        }
+
+        // Stencil A[i][j] = A[i-1][j] + A[i][j-1]: distances (1,0) and (0,1).
+        const stencil: Vec[] = [[1, 0], [0, 1]];
+        console.log("stencil interchange legal? " + interchangeLegal(stencil)); // true
+
+        // A skewed dependence (1,-1) blocks interchange.
+        const skewed: Vec[] = [[1, -1]];
+        console.log("(1,-1) interchange legal? " + interchangeLegal(skewed));   // false
+        console.log("  because swapped (-1,1) lex-positive? " + lexPositive([-1, 1]));
+      </primer-code>
+      <p>
+        The stencil interchanges freely; the skewed nest does not. That single check — "is the reordered
+        distance vector still lexicographically positive?" — is, at heart, the entire legality test the
+        polyhedral model generalises to arbitrary affine schedules.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why is it called the 'polyhedral' model?">
+      <p>
+        Because the iteration domain of an affine loop nest is literally a <strong>polyhedron</strong> — an
+        intersection of half-spaces, each half-space being one loop bound <primer-math>a\cdot\vec{i} \le b</primer-math>.
+        A doubly-nested triangular loop <primer-math>\{0\le i&lt;N,\ 0\le j\le i\}</primer-math> is a triangle;
+        a rectangular nest is a box; tiling literally slices the polytope into smaller polytopes. Because the
+        whole loop nest is captured as geometry, transformations are <em>affine maps</em> of that geometry, and
+        the machinery of integer linear programming (via tools like <strong>isl</strong>, the integer set
+        library) can reason about them exactly rather than pattern-matching source syntax. Turning a
+        compiler-optimisation question into a computational-geometry question is what makes the model so
+        powerful — and why it can discover transform <em>compositions</em> a human would never hand-code.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A legal-looking transform that breaks one dependence is still illegal">
+      <p>
+        The seductive error is to justify a transform by the benefit — "tiling improves locality, so tile" —
+        without checking dependences. Tiling, fusion and interchange are only legal when they respect
+        <em>every</em> dependence; a single loop-carried dependence pointing the wrong way after the transform
+        makes it <strong>illegal</strong>, and the compiler will silently compute wrong answers. Tiling a loop
+        whose iterations must run strictly in order (a recurrence like <code>x[i] = x[i-1] * a</code>) does not
+        magically become parallel just because the blocks fit in cache — the dependence
+        <primer-math>(1)</primer-math> crosses every tile boundary. Locality is the <em>reward</em>; dependence
+        legality is the <em>gate</em>, and the gate comes first. Skewing exists precisely to <em>make</em> an
+        otherwise-illegal tiling legal by reorienting the dependences first.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "loopQuiz@1": {
+          "intro": "Loop transforms reshape a nest for locality and parallelism; a dependence distance vector decides legality. Numbers change every attempt.",
+          "tileQ": "Loop tiling (blocking) chiefly improves…",
+          "tLoc": "cache locality — reuse data before it is evicted",
+          "tIC": "the total instruction count in the ISA",
+          "tType": "type safety",
+          "tName": "variable naming",
+          "interQ": "Loop interchange…",
+          "iSwap": "swaps the order of two loops in a nest",
+          "iMerge": "merges two loops into one",
+          "iSplit": "splits one loop into two",
+          "iUnroll": "replicates the loop body",
+          "flowQ": "A flow (true) dependence is…",
+          "fRAW": "write then read (RAW) — the read needs the written value",
+          "fWAR": "read then write (WAR)",
+          "fWAW": "write then write (WAW)",
+          "fNone": "two reads of the same value",
+          "distQ": "For A[i] = A[i-1] + 1, the loop-carried dependence distance is…",
+          "d1": "1",
+          "d0": "0",
+          "dm1": "-1",
+          "d2": "2",
+          "legalQ": "A reordering loop transform is legal if and only if…",
+          "lLex": "every dependence distance vector stays lexicographically positive under the new schedule",
+          "lFast": "it makes the loop run faster",
+          "lFits": "the data fits in cache",
+          "lNoWrite": "the loop contains no writes",
+          "polyQ": "In the polyhedral model, a loop nest's iteration domain is represented as…",
+          "pPoly": "a polytope (intersection of affine half-spaces) of integer iteration vectors",
+          "pList": "a linked list of statements",
+          "pTree": "a binary search tree",
+          "pHash": "a hash table of variables",
+          "schedQ": "In the polyhedral model, what does a classical transform correspond to?",
+          "sAff": "a different affine schedule applied to the same iteration domain",
+          "sNew": "rewriting the source into a new language",
+          "sHW": "a hardware change",
+          "sType": "a change of type system",
+          "skewQ": "Loop skewing is used to…",
+          "skWave": "reshape the iteration space so a parallel wavefront (or legal tiling) is exposed",
+          "skFast": "increase the clock frequency",
+          "skDel": "delete loop-carried dependences",
+          "skType": "convert floats to ints",
+          "carriedQ": "A single loop-carried dependence pointing the wrong way after a transform means the transform is…",
+          "cIll": "illegal — it would compute wrong results",
+          "cSlow": "merely slower but still correct",
+          "cFast": "always faster",
+          "cFine": "always fine if tiles fit in cache",
+          "lexQ": "Is the distance vector ({a}, {b}) lexicographically positive? Enter 1 for yes, 0 for no.",
+          "swapQ": "Interchange swaps a distance vector's components. After swapping ({p}, {q}), is the result lexicographically positive (so interchange stays legal for this dependence)? Enter 1 for yes, 0 for no."
+        }
+      }
+    </script>
+
+    <primer-quiz name="loopQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/optimization/loop-invariant-code-motion"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Iteration space: a grid of points with dependence arrows.
+  registerGeometryScene("iterSpace", ({ board, step, colors }) => {
+    const N = 4;
+    const pts = {};
+    // draw the grid of iteration points
+    for (let i = 0; i < N; i++) {
+      for (let j = 0; j < N; j++) {
+        pts[`${i},${j}`] = board.create("point", [j, i], {
+          fixed: true, size: 3, strokeColor: colors.cat[0], fillColor: colors.cat[0],
+          name: "", withLabel: false, highlight: false,
+        });
+      }
+    }
+    board.create("text", [1.5, -0.9, "j  (inner loop) →"], {
+      anchorX: "middle", fontSize: 13, fixed: true, highlight: false, strokeColor: colors.ink, color: colors.ink,
+    });
+    board.create("text", [-0.95, 1.5, "i ↑"], {
+      anchorX: "middle", fontSize: 13, fixed: true, highlight: false, strokeColor: colors.ink, color: colors.ink,
+    });
+
+    const arrow = (fromI, fromJ, toI, toJ, col) => {
+      board.create("arrow", [[fromJ, fromI], [toJ, toI]], {
+        strokeColor: col, strokeWidth: 2, fixed: true, highlight: false, lastArrow: { size: 5 },
+      });
+    };
+
+    step("South dependence: each point depends on (i-1, j) → distance (1,0).", () => {
+      for (let i = 1; i < N; i++)
+        for (let j = 0; j < N; j++) arrow(i - 1, j, i, j, colors.cat[1]);
+    });
+    step("West dependence: each point depends on (i, j-1) → distance (0,1).", () => {
+      for (let i = 0; i < N; i++)
+        for (let j = 1; j < N; j++) arrow(i, j - 1, i, j, colors.cat[2]);
+    });
+    step("Anti-diagonals i+j = const have NO arrows between their points — a parallel wavefront.", () => {
+      board.create("line", [[3, 0], [0, 3]], {
+        strokeColor: colors.cat[3], strokeWidth: 2, dash: 2, straightFirst: false, straightLast: false, fixed: true, highlight: false,
+      });
+      board.create("text", [2.4, 2.1, "wavefront"], {
+        anchorX: "middle", fontSize: 12, fixed: true, highlight: false, strokeColor: colors.cat[3], color: colors.cat[3],
+      });
+    });
+  }, { boundingbox: [-1.8, 4, 4.4, -1.6], keepAspect: false, title: "Iteration space of a 2-D stencil with dependence arrows" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("loopQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("tileQ"),
+      options: [
+        { text: () => sceneStrings("tLoc"), correct: true },
+        { text: () => sceneStrings("tIC"), correct: false },
+        { text: () => sceneStrings("tType"), correct: false },
+        { text: () => sceneStrings("tName"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("interQ"),
+      options: [
+        { text: () => sceneStrings("iSwap"), correct: true },
+        { text: () => sceneStrings("iMerge"), correct: false },
+        { text: () => sceneStrings("iSplit"), correct: false },
+        { text: () => sceneStrings("iUnroll"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("flowQ"),
+      options: [
+        { text: () => sceneStrings("fRAW"), correct: true },
+        { text: () => sceneStrings("fWAR"), correct: false },
+        { text: () => sceneStrings("fWAW"), correct: false },
+        { text: () => sceneStrings("fNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("distQ"),
+      options: [
+        { text: () => sceneStrings("d1"), correct: true },
+        { text: () => sceneStrings("d0"), correct: false },
+        { text: () => sceneStrings("dm1"), correct: false },
+        { text: () => sceneStrings("d2"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("legalQ"),
+      options: [
+        { text: () => sceneStrings("lLex"), correct: true },
+        { text: () => sceneStrings("lFast"), correct: false },
+        { text: () => sceneStrings("lFits"), correct: false },
+        { text: () => sceneStrings("lNoWrite"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("polyQ"),
+      options: [
+        { text: () => sceneStrings("pPoly"), correct: true },
+        { text: () => sceneStrings("pList"), correct: false },
+        { text: () => sceneStrings("pTree"), correct: false },
+        { text: () => sceneStrings("pHash"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("schedQ"),
+      options: [
+        { text: () => sceneStrings("sAff"), correct: true },
+        { text: () => sceneStrings("sNew"), correct: false },
+        { text: () => sceneStrings("sHW"), correct: false },
+        { text: () => sceneStrings("sType"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("skewQ"),
+      options: [
+        { text: () => sceneStrings("skWave"), correct: true },
+        { text: () => sceneStrings("skFast"), correct: false },
+        { text: () => sceneStrings("skDel"), correct: false },
+        { text: () => sceneStrings("skType"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("carriedQ"),
+      options: [
+        { text: () => sceneStrings("cIll"), correct: true },
+        { text: () => sceneStrings("cSlow"), correct: false },
+        { text: () => sceneStrings("cFast"), correct: false },
+        { text: () => sceneStrings("cFine"), correct: false },
+      ],
+    },
+    {
+      // lexicographically positive: first non-zero component > 0.
+      prompt: (v) => sceneStrings("lexQ", v),
+      variables: "a=[-2:2] b=[-2:2]",
+      constraints: "a != 0 || b != 0",
+      answer: (v) => (v.a > 0 || (v.a === 0 && v.b > 0) ? 1 : 0),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // after swap (q,p): lex-positive iff q>0 or (q==0 and p>0).
+      prompt: (v) => sceneStrings("swapQ", v),
+      variables: "p=[-2:2] q=[-2:2]",
+      constraints: "p != 0 || q != 0",
+      answer: (v) => (v.q > 0 || (v.q === 0 && v.p > 0) ? 1 : 0),
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

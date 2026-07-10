@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The Block I/O Layer</primer-title>
+
+    <primer-card>
+      <p>
+        As an undergraduate you learned that a program calls
+        <primer-ref to="computer-science/operating-systems/io-and-interrupts">read()</primer-ref>, the CPU
+        issues a command to a device, and eventually an interrupt says "done". That cartoon hides one of the most
+        heavily engineered subsystems in the kernel. Between the <primer-math>\texttt{read()}</primer-math> a
+        program makes and the electrons that finally move on a SATA cable, a single request passes through
+        <strong>five or six distinct layers</strong>, gets merged with its neighbours, is parked in a queue,
+        handed to a driver, shipped to the device by <strong>DMA</strong>, and returned to you by an interrupt —
+        or, increasingly, by a busy-polling loop that never sleeps at all.
+      </p>
+      <p>
+        This lesson maps that path. It is the spine of the whole storage module: every later topic —
+        <primer-ref forward to="computer-science/advanced-operating-systems/storage/disks-and-io-scheduling">disk
+        scheduling</primer-ref>, <primer-ref forward to="computer-science/advanced-operating-systems/storage/the-page-cache-and-writeback">the
+        page cache</primer-ref>, <primer-ref forward to="computer-science/advanced-operating-systems/storage/asynchronous-io-and-io-uring">io_uring</primer-ref>
+        — is a modification to one box in the diagram you are about to build. Get the stack straight and the rest
+        of the module becomes "which layer are we optimising, and why?"
+      </p>
+    </primer-card>
+
+    <!-- Strings for the I/O stack figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "stack": {
+          "title": "The Linux storage stack: a read()/write() falls through six layers to the device and back",
+          "app": "Application — read(fd, buf, n) / write(fd, buf, n)",
+          "vfs": "VFS + file system — path lookup, ext4 / XFS / ZFS, maps file offset → logical block",
+          "cache": "Page cache — most reads hit here in RAM and never touch the device",
+          "block": "Block layer — bio requests, the request queue, merging & plugging, the I/O scheduler",
+          "driver": "Device driver — builds device commands (SCSI / NVMe), programs DMA",
+          "dev": "Device — HDD / SSD / NVMe: does the transfer, raises a completion",
+          "down": "request goes down",
+          "up": "data + completion come up"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The stack, top to bottom</h2>
+      <p>
+        Think of the storage stack as a lift shaft. A request steps in at the top as a byte range in a file and
+        steps out at the bottom as a command to a specific device. Each floor <em>translates</em> the request into
+        the vocabulary of the floor below.
+      </p>
+      <primer-geometry scene="stack"></primer-geometry>
+      <ul>
+        <li><strong>VFS + file system.</strong> The Virtual File System gives every file system one common API,
+          then the concrete file system (ext4, XFS, ZFS, Btrfs) turns "byte 9000 of this file" into "logical
+          block 42 of this device".</li>
+        <li><strong>Page cache.</strong> A read is first checked against RAM. On a warm cache the request
+          <em>never descends further</em> — this is why re-reading a file is essentially free. Writes usually land
+          here too, marked <em>dirty</em>, to be flushed later.</li>
+        <li><strong>Block layer.</strong> The heart of this lesson. It packages the work into <code>bio</code>
+          structures, drops them into a <strong>request queue</strong>, and — crucially — <strong>merges and
+          reorders</strong> them before they reach the device.</li>
+        <li><strong>Driver.</strong> Speaks the device's command language (SCSI, ATA, NVMe) and sets up the
+          <strong>DMA</strong> transfer so the device can move data to/from RAM without the CPU copying it.</li>
+        <li><strong>Device.</strong> Performs the physical transfer and signals completion — by an interrupt, or
+          by leaving a flag the kernel polls.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why the block layer earns its keep: merging and plugging</h2>
+      <p>
+        Suppose a program writes a 64 KiB buffer. The file system chops it into sixteen 4 KiB blocks that happen
+        to be <em>contiguous</em> on disk. If the block layer forwarded sixteen tiny requests, a hard disk would
+        pay a seek and command overhead for each. Instead the block layer <strong>coalesces</strong> adjacent
+        requests into one large sequential transfer — one seek, one command, sixteen blocks. On a spinning disk
+        this is the difference between a millisecond and a small fraction of one.
+      </p>
+      <p>
+        To create the <em>opportunity</em> to merge, the block layer uses <strong>plugging</strong>: when it sees
+        a burst of I/O beginning, it briefly "plugs" the queue — holding requests back for a very short window —
+        so that neighbours arriving microseconds apart can be discovered and fused, then "unplugs" and releases
+        the merged, sorted batch. It is the storage analogue of waiting a beat at a lift so several people ride
+        together instead of sending the car up empty sixteen times.
+      </p>
+      <primer-theorem name="What the block I/O layer does">
+        <ul>
+          <li>it turns file-system block requests into <strong>bio/request</strong> structures on a per-device
+            <strong>request queue</strong>;</li>
+          <li>it <strong>merges</strong> adjacent requests and <strong>reorders</strong> them (via the I/O
+            scheduler) so the device sees fewer, larger, better-ordered transfers;</li>
+          <li>it <strong>plugs</strong> the queue briefly to gather mergeable neighbours, then unplugs;</li>
+          <li>it hands finished commands to the driver, which programs <strong>DMA</strong> and takes a
+            <strong>completion</strong> (interrupt or poll) back up the stack.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Simulate merging</h2>
+      <p>
+        The model below takes a stream of single-block requests and merges any that are contiguous (request for
+        block <primer-math>b</primer-math> can extend a pending request that ends at block <primer-math>b</primer-math>).
+        Watch sixteen little requests collapse into a handful of big ones — and count the device commands saved.
+      </p>
+      <primer-code run>
+        // Block-layer merging: fuse contiguous 4 KiB block requests into large sequential transfers.
+        // Each incoming request is a starting block number for a single 4 KiB block.
+        const incoming = [10, 11, 12, 13, 40, 41, 100, 14, 42, 101, 102];
+
+        type Req = { start: number; len: number };
+        const queue: Req[] = [];
+
+        for (const blk of incoming) {
+          // Try to extend an existing request that ends exactly at `blk`.
+          const ext = queue.find((r) =&gt; r.start + r.len === blk);
+          if (ext) { ext.len++; continue; }
+          // Or one that starts exactly at blk+1 (prepend).
+          const pre = queue.find((r) =&gt; r.start === blk + 1);
+          if (pre) { pre.start = blk; pre.len++; continue; }
+          queue.push({ start: blk, len: 1 });
+        }
+
+        console.log(`${incoming.length} single-block requests merged into ${queue.length} transfers:`);
+        for (const r of queue)
+          console.log(`  blocks ${r.start}..${r.start + r.len - 1}  (${r.len} block${r.len > 1 ? "s" : ""}, ${r.len * 4} KiB)`);
+        console.log(`device commands saved: ${incoming.length} - ${queue.length} = ${incoming.length - queue.length}`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Sync vs async, blocking vs non-blocking</h2>
+      <p>
+        These two axes are constantly confused, so pin them down. <strong>Blocking vs non-blocking</strong> is
+        about whether the calling thread <em>waits</em>: a blocking <primer-math>\texttt{read()}</primer-math>
+        puts the thread to sleep until data is ready; a non-blocking one returns immediately, perhaps with
+        <primer-math>\texttt{EAGAIN}</primer-math> ("nothing yet"). <strong>Synchronous vs asynchronous</strong>
+        is about <em>who does the work and when you learn it finished</em>: a synchronous call performs the I/O
+        inline; an asynchronous one <em>submits</em> the request and the completion arrives later, decoupled from
+        the submitting call.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Model</th><th>Calling thread</th><th>Completion learned via</th><th>Example</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Synchronous blocking</td><td>sleeps until done</td><td>the call returns</td><td>plain <code>read()</code></td></tr>
+            <tr><td>Synchronous non-blocking</td><td>returns at once</td><td>you poll / retry</td><td><code>O_NONBLOCK</code> + <code>epoll</code></td></tr>
+            <tr><td>Asynchronous</td><td>returns after submit</td><td>a later completion event</td><td>io_uring, POSIX AIO</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The whole arc of the module bends toward the bottom row: <strong>submit many, wait once, be told on
+        completion</strong>. That is what lets one core drive a million IOPS to an NVMe drive.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If the CPU doesn't copy the data, who does? — the DMA story">
+      <p>
+        Early machines used <em>programmed I/O</em>: the CPU read the device one word at a time into a register
+        and stored it to memory, byte after byte, burning cycles as a glorified copy machine. <strong>Direct
+        Memory Access</strong> ended that. The driver hands the device a list of physical memory addresses (a
+        scatter-gather list), says "put the 128 KiB there," and steps away. A dedicated DMA engine moves the bytes
+        straight between device and RAM across the memory bus while the CPU runs other threads. The CPU's only
+        jobs are to <em>set up</em> the transfer and to <em>notice it finished</em>. This is precisely why the
+        interesting cost of an I/O is not the data movement but the <strong>per-request overhead</strong> —
+        building the command, the doorbell write, the completion — which is exactly what merging and batching
+        attack.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! For fast devices, interrupts can be SLOWER than polling">
+      <p>
+        The reflex from undergraduate OS is "interrupts good, polling wasteful" — because for a 10 ms disk seek,
+        sleeping the thread and taking an interrupt is obviously right; you'd waste ten million cycles spinning.
+        But an NVMe SSD can complete a read in <strong>~10 µs</strong>. Taking a hardware interrupt costs a
+        context switch, cache pollution, and thousands of cycles — a large fraction of the I/O itself. So Linux's
+        NVMe driver supports <strong>hybrid and busy polling</strong> (<code>io_poll</code>): for ultra-low-latency
+        devices the CPU <em>spins</em> waiting for completion, because spinning for 10 µs beats the overhead of
+        sleeping and being woken. The right answer flips with the device: <em>interrupt when the wait is long,
+        poll when it is short.</em> Never assume; measure against the device's latency.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Putting the numbers on it</h2>
+      <p>
+        Keep this hierarchy in your head for the rest of the module — every optimisation is a bet about which of
+        these you are paying:
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th>Operation</th><th>Rough latency</th><th>Relative</th></tr></thead>
+          <tbody>
+            <tr><td>DRAM access (page-cache hit)</td><td>~100 ns</td><td>1×</td></tr>
+            <tr><td>NVMe SSD read</td><td>~10–100 µs</td><td>~100–1000×</td></tr>
+            <tr><td>SATA SSD read</td><td>~100 µs</td><td>~1000×</td></tr>
+            <tr><td>HDD random read (seek + rotation)</td><td>~10 ms</td><td>~100 000×</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        A page-cache hit is a hundred thousand times faster than a disk seek. That single ratio is why the block
+        layer, the scheduler, and the cache exist at all — and why the next lessons obsess over turning random
+        access into sequential and RAM hits into more RAM hits.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: stack concepts + numeric merge/latency calcs. Variables avoid evaluator collisions
+         (nb, hit, dram, ssd, cmd). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "blockIoQuiz@1": {
+          "intro": "The storage stack (VFS → page cache → block layer → driver → device), request merging & plugging, sync/async, DMA and interrupt-vs-poll completion.",
+          "orderQ": "Ordered top (application) to bottom (device), the storage stack is…",
+          "orRight": "application → VFS/file system → page cache → block layer → driver → device",
+          "orWrong1": "application → driver → block layer → page cache → device",
+          "orWrong2": "application → device → block layer → VFS → driver",
+          "orWrong3": "device → application → page cache → driver",
+          "mergeQ": "The block layer 'merges' requests in order to…",
+          "meRight": "fuse contiguous blocks into fewer, larger, sequential transfers, cutting per-request overhead",
+          "meWrong1": "encrypt the data before it reaches the disk",
+          "meWrong2": "duplicate every write for safety",
+          "meWrong3": "compress blocks to save space",
+          "plugQ": "'Plugging' the request queue means…",
+          "plRight": "briefly holding requests back so mergeable neighbours can be gathered, then unplugging",
+          "plWrong1": "permanently blocking all I/O to the device",
+          "plWrong2": "physically unplugging the disk cable",
+          "plWrong3": "encrypting the queue",
+          "cacheQ": "A read that hits the page cache…",
+          "caRight": "is served from RAM and never descends to the block layer or device",
+          "caWrong1": "always still issues a disk command for safety",
+          "caWrong2": "is slower than a disk read",
+          "caWrong3": "erases the file",
+          "dmaQ": "During a DMA transfer, the CPU…",
+          "dmRight": "sets up the transfer and is freed while the DMA engine moves data between device and RAM",
+          "dmWrong1": "copies every byte itself, one word at a time",
+          "dmWrong2": "is powered off",
+          "dmWrong3": "runs the disk motor",
+          "blockingQ": "'Blocking vs non-blocking' concerns…",
+          "blRight": "whether the calling thread sleeps until the data is ready",
+          "blWrong1": "whether the data is encrypted",
+          "blWrong2": "the physical block size on disk",
+          "blWrong3": "how many CPUs the machine has",
+          "asyncQ": "An asynchronous I/O model is characterised by…",
+          "asRight": "submitting a request now and receiving its completion as a later, decoupled event",
+          "asWrong1": "always finishing before the submit call returns",
+          "asWrong2": "never using the device at all",
+          "asWrong3": "requiring one thread per byte",
+          "pollQ": "For an ultra-low-latency NVMe SSD (~10 µs), busy-polling for completion can beat interrupts because…",
+          "poRight": "taking an interrupt costs a context switch and thousands of cycles — a big fraction of the I/O",
+          "poWrong1": "interrupts are always disabled on NVMe",
+          "poWrong2": "polling uses no CPU at all",
+          "poWrong3": "NVMe cannot raise interrupts",
+          "vfsQ": "The VFS layer's job is to…",
+          "vfRight": "present one common file API over many concrete file systems (ext4, XFS, ZFS…)",
+          "vfWrong1": "spin the disk platters",
+          "vfWrong2": "allocate CPU time slices",
+          "vfWrong3": "manage network sockets only",
+          "mergeNumQ": "A 64 KiB write becomes {nb} contiguous 4 KiB blocks. If the block layer merges them all into ONE transfer, how many device commands are saved versus sending each block separately?",
+          "hitNumQ": "A page-cache hit takes {dram} ns and a disk seek takes {ms} ms. The disk is how many TIMES slower? (1 ms = 1,000,000 ns)",
+          "iopsNumQ": "If each NVMe read completes in {us} µs and one queue processes them back-to-back, how many reads complete per millisecond? (1 ms = 1000 µs)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="blockIoQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/operating-systems/io-and-interrupts"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The storage stack: six stacked layers from application down to device, with down/up flow arrows.
+     Drawn as BASE content so the whole stack is visible on load. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "stack",
+    ({ board, colors, sceneStrings }) => {
+      const W = 11.4, x0 = 0.4;
+      const layers = ["app", "vfs", "cache", "block", "driver", "dev"];
+      const H = 1.15, gap = 0.18;
+      let yTop = 6.6;
+      layers.forEach((key, i) => {
+        const yBot = yTop - H;
+        board.create(
+          "polygon",
+          [[x0, yBot], [x0 + W, yBot], [x0 + W, yTop], [x0, yTop]],
+          {
+            fillColor: i === 3 ? colors.cat[1] : colors.cat[0],
+            fillOpacity: i === 3 ? 0.34 : 0.18,
+            borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+            vertices: { visible: false }, fixed: true, highlight: false,
+          },
+        );
+        board.create("text", [x0 + W / 2, (yTop + yBot) / 2, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:600; max-width:560px",
+        });
+        yTop = yBot - gap;
+      });
+      // Down arrow (left) and up arrow (right).
+      board.create("arrow", [[x0 - 0.05, 6.5], [x0 - 0.05, yTop + gap + 0.1]], {
+        strokeColor: colors.cat[2], strokeWidth: 2.5, lastArrow: { size: 6 }, fixed: true, highlight: false,
+      });
+      board.create("text", [x0 - 0.35, 3.6, sceneStrings("down")], {
+        strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle",
+        rotate: 90, fixed: true, highlight: false, cssStyle: "opacity:0.85",
+      });
+      board.create("arrow", [[x0 + W + 0.05, yTop + gap + 0.1], [x0 + W + 0.05, 6.5]], {
+        strokeColor: colors.cat[3], strokeWidth: 2.5, lastArrow: { size: 6 }, fixed: true, highlight: false,
+      });
+      board.create("text", [x0 + W + 0.35, 3.6, sceneStrings("up")], {
+        strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle",
+        rotate: 90, fixed: true, highlight: false, cssStyle: "opacity:0.85",
+      });
+    },
+    {
+      boundingbox: [-0.9, 7.0, 12.6, -0.5],
+      keepAspect: false,
+      title: () => makeStrings("stack")("title"),
+    },
+  );
+
+  registerQuiz("blockIoQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("orderQ"), options: [
+      { text: () => sceneStrings("orRight"), correct: true },
+      { text: () => sceneStrings("orWrong1"), correct: false },
+      { text: () => sceneStrings("orWrong2"), correct: false },
+      { text: () => sceneStrings("orWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("mergeQ"), options: [
+      { text: () => sceneStrings("meRight"), correct: true },
+      { text: () => sceneStrings("meWrong1"), correct: false },
+      { text: () => sceneStrings("meWrong2"), correct: false },
+      { text: () => sceneStrings("meWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("plugQ"), options: [
+      { text: () => sceneStrings("plRight"), correct: true },
+      { text: () => sceneStrings("plWrong1"), correct: false },
+      { text: () => sceneStrings("plWrong2"), correct: false },
+      { text: () => sceneStrings("plWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cacheQ"), options: [
+      { text: () => sceneStrings("caRight"), correct: true },
+      { text: () => sceneStrings("caWrong1"), correct: false },
+      { text: () => sceneStrings("caWrong2"), correct: false },
+      { text: () => sceneStrings("caWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dmaQ"), options: [
+      { text: () => sceneStrings("dmRight"), correct: true },
+      { text: () => sceneStrings("dmWrong1"), correct: false },
+      { text: () => sceneStrings("dmWrong2"), correct: false },
+      { text: () => sceneStrings("dmWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("blockingQ"), options: [
+      { text: () => sceneStrings("blRight"), correct: true },
+      { text: () => sceneStrings("blWrong1"), correct: false },
+      { text: () => sceneStrings("blWrong2"), correct: false },
+      { text: () => sceneStrings("blWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("asyncQ"), options: [
+      { text: () => sceneStrings("asRight"), correct: true },
+      { text: () => sceneStrings("asWrong1"), correct: false },
+      { text: () => sceneStrings("asWrong2"), correct: false },
+      { text: () => sceneStrings("asWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("pollQ"), options: [
+      { text: () => sceneStrings("poRight"), correct: true },
+      { text: () => sceneStrings("poWrong1"), correct: false },
+      { text: () => sceneStrings("poWrong2"), correct: false },
+      { text: () => sceneStrings("poWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("vfsQ"), options: [
+      { text: () => sceneStrings("vfRight"), correct: true },
+      { text: () => sceneStrings("vfWrong1"), correct: false },
+      { text: () => sceneStrings("vfWrong2"), correct: false },
+      { text: () => sceneStrings("vfWrong3"), correct: false },
+    ] },
+    {
+      // Saved = nb - 1 (nb blocks merged into 1 transfer).
+      prompt: (v) => sceneStrings("mergeNumQ", v),
+      variables: "nb=[8,16,32]",
+      answer: (v) => v.nb - 1,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Times slower = (ms * 1e6) / dram.
+      prompt: (v) => sceneStrings("hitNumQ", v),
+      variables: "dram=[100,200] ms=[5,10]",
+      answer: (v) => (v.ms * 1000000) / v.dram,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Reads per ms = 1000 / us.
+      prompt: (v) => sceneStrings("iopsNumQ", v),
+      variables: "us=[10,20,25,50]",
+      answer: (v) => 1000 / v.us,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Distributed Operating Systems and DSM</primer-title>
+
+    <primer-card>
+      <p>
+        You have a rack of machines. The dream — old, beautiful, and mostly defeated — is that they should not
+        feel like a rack of machines. They should feel like <strong>one big computer</strong>: a single pool of
+        CPUs, one memory, one file system, one process space, where you launch a program and the operating system
+        transparently runs it wherever there is room, and it can touch any memory and any file as if everything
+        were local. This is the <strong>single-system-image (SSI) distributed operating system</strong>, and in
+        the 1980s it looked like the obvious future.
+      </p>
+      <p>
+        It is not how we build datacenters today. We build them out of a pile of ordinary machines, each running
+        its own boring Linux, glued together by <em>middleware</em> —
+        <primer-ref to="computer-science/distributed-systems/remote-procedure-call">RPC</primer-ref>,
+        message queues, Kubernetes — that runs <em>above</em> the OS, not inside it. This lesson is about that
+        beautiful defeat: the real distributed OSes (Amoeba, Sprite, Plan 9), the seductive-but-doomed idea of
+        <strong>distributed shared memory</strong>, <em>why</em> the transparent single-system dream lost to
+        clusters, and how — the twist — nearly every idea survived and won somewhere else.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Three attempts at one computer</h2>
+      <p>
+        The classic distributed OSes each attacked the dream from a different direction, and each left a durable
+        idea behind:
+      </p>
+      <primer-theorem name="The distributed-OS canon">
+        <ul>
+          <li><strong>Amoeba</strong> (Tanenbaum, VU Amsterdam) — a <em>processor pool</em> model: cores are a
+            shared commodity the OS hands out; you don't know or care <em>which</em> machine your process runs on.
+            Capability-based, RPC everywhere. The purest "the network is the computer" system.</li>
+          <li><strong>Sprite</strong> (Berkeley) — a Unix-compatible network OS famous for
+            <strong>process migration</strong> (move a running process to an idle workstation) and a
+            single shared network file system with aggressive caching + strict cache consistency.</li>
+          <li><strong>Plan 9</strong> (Bell Labs, by the Unix team) — the most influential. Its radical bet:
+            <em>everything is a file</em>, and every resource — a remote CPU, a window, a network connection, a
+            process's memory — appears as a file in a per-process namespace, reachable over one protocol
+            (<strong>9P</strong>). You assemble your "computer" by mounting other machines' file trees into your
+            own namespace.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Notice the common move: take an OS abstraction you already trust locally — a process, a file — and stretch
+        it transparently across the network. The question is always the same: <em>what breaks when "local"
+        silently becomes "remote"?</em>
+      </p>
+    </primer-card>
+
+    <!-- Strings for the DSM page-fault-over-network figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "dsm": {
+          "title": "A DSM read fault: node A touches a page it does not own; the OS traps, finds the owner (B), and ships the page over the network",
+          "aLab": "NODE A",
+          "bLab": "NODE B (current owner)",
+          "netLab": "NETWORK",
+          "s1": "A reads virtual page P — but A's page-table entry is invalid (not resident)",
+          "s2": "MMU raises a PAGE FAULT — trap into A's DSM handler",
+          "s3": "DSM directory says: owner of P is node B. Send a fetch request over the network",
+          "s4": "B receives the request, sends page P's 4 KB of data back over the network",
+          "s5": "A maps P read-only, marks it resident, resumes the instruction — as if local",
+          "aBox": "load P[i]\ntrap: page invalid",
+          "fetch": "fetch(P) ->",
+          "data": "<- 4 KB page P",
+          "bBox": "owner of P\nsend copy",
+          "resume": "P mapped read-only\ninstruction resumes"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Distributed shared memory — the most seductive idea</h2>
+      <p>
+        Of all the stretches, the boldest is <strong>distributed shared memory (DSM)</strong>: make the physical
+        memory of many machines look like <em>one shared address space</em>, so a program on any node can just read
+        and write <primer-math>\texttt{x}</primer-math> and the OS makes it coherent across the network — no
+        explicit messages, no RPC, just <em>load</em> and <em>store</em>. Ivy (Kai Li, 1986) showed how, and the
+        trick is gorgeous: <strong>reuse the paging hardware you already have.</strong>
+      </p>
+      <p>
+        Each shared page lives on some owner node. When a node touches a page it doesn't hold, its
+        <primer-ref to="computer-science/advanced-operating-systems/kernel/the-system-call-interface">MMU</primer-ref>
+        raises an ordinary <strong>page fault</strong> — but instead of reading from a local disk, the fault
+        handler fetches the page <em>from the owning node over the network</em>. Reads can be replicated
+        (many read-only copies); a write must invalidate all other copies and take ownership — exactly the
+        <primer-ref to="computer-science/distributed-systems/replication-and-consistency">invalidation protocol</primer-ref>
+        of a cache-coherent multiprocessor, but with the "cache line" being a 4 KB page and the "bus" being an
+        Ethernet. Watch one read fault travel:
+      </p>
+      <primer-geometry scene="dsm"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Where DSM hurts: false sharing at 4 KB, and the consistency tax</h2>
+      <p>
+        DSM is transparent, which is precisely its curse — the programmer cannot see the network cost hiding under
+        an innocent <primer-math>\texttt{x = x + 1}</primer-math>. Two problems dominate:
+      </p>
+      <ul>
+        <li><strong>False sharing, amplified.</strong> The coherence unit is a whole <strong>page</strong> (4 KB),
+          not a cache line (64 B). If two nodes update two <em>different</em> variables that happen to sit on the
+          same page, the page ping-pongs across the network on every write — a millisecond each way — even though
+          the variables never actually conflict. On a cache-coherent CPU false sharing wastes tens of nanoseconds;
+          on page-based DSM it wastes <em>milliseconds</em>. Same bug, five orders of magnitude worse.</li>
+        <li><strong>The consistency-model tax.</strong> Providing strict
+          <primer-ref to="computer-science/distributed-systems/replication-and-consistency">sequential
+          consistency</primer-ref> means every write may have to synchronise globally — brutal over a network. So
+          DSM systems (Munin, TreadMarks) invented <strong>relaxed models</strong> — release consistency,
+          lazy release consistency — that only reconcile memory at explicit <primer-math>\texttt{acquire}</primer-math>/
+          <primer-math>\texttt{release}</primer-math> (lock) points. Faster, but now the "transparent" shared
+          memory has a subtle contract the programmer <em>must</em> understand — so it was never really transparent
+          after all.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>Page ownership, simulated</h2>
+      <p>
+        Model a single-writer/multiple-reader DSM page as a sequence of accesses from different nodes. A read by a
+        non-holder fetches a copy; a write invalidates every other copy and seizes ownership. Count the network
+        transfers — and watch two nodes write-fighting turn into a ping-pong.
+      </p>
+      <primer-code run>
+        // Single-writer / multiple-reader DSM for ONE page.
+        // reads add a read-only copy; a write invalidates all other copies and takes the (sole) writable copy.
+        type Access = { node: string; write: boolean };
+
+        let owner = "B";                          // node B starts as the writable owner
+        let readers = new Set&lt;string&gt;(["B"]);     // nodes holding a valid copy
+        let transfers = 0;
+
+        const trace: Access[] = [
+          { node: "A", write: false },            // A reads  -> fetch copy from owner
+          { node: "C", write: false },            // C reads  -> fetch copy
+          { node: "A", write: true  },            // A writes -> invalidate B,C ; A becomes owner
+          { node: "B", write: true  },            // B writes -> invalidate A   ; B becomes owner  (ping!)
+          { node: "A", write: true  },            // A writes -> invalidate B   ; A becomes owner  (pong!)
+        ];
+
+        for (const a of trace) {
+          if (a.write) {
+            const invalidated = [...readers].filter((n) => n !== a.node);
+            transfers += invalidated.length + (readers.has(a.node) ? 0 : 1);
+            readers = new Set([a.node]);
+            owner = a.node;
+            console.log(`${a.node} WRITE -> invalidate [${invalidated.join(",") || "-"}], ${a.node} now sole owner`);
+          } else {
+            if (!readers.has(a.node)) { transfers++; readers.add(a.node); }
+            console.log(`${a.node} READ  -> copies held by {${[...readers].sort().join(",")}}`);
+          }
+        }
+        console.log(`\ntotal network page transfers = ${transfers}`);
+        console.log("note: the A/B write-fight ping-pongs the page every time — that is false-sharing pain.");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why the dream lost — and where every idea won anyway</h2>
+      <p>
+        Transparent single-system-image OSes and DSM never took over the datacenter. The reasons are sobering and
+        worth stating plainly, because they are a lesson about abstraction itself:
+      </p>
+      <ul>
+        <li><strong>The transparency was a lie the network could not sustain.</strong> Making remote look exactly
+          like local hides the one thing you most need to see: that a memory access might now cost a million times
+          more and can <em>fail independently</em>. Leaky abstraction over a lossy, partitionable network is a trap
+          (this is the heart of the
+          <primer-ref to="computer-science/distributed-systems/replication-and-consistency">fallacies of
+          distributed computing</primer-ref>).</li>
+        <li><strong>Fault isolation beat fault transparency.</strong> A cluster of independent machines has a
+          killer feature a single-system image lacks: when one node dies, the others don't. Explicit RPC +
+          stateless services + orchestration (Kubernetes) gives you scaling and resilience the SSI model fought.</li>
+        <li><strong>Commodity + middleware was cheaper and good enough.</strong> Google/Amazon-scale computing was
+          built on racks of cheap boxes and software that <em>embraces</em> partial failure, not an OS pretending
+          it away.</li>
+      </ul>
+      <p>
+        And yet — the ideas are everywhere, just moved up or sideways:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Old distributed-OS idea</th><th>Where it lives now</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Plan 9's "everything is a file" + per-process namespaces</td><td>Linux namespaces &amp; bind mounts — the machinery under <strong>containers</strong>; <primer-math>\texttt{/proc}</primer-math>, <primer-math>\texttt{/sys}</primer-math>; the <strong>9P</strong> protocol still shipping (WSL2, QEMU, Docker)</td></tr>
+            <tr><td>Sprite process migration</td><td>live VM/container migration; datacenter schedulers rebalancing load</td></tr>
+            <tr><td>Amoeba processor pool</td><td>cluster schedulers (Borg, Kubernetes, Mesos): you submit work, not a target machine</td></tr>
+            <tr><td>Distributed shared memory</td><td><strong>RDMA</strong> (read remote memory in ~1 µs) and memory <strong>disaggregation</strong> — DSM's dream on hardware that finally makes it pay</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The single-system OS lost the battle and won the war: we didn't build one giant transparent computer, but
+        we plundered its ideas for the cluster we built instead. RDMA in particular is DSM reincarnated — remote
+        memory at microsecond, not millisecond, latency — which is why "the datacenter as a computer" is the theme
+        of this module's final lesson.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If Plan 9 was so elegant, why aren't we all running it?">
+      <p>
+        Plan 9 came from the very people who wrote Unix, and by almost every measure it is <em>cleaner</em>: one
+        protocol (9P) for all resources, genuinely composable per-process namespaces, no exceptions bolted on the
+        side. It should have won. It didn't — and the reason is one of computing's hardest laws:
+        <strong>incumbency beats elegance.</strong> By the time Plan 9 matured (early 1990s) Unix already had the
+        applications, the drivers, the users, and the momentum; "better, but incompatible, and you must rewrite
+        everything" is a losing pitch no matter how good the "better" is. So Plan 9 became the most influential OS
+        almost nobody runs: its ideas were quietly strip-mined into everyone else's systems —
+        <primer-math>\texttt{/proc}</primer-math>, UTF-8 (invented for Plan 9, by Thompson and Pike, on a diner
+        placemat), union mounts, namespaces — while the OS itself stayed a research curiosity. Elegance is
+        portable even when the system is not.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! DSM does not make the network disappear — it hides it, which is worse">
+      <p>
+        The tempting misread of DSM is "great, now I can ignore the network and just use shared variables." That is
+        exactly backwards. DSM does not <em>remove</em> the network cost; it <em>conceals</em> it behind ordinary
+        loads and stores, so you can no longer <em>see</em> where you are paying it. An explicit RPC at least
+        announces "this is a remote call, it is slow and can fail." A DSM <primer-math>\texttt{x = x + 1}</primer-math>
+        looks free but may trigger a 4 KB page fetch, an invalidation storm, or a false-sharing ping-pong — silently,
+        millions of times worse than the same line on one machine. The lesson generalises far beyond DSM: a leaky
+        abstraction that hides a cost gradient (local vs remote, cached vs uncached, memory vs disk) is dangerous
+        precisely <em>because</em> it is convenient. Transparency is not free; someone always pays the latency, and
+        if you can't see it, you can't fix it.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: SSI, the canon (Amoeba/Sprite/Plan 9/9P), DSM page-fault mechanism, false sharing, consistency, why it lost, legacy. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "dsmQuiz@1": {
+          "intro": "Single-system-image OSes (Amoeba, Sprite, Plan 9), how page-based DSM works, false sharing, and why the dream survived as clusters + RDMA.",
+          "ssiQ": "A 'single-system-image' distributed OS tries to…",
+          "ssiRight": "make many machines look and behave like one big computer (one process space, memory, file system)",
+          "ssiWrong1": "run one program per machine with no coordination",
+          "ssiWrong2": "install the same OS image on every machine",
+          "ssiWrong3": "show one desktop wallpaper across screens",
+          "planQ": "Plan 9's central design bet was…",
+          "planRight": "everything is a file, reachable over one protocol (9P), assembled via per-process namespaces",
+          "planWrong1": "distributed shared memory as the only abstraction",
+          "planWrong2": "putting the whole OS into one giant lock",
+          "planWrong3": "running Windows binaries transparently",
+          "spriteQ": "Sprite was best known for…",
+          "spriteRight": "process migration and a strongly-consistent shared network file system",
+          "spriteWrong1": "being the first microkernel",
+          "spriteWrong2": "inventing the container",
+          "spriteWrong3": "having no file system at all",
+          "amoebaQ": "Amoeba's 'processor pool' model means…",
+          "amoebaRight": "CPUs are a shared commodity the OS allocates; you don't choose which machine runs your process",
+          "amoebaWrong1": "each user is assigned one fixed CPU forever",
+          "amoebaWrong2": "the OS runs only on a single processor",
+          "amoebaWrong3": "processors are pooled money to buy hardware",
+          "dsmQ": "In page-based DSM, what happens when a node reads a shared page it does not hold?",
+          "dsmRight": "the MMU faults; the handler finds the owner and fetches the page over the network, then maps it",
+          "dsmWrong1": "the program crashes with a segfault",
+          "dsmWrong2": "it reads stale local zeros silently",
+          "dsmWrong3": "the whole cluster reboots",
+          "reuseQ": "The clever mechanism DSM reuses to detect remote accesses is…",
+          "reuseRight": "the paging / page-fault hardware already in the MMU",
+          "reuseWrong1": "the network interrupt controller",
+          "reuseWrong2": "the disk scheduler",
+          "reuseWrong3": "the branch predictor",
+          "falseQ": "Why is false sharing so much worse under page-based DSM than on a normal CPU?",
+          "falseRight": "the coherence unit is a whole 4 KB page over a network, so a bounce costs milliseconds, not nanoseconds",
+          "falseWrong1": "DSM has no cache lines so sharing is impossible",
+          "falseWrong2": "pages are smaller than cache lines",
+          "falseWrong3": "it is actually much cheaper on DSM",
+          "consistQ": "Why did DSM systems adopt RELAXED consistency (e.g. release consistency)?",
+          "consistRight": "strict sequential consistency needs global synchronisation per write, which is brutal over a network",
+          "consistWrong1": "relaxed consistency is always simpler for programmers",
+          "consistWrong2": "networks guarantee sequential consistency for free",
+          "consistWrong3": "to make every write slower on purpose",
+          "writeQ": "In a single-writer DSM protocol, a write to a shared page must…",
+          "writeRight": "invalidate all other copies and take ownership before proceeding",
+          "writeWrong1": "broadcast the new value to every node with no coordination",
+          "writeWrong2": "do nothing special — writes are always local",
+          "writeWrong3": "delete the page everywhere permanently",
+          "loseQ": "Why did transparent single-system-image OSes lose to clusters + middleware?",
+          "loseRight": "hiding the network hid failure and latency; independent machines give fault isolation the SSI model lacked",
+          "loseWrong1": "single-system images were too fast and reliable",
+          "loseWrong2": "clusters cannot scale past a few machines",
+          "loseWrong3": "middleware was banned by standards bodies",
+          "legacyQ": "Which modern technology most directly inherits Plan 9's namespaces and 'everything is a file'?",
+          "legacyRight": "Linux namespaces and bind mounts — the machinery underneath containers (and the 9P protocol)",
+          "legacyWrong1": "GPU shaders",
+          "legacyWrong2": "the TCP/IP stack",
+          "legacyWrong3": "the BIOS",
+          "rdmaQ": "RDMA and memory disaggregation are described as DSM reincarnated because…",
+          "rdmaRight": "they deliver remote memory at ~microsecond latency, finally making the DSM idea pay off",
+          "rdmaWrong1": "they abolish the network entirely",
+          "rdmaWrong2": "they make all memory local by copying it to every node",
+          "rdmaWrong3": "they have nothing to do with DSM",
+          "utfQ": "Which everyday technology was invented for Plan 9?",
+          "utfRight": "UTF-8 (by Thompson and Pike)",
+          "utfWrong1": "the C programming language",
+          "utfWrong2": "the HTTP protocol",
+          "utfWrong3": "the JPEG image format"
+        }
+      }
+    </script>
+
+    <primer-quiz name="dsmQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/distributed-systems/remote-procedure-call",
+      "computer-science/distributed-systems/replication-and-consistency"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- DSM read-fault-over-network: node A (left), the network band (centre), node B owner (right); five
+     stepped stages with fetch/data arrows crossing the network. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "dsm",
+    ({ board, colors, step, sceneStrings }) => {
+      const bw = 2.8, bh = 1.1;
+      const AX = 2.0, NX = 6.0, BX = 10.0;
+      const box = (cx, cy, key, ci) => {
+        const x0 = cx - bw / 2, x1 = cx + bw / 2, y0 = cy - bh / 2, y1 = cy + bh / 2;
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[ci], fillOpacity: 0.2,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [cx, cy, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "text-align:center; white-space:pre-line;",
+        });
+      };
+      const arrow = (p1, p2, ci, label, dashed) => {
+        board.create("arrow", [p1, p2], {
+          strokeColor: colors.cat[ci], strokeWidth: 2.5, dash: dashed ? 2 : 0,
+          lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+        });
+        if (label)
+          board.create("text", [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2 + 0.28, label], {
+            strokeColor: colors.ink, fontSize: 10.5, anchorX: "middle", anchorY: "middle",
+            fixed: true, highlight: false,
+          });
+      };
+      const caption = (x, y, text) =>
+        board.create("text", [x, y, text], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:700",
+        });
+
+      // Network band base content + column labels.
+      board.create("polygon", [[NX - 1.5, -0.2], [NX + 1.5, -0.2], [NX + 1.5, 7.4], [NX - 1.5, 7.4]], {
+        fillColor: colors.cat[2], fillOpacity: 0.08,
+        borders: { strokeColor: colors.line, strokeWidth: 1, dash: 2, highlight: false },
+        vertices: { visible: false }, fixed: true, highlight: false,
+      });
+      caption(AX, 7.8, sceneStrings("aLab"));
+      caption(NX, 7.8, sceneStrings("netLab"));
+      caption(BX, 7.8, sceneStrings("bLab"));
+
+      step(sceneStrings("s1"), () => box(AX, 6.4, "aBox", 0));
+      step(sceneStrings("s2"), () => box(AX, 4.7, "aBox", 3));
+      step(sceneStrings("s3"), () => arrow([AX + bw / 2, 4.7], [BX - bw / 2, 4.7], 2, sceneStrings("fetch"), false));
+      step(sceneStrings("s4"), () => {
+        box(BX, 4.7, "bBox", 1);
+        arrow([BX - bw / 2, 3.4], [AX + bw / 2, 3.4], 2, sceneStrings("data"), true);
+      });
+      step(sceneStrings("s5"), () => box(AX, 2.1, "resume", 0));
+    },
+    {
+      boundingbox: [0.0, 8.3, 12.0, 1.2],
+      keepAspect: false,
+      title: () => makeStrings("dsm")("title"),
+    },
+  );
+
+  registerQuiz("dsmQuiz@1", ({ sceneStrings }) => {
+    const mc = (q, right, w1, w2, w3) => ({
+      prompt: () => sceneStrings(q),
+      options: [
+        { text: () => sceneStrings(right), correct: true },
+        { text: () => sceneStrings(w1), correct: false },
+        { text: () => sceneStrings(w2), correct: false },
+        { text: () => sceneStrings(w3), correct: false },
+      ],
+    });
+    return [
+      { num_questions: 5, preamble: () => sceneStrings("intro") },
+      mc("ssiQ", "ssiRight", "ssiWrong1", "ssiWrong2", "ssiWrong3"),
+      mc("planQ", "planRight", "planWrong1", "planWrong2", "planWrong3"),
+      mc("spriteQ", "spriteRight", "spriteWrong1", "spriteWrong2", "spriteWrong3"),
+      mc("amoebaQ", "amoebaRight", "amoebaWrong1", "amoebaWrong2", "amoebaWrong3"),
+      mc("dsmQ", "dsmRight", "dsmWrong1", "dsmWrong2", "dsmWrong3"),
+      mc("reuseQ", "reuseRight", "reuseWrong1", "reuseWrong2", "reuseWrong3"),
+      mc("falseQ", "falseRight", "falseWrong1", "falseWrong2", "falseWrong3"),
+      mc("consistQ", "consistRight", "consistWrong1", "consistWrong2", "consistWrong3"),
+      mc("writeQ", "writeRight", "writeWrong1", "writeWrong2", "writeWrong3"),
+      mc("loseQ", "loseRight", "loseWrong1", "loseWrong2", "loseWrong3"),
+      mc("legacyQ", "legacyRight", "legacyWrong1", "legacyWrong2", "legacyWrong3"),
+      mc("rdmaQ", "rdmaRight", "rdmaWrong1", "rdmaWrong2", "rdmaWrong3"),
+      mc("utfQ", "utfRight", "utfWrong1", "utfWrong2", "utfWrong3"),
+    ];
+  });
+</script>

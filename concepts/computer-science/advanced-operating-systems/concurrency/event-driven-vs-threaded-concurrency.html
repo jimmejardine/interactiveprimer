@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Event-Driven vs Threaded Concurrency</primer-title>
+
+    <primer-card>
+      <p>
+        It is 1999 and Dan Kegel poses the <strong>C10K problem</strong>: can a single server handle
+        <em>ten thousand</em> simultaneous clients? The obvious design —
+        <primer-ref to="computer-science/operating-systems/threads-and-the-thread-model">one thread per
+        connection</primer-ref> — hits a wall long before that. Twenty-five years later the bar is
+        <strong>C10M</strong> (ten <em>million</em>), and the architecture that gets there looks nothing like
+        thread-per-connection. This lesson is the great fork in the road of server design: <strong>a thread for
+        every client</strong> versus <strong>a single event loop</strong> juggling them all, and the coroutine
+        middle path that tries to give you both.
+      </p>
+      <p>
+        The whole debate turns on one number: what does an <em>idle, waiting</em> connection cost? In the threaded
+        model, a blocked connection costs a whole thread — a megabyte or two of stack sitting idle, plus a slot in
+        the scheduler. In the event-driven model, a waiting connection costs a few hundred bytes of state in a hash
+        table. Multiply by ten million and the difference decides whether your server runs or falls over.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two ways to wait</h2>
+      <p>
+        A server spends almost all its life <em>waiting</em> — for a client to send a request, for a disk to
+        return data, for a socket buffer to drain. The two architectures are two answers to "what does a thread do
+        while it waits?"
+      </p>
+      <ul>
+        <li><strong>Thread-per-connection (blocking)</strong>: each connection gets its own thread that calls
+          <primer-math>\texttt{read()}</primer-math> and <em>blocks</em> — the kernel parks it until data arrives.
+          The code is beautifully simple and linear (read, process, write, repeat), and the kernel scheduler does
+          all the multiplexing. But every blocked thread holds a full stack, and 10,000 threads means gigabytes of
+          stacks and a scheduler thrashing through context switches.</li>
+        <li><strong>Event-driven (the reactor)</strong>: a <em>single</em> thread runs an <strong>event loop</strong>.
+          It asks the kernel "which of my thousands of sockets are ready right now?", then runs a short, <em>non-blocking</em>
+          handler for each ready one, and loops. One thread, one stack, no per-connection thread cost — but the
+          code inverts into callbacks, and one handler that blocks or runs long stalls <em>everyone</em>.</li>
+      </ul>
+      <p>
+        The pivot that makes the event loop possible is <strong>non-blocking I/O</strong>: a socket set to
+        non-blocking mode, when read with no data available, returns immediately with
+        <primer-math>\texttt{EAGAIN}</primer-math> instead of parking the thread. The event loop never blocks on any
+        single socket; it blocks only in one place — the readiness call that waits for <em>any</em> socket to
+        become ready.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>select/poll to epoll: the O(1) readiness revolution</h2>
+      <p>
+        The event loop needs to ask the kernel "which sockets are ready?" The old syscalls,
+        <primer-math>\texttt{select()}</primer-math> and <primer-math>\texttt{poll()}</primer-math>, answer this
+        but with a fatal flaw: you pass in the <em>entire</em> set of file descriptors <em>every call</em>, and the
+        kernel scans <em>all</em> of them to find the ready few. That is <primer-math>O(n)</primer-math> per loop
+        iteration in the number of connections — so with 10,000 mostly-idle connections you scan 10,000 fds to find
+        the 5 that are ready, every single time around the loop. The cost grows with connections even though the
+        <em>work</em> does not.
+      </p>
+      <p>
+        Linux's <primer-math>\texttt{epoll}</primer-math> (and BSD's <primer-math>\texttt{kqueue}</primer-math>,
+        Windows' IOCP) fix this. You register interest in each fd <em>once</em>, and the kernel maintains a
+        <strong>ready list</strong> internally, updated by interrupts as data arrives. Each
+        <primer-math>\texttt{epoll\_wait()}</primer-math> returns <em>only the fds that are actually ready</em> — so
+        the cost is <primer-math>O(\text{ready})</primer-math>, independent of the total connection count. That
+        single change from <primer-math>O(n)</primer-math> to <primer-math>O(1)</primer-math> per event is what
+        made C10K, and then C10M, achievable.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>API</th><th>Cost per loop</th><th>Set passed each call?</th><th>Scales to millions?</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>select</code>/<code>poll</code></td><td><primer-math>O(n)</primer-math> (n = all fds)</td><td>yes — rescanned every call</td><td>no</td></tr>
+            <tr><td><code>epoll</code> / <code>kqueue</code></td><td><primer-math>O(\text{ready})</primer-math></td><td>no — registered once</td><td><strong>yes</strong></td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <!-- Strings for the epoll reactor event-loop figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "reactor": {
+          "title": "The reactor: one thread loops — wait for readiness, dispatch a short handler for each ready fd, repeat",
+          "wait": "epoll_wait()  — block until ANY fd is ready",
+          "ready": "ready list: only the fds with data (O(ready))",
+          "dispatch": "dispatch: run a short non-blocking handler per ready fd",
+          "handlers": "handler A · handler B · handler C  (must NOT block)",
+          "loop": "loop back",
+          "kernel": "kernel updates the ready list as packets arrive (interrupts)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The reactor loop, drawn</h2>
+      <p>
+        The event-driven server is called the <strong>reactor pattern</strong>: it <em>reacts</em> to readiness
+        events. Follow the cycle. The single thread parks in <primer-math>\texttt{epoll\_wait()}</primer-math>; the
+        kernel wakes it with a list of exactly the sockets that now have data; the loop dispatches a short,
+        non-blocking handler for each; the handlers do a little work and return <em>immediately</em>; and the loop
+        goes back to wait. No handler ever blocks — if one needs the disk, it kicks off async I/O and returns,
+        arranging to be called again when that completes.
+      </p>
+      <primer-geometry scene="reactor"></primer-geometry>
+      <p>
+        The elegance is that <em>ten thousand</em> connections flow through this one loop with one stack and no
+        per-connection thread. The catch is written on the handler box: <strong>must not block</strong>. A single
+        handler that does a synchronous disk read, a slow computation, or (the classic sin) a blocking DNS lookup
+        freezes the entire server — every other connection waits behind it. Event-driven code trades the kernel's
+        pre-emptive fairness for the programmer's discipline.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The stack tax, and why threads run out first</h2>
+      <p>
+        Why can't you just spawn a million threads and be done? The dominant cost is <strong>stack memory</strong>.
+        Each thread needs its own stack, and the default on Linux is <em>8&nbsp;MB</em> of virtual address space
+        (though only touched pages are physically backed). Even at a frugal 64&nbsp;KB of resident stack per
+        thread, a million threads is 64&nbsp;GB of RAM doing nothing but holding stacks for connections that are
+        99% idle. Add scheduler overhead — a million runnable threads is a scheduler's nightmare — and the model
+        collapses. Let's compare the two models' memory footprints directly.
+      </p>
+      <primer-code run>
+        // Compare memory footprint: thread-per-connection vs a single event loop, as connections scale.
+        const THREAD_STACK_KB = 64;    // resident stack per blocked thread (frugal estimate)
+        const EVENT_STATE_B   = 512;   // bytes of heap state per connection in an event loop
+
+        function threadedMemMB(conns: number): number {
+          return (conns * THREAD_STACK_KB) / 1024;                 // MB
+        }
+        function eventMemMB(conns: number): number {
+          return (conns * EVENT_STATE_B) / (1024 * 1024);          // MB (one stack, tiny per-conn state)
+        }
+
+        console.log("conns        threaded      event-loop     ratio");
+        for (const c of [1_000, 10_000, 100_000, 1_000_000]) {
+          const t = threadedMemMB(c), e = eventMemMB(c);
+          console.log(
+            `${c.toLocaleString().padStart(9)}   ${(t.toFixed(0) + " MB").padStart(9)}   ` +
+            `${(e.toFixed(1) + " MB").padStart(9)}   ${(t / e).toFixed(0)}x`,
+          );
+        }
+
+        // Readiness cost per loop: select/poll is O(n); epoll is O(ready).
+        function scanCost(api: "poll" | "epoll", totalConns: number, ready: number): number {
+          return api === "poll" ? totalConns : ready;   // fds examined per loop iteration
+        }
+        const conns = 100_000, ready = 20;
+        console.log(`\npoll  examines ${scanCost("poll", conns, ready).toLocaleString()} fds/loop`);
+        console.log(`epoll examines ${scanCost("epoll", conns, ready).toLocaleString()} fds/loop  (only the ready ones)`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Coroutines: have your cake and eat it</h2>
+      <p>
+        The event loop is efficient but its callback-inverted code is painful (the infamous "callback hell").
+        <strong>Coroutines</strong> — green threads, fibers, <primer-math>\texttt{async}</primer-math>/<primer-math>\texttt{await}</primer-math>
+        — are the middle path that keeps the efficiency while restoring straight-line code. The idea: write code
+        that <em>looks</em> blocking (<primer-math>\texttt{let data = await read(sock)}</primer-math>), but at each
+        <primer-math>\texttt{await}</primer-math> the coroutine <em>suspends</em> and yields control back to an
+        event loop underneath, which runs other coroutines while this one waits. When the I/O completes, the
+        coroutine resumes exactly where it left off.
+      </p>
+      <p>
+        The trick is that a suspended coroutine saves only its <em>small</em> live state (a few hundred bytes), not
+        a full OS thread stack — so you can have millions of them cheaply, multiplexed onto a handful of OS threads
+        by a user-space scheduler. This is exactly how <strong>Go goroutines</strong>, <strong>Rust async</strong>,
+        <strong>Kotlin coroutines</strong>, and <strong>Node.js</strong> (single-threaded async under the hood)
+        reach C10M with readable code. You write it like threads; it runs like an event loop.
+      </p>
+      <primer-theorem name="The three concurrency models">
+        <ul>
+          <li><strong>Thread-per-connection</strong> — simple linear code; kernel does the multiplexing; cost is
+            one full stack + scheduler slot per connection. Fine to thousands, not millions;</li>
+          <li><strong>Event loop (reactor)</strong> — one thread, non-blocking I/O, <primer-math>O(1)</primer-math>
+            readiness via epoll; scales to millions but code inverts to callbacks and no handler may block;</li>
+          <li><strong>Coroutines / async-await</strong> — straight-line code that suspends at
+            <primer-math>\texttt{await}</primer-math>; a user-space scheduler multiplexes millions of tiny stacks
+            onto few OS threads. The efficiency of the event loop with the readability of threads.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="If threads are so costly, why not just make thread stacks tiny? (Some languages did.)">
+      <p>
+        The line between "thread" and "coroutine" is blurrier than it looks, and the difference is mostly
+        <em>stack size and who schedules</em>. Go's goroutines began life with tiny <em>segmented</em> stacks
+        (a few KB that grow on demand), scheduled by Go's own runtime rather than the kernel — which is precisely
+        why you can spawn a million of them. Old-school <em>green threads</em> (early Java, Erlang processes) did
+        the same trick in user space. The reason the OS can't just shrink its threads to match is that a kernel
+        thread must handle <em>arbitrary</em> C code that might recurse deeply or call blocking syscalls, so it
+        conservatively reserves a big stack and schedules pre-emptively. A language runtime knows more about its
+        own coroutines — where they suspend, how deep they go — so it can be far more frugal. "Cheap threads" and
+        "coroutines" are two names for the same escape from the kernel-thread tax.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! One blocking call poisons an entire event loop">
+      <p>
+        The deadliest bug in event-driven code: a handler that <em>blocks</em>. Because the whole server is one
+        thread, a single <primer-math>\texttt{read()}</primer-math> on a blocking fd, a synchronous file read (many
+        OSes can't do truly async disk I/O easily — a real historical headache), a slow regex, or a
+        <primer-math>\texttt{getaddrinfo()}</primer-math> DNS lookup freezes <em>every</em> connection until it
+        returns. There is no scheduler to pre-empt it, because you gave that up for efficiency. Symptoms are
+        maddening: the server handles 100k connections fine, then one slow database query and <em>all</em> latencies
+        spike together. The disciplines: never call a blocking API from a handler; offload genuinely blocking work
+        (CPU-heavy or unavoidably-sync I/O) to a separate thread pool; and keep every handler short. The event loop
+        gives you scale in exchange for a vow of non-blocking — break the vow and it all falls down.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: C10K, blocking vs non-blocking, select/poll vs epoll, stack cost, reactor, coroutines. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "eventQuiz@1": {
+          "intro": "Thread-per-connection: simple but a stack per conn (fails at scale). Event loop/reactor: one thread + non-blocking I/O + epoll (O(ready)), scales to millions but no handler may block. Coroutines: straight-line code, tiny suspended stacks, best of both.",
+          "c10kQ": "The C10K problem asks whether a single server can…",
+          "cRight": "handle ten thousand simultaneous connections at once",
+          "cSpeed": "run at ten thousand gigahertz",
+          "cThreads": "compile in ten thousand milliseconds",
+          "cRam": "use exactly ten thousand bytes of RAM",
+          "modelQ": "The dominant per-connection cost of the thread-per-connection model is…",
+          "moRight": "a full thread stack (plus scheduler slot) even while the connection is idle",
+          "moCpu": "CPU cycles spent computing while idle",
+          "moDisk": "disk space for each connection",
+          "moNone": "there is essentially no per-connection cost",
+          "nbQ": "Non-blocking I/O is essential to an event loop because…",
+          "nbRight": "a read with no data returns immediately (EAGAIN) instead of parking the single thread",
+          "nbLock": "it takes a lock on the socket",
+          "nbFast": "it makes each read transfer more bytes",
+          "nbThread": "it spawns a new thread per read",
+          "epollQ": "The key advantage of epoll/kqueue over select/poll is that its cost per loop is…",
+          "epRight": "O(ready) — only the fds that are actually ready — not O(n) over all fds",
+          "epSame": "identical — O(n) in both",
+          "epZero": "always zero",
+          "epMore": "O(n²) but more parallel",
+          "pollQ": "Why does select/poll scale badly to many connections?",
+          "poRight": "you pass the whole fd set each call and the kernel scans all of them every loop",
+          "poLock": "it holds a global lock for the whole scan",
+          "poRam": "each fd needs a megabyte of RAM",
+          "poNone": "it does not — it scales perfectly",
+          "reactorQ": "In the reactor pattern, the single event-loop thread…",
+          "reRight": "waits for readiness, then dispatches a short non-blocking handler for each ready fd, and repeats",
+          "reBlock": "blocks on each connection's read in turn",
+          "reSpawn": "spawns one thread per ready fd",
+          "reSleep": "sleeps for a fixed interval between checks",
+          "blockQ": "What happens if one handler in an event loop performs a blocking call?",
+          "blRight": "it stalls the entire server — every other connection waits behind it",
+          "blOk": "nothing — other connections keep running on other threads",
+          "blFast": "the loop speeds up",
+          "blThread": "the kernel silently spawns a helper thread",
+          "coroQ": "Coroutines (async/await, goroutines) give you…",
+          "coRight": "straight-line code that suspends at await, multiplexing tiny stacks onto few OS threads",
+          "coSame": "exactly one OS thread per coroutine, like blocking threads",
+          "coBlock": "guaranteed blocking of the whole runtime",
+          "coNone": "no concurrency at all",
+          "suspendQ": "A suspended coroutine is cheap compared with a blocked thread because it saves…",
+          "suRight": "only its small live state (hundreds of bytes), not a full OS thread stack",
+          "suFull": "an entire 8 MB stack just like a thread",
+          "suDisk": "its state to disk each time",
+          "suNone": "nothing at all",
+          "whoQ": "Which real systems reach C10M with straight-line code via coroutines/async?",
+          "whRight": "Go goroutines, Rust async, Node.js, Kotlin coroutines",
+          "whNone": "none — all servers use thread-per-connection",
+          "whOnly": "only single-connection servers",
+          "whGpu": "only GPU-based servers",
+          "offloadQ": "The correct way to do genuinely blocking work inside an event-driven server is to…",
+          "ofRight": "offload it to a separate thread pool and resume the handler when it completes",
+          "ofBlock": "just call the blocking API directly in the handler",
+          "ofSpin": "busy-spin in the event loop until it finishes",
+          "ofDrop": "drop the connection",
+          "threadedGoodQ": "The thread-per-connection model's main advantage is…",
+          "tgRight": "simple linear code — the kernel scheduler handles all multiplexing",
+          "tgScale": "it scales to tens of millions of connections effortlessly",
+          "tgMem": "it uses the least memory of any model",
+          "tgNone": "there is no advantage"
+        }
+      }
+    </script>
+
+    <primer-quiz name="eventQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/operating-systems/threads-and-the-thread-model"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Reactor event-loop block diagram: epoll_wait -> ready list -> dispatch -> handlers -> loop back,
+     with the kernel feeding the ready list. Static base content, wide layout. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "reactor",
+    ({ board, colors, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, fillIdx, key, size) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[fillIdx], fillOpacity: 0.2, strokeColor: colors.line, strokeWidth: 1.5,
+          fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: size || 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "max-width:170px",
+        });
+      };
+      const arrow = (p1, p2) => board.create("arrow", [p1, p2], { strokeColor: colors.cat[0], strokeWidth: 2, lastArrow: { type: 2, size: 5 }, highlight: false, fixed: true });
+
+      // Main loop stages left-to-right along the middle row.
+      box(0.3, 3.4, 3.0, 4.6, 0, "wait");        // epoll_wait
+      box(3.6, 3.4, 6.5, 4.6, 1, "ready");       // ready list
+      box(7.1, 3.4, 9.8, 4.6, 2, "dispatch");    // dispatch
+      arrow([3.0, 4.0], [3.6, 4.0]);
+      arrow([6.5, 4.0], [7.1, 4.0]);
+
+      // Handlers row below dispatch.
+      box(6.8, 1.6, 10.1, 2.8, 3, "handlers", 10);
+      arrow([8.45, 3.4], [8.45, 2.8]);
+
+      // Loop-back arrow from handlers back to epoll_wait.
+      board.create("arrow", [[6.8, 2.2], [1.65, 2.2]], { strokeColor: colors.cat[0], strokeWidth: 2, dash: 2, lastArrow: { type: 2, size: 5 }, highlight: false, fixed: true });
+      board.create("arrow", [[1.65, 2.2], [1.65, 3.4]], { strokeColor: colors.cat[0], strokeWidth: 2, dash: 2, lastArrow: { type: 2, size: 5 }, highlight: false, fixed: true });
+      board.create("text", [4.0, 2.5, sceneStrings("loop")], { strokeColor: colors.cat[0], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+
+      // Kernel feeding the ready list from above.
+      box(3.6, 5.4, 6.5, 6.4, 1, "kernel", 10);
+      board.create("arrow", [[5.05, 5.4], [5.05, 4.6]], { strokeColor: colors.line, strokeWidth: 2, lastArrow: { type: 2, size: 5 }, highlight: false, fixed: true });
+    },
+    { boundingbox: [-0.4, 7.0, 10.6, 1.2], keepAspect: false, title: () => makeStrings("reactor")("title") },
+  );
+
+  registerQuiz("eventQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("c10kQ"),
+      options: [
+        { text: () => sceneStrings("cRight"), correct: true },
+        { text: () => sceneStrings("cSpeed"), correct: false },
+        { text: () => sceneStrings("cThreads"), correct: false },
+        { text: () => sceneStrings("cRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("modelQ"),
+      options: [
+        { text: () => sceneStrings("moRight"), correct: true },
+        { text: () => sceneStrings("moCpu"), correct: false },
+        { text: () => sceneStrings("moDisk"), correct: false },
+        { text: () => sceneStrings("moNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("nbQ"),
+      options: [
+        { text: () => sceneStrings("nbRight"), correct: true },
+        { text: () => sceneStrings("nbLock"), correct: false },
+        { text: () => sceneStrings("nbFast"), correct: false },
+        { text: () => sceneStrings("nbThread"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("epollQ"),
+      options: [
+        { text: () => sceneStrings("epRight"), correct: true },
+        { text: () => sceneStrings("epSame"), correct: false },
+        { text: () => sceneStrings("epZero"), correct: false },
+        { text: () => sceneStrings("epMore"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pollQ"),
+      options: [
+        { text: () => sceneStrings("poRight"), correct: true },
+        { text: () => sceneStrings("poLock"), correct: false },
+        { text: () => sceneStrings("poRam"), correct: false },
+        { text: () => sceneStrings("poNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("reactorQ"),
+      options: [
+        { text: () => sceneStrings("reRight"), correct: true },
+        { text: () => sceneStrings("reBlock"), correct: false },
+        { text: () => sceneStrings("reSpawn"), correct: false },
+        { text: () => sceneStrings("reSleep"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("blockQ"),
+      options: [
+        { text: () => sceneStrings("blRight"), correct: true },
+        { text: () => sceneStrings("blOk"), correct: false },
+        { text: () => sceneStrings("blFast"), correct: false },
+        { text: () => sceneStrings("blThread"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("coroQ"),
+      options: [
+        { text: () => sceneStrings("coRight"), correct: true },
+        { text: () => sceneStrings("coSame"), correct: false },
+        { text: () => sceneStrings("coBlock"), correct: false },
+        { text: () => sceneStrings("coNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("suspendQ"),
+      options: [
+        { text: () => sceneStrings("suRight"), correct: true },
+        { text: () => sceneStrings("suFull"), correct: false },
+        { text: () => sceneStrings("suDisk"), correct: false },
+        { text: () => sceneStrings("suNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whoQ"),
+      options: [
+        { text: () => sceneStrings("whRight"), correct: true },
+        { text: () => sceneStrings("whNone"), correct: false },
+        { text: () => sceneStrings("whOnly"), correct: false },
+        { text: () => sceneStrings("whGpu"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("offloadQ"),
+      options: [
+        { text: () => sceneStrings("ofRight"), correct: true },
+        { text: () => sceneStrings("ofBlock"), correct: false },
+        { text: () => sceneStrings("ofSpin"), correct: false },
+        { text: () => sceneStrings("ofDrop"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("threadedGoodQ"),
+      options: [
+        { text: () => sceneStrings("tgRight"), correct: true },
+        { text: () => sceneStrings("tgScale"), correct: false },
+        { text: () => sceneStrings("tgMem"), correct: false },
+        { text: () => sceneStrings("tgNone"), correct: false },
+      ],
+    },
+  ]);
+</script>

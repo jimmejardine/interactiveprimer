@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Trap-and-Emulate and Binary Translation</primer-title>
+
+    <primer-card>
+      <p>
+        The <primer-ref to="computer-science/advanced-operating-systems/virtualization/machine-virtualization-and-popek-goldberg">Popek-Goldberg
+        theorem</primer-ref> told us <em>when</em> a machine can be virtualized. This lesson is about
+        <em>how</em>: the concrete machinery a VMM uses to run a whole guest operating system on real hardware
+        while staying in complete control. There are three historic techniques, and every hypervisor you will
+        ever meet is built from one or more of them — <strong>trap-and-emulate</strong> (the textbook ideal),
+        <strong>binary translation</strong> (VMware's answer to x86's leaks), and
+        <strong>paravirtualization</strong> (Xen's answer). By the end you'll understand why x86 needed such
+        cleverness before the hardware caught up.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The ideal: trap-and-emulate</h2>
+      <p>
+        Recall the plan. The VMM runs the guest — kernel and all — <strong>de-privileged</strong>, below the
+        ring 0 it thinks it owns. Now the CPU does the policing for free:
+      </p>
+      <ul>
+        <li>An <strong>innocuous</strong> guest instruction (arithmetic, a register move, a branch) runs
+          <strong>directly</strong> on the real CPU at full native speed. No VMM involvement whatsoever — this is
+          where the "performance" property is earned.</li>
+        <li>A <strong>privileged</strong> instruction (the guest kernel trying to load a page-table base, mask
+          interrupts, or touch a device) executes in the wrong mode, so the hardware raises a fault: a
+          <strong>trap</strong>. Control jumps to the VMM.</li>
+        <li>The VMM decodes the faulting instruction, <strong>emulates</strong> its effect on the
+          <em>virtual</em> machine's state (updates a shadow of the guest's control registers, virtual interrupt
+          flag, virtual devices), advances the guest program counter, and <strong>resumes</strong> the guest.</li>
+      </ul>
+      <p>
+        The guest never notices: from its point of view the privileged instruction "just worked". This
+        trap→emulate→resume loop is the beating heart of a classical VMM. It is exactly limited direct execution,
+        lifted from processes to an entire OS. Trace the loop below.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the trap-emulate-resume loop figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "teLoop": {
+          "title": "The trap-and-emulate loop — guest runs native until a privileged op faults into the VMM",
+          "run": "GUEST runs de-privileged\n(innocuous insns native, full speed)",
+          "priv": "guest hits a PRIVILEGED\ninstruction",
+          "trap": "hardware TRAP\ninto the VMM",
+          "emu": "VMM EMULATES it on the\nvirtual machine's state",
+          "resume": "VMM RESUMES the guest\nat the next instruction",
+          "loop": "…and back to running native"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The loop, drawn</h2>
+      <primer-geometry scene="teLoop"></primer-geometry>
+      <p>
+        The important economics: <em>only the trap edges cost anything</em>. If a workload almost never executes
+        privileged instructions, it runs at nearly native speed. A syscall-heavy or interrupt-heavy kernel
+        workload, though, can trap thousands of times a second, and each trap is a full mode-switch round trip
+        into the VMM — this is the tax trap-and-emulate must pay, and the reason later hardware works so hard to
+        make traps cheap.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why the ideal breaks on x86</h2>
+      <p>
+        Trap-and-emulate has one non-negotiable prerequisite: <em>every</em> sensitive instruction must trap. On
+        classic x86 that is false — there are 17 sensitive-but-unprivileged instructions (recall
+        <primer-math>\texttt{popf}</primer-math>, <primer-math>\texttt{sgdt}</primer-math>,
+        <primer-math>\texttt{smsw}</primer-math>). A de-privileged guest that executes
+        <primer-math>\texttt{popf}</primer-math> to disable interrupts gets <strong>no trap</strong>; the
+        interrupt-flag write is silently dropped. The VMM never finds out, the virtual machine's state drifts
+        out of sync with what the guest believes, and eventually the guest crashes or misbehaves. Pure
+        trap-and-emulate simply cannot run an unmodified x86 guest. Two very different rescues emerged.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Rescue 1 — VMware's dynamic binary translation</h2>
+      <p>
+        VMware's insight (1998–99): don't wait for a trap that will never come — <strong>rewrite the dangerous
+        code before it runs</strong>. The VMM contains a just-in-time <strong>binary translator</strong>. As the
+        guest kernel is about to execute a block of code, the translator scans it and produces a safe,
+        functionally-equivalent version:
+      </p>
+      <ul>
+        <li>Innocuous instructions are copied through essentially <strong>identical</strong> (translation is
+          "mostly the identity") so they still run native.</li>
+        <li>Each sensitive instruction — trapping or not — is replaced by a safe sequence: usually a
+          <strong>call into the VMM</strong> (a "callout") that emulates the intended effect on virtual state.
+          The silent leaks are caught because the translator can <em>see</em> them in the code, even though the
+          hardware wouldn't.</li>
+        <li>Translated blocks are stored in a <strong>translation cache</strong> and chained together, so a hot
+          block is translated <em>once</em> and then re-executed straight from the cache — amortising the
+          translation cost across millions of executions. This is the same trick a JIT compiler uses.</li>
+      </ul>
+      <p>
+        Crucially only <strong>guest kernel</strong> (ring 0) code needs translating; unprivileged
+        <strong>guest user</strong> code has no sensitive instructions and runs native, untranslated. So a
+        user-space-bound workload sees almost no overhead, while kernel-bound code pays for translation. VMware's
+        translator was so good that on many workloads binary translation actually <em>beat</em> the first
+        generation of hardware virtualization, because a translated <primer-math>\texttt{popf}</primer-math> is
+        an inline callout, whereas a hardware trap was a slow VM-exit.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Rescue 2 — Xen's paravirtualization</h2>
+      <p>
+        Xen (Cambridge, 2003) took the opposite philosophy: if the problem is that the guest issues instructions
+        the VMM can't safely intercept, then <strong>change the guest</strong> so it never issues them. In
+        <strong>paravirtualization</strong> (PV) the guest OS is <em>ported</em> to a slightly different,
+        virtualization-friendly interface. Where the guest kernel used to execute a privileged instruction, it
+        now makes an explicit <strong>hypercall</strong> — a deliberate, well-defined call down into the
+        hypervisor (the VM analogue of a syscall). "Load this page table", "update this PTE", "mask my virtual
+        interrupts" all become clean API calls rather than trapped instructions.
+      </p>
+      <ul>
+        <li><strong>Pro:</strong> no traps to catch, no code to translate — the guest cooperates. Xen PV
+          delivered near-native performance on the un-virtualizable x86 of its day, and let the guest
+          <em>batch</em> many page-table updates into one hypercall (far cheaper than one trap each).</li>
+        <li><strong>Con:</strong> the guest OS must be <strong>modified and recompiled</strong>. That is fine for
+          open-source Linux/BSD (Xen upstreamed a PV port) but impossible for a closed guest like older Windows.
+          Paravirtualization trades transparency for speed.</li>
+      </ul>
+      <p>
+        The paravirtual idea never died — even today, "unmodified" guests on modern hardware still use
+        <strong>paravirtual drivers</strong> (virtio) for fast I/O, which you'll meet in the
+        <primer-ref forward to="computer-science/advanced-operating-systems/virtualization/io-virtualization">I/O
+        virtualization</primer-ref> lesson. The lesson: even a leaky ISA can be virtualized if you are willing to
+        translate the binary (VMware) or rewrite the guest (Xen).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Counting the traps</h2>
+      <p>
+        Let's make the trap tax concrete. A workload issues a stream of instructions; some fraction are
+        privileged. Under pure trap-and-emulate, each privileged instruction is a costly trap. Binary
+        translation replaces those with cheaper inline callouts, and a translation cache means each unique kernel
+        block is only translated once. The simulation compares the total cost.
+      </p>
+      <primer-code run>
+        // Cost of running a kernel-heavy workload three ways. Costs in (illustrative) cycles.
+        const TRAP = 1500;      // a full trap/mode-switch round trip into the VMM
+        const CALLOUT = 300;    // a binary-translation inline call into the VMM
+        const XLATE = 4000;     // one-time cost to translate a unique block
+        const NATIVE = 1;       // an innocuous instruction
+
+        const totalInsns = 1_000_000;
+        const privFrac = 0.03;               // 3% of executed insns are privileged/sensitive
+        const priv = Math.round(totalInsns * privFrac);
+        const uniqueBlocks = 800;            // distinct kernel code blocks that get executed
+
+        // Pure trap-and-emulate: every privileged insn traps (assume no silent leaks for the model).
+        const teCost = (totalInsns - priv) * NATIVE + priv * TRAP;
+
+        // Binary translation: each privileged insn becomes a callout; translate each unique block once.
+        const btCost = (totalInsns - priv) * NATIVE + priv * CALLOUT + uniqueBlocks * XLATE;
+
+        console.log(`executed instructions : ${totalInsns.toLocaleString()}`);
+        console.log(`privileged/sensitive  : ${priv.toLocaleString()} (${privFrac * 100}%)`);
+        console.log(`trap-and-emulate cost : ${teCost.toLocaleString()} cycles`);
+        console.log(`binary-translate cost : ${btCost.toLocaleString()} cycles`);
+        console.log(`speedup of BT over T&amp;E: ${(teCost / btCost).toFixed(2)}x`);
+        console.log("\n=> when privileged ops are frequent, cheap inline callouts beat expensive traps —");
+        console.log("   exactly why VMware's translator out-ran first-gen hardware traps on kernel-heavy loads.");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The three techniques, side by side</h2>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Technique</th><th>Guest modified?</th><th>How sensitive ops are handled</th><th>Real system</th><th>Catch</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Trap-and-emulate</strong></td><td>no</td><td>they trap; VMM emulates</td><td>IBM VM/370</td><td>needs sensitive ⊆ privileged (fails on x86)</td></tr>
+            <tr><td><strong>Binary translation</strong></td><td>no (unmodified)</td><td>translator rewrites them to VMM callouts, cached</td><td>VMware Workstation / ESX</td><td>translation overhead; complex engine</td></tr>
+            <tr><td><strong>Paravirtualization</strong></td><td><strong>yes</strong> (ported)</td><td>guest issues explicit hypercalls instead</td><td>Xen (PV mode)</td><td>can't run closed/unmodifiable guests</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-vignette title="How can rewriting the guest's code on the fly possibly be safe?">
+      <p>
+        It sounds terrifying — a VMM editing another OS's machine code as it runs. The safety comes from three
+        disciplines. First, translation is <em>overwhelmingly the identity</em>: the translator changes only the
+        handful of sensitive instructions and control-flow that leaves a block, so the guest's logic is
+        preserved instruction-for-instruction. Second, the guest <em>never executes its own kernel code
+        directly</em> — it only ever runs the translated copy out of the translation cache, so there is no way
+        to "sneak past" the translator. Third, self-modifying guest code (and pages the guest writes to that
+        hold translated code) is caught by write-protecting those pages, so the cache is invalidated and
+        re-translated. It is precisely the same set of tricks a modern JavaScript JIT uses to safely run
+        untrusted code faster than an interpreter.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Emulation' here does NOT mean interpreting every instruction">
+      <p>
+        A frequent muddle: hearing "the VMM emulates the instruction" and picturing a slow software CPU
+        interpreting the whole guest, one instruction at a time (like QEMU's pure interpreter). That is
+        <em>not</em> what trap-and-emulate or binary translation do. The overwhelming majority of guest
+        instructions run <strong>natively on the real CPU</strong>; only the rare sensitive ones are emulated in
+        software. "Emulate" applies to those individual leaking/privileged instructions, not to the guest as a
+        whole. If the VMM interpreted everything it would satisfy fidelity and safety but violate
+        <em>performance</em> — and by Popek-Goldberg's definition it would no longer be a virtual machine monitor
+        at all, just an emulator.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The design law</h2>
+      <primer-theorem name="Three routes to virtualizing a leaky ISA">
+        <ul>
+          <li><strong>Trap-and-emulate:</strong> run the guest de-privileged; privileged instructions trap and
+            the VMM emulates them. Clean and fast — but only works if every sensitive instruction traps.</li>
+          <li><strong>Binary translation:</strong> a JIT in the VMM rewrites guest kernel code, turning sensitive
+            instructions (even non-trapping ones) into VMM callouts; a translation cache amortises the cost. Runs
+            <em>unmodified</em> guests on a leaky ISA (VMware).</li>
+          <li><strong>Paravirtualization:</strong> modify the guest OS to replace privileged instructions with
+            explicit <em>hypercalls</em>. Near-native speed and batching — but the guest must be recompiled, so
+            no closed guests (Xen PV).</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Where next</h2>
+      <p>
+        Software heroics kept x86 virtualization alive for a decade. Then Intel and AMD did the honest thing and
+        fixed the CPU. Next:
+        <primer-ref forward to="computer-science/advanced-operating-systems/virtualization/hardware-assisted-virtualization">hardware-assisted
+        virtualization</primer-ref> — VT-x and AMD-V — which added a real hypervisor mode and made textbook
+        trap-and-emulate work again, this time in silicon.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: the loop, x86's leak, binary translation, paravirtualization. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "teQuiz@1": {
+          "intro": "Trap→emulate→resume; why x86's silent leaks break it; VMware binary translation vs Xen paravirtualization.",
+          "loopQ": "In trap-and-emulate, what happens when the de-privileged guest executes a privileged instruction?",
+          "loopRight": "the hardware traps into the VMM, which emulates the effect and resumes the guest",
+          "loopWrong1": "the instruction runs normally in ring 0",
+          "loopWrong2": "the guest is killed immediately",
+          "loopWrong3": "the VMM interprets every subsequent guest instruction",
+          "nativeQ": "Under trap-and-emulate, innocuous guest instructions…",
+          "nativeRight": "run directly on the real CPU at native speed, with no VMM involvement",
+          "nativeWrong1": "are all interpreted in software",
+          "nativeWrong2": "each cause a trap",
+          "nativeWrong3": "are rewritten by the translator every time",
+          "whyfailQ": "Why does pure trap-and-emulate fail on classic x86?",
+          "whyfailRight": "some sensitive instructions (e.g. popf, sgdt) do NOT trap, so the VMM can't intercept them",
+          "whyfailWrong1": "x86 has too many registers to save on a trap",
+          "whyfailWrong2": "x86 has no privileged instructions at all",
+          "whyfailWrong3": "traps are impossible on x86",
+          "btQ": "VMware's dynamic binary translation works by…",
+          "btRight": "scanning guest kernel code and rewriting sensitive instructions into safe VMM callouts",
+          "btWrong1": "recompiling the guest's source code before boot",
+          "btWrong2": "interpreting every guest instruction one at a time",
+          "btWrong3": "asking the guest to make hypercalls",
+          "cacheQ": "What is the translation cache for?",
+          "cacheRight": "to store translated code blocks so each is translated once and re-run many times",
+          "cacheWrong1": "to cache disk blocks for the guest",
+          "cacheWrong2": "to store the guest's page tables",
+          "cacheWrong3": "to hold network packets",
+          "whichcodeQ": "In VMware's binary translation, which guest code actually needs translating?",
+          "whichcodeRight": "only the guest kernel (ring 0) code — guest user code runs native",
+          "whichcodeWrong1": "all guest code, user and kernel alike",
+          "whichcodeWrong2": "only guest user-mode code",
+          "whichcodeWrong3": "none — nothing is translated",
+          "pvQ": "Paravirtualization (Xen PV) differs from binary translation by…",
+          "pvRight": "modifying the guest OS to issue explicit hypercalls instead of privileged instructions",
+          "pvWrong1": "rewriting the guest binary at run time",
+          "pvWrong2": "requiring no changes to the guest at all",
+          "pvWrong3": "running the guest fully interpreted",
+          "hyperQ": "A 'hypercall' is best described as…",
+          "hyperRight": "a deliberate call from a paravirtualized guest down into the hypervisor (like a syscall)",
+          "hyperWrong1": "an especially fast function call inside the guest",
+          "hyperWrong2": "a network request to another VM",
+          "hyperWrong3": "a hardware interrupt",
+          "pvconQ": "The main drawback of paravirtualization is that…",
+          "pvconRight": "the guest OS must be modified/recompiled, so closed guests can't use it",
+          "pvconWrong1": "it can only run one VM at a time",
+          "pvconWrong2": "it is always slower than trap-and-emulate",
+          "pvconWrong3": "it needs no hardware support",
+          "emuMeanQ": "When we say the VMM 'emulates' a trapped instruction, we mean…",
+          "emuMeanRight": "it applies that one instruction's effect to the virtual machine's state in software",
+          "emuMeanWrong1": "it interprets the entire guest OS in software",
+          "emuMeanWrong2": "it deletes the instruction and skips it",
+          "emuMeanWrong3": "it forwards the instruction to another CPU",
+          "batchQ": "One performance advantage paravirtualization has over trapping is that the guest can…",
+          "batchRight": "batch many updates (e.g. page-table changes) into a single hypercall",
+          "batchWrong1": "avoid using memory entirely",
+          "batchWrong2": "run without any hypervisor",
+          "batchWrong3": "disable all interrupts permanently",
+          "trapCostQ": "A workload executes ${k}$ privileged instructions, each costing a ${c}$-cycle trap. What is the total trap cost in cycles (assume innocuous instructions are free)?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="teQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/virtualization/machine-virtualization-and-popek-goldberg"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The trap-and-emulate cycle: five boxes (run native, hit privileged, trap, emulate, resume) joined by
+     arrows into a loop back to running native. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "teLoop",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (cx, cy, w, h, key, ci) => {
+        board.create("polygon", [[cx - w / 2, cy - h / 2], [cx + w / 2, cy - h / 2], [cx + w / 2, cy + h / 2], [cx - w / 2, cy + h / 2]], {
+          fillColor: colors.cat[ci], fillOpacity: 0.2,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [cx, cy, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "white-space:pre-line; text-align:center; max-width:170px; font-weight:600",
+        });
+      };
+      const arrow = (p, q) =>
+        board.create("arrow", [p, q], { strokeColor: colors.line, strokeWidth: 2, highlight: false, fixed: true, lastArrow: { type: 2, size: 5 } });
+
+      // Positions: a rectangular loop. run (top-left) -> priv (top-right) -> trap (right) -> emu (bottom) -> resume (left) -> run.
+      const P = {
+        run:    [2.2, 5.2],
+        priv:   [7.2, 5.2],
+        trap:   [7.2, 3.0],
+        emu:    [4.7, 1.2],
+        resume: [2.2, 3.0],
+      };
+      box(P.run[0],    P.run[1],    3.0, 1.3, "run", 0);
+      step(sceneStrings("priv"), () => { box(P.priv[0], P.priv[1], 2.8, 1.3, "priv", 1); arrow([3.7, 5.2], [5.8, 5.2]); });
+      step(sceneStrings("trap"), () => { box(P.trap[0], P.trap[1], 2.6, 1.1, "trap", 3); arrow([7.2, 4.55], [7.2, 3.55]); });
+      step(sceneStrings("emu"),  () => { box(P.emu[0],  P.emu[1],  3.4, 1.3, "emu", 3);  arrow([6.6, 2.55], [5.6, 1.7]); });
+      step(sceneStrings("resume"), () => { box(P.resume[0], P.resume[1], 2.8, 1.3, "resume", 0); arrow([3.8, 1.7], [2.7, 2.4]); });
+      step(sceneStrings("loop"), () => arrow([2.2, 3.65], [2.2, 4.55]));
+    },
+    {
+      boundingbox: [-0.4, 6.4, 9.4, -0.2],
+      keepAspect: false,
+      title: () => makeStrings("teLoop")("title"),
+    },
+  );
+
+  registerQuiz("teQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("loopQ"), options: [
+      { text: () => sceneStrings("loopRight"), correct: true },
+      { text: () => sceneStrings("loopWrong1"), correct: false },
+      { text: () => sceneStrings("loopWrong2"), correct: false },
+      { text: () => sceneStrings("loopWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("nativeQ"), options: [
+      { text: () => sceneStrings("nativeRight"), correct: true },
+      { text: () => sceneStrings("nativeWrong1"), correct: false },
+      { text: () => sceneStrings("nativeWrong2"), correct: false },
+      { text: () => sceneStrings("nativeWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("whyfailQ"), options: [
+      { text: () => sceneStrings("whyfailRight"), correct: true },
+      { text: () => sceneStrings("whyfailWrong1"), correct: false },
+      { text: () => sceneStrings("whyfailWrong2"), correct: false },
+      { text: () => sceneStrings("whyfailWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("btQ"), options: [
+      { text: () => sceneStrings("btRight"), correct: true },
+      { text: () => sceneStrings("btWrong1"), correct: false },
+      { text: () => sceneStrings("btWrong2"), correct: false },
+      { text: () => sceneStrings("btWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cacheQ"), options: [
+      { text: () => sceneStrings("cacheRight"), correct: true },
+      { text: () => sceneStrings("cacheWrong1"), correct: false },
+      { text: () => sceneStrings("cacheWrong2"), correct: false },
+      { text: () => sceneStrings("cacheWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("whichcodeQ"), options: [
+      { text: () => sceneStrings("whichcodeRight"), correct: true },
+      { text: () => sceneStrings("whichcodeWrong1"), correct: false },
+      { text: () => sceneStrings("whichcodeWrong2"), correct: false },
+      { text: () => sceneStrings("whichcodeWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("pvQ"), options: [
+      { text: () => sceneStrings("pvRight"), correct: true },
+      { text: () => sceneStrings("pvWrong1"), correct: false },
+      { text: () => sceneStrings("pvWrong2"), correct: false },
+      { text: () => sceneStrings("pvWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("hyperQ"), options: [
+      { text: () => sceneStrings("hyperRight"), correct: true },
+      { text: () => sceneStrings("hyperWrong1"), correct: false },
+      { text: () => sceneStrings("hyperWrong2"), correct: false },
+      { text: () => sceneStrings("hyperWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("pvconQ"), options: [
+      { text: () => sceneStrings("pvconRight"), correct: true },
+      { text: () => sceneStrings("pvconWrong1"), correct: false },
+      { text: () => sceneStrings("pvconWrong2"), correct: false },
+      { text: () => sceneStrings("pvconWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("emuMeanQ"), options: [
+      { text: () => sceneStrings("emuMeanRight"), correct: true },
+      { text: () => sceneStrings("emuMeanWrong1"), correct: false },
+      { text: () => sceneStrings("emuMeanWrong2"), correct: false },
+      { text: () => sceneStrings("emuMeanWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("batchQ"), options: [
+      { text: () => sceneStrings("batchRight"), correct: true },
+      { text: () => sceneStrings("batchWrong1"), correct: false },
+      { text: () => sceneStrings("batchWrong2"), correct: false },
+      { text: () => sceneStrings("batchWrong3"), correct: false },
+    ] },
+    {
+      // total trap cost = k * c
+      prompt: (v) => sceneStrings("trapCostQ", v),
+      variables: "k=[3:12] c=[800:2000]",
+      answer: (v) => v.k * v.c,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Instruction Selection</primer-title>
+
+    <primer-card>
+      <p>
+        The
+        <primer-ref to="computer-science/compiler-design/codegen/a-simple-code-generator">simple code generator</primer-ref>
+        assumed a cosy one-to-one world: each three-address operation became one target instruction. Real
+        machines are not so tidy. A modern ISA offers dozens of instructions, many of them doing
+        <em>several</em> IR operations at once — a load with a scaled-index addressing mode computes an
+        address <em>and</em> fetches memory in a single opcode; a fused multiply-add does a multiply
+        <em>and</em> an add. <strong>Instruction selection</strong> is the art of covering the IR with the
+        <em>best</em> such instructions.
+      </p>
+      <p>
+        The clean way to think about it is <strong>tree tiling</strong>. Express the computation as an
+        expression tree; give each machine instruction a <strong>tile</strong> — a little tree pattern it
+        can implement, with a cost. Selecting instructions is then covering the whole tree with
+        non-overlapping tiles so that every node is covered exactly once, minimising total cost. Each tile
+        laid down becomes one emitted instruction; the edges crossing a tile's boundary become the registers
+        that flow between instructions.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Tiles are patterns with a price</h2>
+      <p>
+        A tile is a fragment of tree — an operator with some children — annotated with the instruction it
+        emits and its cost (cycles, or code size). A few tiles for a typical machine:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Tile (tree pattern)</th><th>Instruction</th><th>Covers</th><th>Cost</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><primer-math>+(r, r)</primer-math></td><td><code>ADD Rd, Rs, Rt</code></td><td>1 node</td><td>1</td></tr>
+            <tr><td><primer-math>\times(r, r)</primer-math></td><td><code>MUL Rd, Rs, Rt</code></td><td>1 node</td><td>1</td></tr>
+            <tr><td><primer-math>+(r,\ \times(r,r))</primer-math></td><td><code>MADD Rd, Rs, Rt, Ru</code></td><td>2 nodes</td><td>1</td></tr>
+            <tr><td><primer-math>\text{MEM}(+(r, \text{const}))</primer-math></td><td><code>LD Rd, c(Rs)</code></td><td>2 nodes</td><td>1</td></tr>
+            <tr><td><primer-math>\text{MEM}(+(r,\ \times(r,\text{const})))</primer-math></td><td><code>LD Rd, (Rs,Rt,c)</code></td><td>3 nodes</td><td>1</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The last two are the payoff of a <strong>CISC addressing mode</strong>: a single load instruction
+        that swallows an entire address-arithmetic subtree — a multiply-by-scale, an add of a base, a
+        constant displacement — for the price of one. A big tile that covers three nodes at cost 1 beats
+        three little tiles at cost 3. Instruction selection is largely a hunt for these big, cheap tiles.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Maximal munch: grab the biggest tile you can</h2>
+      <p>
+        The simplest good algorithm is <strong>maximal munch</strong>. Starting at the root, choose the
+        <em>largest</em> tile that matches there — the one covering the most nodes — emit its instruction,
+        then recurse on each subtree left dangling below the tile's leaves. It is greedy and top-down, and it
+        runs in linear time. Below, the tree for <primer-math>a + b \times c</primer-math> is tiled: the
+        multiply is a natural tile, but a machine with a fused multiply-add can cover the
+        <primer-math>+</primer-math> <em>and</em> the <primer-math>\times</primer-math> with one big
+        <code>MADD</code> tile. Reveal the tiling:
+      </p>
+      <primer-geometry scene="exprTiling"></primer-geometry>
+      <p>
+        Each dashed region is one tile — one emitted instruction. The value produced by a tile leaves
+        through its top edge as a register that the tile above consumes. Where the two-node
+        <code>MADD</code> tile lands, it replaces what would have been a separate <code>MUL</code> then
+        <code>ADD</code> — one instruction instead of two. That is exactly the win instruction selection
+        exists to capture.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Greedy is fast; dynamic programming is optimal</h2>
+      <p>
+        Maximal munch is <em>locally</em> optimal — the biggest tile at each step — but not necessarily
+        <em>globally</em> optimal. Grabbing a fat tile high in the tree can force awkward, expensive tiles
+        below it, for a worse total than a slightly smaller top tile would have allowed. When you truly want
+        the minimum-cost tiling, use <strong>dynamic programming</strong>.
+      </p>
+      <primer-theorem name="Optimal tiling by dynamic programming">
+        <ul>
+          <li>compute, bottom-up, for every node the minimum cost to tile the subtree rooted there and leave
+            its result in a register;</li>
+          <li>a node's cost is the minimum, over all tiles matching at that node, of the tile's cost plus the
+            already-computed costs of the subtrees hanging off the tile's leaves;</li>
+          <li>because subtree costs are reused, the whole tree is tiled optimally in <strong>linear
+            time</strong> — optimality without the exponential search.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        This is the idea behind tools like <strong>BURS</strong> (bottom-up rewrite systems) and code
+        generators such as <code>iburg</code>/<code>burg</code>: you write the tiles as a cost-annotated
+        tree grammar, and the tool produces a linear-time, provably optimal tiler by dynamic programming
+        over the tree. Modern compilers largely automate instruction selection this way rather than by
+        hand-written case analysis.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A maximal-munch tiler you can run</h2>
+      <p>
+        Here is maximal munch in code. Each node is tiled by the largest matching pattern; the fused
+        <code>MADD</code> tile is tried <em>before</em> the plain <code>ADD</code>, so it wins wherever a
+        <primer-math>+</primer-math> sits directly above a <primer-math>\times</primer-math>. We tile the
+        tree for <primer-math>a + b \times c</primer-math> and print the emitted instructions, then compare
+        the instruction count against a small-tiles-only run.
+      </p>
+      <primer-code run>
+        interface Tree { op: string; name?: string; left?: Tree; right?: Tree; }
+
+        const leaf = (name: string): Tree =&gt; ({ op: "leaf", name });
+        // a + b * c
+        const tree: Tree = {
+          op: "+", left: leaf("a"),
+          right: { op: "*", left: leaf("b"), right: leaf("c") },
+        };
+
+        let rc = 0;
+        const fresh = () =&gt; `R${++rc}`;
+
+        // Maximal munch: at each node take the LARGEST matching tile, recurse on its leaves.
+        function munch(n: Tree, out: string[], useFused: boolean): string {
+          if (n.op === "leaf") { const d = fresh(); out.push(`LD ${d}, ${n.name}`); return d; }
+
+          // Big tile first: + directly above * => fused multiply-add (2 nodes, 1 instruction).
+          if (useFused &amp;&amp; n.op === "+" &amp;&amp; n.right?.op === "*") {
+            const rx = munch(n.left!, out, useFused);
+            const ry = munch(n.right.left!, out, useFused);
+            const rz = munch(n.right.right!, out, useFused);
+            const d = fresh();
+            out.push(`MADD ${d}, ${rx}, ${ry}, ${rz}   ; ${d} = ${rx} + ${ry}*${rz}`);
+            return d;
+          }
+          // Small tiles.
+          const a = munch(n.left!, out, useFused);
+          const b = munch(n.right!, out, useFused);
+          const d = fresh();
+          out.push(`${n.op === "*" ? "MUL" : "ADD"} ${d}, ${a}, ${b}`);
+          return d;
+        }
+
+        rc = 0;
+        const fused: string[] = [];
+        munch(tree, fused, true);
+        console.log("Maximal munch WITH the MADD tile:");
+        fused.forEach((i) =&gt; console.log("  " + i));
+        console.log(`  -> ${fused.length} instructions`);
+
+        rc = 0;
+        const small: string[] = [];
+        munch(tree, small, false);
+        console.log("Small tiles only (MUL then ADD):");
+        small.forEach((i) =&gt; console.log("  " + i));
+        console.log(`  -> ${small.length} instructions`);
+      </primer-code>
+      <p>
+        The fused run emits one fewer arithmetic instruction: the big tile paid off. Swap the tree for
+        something whose shape doesn't match <code>MADD</code> and the big tile simply never fires — which is
+        the whole point of pattern matching: tiles apply only where the tree actually has their shape.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why does a CISC addressing mode count as instruction selection at all?">
+      <p>
+        Because an addressing mode <em>is</em> a big tile. Writing <code>LD R1, 8(R2)</code> quietly performs
+        an add (<primer-math>R2 + 8</primer-math>) and a memory dereference in one instruction — it covers a
+        <primer-math>\text{MEM}(+(r, \text{const}))</primer-math> subtree. An x86 <code>lea</code> or a
+        scaled-index load like <code>mov eax, [rbx + rcx*4 + 8]</code> covers an even bigger subtree: a
+        multiply-by-4, two adds, and (for a load) a dereference — four IR operations, one instruction. The
+        selector's job is to notice those subtrees in the IR and reach for the fat instruction instead of
+        emitting the arithmetic longhand. This is why CISC machines lean so heavily on a good tiling
+        selector, and why RISC machines — with simpler, smaller tiles — make selection almost trivial but
+        push the cleverness into
+        <primer-ref soft to="computer-science/compiler-design/codegen/instruction-scheduling">scheduling</primer-ref>
+        and
+        <primer-ref soft to="computer-science/compiler-design/codegen/register-allocation-by-graph-colouring">allocation</primer-ref>
+        instead.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Maximal munch is locally optimal, not globally optimal">
+      <p>
+        "Always grab the biggest tile" <em>feels</em> like it must be best, but it is a <strong>greedy</strong>
+        heuristic and greed can misfire. Suppose the biggest tile at the root covers four nodes but leaves
+        behind two subtrees that can only be tiled by three costly instructions each; a slightly smaller top
+        tile might have left cheaply-tileable subtrees and won on total cost. Maximal munch never
+        reconsiders — it commits to the local maximum and recurses. When you need the genuine minimum, use
+        the <strong>dynamic-programming</strong> tiler: it computes the optimal cost of every subtree once,
+        bottom-up, and combines them, so a locally smaller tile is chosen whenever it leads to a globally
+        cheaper cover. Greedy is fine for many machines and always linear; DP costs a little more machinery
+        and buys provable optimality.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: tiling / maximal munch / DP / addressing-mode tiles + small variable-driven counts. Bank of 12, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "selectQuiz@1": {
+          "intro": "Instruction selection covers an expression tree with instruction 'tiles' at minimum total cost. Numbers change every attempt.",
+          "whatQ": "Instruction selection maps IR to real instructions by…",
+          "wtTile": "covering an expression tree with instruction 'tiles' (tree patterns)",
+          "wtSort": "sorting the instructions alphabetically",
+          "wtCount": "counting the variables",
+          "wtRand": "choosing instructions at random",
+          "tileQ": "In tree tiling, one TILE corresponds to…",
+          "tlOne": "one emitted machine instruction",
+          "tlAll": "the whole program",
+          "tlBlock": "one basic block",
+          "tlReg": "one register",
+          "coverQ": "A valid tiling must cover every tree node…",
+          "cvExactly": "exactly once, with non-overlapping tiles",
+          "cvTwice": "at least twice",
+          "cvSome": "only the leaves",
+          "cvNone": "not at all",
+          "munchQ": "Maximal munch selects, at each node…",
+          "mnBig": "the largest tile that matches, then recurses on the leftover subtrees",
+          "mnSmall": "the smallest tile that matches",
+          "mnRand": "a random matching tile",
+          "mnNone": "no tile",
+          "greedyQ": "Maximal munch is…",
+          "grLocal": "locally optimal but not necessarily globally optimal",
+          "grGlobal": "always globally optimal",
+          "grNever": "never correct",
+          "grSlow": "exponential in the tree size",
+          "dpQ": "To obtain a provably minimum-cost tiling in linear time, use…",
+          "dpDp": "dynamic programming (bottom-up optimal costs), as in BURS/iburg",
+          "dpGreedy": "maximal munch",
+          "dpBrute": "brute-force search over all tilings",
+          "dpNone": "there is no way to get optimality",
+          "ciscQ": "A CISC addressing mode (e.g. a scaled-index load) is, in tiling terms…",
+          "ciBig": "a big tile covering several IR operations (address arithmetic + a load) in one instruction",
+          "ciSmall": "always the smallest possible tile",
+          "ciNo": "not a tile at all",
+          "ciReg": "a register allocation decision",
+          "costQ": "The 'cost' attached to a tile typically models…",
+          "coCycles": "cycles or code size — how expensive the instruction is",
+          "coName": "the instruction's name length",
+          "coRegs": "the number of registers in the machine",
+          "coLine": "the source line number",
+          "edgeQ": "An edge crossing a tile's boundary (leaving the tile) corresponds to…",
+          "egReg": "a register holding a value passed between instructions",
+          "egMem": "a jump",
+          "egLabel": "a label",
+          "egNop": "a no-op",
+          "burgQ": "Tools like iburg / BURS generate a selector from…",
+          "buGrammar": "a cost-annotated tree grammar of tile patterns",
+          "buRegex": "a set of regular expressions",
+          "buCfg": "a control-flow graph",
+          "buList": "a hand-written list of test cases",
+          "tileCountQ": "A perfectly balanced binary expression tree has ${n} internal operator nodes. If every tile covers exactly one node, how many instructions does the tiling emit?",
+          "fusedQ": "A subtree is a MUL directly under an ADD (3 leaf operands). Using ONLY 1-node tiles it needs 2 arithmetic instructions; with one fused MADD tile it needs how many arithmetic instructions?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="selectQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/codegen/a-simple-code-generator"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Expression-tree toolkit: circular nodes, trimmed edges, dashed tile regions with an instruction label.
+  function treeTools(board, colors) {
+    const R = 0.55;
+    const node = (cx, cy, label, col) => {
+      board.create("circle", [[cx, cy], R], {
+        strokeColor: col, strokeWidth: 2, fillColor: col, fillOpacity: 0.14,
+        fixed: true, highlight: false,
+      });
+      board.create("text", [cx, cy, label], {
+        anchorX: "middle", anchorY: "middle", fontSize: 15, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    const edge = (ax, ay, bx, by, col) => {
+      const dx = bx - ax, dy = by - ay, d = Math.hypot(dx, dy), ux = dx / d, uy = dy / d;
+      board.create("segment", [[ax + ux * R, ay + uy * R], [bx - ux * R, by - uy * R]], {
+        strokeColor: col, strokeWidth: 1.6, fixed: true, highlight: false, straightFirst: false, straightLast: false,
+      });
+    };
+    const tile = (x0, y0, x1, y1, col, label, lx, ly) => {
+      board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+        borders: { strokeColor: col, strokeWidth: 2, dash: 2 },
+        vertices: { visible: false }, fillColor: col, fillOpacity: 0.08,
+        fixed: true, highlight: false, withLabel: false,
+      });
+      board.create("text", [lx, ly, label], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    };
+    return { node, edge, tile };
+  }
+
+  // Tree for a + b*c, then a MADD tile fusing + and *, and a store tile at the root.
+  registerGeometryScene("exprTiling", ({ board, step, colors }) => {
+    const T = treeTools(board, colors);
+    const EQ = [-1, 5], X = [-3.5, 3], PLUS = [1.5, 3], A = [-0.5, 1], MUL = [3.5, 1], B = [2.5, -1], C = [4.5, -1];
+
+    // Base content: the whole expression tree, always visible.
+    T.edge(EQ[0], EQ[1], X[0], X[1], colors.line);
+    T.edge(EQ[0], EQ[1], PLUS[0], PLUS[1], colors.line);
+    T.edge(PLUS[0], PLUS[1], A[0], A[1], colors.line);
+    T.edge(PLUS[0], PLUS[1], MUL[0], MUL[1], colors.line);
+    T.edge(MUL[0], MUL[1], B[0], B[1], colors.line);
+    T.edge(MUL[0], MUL[1], C[0], C[1], colors.line);
+    T.node(EQ[0], EQ[1], "=", colors.cat[0]);
+    T.node(X[0], X[1], "x", colors.cat[0]);
+    T.node(PLUS[0], PLUS[1], "+", colors.cat[1]);
+    T.node(A[0], A[1], "a", colors.cat[2]);
+    T.node(MUL[0], MUL[1], "×", colors.cat[1]);
+    T.node(B[0], B[1], "b", colors.cat[2]);
+    T.node(C[0], C[1], "c", colors.cat[2]);
+
+    step("Leaves a, b, c load into registers.", () => {
+      T.tile(-1.4, 0.2, 0.4, 1.8, colors.cat[2], "LD R1,a", -0.5, 2.05);
+      T.tile(1.6, -1.9, 5.4, -0.1, colors.cat[2], "LD R2,b · LD R3,c", 3.5, -2.15);
+    });
+    step("The + directly above × is covered by ONE fused tile → MADD.", () => {
+      T.tile(0.4, 0.2, 4.4, 3.9, colors.cat[3], "MADD R4, R1, R2, R3", 2.4, 4.15);
+    });
+    step("The root '=' is a store tile → the value in R4 is stored to x.", () => {
+      T.tile(-4.4, 2.1, -0.1, 5.9, colors.cat[4], "ST x, R4", -2.6, 6.15);
+    });
+  }, { boundingbox: [-5.2, 6.9, 6, -2.8], keepAspect: false, title: "Tiling the tree for x = a + b×c" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("selectQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("whatQ"),
+      options: [
+        { text: () => sceneStrings("wtTile"), correct: true },
+        { text: () => sceneStrings("wtSort"), correct: false },
+        { text: () => sceneStrings("wtCount"), correct: false },
+        { text: () => sceneStrings("wtRand"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tileQ"),
+      options: [
+        { text: () => sceneStrings("tlOne"), correct: true },
+        { text: () => sceneStrings("tlAll"), correct: false },
+        { text: () => sceneStrings("tlBlock"), correct: false },
+        { text: () => sceneStrings("tlReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("coverQ"),
+      options: [
+        { text: () => sceneStrings("cvExactly"), correct: true },
+        { text: () => sceneStrings("cvTwice"), correct: false },
+        { text: () => sceneStrings("cvSome"), correct: false },
+        { text: () => sceneStrings("cvNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("munchQ"),
+      options: [
+        { text: () => sceneStrings("mnBig"), correct: true },
+        { text: () => sceneStrings("mnSmall"), correct: false },
+        { text: () => sceneStrings("mnRand"), correct: false },
+        { text: () => sceneStrings("mnNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("greedyQ"),
+      options: [
+        { text: () => sceneStrings("grLocal"), correct: true },
+        { text: () => sceneStrings("grGlobal"), correct: false },
+        { text: () => sceneStrings("grNever"), correct: false },
+        { text: () => sceneStrings("grSlow"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dpQ"),
+      options: [
+        { text: () => sceneStrings("dpDp"), correct: true },
+        { text: () => sceneStrings("dpGreedy"), correct: false },
+        { text: () => sceneStrings("dpBrute"), correct: false },
+        { text: () => sceneStrings("dpNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ciscQ"),
+      options: [
+        { text: () => sceneStrings("ciBig"), correct: true },
+        { text: () => sceneStrings("ciSmall"), correct: false },
+        { text: () => sceneStrings("ciNo"), correct: false },
+        { text: () => sceneStrings("ciReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("costQ"),
+      options: [
+        { text: () => sceneStrings("coCycles"), correct: true },
+        { text: () => sceneStrings("coName"), correct: false },
+        { text: () => sceneStrings("coRegs"), correct: false },
+        { text: () => sceneStrings("coLine"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("edgeQ"),
+      options: [
+        { text: () => sceneStrings("egReg"), correct: true },
+        { text: () => sceneStrings("egMem"), correct: false },
+        { text: () => sceneStrings("egLabel"), correct: false },
+        { text: () => sceneStrings("egNop"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("burgQ"),
+      options: [
+        { text: () => sceneStrings("buGrammar"), correct: true },
+        { text: () => sceneStrings("buRegex"), correct: false },
+        { text: () => sceneStrings("buCfg"), correct: false },
+        { text: () => sceneStrings("buList"), correct: false },
+      ],
+    },
+    {
+      // One-node tiles => one instruction per internal operator node.
+      prompt: (v) => sceneStrings("tileCountQ", v),
+      variables: "n=[2:12]",
+      answer: (v) => v.n,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Fused MADD replaces MUL+ADD => exactly 1 arithmetic instruction.
+      prompt: () => sceneStrings("fusedQ"),
+      answer: 1,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

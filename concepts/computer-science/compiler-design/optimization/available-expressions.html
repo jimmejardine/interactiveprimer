@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Available Expressions</primer-title>
+
+    <primer-card>
+      <p>
+        Programs recompute things. A loop body squares an index, an address calculation re-adds the same base
+        and stride, a bounds check re-evaluates <primer-math>n-1</primer-math> for the third time this block.
+        Some of that repetition is genuinely necessary; much of it is not. <strong>Available-expressions
+        analysis</strong> is the compiler's tool for telling the two apart <em>across the whole procedure</em>,
+        and it is the engine behind <strong>global common-subexpression elimination</strong> (global CSE): if
+        the value of <primer-math>a+b</primer-math> is already sitting in a register when control reaches you,
+        do not compute <primer-math>a+b</primer-math> again — reuse it.
+      </p>
+      <p>
+        Locally, within one basic block, spotting a redundant <primer-math>a+b</primer-math> is easy — you just
+        read the block top to bottom (that is what the
+        <primer-ref to="computer-science/compiler-design/optimization/local-optimization-and-the-dag">value-numbering DAG</primer-ref>
+        does). The hard, interesting question is <em>global</em>: at a point <primer-math>p</primer-math> buried
+        deep in the control-flow graph, with many paths flowing into it, is <primer-math>a+b</primer-math>
+        <em>guaranteed</em> to have been computed already, no matter which path execution actually took? That is
+        a job for the
+        <primer-ref to="computer-science/compiler-design/optimization/the-dataflow-analysis-framework">dataflow framework</primer-ref>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What "available" means — precisely</h2>
+      <primer-theorem name="Availability">
+        <ul>
+          <li>
+            An expression <primer-math>x \circ y</primer-math> (say <primer-math>a+b</primer-math>) is
+            <strong>available</strong> at a program point <primer-math>p</primer-math> if <em>on every path</em>
+            from the entry of the procedure to <primer-math>p</primer-math>, the expression is computed
+            <strong>at least once</strong>, and
+          </li>
+          <li>
+            after the <em>last</em> such computation on the path, <strong>no operand</strong>
+            (<primer-math>x</primer-math> or <primer-math>y</primer-math>) is redefined before reaching
+            <primer-math>p</primer-math>.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The word doing all the work is <strong>every</strong>. One path that fails to compute
+        <primer-math>a+b</primer-math>, or that clobbers <primer-math>a</primer-math> after computing it, is
+        enough to make the expression <em>unavailable</em>. This is a <strong>"must" property</strong> — it must
+        hold on all incoming paths — and that single fact dictates the entire shape of the analysis: the paths
+        are combined with <strong>intersection</strong>, and the iteration starts <strong>optimistic</strong>,
+        assuming everything is available until a path proves otherwise. It is a <strong>forward</strong>
+        analysis, because availability accumulates as control flows forward from the entry.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Local effect: <primer-math>e\text{-}gen</primer-math> and <primer-math>e\text{-}kill</primer-math></h2>
+      <p>
+        Before we can talk about whole paths, we summarise each basic block <primer-math>B</primer-math> by two
+        sets over the fixed <em>universe</em> <primer-math>U</primer-math> of all candidate expressions in the
+        procedure:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Set</th><th>Meaning</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><primer-math>e\text{-}gen[B]</primer-math></td>
+              <td>expressions <strong>computed</strong> in <primer-math>B</primer-math> whose operands are
+                <strong>not</strong> subsequently redefined <em>within</em> <primer-math>B</primer-math> — the
+                block generates them and they survive to its exit</td>
+            </tr>
+            <tr>
+              <td><primer-math>e\text{-}kill[B]</primer-math></td>
+              <td>expressions in <primer-math>U</primer-math> that use a variable
+                <primer-math>B</primer-math> <strong>redefines</strong> — assigning to
+                <primer-math>a</primer-math> kills every expression that mentions <primer-math>a</primer-math></td>
+            </tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        With those, the <strong>transfer function</strong> of a block — how it turns the set available on entry
+        into the set available on exit — is the familiar dataflow shape "gen what you make, keep what survives":
+      </p>
+      <primer-math display>\mathrm{OUT}[B] \;=\; e\text{-}gen[B] \;\cup\; \big(\mathrm{IN}[B] \setminus e\text{-}kill[B]\big).</primer-math>
+      <p>
+        And because availability must hold on <em>all</em> incoming edges, the value on entry is the
+        <strong>intersection</strong> (the <em>meet</em>, "<primer-math>\wedge</primer-math>") over predecessors:
+      </p>
+      <primer-math display>\mathrm{IN}[B] \;=\; \bigcap_{P \,\in\, \mathrm{pred}(B)} \mathrm{OUT}[P], \qquad \mathrm{IN}[\text{entry}] = \varnothing.</primer-math>
+    </primer-card>
+
+    <primer-card>
+      <h2>The initialisation that trips everyone up</h2>
+      <p>
+        You solve those equations by iteration. But <em>what do you start from?</em> For a "must" analysis the
+        answer is counter-intuitive and it is the single most common bug: initialise
+      </p>
+      <primer-math display>\mathrm{OUT}[B] = U \ \text{(the FULL universe)} \quad\text{for every block } B \neq \text{entry},\qquad \mathrm{OUT}[\text{entry}] = e\text{-}gen[\text{entry}].</primer-math>
+      <p>
+        Start by <em>optimistically</em> assuming every expression is available everywhere, then let the
+        intersections chip availability away as the iteration discovers paths that fail. This is exactly the
+        opposite of a "may" analysis such as
+        <primer-ref soft to="computer-science/compiler-design/optimization/reaching-definitions">reaching definitions</primer-ref>,
+        which unions and starts from <primer-math>\varnothing</primer-math>. Intersecting into an
+        <primer-math>\varnothing</primer-math>-initialised set would wrongly annihilate everything on the first
+        pass; you must start from the <strong>top</strong> element of the lattice, and for a
+        must/intersection analysis the top element is the full set <primer-math>U</primer-math>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A worked example</h2>
+      <p>
+        Track three expressions, <primer-math>U = \{\,a+b,\ a\cdot c,\ b+c\,\}</primer-math>, over this small
+        control-flow graph. Block <primer-math>B_1</primer-math> computes <primer-math>a+b</primer-math> and
+        <primer-math>a\cdot c</primer-math>; the graph then forks, and on the left arm <primer-math>B_3</primer-math>
+        redefines <primer-math>c</primer-math> (killing <primer-math>a\cdot c</primer-math> and
+        <primer-math>b+c</primer-math>), while on the right arm <primer-math>B_4</primer-math> computes
+        <primer-math>b+c</primer-math>. Both arms merge at <primer-math>B_5</primer-math>, which uses
+        <primer-math>a+b</primer-math> and <primer-math>a\cdot c</primer-math>.
+      </p>
+      <primer-geometry scene="aeCfg"></primer-geometry>
+      <p>
+        The per-block summaries are:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Block</th><th>code</th><th><primer-math>e\text{-}gen</primer-math></th><th><primer-math>e\text{-}kill</primer-math></th></tr>
+          </thead>
+          <tbody>
+            <tr><td><primer-math>B_1</primer-math></td><td>t1 = a+b; t2 = a·c</td><td>{a+b, a·c}</td><td>{ }</td></tr>
+            <tr><td><primer-math>B_2</primer-math></td><td>(branch)</td><td>{ }</td><td>{ }</td></tr>
+            <tr><td><primer-math>B_3</primer-math></td><td>c = …</td><td>{ }</td><td>{a·c, b+c}</td></tr>
+            <tr><td><primer-math>B_4</primer-math></td><td>t3 = b+c</td><td>{b+c}</td><td>{ }</td></tr>
+            <tr><td><primer-math>B_5</primer-math></td><td>use a+b, a·c</td><td>{ }</td><td>{ }</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Now iterate. Every non-entry <primer-math>\mathrm{OUT}</primer-math> begins at the full set
+        <primer-math>U=\{a{+}b, a{\cdot}c, b{+}c\}</primer-math>; one forward sweep already reaches the fixed
+        point:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Block</th><th>Init OUT</th><th>Pass 1 · IN</th><th>Pass 1 · OUT</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><primer-math>B_1</primer-math></td><td>{a+b, a·c}</td><td>{ } (entry)</td><td>{a+b, a·c}</td></tr>
+            <tr><td><primer-math>B_2</primer-math></td><td>U</td><td>{a+b, a·c}</td><td>{a+b, a·c}</td></tr>
+            <tr><td><primer-math>B_3</primer-math></td><td>U</td><td>{a+b, a·c}</td><td>{a+b}</td></tr>
+            <tr><td><primer-math>B_4</primer-math></td><td>U</td><td>{a+b, a·c}</td><td>{a+b, a·c, b+c}</td></tr>
+            <tr><td><primer-math>B_5</primer-math></td><td>U</td><td><strong>{a+b}</strong></td><td>{a+b}</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The punchline is <primer-math>\mathrm{IN}[B_5]</primer-math>: the meet
+        <primer-math>\mathrm{OUT}[B_3] \cap \mathrm{OUT}[B_4] = \{a{+}b\} \cap \{a{+}b, a{\cdot}c, b{+}c\} = \{a{+}b\}</primer-math>.
+        So <primer-math>a+b</primer-math> is available at <primer-math>B_5</primer-math> — its two uses are
+        <strong>redundant</strong> and CSE can replace them with the saved value. But
+        <primer-math>a\cdot c</primer-math> is <em>not</em> available, precisely because the left arm
+        <primer-math>B_3</primer-math> redefined <primer-math>c</primer-math>; the intersection dropped it,
+        exactly as the "must on every path" rule demands.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Solving it in code</h2>
+      <p>
+        Represent each set as a <strong>bitset</strong> — one bit per expression in
+        <primer-math>U</primer-math> — so <em>meet</em> is bitwise AND, <em>union</em> is OR, and
+        <em>difference</em> is AND-NOT. The universal set is the all-ones mask. The solver below runs the exact
+        example above and prints the availability at each block's entry.
+      </p>
+      <primer-code run>
+        // Available expressions via bitsets. Bit i = expression i is available.
+        // Universe U = [a+b, a*c, b+c]  ->  bits 0,1,2.
+        const NAMES = ["a+b", "a*c", "b+c"];
+        const U = (1 &lt;&lt; NAMES.length) - 1;      // all-ones universal set = 0b111
+
+        interface Block {
+          name: string;
+          preds: number[];
+          eGen: number;   // bitset
+          eKill: number;  // bitset
+        }
+
+        const b = (...bits: number[]) =&gt; bits.reduce((m, i) =&gt; m | (1 &lt;&lt; i), 0);
+
+        // B1 entry(0) -> B2(1) -> {B3(2), B4(3)} -> B5(4).
+        const blocks: Block[] = [
+          { name: "B1", preds: [],     eGen: b(0, 1), eKill: b()      }, // t1=a+b; t2=a*c
+          { name: "B2", preds: [0],    eGen: b(),     eKill: b()      }, // branch
+          { name: "B3", preds: [1],    eGen: b(),     eKill: b(1, 2)  }, // c = ...  kills a*c, b+c
+          { name: "B4", preds: [1],    eGen: b(2),    eKill: b()      }, // t3 = b+c
+          { name: "B5", preds: [2, 3], eGen: b(),     eKill: b()      }, // uses a+b, a*c
+        ];
+
+        const IN  = new Array(blocks.length).fill(U);
+        const OUT = blocks.map((_, i) =&gt; (i === 0 ? 0 : U));  // MUST-analysis: init to FULL set
+        OUT[0] = blocks[0].eGen;                              // ...except entry's OUT
+
+        let changed = true, rounds = 0;
+        while (changed) {
+          changed = false;
+          rounds++;
+          for (let i = 0; i &lt; blocks.length; i++) {
+            const B = blocks[i];
+            // meet = INTERSECTION over predecessors (empty preds -> entry gets empty set)
+            let inSet = B.preds.length ? U : 0;
+            for (const p of B.preds) inSet &amp;= OUT[p];
+            IN[i] = inSet;
+            const out = B.eGen | (inSet &amp; ~B.eKill &amp; U);   // gen ∪ (IN \ kill)
+            if (out !== OUT[i]) { OUT[i] = out; changed = true; }
+          }
+        }
+
+        const show = (m: number) =&gt; "{" + NAMES.filter((_, i) =&gt; m &amp; (1 &lt;&lt; i)).join(", ") + "}";
+        console.log(`converged in ${rounds} passes`);
+        for (let i = 0; i &lt; blocks.length; i++) {
+          console.log(`${blocks[i].name}: available on entry = ${show(IN[i])}`);
+        }
+      </primer-code>
+      <p>
+        The output confirms the hand-computation: only <code>{a+b}</code> is available entering
+        <code>B5</code>. Change <code>B3</code>'s kill to <code>b()</code> and rerun — now
+        <code>a*c</code> survives the intersection and becomes redundant too. That one-line edit <em>is</em> the
+        difference between "the left path clobbers <primer-math>c</primer-math>" and "it doesn't".
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Available vs. very-busy vs. reaching — how do I keep the four analyses straight?">
+      <p>
+        The four textbook bit-vector analyses are the <em>same</em> algorithm with two independent switches:
+        <strong>direction</strong> (forward vs. backward) and <strong>meet</strong> (union "may" vs. intersection
+        "must"). Available expressions is <em>forward + intersection</em>. Reaching definitions is
+        <em>forward + union</em>. Live variables is <em>backward + union</em>. Very-busy (anticipable)
+        expressions is <em>backward + intersection</em>. Learn the two switches and you have not learned four
+        analyses — you have learned one framework with four settings, which is precisely the point of casting
+        them as a <primer-ref soft to="computer-science/compiler-design/optimization/lattices-and-fixed-points">lattice</primer-ref>
+        problem. The meet direction alone fixes the initial value: union analyses start empty, intersection
+        analyses start full.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A &quot;must&quot; analysis starts FULL, not empty">
+      <p>
+        Two mistakes recur, and both come from muscle memory built on union analyses. First, the
+        <strong>initialisation</strong>: for available expressions you must set every non-entry
+        <primer-math>\mathrm{OUT}[B]</primer-math> to the <strong>full universe</strong>
+        <primer-math>U</primer-math>, not to <primer-math>\varnothing</primer-math>. Seed with
+        <primer-math>\varnothing</primer-math> and the first intersection wipes out every expression and stays
+        there — you will "prove" nothing is ever available. Second, the <strong>meet is intersection</strong>
+        (bitwise AND), never union: an expression is available at a merge only if it is available on
+        <em>every</em> incoming edge. And keep the third rule in the front of your mind: a single redefinition
+        of <em>any</em> operand kills the expression — assigning to <primer-math>a</primer-math> removes
+        <primer-math>a+b</primer-math>, <primer-math>a\cdot c</primer-math>, and every other expression that
+        mentions <primer-math>a</primer-math>, no matter how the value of <primer-math>a</primer-math> was
+        computed.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: availability semantics + must/intersection/init + variable-driven set arithmetic. Bank of 13, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "aeQuiz@1": {
+          "intro": "Available expressions is a FORWARD, MUST analysis: meet = ∩, initialise non-entry OUT to the FULL universe. Numbers change every attempt.",
+          "defQ": "An expression a+b is 'available' at point p when…",
+          "dAll": "on EVERY path from entry to p it is computed, with no operand redefined afterward",
+          "dSome": "on SOME path from entry to p it is computed",
+          "dHere": "it appears anywhere in the procedure text",
+          "dLive": "its value is still used later on",
+          "dirQ": "Available-expressions analysis is…",
+          "diFwdMust": "forward, and combines paths with intersection (a 'must' analysis)",
+          "diFwdMay": "forward, and combines paths with union (a 'may' analysis)",
+          "diBwdMust": "backward, using intersection",
+          "diBwdMay": "backward, using union",
+          "meetQ": "At a control-flow merge, IN[B] is computed as…",
+          "meInter": "the intersection of OUT[P] over all predecessors P",
+          "meUnion": "the union of OUT[P] over all predecessors P",
+          "meFirst": "just OUT of the first predecessor",
+          "meEmpty": "always the empty set",
+          "initQ": "How should non-entry OUT[B] be initialised before iterating?",
+          "inFull": "to the FULL universe U of all expressions (optimistically)",
+          "inEmpty": "to the empty set ∅",
+          "inGen": "to e-gen[B] only",
+          "inKill": "to e-kill[B]",
+          "killQ": "The statement 'a = z * 4;' kills which expressions?",
+          "kiA": "every expression whose operands include a",
+          "kiZ": "only the expression z * 4",
+          "kiNone": "none — assignments never kill expressions",
+          "kiAll": "all expressions in the procedure",
+          "transQ": "The transfer function is OUT[B] = …",
+          "trGen": "e-gen[B] ∪ (IN[B] − e-kill[B])",
+          "trKill": "e-kill[B] ∪ (IN[B] − e-gen[B])",
+          "trUnion": "IN[B] ∪ e-gen[B] ∪ e-kill[B]",
+          "trInt": "IN[B] ∩ e-gen[B]",
+          "useQ": "What optimisation does available-expressions analysis primarily enable?",
+          "usCse": "global common-subexpression elimination",
+          "usInline": "function inlining",
+          "usAlloc": "register allocation by graph colouring",
+          "usUnroll": "loop unrolling",
+          "entryQ": "What is IN[entry] for available expressions?",
+          "enEmpty": "the empty set ∅ (nothing is available before the program starts)",
+          "enFull": "the full universe U",
+          "enGen": "e-gen[entry]",
+          "enUndef": "undefined",
+          "topQ": "Why start from the FULL set rather than the empty set?",
+          "toTop": "the full set is the lattice's top element; a must-analysis must start optimistic so intersections can only remove",
+          "toFast": "it makes the bitsets smaller",
+          "toRandom": "the choice is arbitrary",
+          "toLive": "because it is a backward analysis",
+          "interQ": "Two predecessors have OUT sets {a+b, a·c, b+c} and {a+b, b+c}. The merge IN is…",
+          "iCorrect": "{a+b, b+c}",
+          "iUnion": "{a+b, a·c, b+c}",
+          "iEmpty": "{ }",
+          "iAc": "{a·c}",
+          "cseQ": "An expression e is available on entry to block B and B recomputes e. The compiler can…",
+          "csReuse": "reuse the previously computed value instead of recomputing e",
+          "csDelete": "delete block B entirely",
+          "csNothing": "do nothing — availability has no use",
+          "csKill": "must recompute e to be safe",
+          "sizeQ": "A procedure has ${n} distinct candidate expressions. How many bits are in each availability bitset (the size of U)?",
+          "andQ": "Entering a block, ${c} expressions are available. Its e-kill set removes exactly ${d} of them and its e-gen set is empty. How many expressions are available in OUT (= IN − kill)?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="aeQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/optimization/the-dataflow-analysis-framework",
+      "computer-science/compiler-design/optimization/local-optimization-and-the-dag"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Small control-flow-graph toolkit: rectangular basic blocks + directed edges.
+  function graphTools(board, colors) {
+    const box = (cx, cy, w, h, col, title, body) => {
+      board.create(
+        "polygon",
+        [[cx - w / 2, cy - h / 2], [cx + w / 2, cy - h / 2], [cx + w / 2, cy + h / 2], [cx - w / 2, cy + h / 2]],
+        { borders: { strokeColor: col, strokeWidth: 2 }, strokeColor: col, fillColor: col, fillOpacity: 0.1,
+          vertices: { visible: false }, fixed: true, highlight: false },
+      );
+      board.create("text", [cx, cy + (body ? 0.34 : 0), title], {
+        anchorX: "middle", anchorY: "middle", fontSize: 15, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+      if (body)
+        board.create("text", [cx, cy - 0.34, body], {
+          anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+          strokeColor: colors.ink, color: colors.ink,
+        });
+    };
+    const arrow = (a, cyGap, b, col, text, o = {}) => {
+      const [ax, ay] = a, [bx, by] = b;
+      const dx = bx - ax, dy = by - ay, d = Math.hypot(dx, dy), ux = dx / d, uy = dy / d;
+      const ra = o.ra ?? cyGap, rb = o.rb ?? cyGap;
+      board.create("arrow", [[ax + ux * ra, ay + uy * ra], [bx - ux * rb, by - uy * rb]], {
+        strokeColor: col, strokeWidth: 2, fixed: true, highlight: false,
+      });
+      if (text)
+        board.create("text", [(ax + bx) / 2 + (o.dx ?? 0), (ay + by) / 2 + (o.dy ?? 0), text], {
+          anchorX: "middle", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+          strokeColor: col, color: col,
+        });
+    };
+    const note = (x, y, text, col) =>
+      board.create("text", [x, y, text], {
+        anchorX: "middle", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    return { box, arrow, note };
+  }
+
+  registerGeometryScene("aeCfg", ({ board, step, colors }) => {
+    const T = graphTools(board, colors);
+    const P = { B1: [0, 5], B2: [0, 2.6], B3: [-3, 0.2], B4: [3, 0.2], B5: [0, -2.3] };
+    const gap = 0.95;
+
+    // Base content: the whole CFG is always visible.
+    T.box(...P.B1, 3.2, 1.1, colors.cat[0], "B1", "t1=a+b; t2=a·c");
+    T.box(...P.B2, 2.2, 1.0, colors.cat[1], "B2", "branch");
+    T.box(...P.B3, 2.4, 1.0, colors.cat[2], "B3", "c = …");
+    T.box(...P.B4, 2.4, 1.0, colors.cat[3], "B4", "t3 = b+c");
+    T.box(...P.B5, 3.2, 1.1, colors.cat[4], "B5", "use a+b, a·c");
+    T.arrow(P.B1, gap, P.B2, colors.line, "");
+    T.arrow(P.B2, gap, P.B3, colors.line, "");
+    T.arrow(P.B2, gap, P.B4, colors.line, "");
+    T.arrow(P.B3, gap, P.B5, colors.line, "");
+    T.arrow(P.B4, gap, P.B5, colors.line, "");
+
+    step("B1 generates {a+b, a·c}; both flow out to the branch B2.", () => {
+      T.note(4.5, 5, "gen {a+b, a·c}", colors.cat[0]);
+    });
+    step("On the left arm, B3 redefines c — killing a·c and b+c on this path.", () => {
+      T.note(-5.0, 0.2, "kills a·c, b+c", colors.cat[2]);
+    });
+    step("On the right arm, B4 (re)computes b+c.", () => {
+      T.note(5.0, 0.2, "gen {b+c}", colors.cat[3]);
+    });
+    step("At the merge B5: IN = OUT[B3] ∩ OUT[B4] = {a+b}. Only a+b is available — its uses are redundant.", () => {
+      T.note(0, -3.7, "IN[B5] = {a+b}  (a·c killed on left path)", colors.cat[4]);
+    });
+  }, { boundingbox: [-7, 6, 7, -4.6], keepAspect: false, title: "Available expressions converging on a small CFG" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("aeQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("defQ"),
+      options: [
+        { text: () => sceneStrings("dAll"), correct: true },
+        { text: () => sceneStrings("dSome"), correct: false },
+        { text: () => sceneStrings("dHere"), correct: false },
+        { text: () => sceneStrings("dLive"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dirQ"),
+      options: [
+        { text: () => sceneStrings("diFwdMust"), correct: true },
+        { text: () => sceneStrings("diFwdMay"), correct: false },
+        { text: () => sceneStrings("diBwdMust"), correct: false },
+        { text: () => sceneStrings("diBwdMay"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("meetQ"),
+      options: [
+        { text: () => sceneStrings("meInter"), correct: true },
+        { text: () => sceneStrings("meUnion"), correct: false },
+        { text: () => sceneStrings("meFirst"), correct: false },
+        { text: () => sceneStrings("meEmpty"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("initQ"),
+      options: [
+        { text: () => sceneStrings("inFull"), correct: true },
+        { text: () => sceneStrings("inEmpty"), correct: false },
+        { text: () => sceneStrings("inGen"), correct: false },
+        { text: () => sceneStrings("inKill"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("killQ"),
+      options: [
+        { text: () => sceneStrings("kiA"), correct: true },
+        { text: () => sceneStrings("kiZ"), correct: false },
+        { text: () => sceneStrings("kiNone"), correct: false },
+        { text: () => sceneStrings("kiAll"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("transQ"),
+      options: [
+        { text: () => sceneStrings("trGen"), correct: true },
+        { text: () => sceneStrings("trKill"), correct: false },
+        { text: () => sceneStrings("trUnion"), correct: false },
+        { text: () => sceneStrings("trInt"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("useQ"),
+      options: [
+        { text: () => sceneStrings("usCse"), correct: true },
+        { text: () => sceneStrings("usInline"), correct: false },
+        { text: () => sceneStrings("usAlloc"), correct: false },
+        { text: () => sceneStrings("usUnroll"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("entryQ"),
+      options: [
+        { text: () => sceneStrings("enEmpty"), correct: true },
+        { text: () => sceneStrings("enFull"), correct: false },
+        { text: () => sceneStrings("enGen"), correct: false },
+        { text: () => sceneStrings("enUndef"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("topQ"),
+      options: [
+        { text: () => sceneStrings("toTop"), correct: true },
+        { text: () => sceneStrings("toFast"), correct: false },
+        { text: () => sceneStrings("toRandom"), correct: false },
+        { text: () => sceneStrings("toLive"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("interQ"),
+      options: [
+        { text: () => sceneStrings("iCorrect"), correct: true },
+        { text: () => sceneStrings("iUnion"), correct: false },
+        { text: () => sceneStrings("iEmpty"), correct: false },
+        { text: () => sceneStrings("iAc"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cseQ"),
+      options: [
+        { text: () => sceneStrings("csReuse"), correct: true },
+        { text: () => sceneStrings("csDelete"), correct: false },
+        { text: () => sceneStrings("csNothing"), correct: false },
+        { text: () => sceneStrings("csKill"), correct: false },
+      ],
+    },
+    {
+      // |U| = number of distinct expressions = number of bits.
+      prompt: (v) => sceneStrings("sizeQ", v),
+      variables: "n=[3:12]",
+      answer: (v) => v.n,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // IN has c bits; kill removes d of them; result has c - d.
+      prompt: (v) => sceneStrings("andQ", v),
+      variables: "c=[3:6] d=[1:2]",
+      constraints: "d < c",
+      answer: (v) => v.c - v.d,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

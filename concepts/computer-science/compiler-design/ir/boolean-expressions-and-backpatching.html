@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Boolean Expressions and Backpatching</primer-title>
+
+    <primer-card>
+      <p>
+        Booleans live a double life. Sometimes a program wants a boolean's <em>value</em> —
+        <code>flag = (a &lt; b)</code> stores a 1 or a 0. But far more often a boolean is used only to
+        <em>steer control</em>: <code>if (a &lt; b &amp;&amp; c &lt; d) …</code> never needs the number, only
+        the branch it decides. A good compiler translates these two uses differently, and the second — the
+        <strong>jumping-code</strong> translation — is where the deep and delightful technique of
+        <strong>backpatching</strong> lives. This page is about generating short-circuit boolean code in a
+        <em>single pass</em>, even though, at the moment you emit a jump, you do not yet know where it should go.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two representations of a boolean</h2>
+      <primer-theorem name="Numerical vs control-flow booleans">
+        <ul>
+          <li>
+            <strong>Numerical</strong> — compute an explicit <primer-math>1</primer-math> or
+            <primer-math>0</primer-math> into a temporary. Needed when the boolean is stored, returned, or used
+            arithmetically. <code>t = a &lt; b</code> then <code>flag = t</code>.
+          </li>
+          <li>
+            <strong>Control-flow (jumping code)</strong> — never materialise a value at all; instead emit jumps
+            so that control arrives at one place if the boolean is true and another if it is false. This is what
+            you want inside <code>if</code>/<code>while</code> guards, and it is what makes <strong>short
+            circuiting</strong> natural.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Short-circuit semantics are the reason control-flow code is more than an optimisation — it is often
+        <em>required</em>. In <primer-math>B_1 \;\&amp;\&amp;\; B_2</primer-math>, if <primer-math>B_1</primer-math>
+        is false the whole thing is false and <primer-math>B_2</primer-math> <em>must not be evaluated</em>
+        (it might dereference a null pointer that <primer-math>B_1</primer-math> was guarding against). Dually,
+        in <primer-math>B_1 \;\Vert\; B_2</primer-math>, if <primer-math>B_1</primer-math> is true we skip
+        <primer-math>B_2</primer-math>. Jumping code expresses this directly: each operand jumps away the instant
+        its outcome settles the result.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The one-pass problem</h2>
+      <p>
+        Here is the bind. Generating code in a single forward pass, consider
+        <code>if (a &lt; b) goto ???</code>. At the moment the parser reduces the condition
+        <primer-math>a &lt; b</primer-math>, it must emit a conditional jump — but the <em>target</em> of that
+        jump is code that <strong>has not been generated yet</strong> (the "then" branch, or whatever follows the
+        <code>if</code>). We know a jump is needed; we do not yet know its label. Two escapes exist: make a second
+        pass (wasteful), or emit the jump with the target field left <em>blank</em> and remember to fill it in
+        later, once the target's address is known. That deferred filling-in is <strong>backpatching</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Truelists, falselists, and three little functions</h2>
+      <p>
+        Every boolean sub-expression <primer-math>B</primer-math> synthesizes two lists of <em>incomplete</em>
+        jumps:
+      </p>
+      <primer-theorem name="The attributes and operations">
+        <ul>
+          <li>
+            <primer-math>B.\textit{truelist}</primer-math> — the jumps that should fire when
+            <primer-math>B</primer-math> is <em>true</em> (targets still blank);
+          </li>
+          <li>
+            <primer-math>B.\textit{falselist}</primer-math> — the jumps that should fire when
+            <primer-math>B</primer-math> is <em>false</em>;
+          </li>
+          <li>
+            <primer-math>\textit{makelist}(i)</primer-math> — a new list holding just instruction
+            <primer-math>i</primer-math>; <primer-math>\textit{merge}(p, q)</primer-math> — concatenate two
+            lists; <primer-math>\textit{backpatch}(p, L)</primer-math> — set the target of every jump in list
+            <primer-math>p</primer-math> to label <primer-math>L</primer-math>.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The semantic rules wire these together. For <primer-math>B \to B_1 \;\&amp;\&amp;\; B_2</primer-math>:
+        once we see the <code>&amp;&amp;</code> we know that if <primer-math>B_1</primer-math> is <em>true</em> we
+        must go on to test <primer-math>B_2</primer-math>, so we
+        <primer-math>\textit{backpatch}(B_1.\textit{truelist}, M)</primer-math> where <primer-math>M</primer-math>
+        is the label at the start of <primer-math>B_2</primer-math>'s code. Then
+        <primer-math>B.\textit{truelist} = B_2.\textit{truelist}</primer-math> (both must be true) and
+        <primer-math>B.\textit{falselist} = \textit{merge}(B_1.\textit{falselist}, B_2.\textit{falselist})</primer-math>
+        (either being false makes <primer-math>B</primer-math> false). The rule for <code>||</code> is the exact
+        mirror: backpatch <primer-math>B_1.\textit{falselist}</primer-math>, merge the truelists.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A worked example: <code>if (a &lt; b || c &lt; d) then S</code></h2>
+      <p>
+        Trace the lists as the code is emitted top to bottom. Instructions are numbered; <code>_</code> marks an
+        as-yet-unknown target waiting to be backpatched.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>#</th><th>emitted</th><th>on the list</th><th>action</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>100</td><td><code>if a &lt; b goto _</code></td><td>B1.truelist = {100}</td><td>true ⇒ whole OR is true</td></tr>
+            <tr><td>101</td><td><code>goto _</code></td><td>B1.falselist = {101}</td><td>false ⇒ must test B2</td></tr>
+            <tr><td>—</td><td><em>label M</em> = 102</td><td></td><td>backpatch B1.falselist→102</td></tr>
+            <tr><td>102</td><td><code>if c &lt; d goto _</code></td><td>B2.truelist = {102}</td><td>true ⇒ whole OR is true</td></tr>
+            <tr><td>103</td><td><code>goto _</code></td><td>B2.falselist = {103}</td><td>false ⇒ OR is false</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        After the <code>||</code> rule: <primer-math>B.\textit{truelist} = \textit{merge}(\{100\},\{102\}) = \{100,102\}</primer-math>
+        and <primer-math>B.\textit{falselist} = \{103\}</primer-math>. When the parser later sees the
+        <code>then S</code>, it backpatches the whole truelist <primer-math>\{100,102\}</primer-math> to the
+        label at the start of <primer-math>S</primer-math>, and the falselist <primer-math>\{103\}</primer-math>
+        to whatever follows the <code>if</code>. Every blank <code>_</code> is now filled — in a single forward
+        pass.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Backpatching, in code</h2>
+      <p>
+        We model the machine directly: an array of instructions with mutable target fields, and the three
+        operations. We build the code for <code>a &lt; b || c &lt; d</code> guarding a statement
+        <code>S</code>, then backpatch and print the finished, fully-targeted TAC.
+      </p>
+      <primer-code run>
+        type Instr = { text: string; target: number | null }; // target null = blank, to be patched
+
+        const code: Instr[] = [];
+        const emit = (text: string, hasTarget: boolean): number =&gt; {
+          code.push({ text, target: hasTarget ? null : -1 });
+          return code.length - 1; // its instruction index
+        };
+
+        // The three list operations.
+        const makelist = (i: number): number[] =&gt; [i];
+        const merge = (p: number[], q: number[]): number[] =&gt; [...p, ...q];
+        const backpatch = (list: number[], label: number): void =&gt; {
+          for (const i of list) code[i].target = label;
+        };
+
+        // --- Generate:  a < b || c < d  ---
+        const i100 = emit("if a &lt; b goto", true);   // B1: true-jump
+        const b1true = makelist(i100);
+        const i101 = emit("goto", true);               // B1: false-jump
+        const b1false = makelist(i101);
+
+        // We hit '||': B1 false means "go test B2", which starts at the NEXT instruction.
+        const M = code.length;                          // label at start of B2
+        backpatch(b1false, M);
+
+        const i102 = emit("if c &lt; d goto", true);   // B2: true-jump
+        const b2true = makelist(i102);
+        const i103 = emit("goto", true);               // B2: false-jump
+        const b2false = makelist(i103);
+
+        // '||' combining rule: truelists merge, falselist = B2's falselist.
+        const B_true = merge(b1true, b2true);
+        const B_false = b2false;
+
+        // --- The enclosing 'if B then S': emit S, then patch. ---
+        const Sstart = code.length;
+        emit("S: ... then-branch ...", false);
+        const after = code.length; // where control goes when B is false
+
+        backpatch(B_true, Sstart);   // true  -> run S
+        backpatch(B_false, after);   // false -> skip S
+
+        code.forEach((ins, i) =&gt;
+          console.log(`${100 + i}: ${ins.text}${ins.target !== null &amp;&amp; ins.target &gt;= 0 ? " " + (100 + ins.target) : ""}`)
+        );
+        console.log(`truelist = {${B_true.map((i) =&gt; 100 + i).join(",")}}  falselist = {${B_false.map((i) =&gt; 100 + i).join(",")}}`);
+      </primer-code>
+      <p>
+        Run it: the two <code>if … goto</code> jumps (100 and 102) end up patched to the start of
+        <code>S</code>, the first <code>goto</code> (101) points into the test of the second operand, and the last
+        <code>goto</code> (103) skips past <code>S</code>. No second pass, no placeholder left blank.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Where did the name 'backpatching' come from?">
+      <p>
+        It predates high-level compilers — it comes from <em>assemblers</em> and early linkers coping with
+        forward references. When an assembler met <code>JMP done</code> before it had seen the label
+        <code>done:</code>, it could not know the address, so it left the operand as a hole and kept a list of
+        such holes. When <code>done:</code> finally appeared, the assembler walked back and "patched" every hole
+        with the now-known address — literally writing back into instructions it had already emitted. Compilers
+        inherited the trick wholesale for short-circuit booleans and jumping code. It is the same idea a modern
+        linker uses when it resolves <primer-ref todo to="linking/relocation">relocations</primer-ref>: emit now,
+        record the hole, fill it when the address is known.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Short-circuit means you must NOT evaluate the right operand eagerly">
+      <p>
+        The whole point of jumping code for <code>&amp;&amp;</code> and <code>||</code> is preserving
+        <strong>short-circuit semantics</strong>, and the classic bug is to break them by evaluating both
+        operands unconditionally (as a numerical translation of <code>t = (B1 &amp; B2)</code> would). Consider
+        <code>if (p != null &amp;&amp; p.x &gt; 0)</code>. If you evaluate <code>p.x</code> whenever you compute
+        the boolean, you dereference <code>null</code> exactly when the guard was meant to protect you —
+        crash. Correct jumping code emits <code>B2</code>'s test <em>only on the path where <code>B1</code> was
+        true</em>, so <code>p.x</code> is never touched when <code>p</code> is null. When you hand-lower
+        <code>&amp;&amp;</code>, always route <code>B1</code>'s false-exit <em>around</em> <code>B2</code>'s
+        code, never through it.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: boolean representation / short-circuit / backpatching operations. Bank of 13, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "bpQuiz@1": {
+          "intro": "Translating booleans as jumping code, and backpatching forward jumps in one pass. Numbers change every attempt.",
+          "twoQ": "What are the two ways to translate a boolean expression?",
+          "twoBoth": "numerical (a 0/1 value) and control-flow (jumping code)",
+          "twoOnly": "only numerical",
+          "twoStack": "stack-based and register-based",
+          "twoSSA": "SSA and non-SSA",
+          "jumpUseQ": "The control-flow (jumping-code) translation is preferred when the boolean is used to…",
+          "juGuard": "steer control, as in an if/while guard",
+          "juStore": "be stored into a variable",
+          "juPrint": "be printed",
+          "juReturn": "be returned arithmetically",
+          "scQ": "Short-circuit evaluation of B1 && B2 means…",
+          "scSkip": "if B1 is false, B2 is not evaluated at all",
+          "scBoth": "both operands are always evaluated",
+          "scRight": "only B2 is evaluated",
+          "scValue": "the result is the sum of the two",
+          "oneQ": "What is the 'one-pass problem' backpatching solves?",
+          "opUnknown": "a forward jump must be emitted before its target label is known",
+          "opSlow": "the parser is too slow",
+          "opTemp": "too many temporaries are created",
+          "opStack": "the stack overflows",
+          "truelistQ": "B.truelist is the set of jumps that should fire when…",
+          "tlTrue": "B evaluates to true (their targets not yet filled in)",
+          "tlFalse": "B evaluates to false",
+          "tlAlways": "always, unconditionally",
+          "tlNever": "never",
+          "makelistQ": "makelist(i) returns…",
+          "mkNew": "a new list containing just instruction i",
+          "mkMerge": "the merge of two lists",
+          "mkPatch": "nothing; it patches a jump",
+          "mkEmpty": "an always-empty list",
+          "backpatchQ": "backpatch(p, L) does what?",
+          "bpFill": "fills in target label L for every jump in list p",
+          "bpNew": "creates a new list",
+          "bpDelete": "deletes list p",
+          "bpEval": "evaluates the boolean p",
+          "andQ": "For B -> B1 && B2, which list is backpatched to the start of B2's code?",
+          "andTrue": "B1.truelist (true means: go on to test B2)",
+          "andFalse": "B1.falselist",
+          "andB2": "B2.truelist",
+          "andBoth": "both truelists",
+          "orQ": "For B -> B1 || B2, B.truelist is…",
+          "orMerge": "merge(B1.truelist, B2.truelist)",
+          "orB1": "just B1.truelist",
+          "orEmpty": "always empty",
+          "orFalse": "B1.falselist",
+          "watchQ": "The danger of translating && without short-circuiting is…",
+          "waCrash": "evaluating B2 even when B1 is false may crash (e.g. null dereference)",
+          "waSlow": "it is merely slower, never wrong",
+          "waLabel": "it uses one extra label",
+          "waNone": "there is no danger",
+          "originQ": "The backpatching idea originally came from…",
+          "orAsm": "assemblers/linkers resolving forward references (holes)",
+          "orGpu": "GPU shader compilers",
+          "orJit": "just-in-time garbage collection",
+          "orNet": "network routing",
+          "listMergeQ": "merge combines a truelist of ${p} jumps and one of ${q} jumps into a list of how many jumps?",
+          "patchCountQ": "backpatch is called on a list of ${p} pending jumps. How many jump-target fields does it fill in?",
+          "scEvalQ": "In 'B1 && B2', on how many of the 2 operands is B2 evaluated when B1 is false? (short-circuit)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="bpQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/ir/translating-control-flow"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("bpQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("twoQ"),
+      options: [
+        { text: () => sceneStrings("twoBoth"), correct: true },
+        { text: () => sceneStrings("twoOnly"), correct: false },
+        { text: () => sceneStrings("twoStack"), correct: false },
+        { text: () => sceneStrings("twoSSA"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("jumpUseQ"),
+      options: [
+        { text: () => sceneStrings("juGuard"), correct: true },
+        { text: () => sceneStrings("juStore"), correct: false },
+        { text: () => sceneStrings("juPrint"), correct: false },
+        { text: () => sceneStrings("juReturn"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("scQ"),
+      options: [
+        { text: () => sceneStrings("scSkip"), correct: true },
+        { text: () => sceneStrings("scBoth"), correct: false },
+        { text: () => sceneStrings("scRight"), correct: false },
+        { text: () => sceneStrings("scValue"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("oneQ"),
+      options: [
+        { text: () => sceneStrings("opUnknown"), correct: true },
+        { text: () => sceneStrings("opSlow"), correct: false },
+        { text: () => sceneStrings("opTemp"), correct: false },
+        { text: () => sceneStrings("opStack"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("truelistQ"),
+      options: [
+        { text: () => sceneStrings("tlTrue"), correct: true },
+        { text: () => sceneStrings("tlFalse"), correct: false },
+        { text: () => sceneStrings("tlAlways"), correct: false },
+        { text: () => sceneStrings("tlNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("makelistQ"),
+      options: [
+        { text: () => sceneStrings("mkNew"), correct: true },
+        { text: () => sceneStrings("mkMerge"), correct: false },
+        { text: () => sceneStrings("mkPatch"), correct: false },
+        { text: () => sceneStrings("mkEmpty"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("backpatchQ"),
+      options: [
+        { text: () => sceneStrings("bpFill"), correct: true },
+        { text: () => sceneStrings("bpNew"), correct: false },
+        { text: () => sceneStrings("bpDelete"), correct: false },
+        { text: () => sceneStrings("bpEval"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("andQ"),
+      options: [
+        { text: () => sceneStrings("andTrue"), correct: true },
+        { text: () => sceneStrings("andFalse"), correct: false },
+        { text: () => sceneStrings("andB2"), correct: false },
+        { text: () => sceneStrings("andBoth"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("orQ"),
+      options: [
+        { text: () => sceneStrings("orMerge"), correct: true },
+        { text: () => sceneStrings("orB1"), correct: false },
+        { text: () => sceneStrings("orEmpty"), correct: false },
+        { text: () => sceneStrings("orFalse"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("watchQ"),
+      options: [
+        { text: () => sceneStrings("waCrash"), correct: true },
+        { text: () => sceneStrings("waSlow"), correct: false },
+        { text: () => sceneStrings("waLabel"), correct: false },
+        { text: () => sceneStrings("waNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("originQ"),
+      options: [
+        { text: () => sceneStrings("orAsm"), correct: true },
+        { text: () => sceneStrings("orGpu"), correct: false },
+        { text: () => sceneStrings("orJit"), correct: false },
+        { text: () => sceneStrings("orNet"), correct: false },
+      ],
+    },
+    {
+      // merge sizes add.
+      prompt: (v) => sceneStrings("listMergeQ", v),
+      variables: "p=[1:6] q=[1:6]",
+      answer: (v) => v.p + v.q,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // backpatch fills p targets.
+      prompt: (v) => sceneStrings("patchCountQ", v),
+      variables: "p=[1:8]",
+      answer: (v) => v.p,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // short-circuit: B2 evaluated 0 times when B1 false.
+      prompt: () => sceneStrings("scEvalQ"),
+      answer: 0,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

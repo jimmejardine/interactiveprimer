@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Caching and CDNs</primer-title>
+
+    <primer-card>
+      <p>
+        Somewhere on the other side of the planet is the one true copy of this page's data — the
+        <em>origin</em> server. If every reader had to reach all the way back to it for every image, script and
+        byte, the web would crawl: a request from Sydney to a server in Virginia is a 300-millisecond round
+        trip <em>before</em> the server does any work, and the origin would collapse under the sheer number of
+        identical requests. Yet the web feels instant. The reason is that almost nothing you load actually
+        comes from the origin. It comes from a <strong>cache</strong> — a nearer, faster copy — and there is a
+        whole ladder of them between you and the truth.
+      </p>
+      <p>
+        A cache is just <primer-ref soft to="computer-science/distributed-systems/replication-and-consistency">replication</primer-ref>
+        with a particular motive: not durability, but <em>speed</em>. Keep a copy of expensive-to-fetch data
+        somewhere cheap-to-reach, and serve future requests from the copy. Simple — until you ask the question
+        that makes caching genuinely hard: <em>when the original changes, how does the copy find out?</em> That
+        question, <strong>cache invalidation</strong>, is the villain of this whole story, and we will build up
+        to it.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Caches all the way down</h2>
+      <p>
+        The same data is copied at layer after layer, each nearer to the user and faster than the last. A
+        single page load might be satisfied at any rung of this ladder:
+      </p>
+      <ul>
+        <li>
+          <strong>Browser cache.</strong> The closest copy of all — on your own disk. A second visit to a site
+          re-uses images and scripts it already downloaded, with <em>zero</em> network at all.
+        </li>
+        <li>
+          <strong>Forward / reverse proxy caches.</strong> A shared cache in front of many users (a corporate
+          proxy) or in front of the origin (a reverse proxy like nginx or Varnish), serving one copy to
+          everyone who asks.
+        </li>
+        <li>
+          <strong>CDN edge cache.</strong> A globe-spanning network of caches parked physically near users, so
+          the copy is milliseconds away instead of an ocean away. The heart of this page — more below.
+        </li>
+        <li>
+          <strong>Application cache.</strong> Inside your own system, a fast in-memory store like
+          <strong>Redis</strong> or memcached holds the results of expensive database queries and computations,
+          so the app answers from RAM instead of re-querying the database.
+        </li>
+      </ul>
+      <p>
+        Every rung trades a little staleness risk for a lot of speed, and the art of caching is choosing that
+        trade deliberately at each layer.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>How HTTP caching actually works</h2>
+      <p>
+        The web has a built-in caching protocol baked into
+        <primer-ref soft to="computer-science/networks/application/http">HTTP</primer-ref> headers. It runs on
+        two ideas: an <em>expiry</em> (how long a copy may be used without checking) and a
+        <em>validator</em> (a cheap way to ask "is my copy still good?" without re-downloading).
+      </p>
+
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Header</th><th>Set by</th><th>What it does</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>Cache-Control: max-age=3600</code></td><td>server</td><td>"This copy is fresh for 3600 seconds — serve it without asking."</td></tr>
+            <tr><td><code>Cache-Control: no-store</code></td><td>server</td><td>"Never cache this at all" (e.g. a bank statement).</td></tr>
+            <tr><td><code>Cache-Control: no-cache</code></td><td>server</td><td>"Cache it, but always revalidate before using."</td></tr>
+            <tr><td><code>Expires: &lt;date&gt;</code></td><td>server</td><td>Older absolute-time form of an expiry (superseded by max-age).</td></tr>
+            <tr><td><code>ETag: "v3-abc"</code></td><td>server</td><td>An opaque fingerprint (version tag) of the resource's current content.</td></tr>
+            <tr><td><code>If-None-Match: "v3-abc"</code></td><td>client</td><td>"I have version v3-abc — only resend if it changed."</td></tr>
+            <tr><td><code>304 Not Modified</code></td><td>server</td><td>"Your copy is still good" — an empty, tiny reply; no re-download.</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+
+      <p>
+        The lifecycle: the server sends a resource with <code>max-age=3600</code> and an <code>ETag</code>. For
+        the next hour the browser serves its copy with no network. After that the copy is <em>stale</em> — but
+        stale does not mean wrong, it means "must check." So the browser sends a conditional request,
+        <code>If-None-Match: "v3-abc"</code>. If the content is unchanged, the server replies
+        <strong>304 Not Modified</strong> — a few bytes, no body — and the browser keeps using its copy for
+        another hour. Only if the content genuinely changed does the server send the full new resource. This
+        <strong>revalidation</strong> makes "check if fresh" almost free compared to "download again."
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Eviction and hit ratio: a cache is finite</h2>
+      <p>
+        A cache is smaller than the data it fronts — that is the whole point, it lives in fast, scarce memory.
+        So when it fills up and a new item must go in, something has to be thrown out. The rule for choosing the
+        victim is the <strong>eviction policy</strong>:
+      </p>
+      <ul>
+        <li>
+          <strong>LRU (Least Recently Used).</strong> Evict the item that has gone longest without being
+          accessed. Bets that recently-used things will be used again soon (<em>temporal locality</em>) — the
+          default choice, and usually a good one.
+        </li>
+        <li>
+          <strong>LFU (Least Frequently Used).</strong> Evict the item with the fewest accesses over time.
+          Better for a workload with a few permanently-popular items and a churn of one-offs around them.
+        </li>
+      </ul>
+      <p>
+        The score that matters is the <strong>hit ratio</strong>: the fraction of requests served from the
+        cache rather than passed through to the origin. A hit ratio of 0.9 means the origin sees only one
+        request in ten — a tenfold reduction in load, and most users getting the fast path. Hit ratio climbs
+        with cache size, but with <em>diminishing returns</em>: once the cache holds the "hot" working set,
+        making it bigger buys little, because the long tail of rarely-touched items would be evicted before
+        they're ever reused anyway.
+      </p>
+
+      <primer-chart scene="hitRatio"></primer-chart>
+      <primer-chart-sliders name="wset"></primer-chart-sliders>
+
+      <p>
+        Drag the working-set slider: a workload with a small, concentrated hot set saturates its hit ratio with
+        a tiny cache; a workload spread over a huge working set needs a far bigger cache to reach the same
+        ratio. Right-sizing a cache is reading exactly this curve for your traffic.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Build an LRU cache and measure its hit ratio</h2>
+      <p>
+        Let's implement LRU from scratch and run a request stream through it. The trick is to keep items in
+        <em>recency order</em>: on every access, move the item to the "most recent" end; when full, evict from
+        the "least recent" end. A JavaScript <code>Map</code> remembers insertion order, so deleting and
+        re-inserting a key on access is a neat way to keep the order honest.
+      </p>
+
+      <primer-code run>
+        class LRUCache {
+          private cap: number;
+          private store = new Map&lt;string, number&gt;();
+          hits = 0; misses = 0;
+          constructor(cap: number) { this.cap = cap; }
+
+          get(key: string): number | undefined {
+            if (!this.store.has(key)) { this.misses++; return undefined; }
+            this.hits++;
+            const val = this.store.get(key)!;
+            this.store.delete(key);          // remove...
+            this.store.set(key, val);        // ...and re-insert → now most-recent
+            return val;
+          }
+          put(key: string, val: number): void {
+            if (this.store.has(key)) this.store.delete(key);
+            this.store.set(key, val);
+            if (this.store.size &gt; this.cap) {
+              const oldest = this.store.keys().next().value;  // least-recently-used
+              this.store.delete(oldest);
+              console.log(`    evicted "${oldest}"`);
+            }
+          }
+        }
+
+        // A request stream with locality: "a" and "b" are hot; c,d,e are one-offs.
+        const stream = ["a","b","a","c","a","b","d","a","b","e","a","b","c","a","b"];
+
+        function run(capacity: number): void {
+          const cache = new LRUCache(capacity);
+          console.log(`--- LRU capacity ${capacity} ---`);
+          for (const key of stream) {
+            if (cache.get(key) === undefined) cache.put(key, 1);   // miss → fetch + store
+          }
+          const total = cache.hits + cache.misses;
+          const ratio = (cache.hits / total).toFixed(2);
+          console.log(`hits=${cache.hits} misses=${cache.misses} hit ratio=${ratio}\n`);
+        }
+
+        run(2);   // too small: the hot pair keeps fighting the one-offs for space
+        run(4);   // roomy enough to hold the hot set: far better hit ratio
+      </primer-code>
+
+      <p>
+        With capacity 2 the cache thrashes — every one-off request (<code>c</code>, <code>d</code>,
+        <code>e</code>) evicts part of the hot set, which then misses next time. Bump the capacity to 4 and the
+        hot items <code>a</code> and <code>b</code> stay resident, so the hit ratio jumps. Same stream, same
+        policy — only the size changed. That is the diminishing-returns curve above, measured.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Content Delivery Networks</h2>
+      <p>
+        A <strong>CDN</strong> is caching turned into planet-scale infrastructure: a company (Cloudflare,
+        Akamai, Fastly) runs thousands of cache servers — <em>edge</em> or <em>Points of Presence</em> — in
+        data centres in hundreds of cities. Your site's static assets (and increasingly its dynamic responses)
+        are cached at these edges, close to wherever your users physically are. A reader in Sydney is served by
+        an edge in Sydney; a reader in Oslo by an edge in Oslo. The 300-millisecond ocean crossing becomes a
+        5-millisecond hop across town.
+      </p>
+      <p>
+        How does a user's request <em>reach</em> the nearby edge instead of the distant origin? By the same
+        steering tricks a load balancer uses: <strong>DNS</strong> hands each user the address of a close edge,
+        or — more cleverly — the CDN uses <strong>anycast</strong>, announcing the same IP address from every
+        edge so the internet's own routing delivers each user to the topologically nearest one. When an edge
+        gets a request for something it hasn't cached (a <em>miss</em>), it fetches from the origin once, caches
+        it, and serves everyone else from the copy. To spare the origin from thousands of edges all missing at
+        once, CDNs use <strong>origin shielding</strong>: a designated middle tier that the edges pull through,
+        so the origin sees a trickle of requests instead of a flood.
+      </p>
+
+      <primer-vignette title="The thundering herd (cache stampede)">
+        <p>
+          Here is a failure that catches everyone once. A wildly popular item is cached with a TTL, and at the
+          instant that TTL expires, the copy vanishes from the cache. In that same instant, <em>ten thousand</em>
+          concurrent requests for it all find a miss — and all ten thousand simultaneously charge the origin
+          database to recompute the very same value. The origin, sized to handle the trickle of misses, is
+          flattened by the stampede; it slows, requests pile up, and the site falls over precisely because
+          something was <em>popular</em>. This is the <strong>thundering herd</strong> or <strong>cache
+          stampede</strong>. The cures: let only the <em>first</em> requester recompute while the others wait
+          for it (request coalescing / a lock); serve the slightly-stale value while one background worker
+          refreshes it (stale-while-revalidate); or jitter the TTLs so a million keys don't all expire at the
+          same second. The common theme — never let a cache miss turn into an uncoordinated mob.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>The hard part: invalidation and staleness</h2>
+      <p>
+        Everything so far has a cost hiding in it. Every cached copy is a bet that the original hasn't changed —
+        and sometimes you lose that bet. A copy the cache still believes is fresh, but which no longer matches
+        the origin, is <strong>stale</strong>, and serving it means serving <em>wrong data</em>: an old price,
+        a deleted post, last week's headline. Fixing this is <strong>cache invalidation</strong> — telling every
+        copy, everywhere, "throw yours away, it's out of date" — and it is genuinely hard because the copies are
+        many, distributed, and not all reachable at once.
+      </p>
+      <p>
+        There is no free lunch here; it is a
+        <primer-ref soft to="computer-science/distributed-systems/the-cap-theorem">CAP-flavoured</primer-ref>
+        tradeoff between freshness and speed/load. The main strategies:
+      </p>
+      <ul>
+        <li>
+          <strong>TTL (time-to-live) — expiry.</strong> Let each copy live for a fixed time, then expire. Dead
+          simple and needs no coordination, but you accept staleness up to one TTL. Short TTL = fresher but more
+          origin load; long TTL = less load but staler. Choosing the TTL <em>is</em> choosing your staleness.
+        </li>
+        <li>
+          <strong>Explicit purge.</strong> When the data changes, actively tell the caches to drop that key
+          (a CDN "purge" API call, an event that busts the app cache). Fresh almost immediately, but you must
+          reliably reach every cache, and it's easy to forget a layer.
+        </li>
+        <li>
+          <strong>Versioned keys (cache busting).</strong> Never invalidate — change the <em>name</em>. Serve
+          <code>app.9f3c1.js</code> instead of <code>app.js</code>; when the file changes, the hash in the name
+          changes, so it's a brand-new key that was never cached. The old key simply ages out. This sidesteps
+          invalidation entirely and is why build tools fingerprint asset filenames.
+        </li>
+      </ul>
+
+      <primer-vignette title="Watch out! — cache invalidation is one of the two hard problems">
+        <p>
+          Phil Karlton's famous quip — "<em>There are only two hard things in computer science: cache
+          invalidation and naming things</em>" — is a joke that is also completely true. Caching is easy to add
+          and feels like free speed, which is exactly the trap: the moment you cache something, you have created
+          a second copy that can silently disagree with the first, and now every write to the original must
+          somehow reckon with every copy of it scattered across browsers, proxies, and edges worldwide. A stale
+          cache does not error; it <em>confidently serves the wrong answer</em> — an old balance, a
+          just-deleted comment, a price you no longer honour — and those bugs are maddening precisely because
+          the code "works." The discipline is to treat every cache entry's lifetime as a deliberate decision:
+          pick a TTL you can defend, know exactly how a change propagates (purge? version? expiry?), and never
+          cache data whose staleness you cannot tolerate (use <code>no-store</code> for the bank statement).
+          Caching is a promise about time, and you must decide, on purpose, how much time you can afford to be
+          wrong.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "cacheQuiz@1": { "instructions": "Check your grasp of caching: the layers, HTTP cache headers and revalidation, eviction and hit ratio, CDNs and the thundering herd, and the invalidation/staleness tradeoff." } }
+    </script>
+    <primer-quiz name="cacheQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/application/http",
+      "computer-science/distributed-systems/replication-and-consistency"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerChartSliders } from "primer";
+
+  // Hit ratio vs cache size: a saturating curve size/(size + w) whose knee is set
+  // by the working-set size w. Illustrates diminishing returns.
+  registerChartSliders("wset", [
+    { name: "w", label: "working-set size", min: 3, max: 60, step: 1, value: 12 },
+  ]);
+  registerCharts(
+    [{
+      name: "hitRatio",
+      f: (size, s) => size / (size + s.w),
+      line: (colors) => ({ strokeColor: colors.cat[0], strokeWidth: 2 }),
+      legend: ["hit ratio"],
+    }],
+    { xmin: 0, xmax: 100, ymin: 0, ymax: 1, xaxisname: "cache size (items)", yaxisname: "hit ratio" },
+    "wset",
+  );
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("cacheQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "A cache is essentially replication for the sake of…",
+      options: [
+        { text: "speed — a nearer, faster copy of expensive-to-fetch data", correct: true },
+        { text: "durability — a permanent backup that never changes", correct: false },
+        { text: "security — an encrypted vault for the data", correct: false },
+        { text: "compression — shrinking the data to save disk", correct: false },
+      ] },
+
+    { prompt: "Which of these is an APPLICATION-layer cache inside your own system?",
+      options: [
+        { text: "Redis / memcached holding expensive query results in memory", correct: true },
+        { text: "The user's browser disk cache", correct: false },
+        { text: "A CDN edge node in another city", correct: false },
+        { text: "The origin database itself", correct: false },
+      ] },
+
+    { prompt: "What does 'Cache-Control: max-age=3600' tell a cache?",
+      options: [
+        { text: "Serve this copy without asking for 3600 seconds; after that it's stale and must be checked", correct: true },
+        { text: "Delete this resource after 3600 requests", correct: false },
+        { text: "Never store this resource at all", correct: false },
+        { text: "Compress the response for 3600 bytes", correct: false },
+      ] },
+
+    { prompt: "An ETag is…",
+      options: [
+        { text: "an opaque fingerprint of the resource's current content, used to check if a copy is still valid", correct: true },
+        { text: "the encryption key for the response", correct: false },
+        { text: "the IP address of the origin server", correct: false },
+        { text: "the number of seconds until expiry", correct: false },
+      ] },
+
+    { prompt: "When a browser sends 'If-None-Match: \"v3-abc\"' and the content is unchanged, the server replies…",
+      options: [
+        { text: "304 Not Modified — a tiny empty response; the browser reuses its copy", correct: true },
+        { text: "the full resource again, every time", correct: false },
+        { text: "404 Not Found", correct: false },
+        { text: "a redirect to the CDN", correct: false },
+      ] },
+
+    { prompt: "LRU eviction throws out…",
+      options: [
+        { text: "the item that has gone longest without being accessed", correct: true },
+        { text: "the item accessed the greatest number of times", correct: false },
+        { text: "the largest item by size", correct: false },
+        { text: "a randomly chosen item", correct: false },
+      ] },
+
+    { prompt: "The 'hit ratio' of a cache is…",
+      options: [
+        { text: "the fraction of requests served from the cache instead of the origin", correct: true },
+        { text: "the number of items currently stored", correct: false },
+        { text: "how many bytes the cache saves per second", correct: false },
+        { text: "the fraction of requests that error out", correct: false },
+      ] },
+
+    { prompt: "Why does hit ratio show DIMINISHING RETURNS as cache size grows?",
+      options: [
+        { text: "Once the hot working set fits, extra space only holds rarely-reused items that would be evicted before reuse anyway", correct: true },
+        { text: "Bigger caches are always slower, cancelling the benefit", correct: false },
+        { text: "Hit ratio actually falls as the cache grows", correct: false },
+        { text: "Because larger caches change the eviction policy automatically", correct: false },
+      ] },
+
+    { prompt: "In the LRU demo, why did capacity 2 give a poor hit ratio on the locality-heavy stream?",
+      options: [
+        { text: "One-off requests kept evicting the hot pair, which then missed on their next access (thrashing)", correct: true },
+        { text: "LRU is broken for small caches", correct: false },
+        { text: "The hot items were never requested twice", correct: false },
+        { text: "A capacity-2 cache stores nothing at all", correct: false },
+      ] },
+
+    { prompt: "What is a CDN?",
+      options: [
+        { text: "A network of edge cache servers placed near users worldwide to serve copies with low latency", correct: true },
+        { text: "A single very large origin database", correct: false },
+        { text: "A protocol for compressing HTTP headers", correct: false },
+        { text: "A load-balancing algorithm based on least connections", correct: false },
+      ] },
+
+    { prompt: "How is a user's request typically steered to a NEARBY CDN edge?",
+      options: [
+        { text: "Via DNS or anycast (the same IP announced everywhere; routing picks the nearest edge)", correct: true },
+        { text: "The user manually types the edge's address", correct: false },
+        { text: "The origin forwards every request to the closest edge", correct: false },
+        { text: "By hashing the request body", correct: false },
+      ] },
+
+    { prompt: "What is 'origin shielding' in a CDN?",
+      options: [
+        { text: "A middle tier the edges pull through, so the origin sees a trickle of requests instead of a flood of edge misses", correct: true },
+        { text: "Encrypting the link between edge and origin", correct: false },
+        { text: "Blocking all traffic to the origin permanently", correct: false },
+        { text: "Storing the origin's data on the user's device", correct: false },
+      ] },
+
+    { prompt: "The 'thundering herd' / cache stampede happens when…",
+      options: [
+        { text: "a hot key expires and thousands of simultaneous misses all hit the origin to recompute the same value", correct: true },
+        { text: "the cache runs out of disk space", correct: false },
+        { text: "too many keys are evicted by LFU", correct: false },
+        { text: "the CDN loses its DNS records", correct: false },
+      ] },
+
+    { prompt: "Which is NOT a cure for the thundering herd?",
+      options: [
+        { text: "Deleting the cache entirely so every request goes to the origin", correct: true },
+        { text: "Request coalescing — only the first requester recomputes while others wait", correct: false },
+        { text: "Stale-while-revalidate — serve the stale value while one worker refreshes", correct: false },
+        { text: "Jittering TTLs so keys don't all expire at the same second", correct: false },
+      ] },
+
+    { prompt: "'Versioned keys' (e.g. app.9f3c1.js) avoid invalidation by…",
+      options: [
+        { text: "changing the name when content changes, so it's a brand-new key that was never cached", correct: true },
+        { text: "purging every cache on every request", correct: false },
+        { text: "setting max-age to zero", correct: false },
+        { text: "encrypting the filename", correct: false },
+      ] },
+
+    { prompt: "Why is cache invalidation famously hard, and what is the danger of getting it wrong?",
+      options: [
+        { text: "Copies are many and distributed; a stale cache doesn't error — it confidently serves the wrong answer", correct: true },
+        { text: "It requires a faster CPU than most servers have", correct: false },
+        { text: "Invalidation always deletes the origin data too", correct: false },
+        { text: "There is no danger; stale data is always harmless", correct: false },
+      ] },
+
+    { prompt: "Choosing a cache's TTL is really choosing…",
+      options: [
+        { text: "how much staleness you are willing to tolerate (freshness traded against origin load/speed)", correct: true },
+        { text: "the encryption strength of the cached data", correct: false },
+        { text: "the eviction policy", correct: false },
+        { text: "the number of CDN edges", correct: false },
+      ] },
+  ]);
+</script>

@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The System-Call Interface</primer-title>
+
+    <primer-card>
+      <p>
+        In your C program you write <primer-math>\texttt{n = read(fd, buf, 4096)}</primer-math> and it looks
+        exactly like calling <primer-math>\texttt{sqrt}</primer-math> or a helper you wrote yourself. It is not.
+        A plain function call stays inside your process, costs a few cycles, and never leaves user mode.
+        <primer-math>\texttt{read}</primer-math> does something categorically different: it <em>crosses the
+        privilege boundary</em> into the kernel, because only the kernel is allowed to touch a disk, a socket,
+        or another process's pages. That crossing is the <strong>system call</strong> — the single narrow
+        doorway between the billions of lines of unprivileged code the world runs and the few million lines that
+        are actually in charge of the machine.
+      </p>
+      <p>
+        You met this boundary in
+        <primer-ref to="computer-science/advanced-operating-systems/kernel/the-graduate-view-of-operating-systems">the
+        graduate view</primer-ref> as the idea of <em>limited direct execution</em>. This lesson opens the
+        doorway and looks at its hinges: the <strong>trap</strong> that crosses it, the <strong>trap table</strong>
+        that decides where control lands, the <strong>ABI</strong> that says how arguments are passed, and the
+        surprising <strong>cost</strong> — hundreds of cycles — that makes "avoid the syscall" a design mantra.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A trap, not a jump</h2>
+      <p>
+        A user program cannot simply <primer-math>\texttt{jmp}</primer-math> to a kernel function. If it could,
+        isolation would be a fiction — any process could jump into the middle of the scheduler and do as it
+        pleased. Instead the hardware provides a <strong>synchronous trap</strong>: a special instruction that
+        atomically (a) raises the privilege level to ring 0, (b) switches to a trusted kernel stack, and (c)
+        transfers control to <em>one fixed entry point</em> the kernel registered at boot. The program never
+        chooses <em>where</em> in the kernel it lands — it only asks, and the kernel's entry code dispatches.
+      </p>
+      <ul>
+        <li>On modern x86-64 the instruction is <primer-math>\texttt{syscall}</primer-math>; the entry point is
+          whatever address the kernel wrote into the <primer-math>\texttt{LSTAR}</primer-math> model-specific
+          register at boot.</li>
+        <li>The classic 32-bit Linux path was <primer-math>\texttt{int 0x80}</primer-math> — a software
+          <primer-ref to="computer-science/computer-architecture/datapath/interrupt-driven-io-and-exceptions">interrupt</primer-ref>
+          vectored through entry <primer-math>0x80</primer-math> of the CPU's interrupt descriptor table (IDT).</li>
+        <li>On ARM64 it is the <primer-math>\texttt{svc}</primer-math> ("supervisor call") instruction, trapping
+          to the exception vector table.</li>
+      </ul>
+      <p>
+        All three are the same idea wearing different names: a deliberate, hardware-mediated exception that the
+        program raises <em>on itself</em> to request a service. The kernel-side entry point is the top of the
+        <strong>trap table</strong> — the array of handlers indexed by a number the caller supplies.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the trap-flow figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "trapflow": {
+          "title": "One system call, round trip — the trap crosses the boundary, the trap table dispatches, sysret returns",
+          "userlab": "USER MODE (ring 3, unprivileged)",
+          "kernlab": "KERNEL MODE (ring 0, privileged)",
+          "s1": "The program executes `syscall`",
+          "s2": "Hardware raises privilege, switches to the kernel stack, jumps to the fixed entry",
+          "s3": "The entry dispatches through the trap table",
+          "s4": "The handler runs in ring 0",
+          "s5": "`sysret` restores registers and drops back to ring 3",
+          "call": "syscall\\n(rax = n, args in registers)",
+          "entry": "entry point (LSTAR):\\nsave regs, switch to kernel stack",
+          "table": "trap table[n]\\n→ sys_read()",
+          "handler": "handler runs\\n(reads the disk, fills buf)",
+          "ret": "sysret:\\nrestore regs, result in rax",
+          "resume": "program resumes\\nwith n bytes read"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The shape of a crossing</h2>
+      <p>
+        Follow a single <primer-math>\texttt{read}</primer-math> from user space, into the kernel, and back.
+        The vertical line is the privilege boundary; nothing crosses it except through the trap.
+      </p>
+      <primer-geometry scene="trapflow"></primer-geometry>
+      <p>
+        Notice how little the <em>program</em> did: it loaded a number and some arguments into registers and ran
+        one instruction. Everything else — the mode switch, the stack switch, the dispatch, the return — is
+        machinery the hardware and kernel provide. That is the whole point of a <em>mechanism</em>: build the
+        expensive, delicate crossing once, and expose it as a single instruction.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The calling convention — the syscall ABI</h2>
+      <p>
+        Because the caller and the kernel are compiled separately (often years apart), they must agree on an
+        exact, frozen contract for <em>how</em> the request is encoded: which register holds the call number,
+        which hold the arguments, where the result comes back. This is the <strong>system-call ABI</strong>, and
+        on Linux/x86-64 it is set in stone — breaking it would break every binary ever compiled.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Role</th><th>x86-64 Linux</th><th>Notes</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>syscall number</td><td><primer-math>\texttt{rax}</primer-math></td><td>e.g. <primer-math>0</primer-math> = read, <primer-math>1</primer-math> = write, <primer-math>60</primer-math> = exit</td></tr>
+            <tr><td>arg 1</td><td><primer-math>\texttt{rdi}</primer-math></td><td>note: user ABI arg 4 is <primer-math>\texttt{rcx}</primer-math>, but…</td></tr>
+            <tr><td>arg 2</td><td><primer-math>\texttt{rsi}</primer-math></td><td></td></tr>
+            <tr><td>arg 3</td><td><primer-math>\texttt{rdx}</primer-math></td><td></td></tr>
+            <tr><td>arg 4</td><td><primer-math>\texttt{r10}</primer-math></td><td>…<primer-math>\texttt{r10}</primer-math> replaces <primer-math>\texttt{rcx}</primer-math>, which <primer-math>\texttt{syscall}</primer-math> clobbers</td></tr>
+            <tr><td>arg 5</td><td><primer-math>\texttt{r8}</primer-math></td><td></td></tr>
+            <tr><td>arg 6</td><td><primer-math>\texttt{r9}</primer-math></td><td>six register args max — no stack args</td></tr>
+            <tr><td>return value</td><td><primer-math>\texttt{rax}</primer-math></td><td>errors come back as <primer-math>-4095 \le \texttt{rax} \le -1</primer-math> (a negative <primer-math>\texttt{errno}</primer-math>)</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The <primer-math>\texttt{read()}</primer-math> you call in C is not the syscall — it is a thin
+        <strong>wrapper</strong> in the C library that marshals its arguments into these registers, executes
+        <primer-math>\texttt{syscall}</primer-math>, and translates a negative return into
+        <primer-math>-1</primer-math> plus a set <primer-math>\texttt{errno}</primer-math>. The kernel never sees
+        your language; it sees registers.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Dispatch through the trap table</h2>
+      <p>
+        Once inside, the kernel's entry stub does the least work it can — saves the user registers, then uses the
+        number in <primer-math>\texttt{rax}</primer-math> as an <em>index</em> into a fixed array of function
+        pointers (Linux calls it <primer-math>\texttt{sys\_call\_table}</primer-math>). A bounds check rejects
+        out-of-range numbers; a valid one is a single indexed indirect call. Here is that dispatch, in miniature.
+      </p>
+      <primer-code run>
+        // A trap table in miniature: the kernel indexes an array of handlers by the syscall
+        // number the user left in "rax". Out-of-range numbers are rejected, not obeyed.
+        type Handler = (a: number, b: number, c: number) =&gt; number;
+
+        const NR_READ = 0, NR_WRITE = 1, NR_GETPID = 39, NR_EXIT = 60;
+
+        // The trap table: number -&gt; handler. Gaps are unimplemented calls.
+        const trapTable: Record&lt;number, Handler&gt; = {
+          [NR_READ]:   (fd, _buf, n) =&gt; { console.log(`  sys_read(fd=${fd}, ${n} bytes)`); return n; },
+          [NR_WRITE]:  (fd, _buf, n) =&gt; { console.log(`  sys_write(fd=${fd}, ${n} bytes)`); return n; },
+          [NR_GETPID]: () =&gt; { console.log(`  sys_getpid()`); return 4242; },
+          [NR_EXIT]:   (code) =&gt; { console.log(`  sys_exit(${code})`); return 0; },
+        };
+
+        function trap(nr: number, a = 0, b = 0, c = 0): number {
+          const h = trapTable[nr];
+          if (!h) { console.log(`  #GP: syscall ${nr} not implemented -> return -ENOSYS`); return -38; }
+          return h(a, b, c);
+        }
+
+        // A tiny program's stream of syscalls (the number is what really matters):
+        console.log("rax=0  ->", trap(NR_READ, 3, 0, 4096));
+        console.log("rax=1  ->", trap(NR_WRITE, 1, 0, 12));
+        console.log("rax=39 ->", trap(NR_GETPID));
+        console.log("rax=999->", trap(999));           // bogus number: rejected
+        console.log("rax=60 ->", trap(NR_EXIT, 0));
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>What a crossing costs</h2>
+      <p>
+        A regular function call is a handful of cycles. A round trip through the kernel is <strong>hundreds</strong>
+        — historically <primer-math>150</primer-math> to <primer-math>500{+}</primer-math> cycles on x86, and
+        made dramatically worse after 2018 by the Spectre/Meltdown mitigations, which force page-table isolation
+        (a full address-space switch) and speculation barriers on every entry and exit. Where does the money go?
+      </p>
+      <ul>
+        <li>the privilege and stack switch itself (the <primer-math>\texttt{syscall}</primer-math>/<primer-math>\texttt{sysret}</primer-math> microcode);</li>
+        <li>saving and restoring the user register file;</li>
+        <li>polluted caches, TLB, and branch predictors — the kernel's working set evicts yours, so your code
+          runs slower for a while <em>after</em> you return;</li>
+        <li>with KPTI, a <primer-math>\texttt{CR3}</primer-math> reload flushing much of the TLB on the way in
+          and out.</li>
+      </ul>
+      <p>
+        The lesson every high-performance system learns: <strong>make fewer crossings</strong>. Three families
+        of tricks recur throughout this course:
+      </p>
+      <primer-theorem name="Amortising the syscall">
+        <ul>
+          <li><strong>Serve it without a trap.</strong> The <primer-math>\texttt{vDSO}</primer-math> is a page of
+            kernel code mapped read-only into every process; calls like
+            <primer-math>\texttt{gettimeofday}</primer-math> and <primer-math>\texttt{clock\_gettime}</primer-math>
+            read a shared kernel-maintained timestamp <em>in user mode</em> — no boundary crossing at all.</li>
+          <li><strong>Batch many operations per crossing.</strong> <primer-math>\texttt{readv}</primer-math>/<primer-math>\texttt{writev}</primer-math>
+            do scatter-gather in one call; <primer-math>\texttt{io\_uring}</primer-math> lets the program push
+            hundreds of I/O requests into a shared ring buffer and reap the completions with, in the limit,
+            <em>zero</em> syscalls.</li>
+          <li><strong>Cache the answer in user space.</strong> Buffered I/O (<primer-math>\texttt{stdio}</primer-math>)
+            turns a thousand one-byte <primer-math>\texttt{write}</primer-math>s into one big
+            <primer-math>\texttt{write}</primer-math>.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Why did Intel add a whole new instruction just to enter the kernel?">
+      <p>
+        The original 386 entered the kernel via <primer-math>\texttt{int 0x80}</primer-math>, a general interrupt
+        gate — and general is <em>slow</em>, because the CPU must read the descriptor from the IDT, do privilege
+        checks, and push a full interrupt frame. As clock speeds rose in the late 1990s the fixed overhead of a
+        gate became a real tax on syscall-heavy workloads. Intel's answer (and AMD's, for 64-bit) was a pair of
+        purpose-built, no-frills instructions — <primer-math>\texttt{sysenter}/\texttt{sysexit}</primer-math> and
+        later <primer-math>\texttt{syscall}/\texttt{sysret}</primer-math> — that skip the descriptor lookup by
+        keeping the kernel entry point and stack in fast MSRs. It cut the raw crossing from a few hundred cycles
+        to well under a hundred. Then Meltdown arrived in 2018 and page-table isolation quietly gave much of that
+        speed back — a reminder that the syscall boundary is where security and performance fight hardest.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! `read()` in your C code is a library wrapper, not the syscall">
+      <p>
+        A frequent confusion is to equate the C function <primer-math>\texttt{read()}</primer-math> with the
+        kernel's <primer-math>\texttt{sys\_read}</primer-math>. They are not the same thing. The libc
+        <primer-math>\texttt{read()}</primer-math> is ordinary user-mode code that <em>marshals</em> your
+        arguments into <primer-math>\texttt{rdi}/\texttt{rsi}/\texttt{rdx}</primer-math>, puts
+        <primer-math>0</primer-math> in <primer-math>\texttt{rax}</primer-math>, executes the one
+        <primer-math>\texttt{syscall}</primer-math> instruction, and then unpacks the result. You can prove it to
+        yourself by running <primer-math>\texttt{strace}</primer-math>: it shows the <em>syscalls</em>, and a
+        single <primer-math>\texttt{printf}</primer-math> may perform zero syscalls (buffered) or one
+        <primer-math>\texttt{write}</primer-math> — never a "printf syscall", because there is no such thing.
+        Keep the two layers distinct: the <em>library</em> gives you a comfortable C API; the <em>ABI</em> is the
+        register contract underneath.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: trap mechanics, the x86-64 ABI, dispatch, cost & batching. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "syscallQuiz@1": {
+          "intro": "The user/kernel trap, the x86-64 syscall ABI, trap-table dispatch, and why crossings are expensive.",
+          "doorQ": "Why can a user program not simply `jmp` to a kernel function to get service?",
+          "doorRight": "the hardware forbids it — entry must go through a controlled trap that raises privilege",
+          "doorWrong1": "kernel functions have no memory address",
+          "doorWrong2": "the jump would be too slow to be worth it",
+          "doorWrong3": "user programs are written in a different language",
+          "instrQ": "On modern x86-64 Linux, which instruction crosses into the kernel for a system call?",
+          "instrRight": "syscall (entry via the LSTAR MSR)",
+          "instrWrong1": "call",
+          "instrWrong2": "ret",
+          "instrWrong3": "mov to a kernel address",
+          "numQ": "In the x86-64 Linux ABI, the system-call NUMBER is passed in which register?",
+          "numRight": "rax",
+          "numWrong1": "rdi",
+          "numWrong2": "rsp",
+          "numWrong3": "rip",
+          "argQ": "Which register holds the FIRST argument of a Linux x86-64 syscall?",
+          "argRight": "rdi",
+          "argWrong1": "rax",
+          "argWrong2": "r10",
+          "argWrong3": "rbp",
+          "r10Q": "Why does the syscall ABI use r10 for arg 4 instead of the usual rcx?",
+          "r10Right": "the syscall instruction clobbers rcx (it stores the return address there)",
+          "r10Wrong1": "rcx cannot hold 64-bit values",
+          "r10Wrong2": "r10 is faster to read",
+          "r10Wrong3": "there is no reason; it is arbitrary",
+          "tableQ": "How does the kernel decide WHICH service a trap requested?",
+          "tableRight": "it indexes a trap table (sys_call_table) by the number in rax",
+          "tableWrong1": "it inspects the program's source code",
+          "tableWrong2": "it asks the user to choose from a menu",
+          "tableWrong3": "it runs every handler and keeps the first that works",
+          "badQ": "What happens on Linux if the number in rax names no valid syscall?",
+          "badRight": "the call is rejected and returns -ENOSYS, not obeyed",
+          "badWrong1": "the kernel picks the nearest valid number",
+          "badWrong2": "the machine reboots",
+          "badWrong3": "control jumps to a random handler",
+          "costQ": "Roughly how expensive is a system-call round trip versus a plain function call?",
+          "costRight": "hundreds of cycles versus a handful — a mode switch, register save/restore, cache/TLB pollution",
+          "costWrong1": "identical — both are just calls",
+          "costWrong2": "cheaper, because the kernel is optimised",
+          "costWrong3": "millions of cycles, always",
+          "vdsoQ": "What makes the vDSO special?",
+          "vdsoRight": "it serves some calls (e.g. clock_gettime) in user mode with NO trap at all",
+          "vdsoWrong1": "it makes every syscall twice as fast by caching results on disk",
+          "vdsoWrong2": "it is a faster CPU instruction",
+          "vdsoWrong3": "it disables interrupts during syscalls",
+          "iouringQ": "How does io_uring reduce syscall cost for heavy I/O?",
+          "iouringRight": "it batches many requests through shared ring buffers, needing few or zero crossings",
+          "iouringWrong1": "it runs I/O on the GPU",
+          "iouringWrong2": "it makes each individual syscall cheaper by 2x",
+          "iouringWrong3": "it disables isolation to skip the mode switch",
+          "wrapQ": "The C library `read()` is best described as…",
+          "wrapRight": "a user-mode wrapper that marshals args into registers and executes one syscall instruction",
+          "wrapWrong1": "the kernel handler sys_read itself",
+          "wrapWrong2": "a CPU instruction named read",
+          "wrapWrong3": "a network request to the OS",
+          "int80Q": "The 32-bit Linux `int 0x80` mechanism entered the kernel by…",
+          "int80Right": "raising a software interrupt vectored through entry 0x80 of the IDT",
+          "int80Wrong1": "calling address 0x80 directly",
+          "int80Wrong2": "reading the file /dev/int80",
+          "int80Wrong3": "spinning until the kernel noticed",
+          "nsNumQ": "A syscall round trip is ${c}$ cycles on a ${g}$ GHz CPU. How many nanoseconds is that? (1 d.p.)",
+          "saveNumQ": "You batch ${n}$ separate reads into ONE io_uring submission (one crossing). How many boundary crossings did batching SAVE?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="syscallQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/kernel/the-graduate-view-of-operating-systems",
+      "computer-science/computer-architecture/datapath/interrupt-driven-io-and-exceptions"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The trap round-trip: two columns split by the privilege boundary, boxes for each stage, arrows
+     crossing the boundary on entry and exit. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "trapflow",
+    ({ board, colors, step, sceneStrings }) => {
+      const BX = 5;                 // the privilege boundary x-coordinate
+      const bw = 3.9, bh = 0.95;    // box width / height
+
+      // A rounded-ish labelled box centred at (cx, cy). Newlines in text split into lines.
+      const box = (cx, cy, key, ci) => {
+        const x0 = cx - bw / 2, x1 = cx + bw / 2, y0 = cy - bh / 2, y1 = cy + bh / 2;
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[ci], fillOpacity: 0.2,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [cx, cy, sceneStrings(key).replace(/\\n/g, "\n")], {
+          strokeColor: colors.ink, fontSize: 11.5, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "text-align:center; white-space:pre-line;",
+        });
+      };
+      const arrow = (p1, p2, ci, dashed) =>
+        board.create("arrow", [p1, p2], {
+          strokeColor: colors.cat[ci], strokeWidth: 2.5, dash: dashed ? 2 : 0,
+          lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+        });
+
+      // The boundary line and the two mode labels (base content, always visible).
+      board.create("segment", [[BX, -0.4], [BX, 8.2]], {
+        strokeColor: colors.line, strokeWidth: 2, dash: 3, straightFirst: false, straightLast: false,
+        highlight: false, fixed: true,
+      });
+      board.create("text", [2.4, 8.5, sceneStrings("userlab")], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle",
+        fixed: true, highlight: false, cssStyle: "font-weight:700",
+      });
+      board.create("text", [7.6, 8.5, sceneStrings("kernlab")], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle",
+        fixed: true, highlight: false, cssStyle: "font-weight:700",
+      });
+
+      const UX = 2.4, KX = 7.6;     // column centres
+
+      step(sceneStrings("s1"), () => box(UX, 7.2, "call", 0));
+      step(sceneStrings("s2"), () => {
+        arrow([UX + bw / 2, 7.2], [KX - bw / 2, 6.0], 1, false);   // cross into kernel
+        box(KX, 6.0, "entry", 1);
+      });
+      step(sceneStrings("s3"), () => {
+        arrow([KX, 6.0 - bh / 2], [KX, 4.7 + bh / 2], 1, false);
+        box(KX, 4.7, "table", 1);
+      });
+      step(sceneStrings("s4"), () => {
+        arrow([KX, 4.7 - bh / 2], [KX, 3.4 + bh / 2], 1, false);
+        box(KX, 3.4, "handler", 1);
+      });
+      step(sceneStrings("s5"), () => {
+        arrow([KX - bw / 2, 3.4], [UX + bw / 2, 2.0], 2, true);    // cross back to user
+        box(UX, 2.0, "ret", 2);
+        arrow([UX, 2.0 - bh / 2], [UX, 0.7 + bh / 2], 2, true);
+        box(UX, 0.7, "resume", 0);
+      });
+    },
+    {
+      boundingbox: [-0.4, 9.1, 10.4, 0.0],
+      keepAspect: false,
+      title: () => makeStrings("trapflow")("title"),
+    },
+  );
+
+  registerQuiz("syscallQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("doorQ"), options: [
+      { text: () => sceneStrings("doorRight"), correct: true },
+      { text: () => sceneStrings("doorWrong1"), correct: false },
+      { text: () => sceneStrings("doorWrong2"), correct: false },
+      { text: () => sceneStrings("doorWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("instrQ"), options: [
+      { text: () => sceneStrings("instrRight"), correct: true },
+      { text: () => sceneStrings("instrWrong1"), correct: false },
+      { text: () => sceneStrings("instrWrong2"), correct: false },
+      { text: () => sceneStrings("instrWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("numQ"), options: [
+      { text: () => sceneStrings("numRight"), correct: true },
+      { text: () => sceneStrings("numWrong1"), correct: false },
+      { text: () => sceneStrings("numWrong2"), correct: false },
+      { text: () => sceneStrings("numWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("argQ"), options: [
+      { text: () => sceneStrings("argRight"), correct: true },
+      { text: () => sceneStrings("argWrong1"), correct: false },
+      { text: () => sceneStrings("argWrong2"), correct: false },
+      { text: () => sceneStrings("argWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("r10Q"), options: [
+      { text: () => sceneStrings("r10Right"), correct: true },
+      { text: () => sceneStrings("r10Wrong1"), correct: false },
+      { text: () => sceneStrings("r10Wrong2"), correct: false },
+      { text: () => sceneStrings("r10Wrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("tableQ"), options: [
+      { text: () => sceneStrings("tableRight"), correct: true },
+      { text: () => sceneStrings("tableWrong1"), correct: false },
+      { text: () => sceneStrings("tableWrong2"), correct: false },
+      { text: () => sceneStrings("tableWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("badQ"), options: [
+      { text: () => sceneStrings("badRight"), correct: true },
+      { text: () => sceneStrings("badWrong1"), correct: false },
+      { text: () => sceneStrings("badWrong2"), correct: false },
+      { text: () => sceneStrings("badWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("costQ"), options: [
+      { text: () => sceneStrings("costRight"), correct: true },
+      { text: () => sceneStrings("costWrong1"), correct: false },
+      { text: () => sceneStrings("costWrong2"), correct: false },
+      { text: () => sceneStrings("costWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("vdsoQ"), options: [
+      { text: () => sceneStrings("vdsoRight"), correct: true },
+      { text: () => sceneStrings("vdsoWrong1"), correct: false },
+      { text: () => sceneStrings("vdsoWrong2"), correct: false },
+      { text: () => sceneStrings("vdsoWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("iouringQ"), options: [
+      { text: () => sceneStrings("iouringRight"), correct: true },
+      { text: () => sceneStrings("iouringWrong1"), correct: false },
+      { text: () => sceneStrings("iouringWrong2"), correct: false },
+      { text: () => sceneStrings("iouringWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("wrapQ"), options: [
+      { text: () => sceneStrings("wrapRight"), correct: true },
+      { text: () => sceneStrings("wrapWrong1"), correct: false },
+      { text: () => sceneStrings("wrapWrong2"), correct: false },
+      { text: () => sceneStrings("wrapWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("int80Q"), options: [
+      { text: () => sceneStrings("int80Right"), correct: true },
+      { text: () => sceneStrings("int80Wrong1"), correct: false },
+      { text: () => sceneStrings("int80Wrong2"), correct: false },
+      { text: () => sceneStrings("int80Wrong3"), correct: false },
+    ] },
+    {
+      // ns = cycles / GHz  (since GHz = cycles per ns).
+      prompt: (v) => sceneStrings("nsNumQ", v),
+      variables: "c=[120:600] g=[2,3,4]",
+      answer: (v) => Math.round((v.c / v.g) * 10) / 10,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Without batching: n crossings. With batching: 1. Saved = n - 1.
+      prompt: (v) => sceneStrings("saveNumQ", v),
+      variables: "n=[4:40]",
+      answer: (v) => v.n - 1,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Translating Control Flow</primer-title>
+
+    <primer-card>
+      <p>
+        Expressions were the calm part. The moment a source program contains an <code>if</code>, a
+        <code>while</code>, or a <code>for</code>, the compiler faces a genuine translation problem: the target
+        <primer-ref to="computer-science/compiler-design/ir/three-address-code">three-address code</primer-ref>
+        has <em>no</em> structured control — no braces, no loop keyword. It has only <strong>labels</strong> and
+        <strong>jumps</strong>: <code>goto L</code>, and the conditional <code>if x relop y goto L</code>. So the
+        entire richness of structured programming must be <strong>lowered</strong> into a flat tangle of gotos
+        that behaves identically. This is "jumping code", and getting the labels in the right places is the whole
+        craft.
+      </p>
+      <p>
+        The good news is that each control construct has a fixed <strong>template</strong>. Once you internalise
+        the shape for <code>if</code>, <code>if-else</code>, and <code>while</code>, every program is just those
+        shapes nested inside one another. We build the templates, draw the control-flow graph they induce, and
+        then generate one in code.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The three templates</h2>
+      <p>
+        Write <primer-math>B</primer-math> for a boolean condition and <primer-math>S</primer-math> for a
+        statement body. Each template introduces one or two fresh labels (the analogue of
+        <primer-math>\textit{newtemp}()</primer-math> is <primer-math>\textit{newlabel}()</primer-math>) and
+        arranges a conditional jump so that control reaches the right place. Here they are as TAC skeletons:
+      </p>
+      <primer-code lang="text">
+        // if (B) S                          // if (B) S1 else S2
+            ifFalse B goto Lend                  ifFalse B goto Lelse
+            ... code for S ...                   ... code for S1 ...
+        Lend:                                    goto Lend
+                                             Lelse:
+                                                 ... code for S2 ...
+                                             Lend:
+
+        // while (B) S
+        Lbegin:
+            ifFalse B goto Lend
+            ... code for S ...
+            goto Lbegin        // the back-edge that makes it a loop
+        Lend:
+      </primer-code>
+      <p>
+        Three things repay attention. The condition is tested with <code>ifFalse … goto</code> so that
+        <em>failure</em> skips the body — you jump when the guard is false, and fall through when it is true.
+        The <code>if-else</code> needs the extra <code>goto Lend</code> after <primer-math>S_1</primer-math> so
+        that the "then" branch does not fall straight into the "else" branch. And the <code>while</code>'s
+        distinguishing feature is the <strong>back-edge</strong> <code>goto Lbegin</code>, the single jump that
+        turns a straight line into a loop.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The shape of the jumps: a control-flow graph</h2>
+      <p>
+        A picture makes the templates click. A <strong>control-flow graph</strong> (CFG) has one node per
+        <em>basic block</em> — a maximal run of straight-line code with a single entry and single exit — and an
+        edge wherever control can pass from one block to another. Below is the CFG of a <code>while</code> loop.
+        Reveal it block by block and watch the back-edge form the cycle.
+      </p>
+      <primer-geometry scene="whileCfg"></primer-geometry>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "whileCfg": {
+            "title": "Control-flow graph of a while loop",
+            "test": "The loop header tests the condition B (Lbegin).",
+            "body": "If B is true, control falls into the body S…",
+            "back": "…which ends in a back-edge 'goto Lbegin' — the cycle that makes it a loop.",
+            "exit": "If B is false, control jumps out to Lend and continues."
+          }
+        }
+      </script>
+      <p>
+        The header node has <strong>two</strong> out-edges — the essence of a conditional — one to the body (guard
+        true) and one to the exit (guard false). The body's out-edge points <em>back</em> to the header, closing
+        the loop. Every loop in every program, however it was written in the source, has exactly this silhouette
+        in the CFG: a header that dominates a body that jumps back to it.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Generating a loop in code</h2>
+      <p>
+        Here the templates become an emitter. We represent a tiny AST — assignments, a <code>while</code>, and a
+        relational condition — and lower it to TAC with fresh labels from <code>newlabel()</code>. The program is
+        <code>i = 1; while (i &lt;= n) { s = s + i; i = i + 1; }</code>.
+      </p>
+      <primer-code run>
+        type Cond = { l: string; rel: string; r: string };         // l rel r
+        type Stmt =
+          | { kind: "assign"; x: string; rhs: string }             // x = rhs (rhs is a raw TAC expression)
+          | { kind: "while"; cond: Cond; body: Stmt[] }
+          | { kind: "seq"; stmts: Stmt[] };
+
+        const code: string[] = [];
+        let labelN = 0;
+        const newlabel = () =&gt; `L${++labelN}`;
+        const emit = (s: string) =&gt; code.push(s);
+
+        // The negation of a relation, so we can jump-on-false to skip the body.
+        const negate = (rel: string) =&gt;
+          ({ "&lt;=": "&gt;", "&gt;=": "&lt;", "&lt;": "&gt;=", "&gt;": "&lt;=", "==": "!=", "!=": "==" } as Record&lt;string, string&gt;)[rel];
+
+        function genStmt(s: Stmt): void {
+          switch (s.kind) {
+            case "assign":
+              emit(`${s.x} = ${s.rhs}`);
+              break;
+            case "seq":
+              s.stmts.forEach(genStmt);
+              break;
+            case "while": {
+              const begin = newlabel(), end = newlabel();
+              emit(`${begin}:`);
+              // Jump OUT when the condition is false: use the negated relation.
+              emit(`ifFalse ${s.cond.l} ${s.cond.rel} ${s.cond.r} goto ${end}`);
+              s.body.forEach(genStmt);
+              emit(`goto ${begin}`);   // the back-edge
+              emit(`${end}:`);
+              break;
+            }
+          }
+        }
+
+        const program: Stmt = {
+          kind: "seq",
+          stmts: [
+            { kind: "assign", x: "s", rhs: "0" },
+            { kind: "assign", x: "i", rhs: "1" },
+            {
+              kind: "while",
+              cond: { l: "i", rel: "&lt;=", r: "n" },
+              body: [
+                { kind: "assign", x: "s", rhs: "s + i" },
+                { kind: "assign", x: "i", rhs: "i + 1" },
+              ],
+            },
+          ],
+        };
+
+        genStmt(program);
+        code.forEach((line) =&gt; console.log(line));
+      </primer-code>
+      <p>
+        The output is textbook jumping code: <code>L1:</code>, an <code>ifFalse i &lt;= n goto L2</code> guarding
+        the body, the two body assignments, a <code>goto L1</code> back-edge, and finally <code>L2:</code>. Notice
+        the emitter used <code>ifFalse … &lt;=</code> directly rather than <code>negate</code>; either works —
+        what matters is that the false case leaves the loop.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Nesting, break, and continue</h2>
+      <p>
+        Nothing new is needed for <strong>nested loops</strong>: because each <code>while</code> mints its own
+        <code>Lbegin</code>/<code>Lend</code>, an inner loop's labels are simply distinct from the outer's, and
+        the templates compose. The two jump statements slot in naturally:
+      </p>
+      <primer-theorem name="Lowering break and continue">
+        <ul>
+          <li>
+            <strong><code>break</code></strong> becomes <code>goto Lend</code> of the <em>nearest enclosing</em>
+            loop — it leaves the loop entirely.
+          </li>
+          <li>
+            <strong><code>continue</code></strong> becomes <code>goto Lbegin</code> (or to the increment step, in
+            a <code>for</code>) of the nearest enclosing loop — it skips the rest of this iteration and re-tests
+            the guard.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The compiler keeps a <em>stack</em> of the enclosing loops' begin/end labels; <code>break</code> and
+        <code>continue</code> read the top of that stack. A <code>for (init; cond; step) S</code> is pure sugar:
+        emit <code>init</code>, then a <code>while (cond) { S; step; }</code> — with the wrinkle that a
+        <code>continue</code> must jump to <code>step</code>, not skip it. A <code>switch</code> lowers to a
+        cascade of <code>if x == c_i goto L_i</code> tests (or, for dense integer cases, a jump table indexed by
+        the value).
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why 'ifFalse … goto' instead of 'if … goto' around the body?">
+      <p>
+        You could translate <code>if (B) S</code> as "<code>if B goto Lbody; goto Lend; Lbody: S; Lend:</code>" —
+        jumping <em>in</em> when true. But that spends an extra label and an extra unconditional jump for no
+        benefit. Testing the <em>negation</em> and jumping <em>out</em> when false lets the true case simply fall
+        through into the body, which is both shorter and the natural order the instructions already sit in.
+        Falling through is free; a jump costs a cycle and, on a real pipeline, risks a
+        <primer-ref soft to="computer-science/computer-architecture/foundations/the-iron-law-of-performance">branch
+        misprediction</primer-ref>. Good jumping code minimises taken branches, so "arrange the common path to
+        fall through" is a rule that echoes all the way down to the silicon.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Fall-through and loop-condition off-by-ones">
+      <p>
+        Two errors dominate hand-written control-flow lowering. First, <strong>fall-through</strong>: forget the
+        <code>goto Lend</code> at the end of the "then" branch of an <code>if-else</code>, and control tumbles
+        straight from <primer-math>S_1</primer-math> into <primer-math>S_2</primer-math> — <em>both</em> branches
+        run. The unconditional jump over the "else" arm is not optional. Second, the <strong>loop guard's
+        polarity</strong>: because you test the guard's negation to jump out, mixing up <code>&lt;=</code> with
+        <code>&lt;</code> (or <code>&gt;</code> with <code>&gt;=</code>) produces the classic off-by-one — the
+        loop runs one iteration too many or too few. When in doubt, write the condition under which you want to
+        <em>stay</em> in the loop, then negate it exactly once for the exit jump.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: control-flow lowering concepts + variable-driven loop-iteration counts. Bank of 13, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "flowQuiz@1": {
+          "intro": "Lowering if / while / for into labels and jumps. Numbers change every attempt.",
+          "primQ": "Structured control flow (if, while) is lowered in TAC using only…",
+          "prLabels": "labels and (conditional/unconditional) jumps",
+          "prLoops": "a built-in loop instruction",
+          "prBraces": "braces, exactly like the source",
+          "prCalls": "procedure calls",
+          "backQ": "What makes a while loop a loop in TAC?",
+          "bkEdge": "a back-edge — 'goto Lbegin' after the body",
+          "bkLabel": "a single label",
+          "bkTwo": "two conditions",
+          "bkCall": "a recursive call",
+          "guardQ": "Why test the condition with 'ifFalse B goto Lend'?",
+          "gFall": "so the true case falls through into the body and only false jumps out",
+          "gFast": "because ifFalse is a faster instruction",
+          "gOnly": "ifFalse is the only jump TAC has",
+          "gLabel": "to save a label on the body",
+          "elseQ": "In lowering if-else, why is a 'goto Lend' emitted after the then-branch S1?",
+          "elJump": "so control skips over the else-branch S2 instead of falling into it",
+          "elCond": "to re-test the condition",
+          "elTemp": "to allocate a temporary",
+          "elNone": "it is never needed",
+          "cfgQ": "In a control-flow graph, a node is…",
+          "cfgBlock": "a basic block — straight-line code with one entry and one exit",
+          "cfgInstr": "a single instruction always",
+          "cfgLabel": "a label only",
+          "cfgVar": "a variable",
+          "headerQ": "How many out-edges does a loop-header (condition) block have?",
+          "hdTwo": "two — one to the body (true), one to the exit (false)",
+          "hdOne": "one",
+          "hdThree": "three",
+          "hdZero": "zero",
+          "breakQ": "How is 'break' lowered?",
+          "brEnd": "goto Lend of the nearest enclosing loop",
+          "brBegin": "goto Lbegin of the loop",
+          "brHalt": "halt the program",
+          "brCall": "call a function",
+          "continueQ": "How is 'continue' lowered?",
+          "coBegin": "goto Lbegin (or the increment step) of the nearest enclosing loop",
+          "coEnd": "goto Lend of the loop",
+          "coNext": "fall through to the next statement",
+          "coRet": "return from the procedure",
+          "forQ": "A 'for (init; cond; step) S' is typically lowered as…",
+          "foWhile": "init; while (cond) { S; step; }",
+          "foDo": "a do-while with no condition",
+          "foGoto": "a single goto",
+          "foSwitch": "a switch statement",
+          "switchQ": "A switch on small dense integer cases is often lowered to…",
+          "swTable": "a jump table indexed by the value",
+          "swLoop": "an infinite loop",
+          "swCall": "one procedure call per case",
+          "swNone": "nothing — switch is a TAC primitive",
+          "watchQ": "Forgetting the 'goto Lend' after an if-else then-branch causes…",
+          "waBoth": "fall-through so BOTH branches execute",
+          "waNeither": "neither branch to execute",
+          "waCrash": "a compile error every time",
+          "waLoop": "an infinite loop always",
+          "iterQ": "The loop 'for i = 1 to ${n}' (inclusive, step 1) executes its body how many times?",
+          "iter0Q": "The loop 'for i = 0 to ${n}' (inclusive, step 1) executes its body how many times? (n+1)",
+          "labelQ": "Lowering a single while loop introduces how many fresh labels (Lbegin and Lend)?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="flowQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/ir/translating-expressions"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // CFG toolkit: rectangular basic-block nodes + directed edges with labels.
+  function cfgTools(board, colors) {
+    const block = (cx, cy, w, h, label, col) => {
+      const x0 = cx - w / 2, x1 = cx + w / 2, y0 = cy - h / 2, y1 = cy + h / 2;
+      board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+        borders: { strokeColor: col, strokeWidth: 2 }, fillColor: col, fillOpacity: 0.12,
+        vertices: { visible: false }, fixed: true, highlight: false,
+      });
+      board.create("text", [cx, cy, label], {
+        anchorX: "middle", anchorY: "middle", fontSize: 14, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    const arrow = (ax, ay, bx, by, col, text, offx = 0.4) => {
+      board.create("arrow", [[ax, ay], [bx, by]], {
+        strokeColor: col, strokeWidth: 2, fixed: true, highlight: false,
+      });
+      if (text) board.create("text", [(ax + bx) / 2 + offx, (ay + by) / 2, text], {
+        anchorX: "middle", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    };
+    return { block, arrow };
+  }
+
+  // CFG of a while loop: header (test) -> body -> back to header; header -> exit.
+  registerGeometryScene("whileCfg", ({ board, step, colors, sceneStrings }) => {
+    const C = cfgTools(board, colors);
+    const header = [0, 2.4], body = [0, -0.4], exit = [4.2, 2.4];
+
+    step(sceneStrings("test"), () => {
+      C.block(header[0], header[1], 3.4, 1.1, "Lbegin: if B", colors.cat[0]);
+    });
+    step(sceneStrings("body"), () => {
+      C.block(body[0], body[1], 3.4, 1.1, "body S", colors.cat[2]);
+      C.arrow(header[0] - 0.4, header[1] - 0.6, body[0] - 0.4, body[1] + 0.6, colors.cat[2], "true", -0.7);
+    });
+    step(sceneStrings("back"), () => {
+      // back-edge up the right side of the two blocks
+      C.arrow(body[0] + 0.9, body[1] + 0.55, header[0] + 0.9, header[1] - 0.55, colors.cat[3], "goto", 0.75);
+    });
+    step(sceneStrings("exit"), () => {
+      C.block(exit[0], exit[1], 3.0, 1.1, "Lend: …", colors.cat[1]);
+      C.arrow(header[0] + 1.7, header[1], exit[0] - 1.5, exit[1], colors.cat[1], "false", 0.0);
+    });
+  }, { boundingbox: [-2.6, 3.4, 6.2, -1.6], keepAspect: false, title: () => "Control-flow graph of a while loop" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("flowQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("primQ"),
+      options: [
+        { text: () => sceneStrings("prLabels"), correct: true },
+        { text: () => sceneStrings("prLoops"), correct: false },
+        { text: () => sceneStrings("prBraces"), correct: false },
+        { text: () => sceneStrings("prCalls"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("backQ"),
+      options: [
+        { text: () => sceneStrings("bkEdge"), correct: true },
+        { text: () => sceneStrings("bkLabel"), correct: false },
+        { text: () => sceneStrings("bkTwo"), correct: false },
+        { text: () => sceneStrings("bkCall"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("guardQ"),
+      options: [
+        { text: () => sceneStrings("gFall"), correct: true },
+        { text: () => sceneStrings("gFast"), correct: false },
+        { text: () => sceneStrings("gOnly"), correct: false },
+        { text: () => sceneStrings("gLabel"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("elseQ"),
+      options: [
+        { text: () => sceneStrings("elJump"), correct: true },
+        { text: () => sceneStrings("elCond"), correct: false },
+        { text: () => sceneStrings("elTemp"), correct: false },
+        { text: () => sceneStrings("elNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cfgQ"),
+      options: [
+        { text: () => sceneStrings("cfgBlock"), correct: true },
+        { text: () => sceneStrings("cfgInstr"), correct: false },
+        { text: () => sceneStrings("cfgLabel"), correct: false },
+        { text: () => sceneStrings("cfgVar"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("headerQ"),
+      options: [
+        { text: () => sceneStrings("hdTwo"), correct: true },
+        { text: () => sceneStrings("hdOne"), correct: false },
+        { text: () => sceneStrings("hdThree"), correct: false },
+        { text: () => sceneStrings("hdZero"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("breakQ"),
+      options: [
+        { text: () => sceneStrings("brEnd"), correct: true },
+        { text: () => sceneStrings("brBegin"), correct: false },
+        { text: () => sceneStrings("brHalt"), correct: false },
+        { text: () => sceneStrings("brCall"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("continueQ"),
+      options: [
+        { text: () => sceneStrings("coBegin"), correct: true },
+        { text: () => sceneStrings("coEnd"), correct: false },
+        { text: () => sceneStrings("coNext"), correct: false },
+        { text: () => sceneStrings("coRet"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("forQ"),
+      options: [
+        { text: () => sceneStrings("foWhile"), correct: true },
+        { text: () => sceneStrings("foDo"), correct: false },
+        { text: () => sceneStrings("foGoto"), correct: false },
+        { text: () => sceneStrings("foSwitch"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("switchQ"),
+      options: [
+        { text: () => sceneStrings("swTable"), correct: true },
+        { text: () => sceneStrings("swLoop"), correct: false },
+        { text: () => sceneStrings("swCall"), correct: false },
+        { text: () => sceneStrings("swNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("watchQ"),
+      options: [
+        { text: () => sceneStrings("waBoth"), correct: true },
+        { text: () => sceneStrings("waNeither"), correct: false },
+        { text: () => sceneStrings("waCrash"), correct: false },
+        { text: () => sceneStrings("waLoop"), correct: false },
+      ],
+    },
+    {
+      // for i = 1 to n inclusive -> n iterations.
+      prompt: (v) => sceneStrings("iterQ", v),
+      variables: "n=[1:12]",
+      answer: (v) => v.n,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // for i = 0 to n inclusive -> n+1 iterations.
+      prompt: (v) => sceneStrings("iter0Q", v),
+      variables: "n=[1:12]",
+      answer: (v) => v.n + 1,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // one while -> 2 labels.
+      prompt: () => sceneStrings("labelQ"),
+      answer: 2,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

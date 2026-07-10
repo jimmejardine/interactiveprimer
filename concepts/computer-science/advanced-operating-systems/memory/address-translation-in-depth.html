@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Address Translation in Depth</primer-title>
+
+    <primer-card>
+      <p>
+        In your undergraduate course you learned that
+        <primer-ref to="computer-science/operating-systems/virtual-memory-and-paging">paging</primer-ref>
+        chops the address space into fixed <strong>pages</strong> and stores, in a <strong>page table</strong>,
+        where each virtual page currently lives in physical memory. That picture is correct — and, for a modern
+        64-bit machine, quietly impossible to implement the way it is usually drawn. This lesson is about what
+        actually sits behind that one innocent phrase, "the page table", on real hardware running a real kernel.
+      </p>
+      <p>
+        The hardware side — the MMU walking the table, the
+        <primer-ref to="computer-science/computer-architecture/memory/the-tlb">TLB</primer-ref> caching the
+        result — you met in
+        <primer-ref to="computer-science/computer-architecture/memory/virtual-memory-and-address-translation">architecture</primer-ref>.
+        Here we take the <em>operating system's</em> view: how the OS <strong>builds and maintains</strong> these
+        structures, what they <strong>cost</strong> in memory, and why the flat array from the textbook has to be
+        replaced by a <strong>tree</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why a flat page table cannot exist</h2>
+      <p>
+        Take the textbook design literally. A page table is an array indexed by virtual page number (VPN); entry
+        <primer-math>i</primer-math> tells you the physical frame for page <primer-math>i</primer-math>. With
+        <primer-math>4\,\text{KiB}</primer-math> pages the offset is <primer-math>12</primer-math> bits, so on a
+        machine with a <primer-math>48</primer-math>-bit virtual address the VPN is
+        <primer-math>48 - 12 = 36</primer-math> bits. That is
+      </p>
+      <primer-math display>2^{36}\ \text{entries} \times 8\ \text{bytes/entry} \;=\; 2^{39}\ \text{bytes} \;=\; 512\ \text{GiB}.</primer-math>
+      <p>
+        Half a terabyte of page table — <em>per process</em> — to map an address space that is almost entirely
+        empty. And that is the friendly case: today's Intel and AMD chips also offer a
+        <primer-math>57</primer-math>-bit space, where the flat table would be
+        <primer-math>256\ \text{PiB}</primer-math>. The flat array pays for every page that <em>could</em> exist,
+        when a real process touches a few thousand. The fix is to make the structure <strong>sparse</strong>:
+        store table only where the address space is actually populated.
+      </p>
+      <primer-vignette title="How much of a 64-bit address space does a program actually use?">
+        <p>
+          A big server process might map a few gigabytes — call it <primer-math>2^{32}</primer-math> bytes, or
+          <primer-math>2^{20}</primer-math> pages. Against a <primer-math>48</primer-math>-bit space that is
+          <primer-math>2^{20}/2^{36} = 2^{-16}</primer-math>, roughly <strong>0.0015%</strong> occupancy. The
+          address space is not a warehouse that is nearly full; it is an almost-empty desert with a few small
+          cities (code, heap, stack, mapped files) scattered light-years apart. Any sane page-table design must
+          spend memory in proportion to the cities, not the desert — which is exactly what a radix tree does.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <!-- Strings for the multi-level page-walk figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "walk": {
+          "title": "The x86-64 four-level page walk: CR3 → PML4 → PDPT → PD → PT → 4 KiB frame",
+          "va": "48-bit virtual address = four 9-bit indices + 12-bit offset",
+          "cr3": "CR3 points at the top table; each 9-bit field indexes one level.",
+          "l4": "PML4: index bits 47–39 pick one of 512 entries → address of a PDPT.",
+          "l3": "PDPT: index bits 38–30 → address of a Page Directory.",
+          "l2": "PD: index bits 29–21 → address of a Page Table.",
+          "l1": "PT: index bits 20–12 → the Page Table Entry (PTE) with the frame number.",
+          "frame": "Frame + 12-bit offset = the physical address. Four memory reads to translate one."
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The radix (multi-level) page table</h2>
+      <p>
+        The winning design — used by x86-64, ARMv8, RISC-V Sv48/Sv57 — is a <strong>radix tree</strong>. Instead
+        of one giant array indexed by the whole 36-bit VPN, split the VPN into equal slices and use each slice to
+        index one <em>level</em> of the tree. On x86-64 with <primer-math>4\,\text{KiB}</primer-math> pages the
+        <primer-math>36</primer-math>-bit VPN is cut into four <primer-math>9</primer-math>-bit indices, giving a
+        <strong>four-level</strong> table (Intel's names: PML4 → PDPT → PD → PT). Each table is exactly
+        <primer-math>512</primer-math> entries <primer-math>\times\, 8</primer-math> bytes
+        <primer-math>= 4\,\text{KiB}</primer-math> — one page, deliberately. Walk the tree once for the whole
+        address:
+      </p>
+      <primer-geometry scene="walk"></primer-geometry>
+      <p>
+        The magic is that <strong>upper levels can be missing</strong>. If a whole <primer-math>512\,\text{GiB}</primer-math>
+        region of the address space is unused, the single PML4 entry that would point into it is simply marked
+        <em>not present</em>, and none of the tables beneath it need exist. A process touching a few megabytes
+        needs only a handful of tables — a few tens of kilobytes — instead of half a terabyte. The tree spends
+        memory on the cities, not the desert.
+      </p>
+      <primer-theorem name="Multi-level (radix) page tables">
+        <ul>
+          <li>the virtual page number is split into <primer-math>k</primer-math> equal indices; each indexes one
+            level of a tree of tables, so a lookup is <primer-math>k</primer-math> dependent memory reads;</li>
+          <li>x86-64 uses <primer-math>k=4</primer-math> levels of <primer-math>9</primer-math>-bit indices
+            (<primer-math>48</primer-math>-bit VA), or <primer-math>k=5</primer-math> for the
+            <primer-math>57</primer-math>-bit space; each table is one <primer-math>4\,\text{KiB}</primer-math> page of
+            <primer-math>512</primer-math> eight-byte entries;</li>
+          <li>a <em>not-present</em> upper entry prunes an entire subtree, so table memory scales with the
+            <strong>pages actually mapped</strong>, not with the size of the address space.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Walk it by hand, then by code</h2>
+      <p>
+        Translation is pure bit-slicing. Given a virtual address, the bottom
+        <primer-math>12</primer-math> bits are the byte <strong>offset</strong> (they are <em>not</em> translated
+        — they pass straight through). The next four groups of <primer-math>9</primer-math> bits, read from the
+        <em>top</em>, index PML4, PDPT, PD and PT in turn:
+      </p>
+      <primer-math display>\text{VA} = \underbrace{i_4}_{47\text{–}39}\;\underbrace{i_3}_{38\text{–}30}\;\underbrace{i_2}_{29\text{–}21}\;\underbrace{i_1}_{20\text{–}12}\;\underbrace{\text{offset}}_{11\text{–}0}.</primer-math>
+      <p>
+        Each index selects an <primer-math>8</primer-math>-byte entry that holds the physical address of the
+        <em>next</em> table (or, at the last level, of the data frame) plus permission and status bits. Run the
+        translator below: it splits an address, prints the four indices, and tallies the memory the walk touches.
+      </p>
+      <primer-code run>
+        // x86-64 style four-level translation of a 48-bit virtual address.
+        // 4 KiB pages -> 12-bit offset; four 9-bit table indices (PML4, PDPT, PD, PT).
+        const VA = 0x5f3c2a15abc; // a virtual address (< 2^48)
+
+        const offset = VA % 4096;                                  // low 12 bits
+        const index = (level: number): number =>                   // level 0 = PT ... 3 = PML4
+          Math.floor(VA / 2 ** (12 + 9 * level)) % 512;
+
+        const names = ["PT", "PD", "PDPT", "PML4"];
+        console.log(`VA = 0x${VA.toString(16)}`);
+        for (let level = 3; level >= 0; level--) {
+          console.log(`  ${names[level].padEnd(4)} index = ${index(level)}  (9 bits)`);
+        }
+        console.log(`  offset      = ${offset}  (passes through untranslated)`);
+
+        // Cost of the walk: four table reads, one page per level.
+        console.log(`translation touches 4 tables x 4 KiB = ${4 * 4} KiB, then 1 data read`);
+        console.log("=> up to 4 extra memory accesses per reference -- which is why the TLB exists");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The other shapes: inverted and hashed page tables</h2>
+      <p>
+        The radix tree is <em>per-process</em> and its size grows with the virtual memory a process maps. A
+        different idea flips the question around. An <strong>inverted page table</strong> has one entry per
+        <em>physical</em> frame, not per virtual page — so its size is fixed by how much RAM the machine has, not
+        by how many processes or how large their address spaces are. To translate, you search the table for the
+        entry holding <primer-math>(\text{pid}, \text{VPN})</primer-math>; to make that search fast you keep a
+        <strong>hash</strong> of <primer-math>(\text{pid}, \text{VPN})</primer-math> — a <strong>hashed page
+        table</strong>. IBM's PowerPC and PA-RISC used exactly this.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Structure</th><th>Size scales with</th><th>Lookup</th><th>Used by</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Flat (single-level)</td><td>virtual address space (huge)</td><td>1 read</td><td>nobody, on 64-bit</td></tr>
+            <tr><td>Radix / multi-level</td><td>pages actually mapped</td><td><primer-math>k</primer-math> dependent reads</td><td>x86-64, ARMv8, RISC-V</td></tr>
+            <tr><td>Inverted / hashed</td><td>physical RAM</td><td>hash + chain walk</td><td>PowerPC, PA-RISC, Itanium</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Inverted tables shine when RAM is small relative to the address space and you have many big, sparse
+        processes — they cost the same no matter how much virtual memory is mapped. But sharing a page between
+        processes is awkward (one physical frame, many virtual mappings), and every miss pays a hash lookup that
+        the MMU must be built to do. x86-64 bet on the radix tree instead, because upper-level entries
+        <em>are</em> shareable and the walk is a dumb, cacheable pointer-chase the hardware does brilliantly.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why did Intel bolt on a fifth level of paging?">
+      <p>
+        Four levels of <primer-math>9</primer-math>-bit indices reach <primer-math>4 \times 9 + 12 = 48</primer-math>
+        bits — a <primer-math>256\,\text{TiB}</primer-math> virtual space, and (with matching physical addressing)
+        enough to map a few terabytes of RAM comfortably. But big-memory servers began bumping into that ceiling,
+        and <em>memory-mapped</em> persistent storage wants to map far more than sits in DRAM. So Intel added
+        <strong>5-level paging</strong>: one more <primer-math>9</primer-math>-bit level (PML5) on top, reaching
+        <primer-math>57</primer-math> bits — a <primer-math>128\,\text{PiB}</primer-math> address space. Linux
+        keeps it off by default and turns it on only when a process asks for a mapping above the 47-bit line, so
+        the common case still pays for four levels, not five. It is the radix tree's best trick: growing the
+        address space costs exactly <em>one more pointer indirection</em>.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The page table lives in physical memory the MMU reads directly">
+      <p>
+        A tempting but wrong mental model is that page tables are some special CPU register file. They are not —
+        they are ordinary data structures sitting in <em>physical</em> RAM, and the entries hold
+        <strong>physical</strong> frame numbers (if they held virtual addresses you would need to translate them,
+        and translation would never terminate). The CPU's <primer-math>\texttt{CR3}</primer-math> register holds
+        the <em>physical</em> address of the top table; the MMU follows physical pointers all the way down. This
+        is also why the OS, when it edits a page table, must reason in physical addresses and cannot simply
+        dereference a pointer — and why a stray write into page-table memory is catastrophic. The tables are
+        data, but they are the data that defines what all other data <em>means</em>.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>What the OS actually does</h2>
+      <p>
+        None of this walking is the OS's job at run time — the MMU does the walk in hardware. The kernel's role is
+        to be the <strong>architect and janitor</strong> of the tree. On <primer-math>\texttt{fork}</primer-math>
+        or <primer-math>\texttt{exec}</primer-math> it allocates the top table and enough lower tables for the
+        initial mappings; on a page fault into a valid-but-unmapped region it <em>allocates a table on demand</em>
+        and fills in the entry; on <primer-math>\texttt{munmap}</primer-math> or exit it tears tables down and can
+        free ones that have become empty. It sets the permission and status bits the hardware reads (present,
+        writable, user/supervisor, no-execute) and the ones the hardware <em>writes</em> (accessed and dirty),
+        which the
+        <primer-ref forward to="computer-science/advanced-operating-systems/memory/page-replacement-algorithms">page-replacement</primer-ref>
+        policy later harvests. Mechanism (the walk) is the hardware's; policy and bookkeeping (the tree's shape and
+        contents) are the kernel's.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: radix-table concepts + variable-driven numeric page-table-size / index-bit calculations. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "atdQuiz@1": {
+          "intro": "Radix page tables: split the VPN into equal indices; table memory scales with pages mapped, not with the address space.",
+          "whyQ": "Why is a single flat page table impractical on a 64-bit machine?",
+          "wRight": "it must reserve one entry for every possible page, so it is enormous even when almost nothing is mapped",
+          "wWrong1": "the MMU cannot read arrays",
+          "wWrong2": "flat tables cannot store permission bits",
+          "wWrong3": "64-bit addresses have no page offset",
+          "sparseQ": "How does a multi-level (radix) page table save memory over a flat one?",
+          "spRight": "a not-present upper-level entry prunes an entire subtree, so no lower tables exist for unmapped regions",
+          "spWrong1": "it compresses each entry to a single bit",
+          "spWrong2": "it stores the table on disk instead of RAM",
+          "spWrong3": "it uses larger pages only",
+          "levelsQ": "x86-64 with 4 KiB pages and a 48-bit virtual address uses how many levels of page table?",
+          "lvRight": "four (four 9-bit indices)",
+          "lvWrong1": "one",
+          "lvWrong2": "two",
+          "lvWrong3": "twelve",
+          "tableSzQ": "Each x86-64 page table is exactly one 4 KiB page because…",
+          "tsRight": "512 entries x 8 bytes = 4 KiB, matching the page size so a table is itself a page",
+          "tsWrong1": "the CPU has only 4 KiB of registers",
+          "tsWrong2": "it stores exactly 4096 entries",
+          "tsWrong3": "pages must be 8 bytes",
+          "invQ": "An inverted page table has one entry per…",
+          "ivRight": "physical frame — so its size is set by installed RAM, not by the address space",
+          "ivWrong1": "virtual page, like a flat table",
+          "ivWrong2": "process, regardless of memory",
+          "ivWrong3": "CPU core",
+          "hashQ": "A hashed page table is used to…",
+          "hRight": "make the search of an inverted table fast by hashing (pid, VPN)",
+          "hWrong1": "encrypt the page table",
+          "hWrong2": "compress physical memory",
+          "hWrong3": "avoid needing any TLB",
+          "offsetQ": "The low bits of a virtual address (the page offset) are…",
+          "offRight": "passed straight through untranslated to the physical address",
+          "offWrong1": "hashed to find the frame",
+          "offWrong2": "the top-level table index",
+          "offWrong3": "discarded during translation",
+          "fiveQ": "5-level paging on x86-64 exists to…",
+          "fvRight": "extend the virtual address from 48 to 57 bits by adding one more index level",
+          "fvWrong1": "make translation twice as fast",
+          "fvWrong2": "remove the need for a TLB",
+          "fvWrong3": "shrink each page to 2 KiB",
+          "crQ": "The CR3 register holds…",
+          "crRight": "the physical address of the top-level page table",
+          "crWrong1": "the virtual address of the heap",
+          "crWrong2": "the current instruction pointer",
+          "crWrong3": "the TLB contents",
+          "offsetNumQ": "With a page size of {pk} KiB, how many bits is the page offset?",
+          "flatNumQ": "A flat page table has a {vb}-bit VPN and 8-byte entries. What is its size in GiB? (i.e. 2^(vb+3) bytes / 2^30)",
+          "idxNumQ": "A radix table splits a {vpn}-bit VPN into {lv} equal indices. How many bits is each index?",
+          "entriesNumQ": "A page table fits in one {pk} KiB page with 8-byte entries. How many entries does it hold?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="atdQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/operating-systems/virtual-memory-and-paging",
+      "computer-science/computer-architecture/memory/virtual-memory-and-address-translation"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The four-level page-walk block diagram (CR3 -> PML4 -> PDPT -> PD -> PT -> frame), stepped so the
+     learner reveals one level at a time; colours only from themeColors(). Plus the randomised quiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "walk",
+    ({ board, colors, step, sceneStrings }) => {
+      const boxes = [
+        { key: "PML4", cx: 0.6, sk: "l4" },
+        { key: "PDPT", cx: 3.0, sk: "l3" },
+        { key: "PD", cx: 5.4, sk: "l2" },
+        { key: "PT", cx: 7.8, sk: "l1" },
+        { key: "4 KiB\nframe", cx: 10.2, sk: "frame" },
+      ];
+      const W = 1.7, H = 1.1, y0 = 1.2;
+
+      // Top: the virtual-address field breakdown (base content, always visible).
+      board.create("text", [5.7, 3.2, sceneStrings("va")], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle",
+        fixed: true, highlight: false, cssStyle: "font-weight:600; max-width:520px",
+      });
+      // CR3 pointer, base content.
+      board.create("text", [0.6 + W / 2, y0 + H + 0.35, "CR3"], {
+        strokeColor: colors.cat[1], fontSize: 12, anchorX: "middle", anchorY: "middle",
+        fixed: true, highlight: false, cssStyle: "font-weight:700",
+      });
+
+      const drawBox = (b, i) => {
+        board.create(
+          "polygon",
+          [[b.cx, y0], [b.cx + W, y0], [b.cx + W, y0 + H], [b.cx, y0 + H]],
+          {
+            fillColor: i === boxes.length - 1 ? colors.cat[1] : colors.cat[0],
+            fillOpacity: 0.22,
+            borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+            vertices: { visible: false }, fixed: true, highlight: false,
+          },
+        );
+        board.create("text", [b.cx + W / 2, y0 + H / 2, b.key], {
+          strokeColor: colors.ink, fontSize: 13, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:600; white-space:pre; text-align:center",
+        });
+        if (i > 0) {
+          const prev = boxes[i - 1];
+          board.create("arrow", [[prev.cx + W, y0 + H / 2], [b.cx, y0 + H / 2]], {
+            strokeColor: colors.line, strokeWidth: 2, lastArrow: { type: 1, size: 5 }, highlight: false, fixed: true,
+          });
+        }
+      };
+
+      boxes.forEach((b, i) => step(sceneStrings(b.sk), () => drawBox(b, i)));
+    },
+    {
+      boundingbox: [-0.6, 3.9, 12.6, 0.4],
+      keepAspect: false,
+      title: () => makeStrings("walk")("title"),
+    },
+  );
+
+  registerQuiz("atdQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("wRight"), correct: true },
+        { text: () => sceneStrings("wWrong1"), correct: false },
+        { text: () => sceneStrings("wWrong2"), correct: false },
+        { text: () => sceneStrings("wWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sparseQ"),
+      options: [
+        { text: () => sceneStrings("spRight"), correct: true },
+        { text: () => sceneStrings("spWrong1"), correct: false },
+        { text: () => sceneStrings("spWrong2"), correct: false },
+        { text: () => sceneStrings("spWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("levelsQ"),
+      options: [
+        { text: () => sceneStrings("lvRight"), correct: true },
+        { text: () => sceneStrings("lvWrong1"), correct: false },
+        { text: () => sceneStrings("lvWrong2"), correct: false },
+        { text: () => sceneStrings("lvWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tableSzQ"),
+      options: [
+        { text: () => sceneStrings("tsRight"), correct: true },
+        { text: () => sceneStrings("tsWrong1"), correct: false },
+        { text: () => sceneStrings("tsWrong2"), correct: false },
+        { text: () => sceneStrings("tsWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("invQ"),
+      options: [
+        { text: () => sceneStrings("ivRight"), correct: true },
+        { text: () => sceneStrings("ivWrong1"), correct: false },
+        { text: () => sceneStrings("ivWrong2"), correct: false },
+        { text: () => sceneStrings("ivWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hashQ"),
+      options: [
+        { text: () => sceneStrings("hRight"), correct: true },
+        { text: () => sceneStrings("hWrong1"), correct: false },
+        { text: () => sceneStrings("hWrong2"), correct: false },
+        { text: () => sceneStrings("hWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("offsetQ"),
+      options: [
+        { text: () => sceneStrings("offRight"), correct: true },
+        { text: () => sceneStrings("offWrong1"), correct: false },
+        { text: () => sceneStrings("offWrong2"), correct: false },
+        { text: () => sceneStrings("offWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fiveQ"),
+      options: [
+        { text: () => sceneStrings("fvRight"), correct: true },
+        { text: () => sceneStrings("fvWrong1"), correct: false },
+        { text: () => sceneStrings("fvWrong2"), correct: false },
+        { text: () => sceneStrings("fvWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("crQ"),
+      options: [
+        { text: () => sceneStrings("crRight"), correct: true },
+        { text: () => sceneStrings("crWrong1"), correct: false },
+        { text: () => sceneStrings("crWrong2"), correct: false },
+        { text: () => sceneStrings("crWrong3"), correct: false },
+      ],
+    },
+    {
+      // Offset bits = log2(page size). pk in KiB -> 10 + log2(pk).
+      prompt: (v) => sceneStrings("offsetNumQ", v),
+      variables: "pk=[4,8,16,64]",
+      answer: (v) => 10 + Math.round(Math.log2(v.pk)),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Flat table size in GiB = 2^(vb+3) / 2^30 = 2^(vb-27).
+      prompt: (v) => sceneStrings("flatNumQ", v),
+      variables: "vb=[28:34]",
+      answer: (v) => 2 ** (v.vb - 27),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Each index bits = vpn / lv (choose divisible pairs).
+      prompt: (v) => sceneStrings("idxNumQ", v),
+      variables: "vpn=[36:36] lv=[3,4,6]",
+      answer: (v) => v.vpn / v.lv,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Entries per table = (pk*1024)/8 = pk*128.
+      prompt: (v) => sceneStrings("entriesNumQ", v),
+      variables: "pk=[4,8,16]",
+      answer: (v) => v.pk * 128,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

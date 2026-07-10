@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Building an HTTP Server</primer-title>
+
+    <primer-card>
+      <p>
+        Everything in this module has been building to a single, satisfying payoff: you now know enough to build
+        a <strong>web server</strong> from raw sockets — the thing that sits behind every URL you have ever
+        visited. And the wonderful secret, once you strip away the frameworks, is how <em>small</em> the core
+        idea is. An HTTP server accepts a TCP connection, reads some text off it, figures out what the client
+        asked for, writes some text back, and decides whether to keep the line open. That's it. HTTP is, at
+        heart, <strong>a text protocol over a byte stream</strong> — and you have already met every hard part.
+      </p>
+      <p>
+        This is the capstone. We will assemble the pieces you now hold — the
+        <primer-ref soft to="computer-science/networks/programming/the-socket-api">socket lifecycle</primer-ref>,
+        <primer-ref soft to="computer-science/networks/programming/serialization-and-framing">framing</primer-ref>,
+        and a <primer-ref soft to="computer-science/networks/programming/concurrent-servers">concurrency
+        choice</primer-ref> — into one working request/response engine, and write a real (runnable) HTTP parser
+        and router. Along the way you'll see precisely where the classic security and correctness bugs hide.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The anatomy of an HTTP message</h2>
+      <p>
+        HTTP's genius is that a request and a response have the <em>same</em> three-part shape, all in plain
+        text with <code>\r\n</code> (carriage-return + line-feed) line endings:
+      </p>
+      <ol>
+        <li>
+          A <strong>start line</strong>. For a request: <code>GET /hello?name=alice HTTP/1.1</code> — method,
+          target, version. For a response: <code>HTTP/1.1 200 OK</code> — version, status code, reason phrase.
+        </li>
+        <li>
+          A block of <strong>headers</strong>, one <code>Name: value</code> per line
+          (<code>Host: example.com</code>, <code>Content-Type: text/plain</code>, <code>Content-Length: 12</code>).
+        </li>
+        <li>
+          A <strong>blank line</strong> (<code>\r\n\r\n</code>) — and then, optionally, the
+          <strong>body</strong>.
+        </li>
+      </ol>
+      <p>
+        Look at how HTTP <em>frames</em> itself, because it is the exact combination from the framing page. The
+        header block is <strong>delimiter-framed</strong>: it ends at the first blank line
+        (<code>\r\n\r\n</code>). The body is <strong>length-prefixed</strong>: the <code>Content-Length</code>
+        header tells you exactly how many body bytes follow. So parsing an HTTP message means: read until you
+        see the blank line (you now have all the headers), read <code>Content-Length</code>, then read exactly
+        that many more bytes for the body. Both framing strategies, in one message.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The request lifecycle</h2>
+      <p>
+        Here is the whole loop a server runs per connection. Trace it once and every web server you ever touch
+        is a variation on it.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "httpLifecycle": {
+            "title": "One connection's request/response loop",
+            "accept": "accept() — a client TCP connection arrives",
+            "read": "read() bytes into a buffer",
+            "complete": "have a WHOLE request? (blank line + full body) — if not, read more",
+            "parse": "parse: start line + headers + body (via Content-Length)",
+            "route": "route: match method + path to a handler",
+            "build": "build response: status line + headers + body",
+            "write": "write() the response bytes back",
+            "keepalive": "keep-alive? loop back to read : close()",
+            "loop": "keep-alive reuses the same connection"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="httpLifecycle"
+        caption="A single vertical timeline for one connection: accept a TCP connection, read bytes into a buffer, check whether a whole request has arrived (blank line plus full Content-Length body) and read more if not, parse the start line/headers/body, route method+path to a handler, build the status-line/headers/body response, write it back, then either loop back to read (keep-alive) or close."
+      ></primer-geometry>
+
+      <p>
+        Two subtleties, both familiar. <strong>Reading a whole request</strong> is a
+        <primer-ref soft to="computer-science/networks/programming/serialization-and-framing">deframing</primer-ref>
+        problem — one <code>read()</code> may deliver half a request or several glued together, so you buffer
+        and re-check. <strong>Keep-alive</strong> means one TCP connection carries many requests in sequence
+        (HTTP/1.1's default), so after writing a response you loop back rather than closing — saving a handshake
+        per request.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The centrepiece: a real HTTP parser and router</h2>
+      <p>
+        Now the payoff — a genuinely working HTTP engine. It parses a raw request <em>string</em> exactly as it
+        arrives on the wire (with real <code>\r\n</code> line endings), splits headers from body at the blank
+        line, routes on method + path, and produces a correct raw response string. Pure string logic — no
+        sockets — so it runs right here.
+      </p>
+
+      <primer-code run>
+        // ---- PARSE a raw HTTP request (the bytes off the socket) into a structured object ----
+        function parseRequest(raw) {
+          const sep = raw.indexOf("\r\n\r\n");         // the blank line: headers END here
+          if (sep === -1) return { partial: true };    // no blank line yet -> need MORE bytes
+          const head = raw.slice(0, sep);
+          const rawBody = raw.slice(sep + 4);
+          const lines = head.split("\r\n");
+          const [method, target, version] = lines[0].split(" ");
+
+          const headers = {};
+          for (let i = 1; i &lt; lines.length; i++) {
+            const c = lines[i].indexOf(":");
+            headers[lines[i].slice(0, c).trim().toLowerCase()] = lines[i].slice(c + 1).trim();
+          }
+          // Body is length-prefixed by Content-Length. If we don't have it all yet, wait.
+          const need = Number(headers["content-length"] || 0);
+          if (rawBody.length &lt; need) return { partial: true };
+
+          const qi = target.indexOf("?");
+          const path = qi === -1 ? target : target.slice(0, qi);
+          return { method, path, version, headers, body: rawBody.slice(0, need) };
+        }
+
+        // ---- BUILD a raw HTTP response string (status line + headers + blank line + body) ----
+        function buildResponse(status, reason, body, extra) {
+          const headers = Object.assign(
+            { "Content-Type": "text/plain", "Content-Length": body.length }, extra || {});
+          let out = `HTTP/1.1 ${status} ${reason}\r\n`;
+          for (const k in headers) out += `${k}: ${headers[k]}\r\n`;
+          return out + "\r\n" + body;                  // the blank line, then the body
+        }
+
+        // ---- ROUTE: a tiny table of "METHOD path" -> handler(req) ----
+        const routes = {
+          "GET /":       (r) =&gt; buildResponse(200, "OK", "Welcome to the Primer HTTP server\n"),
+          "GET /hello":  (r) =&gt; buildResponse(200, "OK", "Hello, HTTP!\n"),
+          "POST /echo":  (r) =&gt; buildResponse(200, "OK", `You said: ${r.body}\n`),
+        };
+
+        function serve(raw) {
+          const req = parseRequest(raw);
+          if (req.partial) return "(request incomplete — read more bytes)";
+          const handler = routes[`${req.method} ${req.path}`];
+          return handler ? handler(req)
+                         : buildResponse(404, "Not Found", `No route for ${req.path}\n`);
+        }
+
+        // ---- Drive it with real raw requests ----
+        const getReq  = "GET /hello HTTP/1.1\r\nHost: primer.dev\r\n\r\n";
+        const postReq = "POST /echo HTTP/1.1\r\nHost: primer.dev\r\nContent-Length: 5\r\n\r\nmilk!";
+        const badReq  = "GET /nope HTTP/1.1\r\nHost: primer.dev\r\n\r\n";
+
+        const show = (label, raw) =&gt; {
+          console.log(`=== ${label} ===`);
+          console.log(serve(raw).replace(/\r\n/g, "\\r\\n\n"));   // show CRLFs visibly
+          console.log("");
+        };
+        show("GET /hello", getReq);
+        show("POST /echo (Content-Length body)", postReq);
+        show("GET /nope (unmatched -> 404)", badReq);
+      </primer-code>
+
+      <p>
+        Read the output as bytes: each response is a status line, some headers, a <em>blank line</em>
+        (<code>\r\n\r\n</code>), then the body — and <code>Content-Length</code> tells the client exactly how
+        many body bytes to expect, so it knows when the response ends without closing the connection. That is a
+        real, if tiny, web server.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Choosing how to serve, and where it breaks</h2>
+      <p>
+        A real server wraps that engine in a concurrency model. The
+        <primer-ref soft to="computer-science/networks/programming/concurrent-servers">choices you met</primer-ref>
+        all apply: a thread/worker pool per connection is simple and common; a
+        <primer-ref soft to="computer-science/networks/programming/nonblocking-and-event-driven-io">single-threaded
+        event loop</primer-ref> (nginx, Node) scales to enormous connection counts; a pre-forked process pool
+        (Apache, Gunicorn) trades memory for isolation. HTTP itself is agnostic — the request/response engine
+        above is the same in all of them.
+      </p>
+      <p>
+        But the engine above is <em>naïve</em>, and a server exposed to the open internet meets input that is
+        not merely well-formed test data. This is where beginners' servers get exploited or fall over.
+      </p>
+
+      <primer-vignette title="Watch out! — never trust the bytes on the wire">
+        <p>
+          A production HTTP server faces <strong>malformed, partial, and hostile</strong> requests as a matter
+          of routine, and the parser above handles none of them safely. The three classic traps:
+        </p>
+        <ul>
+          <li>
+            <strong>Don't trust <code>Content-Length</code> blindly.</strong> A hostile client can claim
+            <code>Content-Length: 999999999</code> and dribble the body one byte per second, tying up a
+            connection forever (a "Slowloris" attack), or lie about the length to smuggle a second request past
+            a proxy (<strong>request smuggling</strong>). Real servers <em>cap</em> the body size, <em>time
+            out</em> slow reads, and reconcile <code>Content-Length</code> with <code>Transfer-Encoding</code>
+            strictly.
+          </li>
+          <li>
+            <strong>Don't forget the blank line.</strong> The <code>\r\n\r\n</code> that separates headers from
+            body is <em>the</em> frame boundary. Miss it and you either read body bytes as headers or hang
+            forever waiting for a request you have already fully received. A request that never sends the blank
+            line must eventually be timed out, not awaited indefinitely.
+          </li>
+          <li>
+            <strong>Sanitise header values (injection).</strong> If you copy a client-supplied value into a
+            response header without stripping <code>\r\n</code>, an attacker can inject their own headers or
+            split your response in two (<strong>HTTP response splitting / header injection</strong>). Never echo
+            untrusted bytes into the header block unescaped.
+          </li>
+        </ul>
+        <p>
+          The one-line moral of the whole module: <strong>a byte stream from the network is adversarial input.</strong>
+          Frame it carefully, bound it, time it out, and validate every field before you believe it.
+        </p>
+      </primer-vignette>
+
+      <primer-vignette title="Why does HTTP still use plain text and \r\n in 2020s binary protocols?">
+        <p>
+          HTTP/1.1 is gloriously human-readable — you can literally <code>telnet</code> to port 80, type
+          <code>GET / HTTP/1.1</code>, and read the reply. That debuggability is a big reason it conquered the
+          world. But text has costs (parsing ambiguity, header repetition, head-of-line blocking), so
+          <strong>HTTP/2</strong> re-encoded the very same semantics as a <em>binary</em>, multiplexed,
+          header-compressed framing — and <strong>HTTP/3</strong> moved it all onto
+          <primer-ref soft to="computer-science/networks/transport/udp">UDP</primer-ref> via QUIC. The
+          <em>meaning</em> (methods, paths, headers, status codes) is unchanged since the 1990s; only the
+          framing on the wire got faster. Learn the text version and you understand all three.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "httpServerQuiz@1": { "instructions": "Check your grasp of building an HTTP server: message anatomy, the parse/route/respond loop, HTTP's self-framing, keep-alive, and the security pitfalls of untrusted input." } }
+    </script>
+    <primer-quiz name="httpServerQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/programming/the-socket-api",
+      "computer-science/networks/application/http"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // A single vertical timeline for one connection: accept -> read -> (complete?) ->
+  // parse -> route -> build -> write -> keep-alive?/close, with a loop-back arrow
+  // from the keep-alive decision to the read step.
+  registerGeometryScene("httpLifecycle", ({ board, step, colors, sceneStrings }) => {
+    const X = 0;
+    const rows = [4, 3, 2, 1, 0, -1, -2, -3];
+
+    const box = (y, s, col) =>
+      board.create("text", [X, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true,
+        highlight: false, strokeColor: col, color: col,
+        cssStyle: "font-weight:600; text-align:center; width:340px; display:inline-block",
+      });
+
+    // faint spine (base content)
+    board.create("segment", [[X, 4.4], [X, -3.4]], { strokeColor: colors.line, strokeOpacity: 0.3, fixed: true, highlight: false, straightFirst: false, straightLast: false });
+
+    step(sceneStrings("accept"),   () => box(rows[0], sceneStrings("accept"), colors.cat[0]));
+    step(sceneStrings("read"),     () => box(rows[1], sceneStrings("read"), colors.ink));
+    step(sceneStrings("complete"), () => box(rows[2], sceneStrings("complete"), colors.cat[2]));
+    step(sceneStrings("parse"),    () => box(rows[3], sceneStrings("parse"), colors.ink));
+    step(sceneStrings("route"),    () => box(rows[4], sceneStrings("route"), colors.ink));
+    step(sceneStrings("build"),    () => box(rows[5], sceneStrings("build"), colors.ink));
+    step(sceneStrings("write"),    () => box(rows[6], sceneStrings("write"), colors.ink));
+    step(sceneStrings("keepalive"), () => box(rows[7], sceneStrings("keepalive"), colors.cat[1]));
+
+    // keep-alive loop-back arrow from the decision (bottom) up to read()
+    step(sceneStrings("loop"), () => {
+      board.create("arrow", [[2.6, rows[7]], [2.6, rows[1]]], { strokeColor: colors.cat[1], strokeWidth: 1.5, dash: 2, fixed: true, highlight: false });
+      board.create("segment", [[X + 0.4, rows[7]], [2.6, rows[7]]], { strokeColor: colors.cat[1], strokeWidth: 1.5, dash: 2, fixed: true, highlight: false, straightFirst: false, straightLast: false });
+      board.create("segment", [[2.6, rows[1]], [X + 0.4, rows[1]]], { strokeColor: colors.cat[1], strokeWidth: 1.5, dash: 2, fixed: true, highlight: false, straightFirst: false, straightLast: false });
+      board.create("text", [3.9, (rows[1] + rows[7]) / 2, sceneStrings("loop")], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true, highlight: false,
+        strokeColor: colors.cat[1], color: colors.cat[1],
+        cssStyle: "text-align:center; width:120px; display:inline-block",
+      });
+    });
+  }, {
+    boundingbox: [-5, 4.8, 5.5, -3.8],
+    keepAspect: false,
+    title: () => makeStrings("httpLifecycle")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("httpServerQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "An HTTP request and response share which three-part structure?",
+      options: [
+        { text: "a start line, a block of Name: value headers, a blank line, then an optional body", correct: true },
+        { text: "a fixed 20-byte binary header, a checksum, and a payload", correct: false },
+        { text: "a length prefix, a schema id, and packed binary fields", correct: false },
+        { text: "just a URL and a status code, with no headers", correct: false },
+      ] },
+
+    { prompt: "In HTTP, what separates the header block from the body?",
+      options: [
+        { text: "a blank line — the sequence \\r\\n\\r\\n", correct: true },
+        { text: "a null byte (0x00)", correct: false },
+        { text: "a 4-byte length prefix", correct: false },
+        { text: "the string 'BODY:'", correct: false },
+      ] },
+
+    { prompt: "How does an HTTP message frame itself?",
+      options: [
+        { text: "delimiter framing for the header block (blank line) AND length framing for the body (Content-Length)", correct: true },
+        { text: "purely by closing the TCP connection after each message", correct: false },
+        { text: "a single length prefix covering the whole message", correct: false },
+        { text: "UDP datagram boundaries", correct: false },
+      ] },
+
+    { prompt: "To read a request body, the server should…",
+      options: [
+        { text: "read exactly Content-Length bytes after the blank line", correct: true },
+        { text: "read until the socket is closed, always", correct: false },
+        { text: "assume the body fits in the first read()", correct: false },
+        { text: "ignore the body; HTTP requests never have one", correct: false },
+      ] },
+
+    { prompt: "Why is reading a full request a deframing problem?",
+      options: [
+        { text: "One read() may deliver a partial request or several glued together, so the server must buffer and re-check for completeness", correct: true },
+        { text: "Because HTTP uses UDP, which loses packets", correct: false },
+        { text: "Because each request always arrives in exactly one read()", correct: false },
+        { text: "Because the body comes before the headers", correct: false },
+      ] },
+
+    { prompt: "What does HTTP/1.1 keep-alive do?",
+      options: [
+        { text: "Reuses one TCP connection for many sequential requests, avoiding a handshake per request", correct: true },
+        { text: "Keeps the server process running after a crash", correct: false },
+        { text: "Sends periodic pings so the client knows the server is alive", correct: false },
+        { text: "Opens a fresh TCP connection for every single request", correct: false },
+      ] },
+
+    { prompt: "In the demo, what does the router use as its key?",
+      options: [
+        { text: "the combination of HTTP method and path (e.g. 'GET /hello')", correct: true },
+        { text: "only the path, ignoring the method", correct: false },
+        { text: "the client's IP address", correct: false },
+        { text: "the Content-Length value", correct: false },
+      ] },
+
+    { prompt: "When the parser finds no blank line yet in the buffer, it should…",
+      options: [
+        { text: "signal 'partial' and wait for more bytes — the request is incomplete", correct: true },
+        { text: "treat everything received so far as the full request", correct: false },
+        { text: "immediately return a 400 error", correct: false },
+        { text: "close the connection", correct: false },
+      ] },
+
+    { prompt: "Why is trusting Content-Length blindly dangerous?",
+      options: [
+        { text: "A client can claim a huge length and dribble the body slowly (Slowloris) or lie to smuggle a second request past a proxy", correct: true },
+        { text: "Content-Length is always encrypted and cannot be read", correct: false },
+        { text: "It forces the server to use UDP", correct: false },
+        { text: "It is only present on responses, never requests", correct: false },
+      ] },
+
+    { prompt: "What is HTTP response splitting / header injection?",
+      options: [
+        { text: "Copying untrusted bytes containing \\r\\n into a response header, letting an attacker inject headers or split the response", correct: true },
+        { text: "Splitting a large response across several TCP segments", correct: false },
+        { text: "Sending the headers and body on separate connections", correct: false },
+        { text: "Compressing headers to save bandwidth", correct: false },
+      ] },
+
+    { prompt: "A well-behaved server protects itself from a client that opens a connection and never sends a full request by…",
+      options: [
+        { text: "timing out slow/incomplete reads and capping the maximum body size, rather than waiting indefinitely", correct: true },
+        { text: "spawning a new thread to wait longer", correct: false },
+        { text: "trusting the client to eventually finish", correct: false },
+        { text: "increasing Content-Length automatically", correct: false },
+      ] },
+
+    { prompt: "Which concurrency model can an HTTP server use?",
+      options: [
+        { text: "any of them — worker pool, single-threaded event loop, or pre-forked processes; HTTP itself is agnostic", correct: true },
+        { text: "only a single serial accept-then-serve loop", correct: false },
+        { text: "only a single-threaded event loop", correct: false },
+        { text: "none — HTTP servers cannot be concurrent", correct: false },
+      ] },
+
+    { prompt: "How do HTTP/2 and HTTP/3 relate to the text-based HTTP/1.1 you learned?",
+      options: [
+        { text: "Same semantics (methods, paths, headers, status codes); only the wire framing changed — binary/multiplexed (HTTP/2) and over QUIC/UDP (HTTP/3)", correct: true },
+        { text: "They replaced methods and status codes with a completely new model", correct: false },
+        { text: "They abandoned headers entirely", correct: false },
+        { text: "They are unrelated protocols that happen to share a name", correct: false },
+      ] },
+
+    { prompt: "The overarching lesson of the whole network-programming module is…",
+      options: [
+        { text: "a byte stream from the network is adversarial input — frame it carefully, bound it, time it out, and validate every field", correct: true },
+        { text: "always trust the client to send well-formed data", correct: false },
+        { text: "one read() always equals one message", correct: false },
+        { text: "UDP should be used for every server", correct: false },
+      ] },
+  ]);
+</script>

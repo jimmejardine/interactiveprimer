@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Parallelizing and Vectorizing Compilers</primer-title>
+
+    <primer-card>
+      <p>
+        A modern CPU core is secretly a small parallel machine. Its <strong>SIMD</strong> units (SSE, AVX, NEON,
+        SVE) apply one instruction to a whole vector of 4, 8, or 16 elements at once; multiple cores can run
+        independent iterations simultaneously. But most source code is written as plain scalar loops — one
+        element at a time. The job of a <strong>parallelizing and vectorizing compiler</strong> is to discover
+        the parallelism latent in those loops and map it onto the hardware's lanes and cores, <em>without</em>
+        the programmer rewriting anything. It is one of the highest-leverage optimisations there is: a single
+        loop, correctly vectorized, can run several times faster on the exact same chip.
+      </p>
+      <p>
+        This work stands squarely on the theory of
+        <primer-ref to="computer-science/compiler-design/advanced/loop-transformations-and-the-polyhedral-model">loop transformations and data dependence</primer-ref>.
+        The gating question is always the same: <em>can these iterations run at the same time, or does one need a
+        value another produces?</em> Parallelism is legal exactly when the answer is "they're independent" — and
+        proving independence is where all the difficulty lives.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two shapes of automatic parallelism</h2>
+      <p>
+        Compilers exploit two distinct granularities, and it helps to keep them separate:
+      </p>
+      <primer-theorem name="Vectorization vs parallelization">
+        <ul>
+          <li>
+            <strong>Auto-vectorization</strong> — pack several iterations (or several nearby scalar operations)
+            into one SIMD instruction that processes a whole vector of lanes per cycle. Fine-grained,
+            within a single core. Two flavours: <em>loop vectorization</em> (consecutive iterations become
+            lanes) and <em>SLP — superword-level parallelism</em> (independent straight-line scalar operations,
+            like the four components of a colour, are bundled into one vector op).
+          </li>
+          <li>
+            <strong>Auto-parallelization</strong> — spread whole iterations across multiple <em>cores/threads</em>.
+            Coarse-grained. The prize target is a <strong>DOALL</strong> loop: one with <em>no loop-carried
+            dependence</em>, so every iteration is independent and they can all run at once.
+          </li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>DOALL, dependences, and the SIMD picture</h2>
+      <p>
+        A <strong>loop-carried dependence</strong> is one that flows from one iteration to a <em>later</em> one.
+        The loop <code>a[i] = b[i] + c[i]</code> has none — iteration 5 neither needs nor disturbs iteration 4,
+        so it is DOALL and vectorizes trivially: load four <code>b</code>s, four <code>c</code>s, add all four in
+        one instruction, store four <code>a</code>s. By contrast <code>a[i] = a[i-1] + b[i]</code> carries a
+        dependence of distance 1 — each iteration needs the <em>previous</em> iteration's result — so its lanes
+        cannot run at once. The picture below contrasts the two:
+      </p>
+      <primer-geometry scene="simdLanes"></primer-geometry>
+      <p>
+        On the left, four independent iterations drop cleanly into four SIMD lanes and execute in one vector
+        step. On the right, the arrows chain iteration to iteration — a serial recurrence that no amount of
+        wishful thinking will let you run in parallel as written.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Reductions: the important exception</h2>
+      <p>
+        Some loops <em>look</em> serial but aren't quite. A <strong>reduction</strong> —
+        <code>sum = sum + a[i]</code> — has a genuine loop-carried dependence on <code>sum</code>, yet it can
+        still be parallelized, because the combining operation (<code>+</code>) is <strong>associative</strong>.
+        The compiler recognises the reduction pattern and splits it: give each lane (or thread) its own partial
+        accumulator, run the independent partial sums in parallel, then combine the partials at the end.
+      </p>
+      <primer-math display>\Big(\sum_{i} a_i\Big) \;=\; \underbrace{(a_0{+}a_4{+}\cdots)}_{\text{lane 0}} + \underbrace{(a_1{+}a_5{+}\cdots)}_{\text{lane 1}} + \underbrace{(a_2{+}a_6{+}\cdots)}_{\text{lane 2}} + \underbrace{(a_3{+}a_7{+}\cdots)}_{\text{lane 3}}</primer-math>
+      <p>
+        There is a subtlety with floating point: real addition is associative, but <em>floating-point</em>
+        addition is not (rounding makes <primer-math>(a+b)+c \ne a+(b+c)</primer-math> in general). So
+        reassociating a floating-point reduction can change the last bits of the result — which is why compilers
+        only do it under a "fast-math"/relaxed-FP flag, and never by default.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Dependence tests: proving independence cheaply</h2>
+      <p>
+        To vectorize <code>A[2*i + 1] = A[3*i] + 1</code> the compiler must decide whether a write in one
+        iteration can ever hit the same array element as a read in another. Solving that exactly is integer
+        linear programming; in practice compilers run a ladder of cheap, conservative <strong>dependence
+        tests</strong>, from fastest-and-weakest to slowest-and-strongest:
+      </p>
+      <ul>
+        <li>
+          <strong>The GCD test.</strong> A dependence between subscripts
+          <primer-math>a\,i + c_1</primer-math> and <primer-math>b\,i' + c_2</primer-math> requires an integer
+          solution to <primer-math>a\,i - b\,i' = c_2 - c_1</primer-math>. Such a solution exists <em>only
+          if</em> <primer-math>\gcd(a,b)</primer-math> divides <primer-math>c_2 - c_1</primer-math>. If it does
+          not, there is provably <strong>no dependence</strong> — vectorize freely. It is a one-line necessary
+          condition and the classic first filter.
+        </li>
+        <li>
+          <strong>The Banerjee test.</strong> Sharper: it checks whether a real solution lies within the loop
+          bounds (using the intermediate-value theorem on the subscript expression). If no solution fits the
+          iteration range, no dependence exists — catching cases the GCD test cannot.
+        </li>
+        <li>
+          Stronger still: the <strong>Omega test</strong> and I-test decide the integer problem exactly for
+          affine subscripts, at higher cost.
+        </li>
+      </ul>
+      <p>
+        Note the logic: these tests prove the <em>absence</em> of a dependence. Failing the GCD condition is a
+        certificate of independence. <em>Passing</em> it (gcd divides the difference) does not prove a dependence
+        exists — only that one <em>might</em>, so the compiler must stay conservative and not parallelize (or run
+        a stronger test).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The GCD test in code</h2>
+      <p>
+        Here is the GCD test deciding whether a dependence can exist between two affine array subscripts in a
+        loop. If the gcd of the coefficients does not divide the constant gap, independence is <em>proven</em>
+        and the loop is safe to vectorize.
+      </p>
+      <primer-code run>
+        function gcd(a: number, b: number): number {
+          a = Math.abs(a); b = Math.abs(b);
+          while (b) { [a, b] = [b, a % b]; }
+          return a;
+        }
+
+        // Write index a1*i + c1, read index a2*j + c2 (same array).
+        // A dependence needs an integer solution to a1*i - a2*j = c2 - c1.
+        // GCD test: solvable only if gcd(a1,a2) divides (c2 - c1).
+        function gcdTest(a1: number, c1: number, a2: number, c2: number): string {
+          const g = gcd(a1, a2);
+          const gap = c2 - c1;
+          if (gap % g !== 0) {
+            return `gcd(${a1},${a2})=${g} does NOT divide ${gap}  ->  NO dependence: vectorize!`;
+          }
+          return `gcd(${a1},${a2})=${g} divides ${gap}  ->  dependence POSSIBLE: stay conservative.`;
+        }
+
+        // A[2i+1] vs A[2i]:  gcd(2,2)=2 does not divide (0-1)=-1  ->  independent.
+        console.log("A[2i+1] = A[2i]   : " + gcdTest(2, 1, 2, 0));
+        // A[i] vs A[i-1]:     gcd(1,1)=1 divides (-1-0)=-1  ->  dependence possible (the classic recurrence).
+        console.log("A[i] = A[i-1]     : " + gcdTest(1, 0, 1, -1));
+        // A[4i] vs A[2i+1]:   gcd(4,2)=2 does not divide (1-0)=1  ->  independent.
+        console.log("A[4i] vs A[2i+1]  : " + gcdTest(4, 0, 2, 1));
+      </primer-code>
+      <p>
+        The first and third loops are certified independent by a single divisibility check; the classic
+        <code>A[i] = A[i-1]</code> recurrence passes the test (gcd 1 divides everything), so the compiler cannot
+        rule out the dependence — exactly the loop that must stay serial.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why it is hard — and why programmers add hints</h2>
+      <p>
+        If dependence testing were the whole story, compilers would vectorize everything. Reality fights back on
+        several fronts:
+      </p>
+      <ul>
+        <li>
+          <strong>Aliasing.</strong> If two array pointers <em>might</em>
+          <primer-ref to="computer-science/compiler-design/advanced/alias-and-pointer-analysis">alias</primer-ref>,
+          the compiler must assume the worst and refuse to vectorize. This is the single most common blocker.
+        </li>
+        <li>
+          <strong>Alignment.</strong> SIMD loads are fastest (sometimes only correct) on suitably aligned
+          addresses; the compiler must handle unaligned starts and generate a scalar <em>remainder loop</em> for
+          the leftover iterations when the trip count isn't a multiple of the vector width.
+        </li>
+        <li>
+          <strong>Control flow.</strong> Branches inside the loop body must be turned into <em>predicated</em>
+          (masked) vector operations, which not every target supports well.
+        </li>
+        <li>
+          <strong>Unknown trip counts and non-affine subscripts</strong> (<code>A[index[i]]</code> gathers)
+          defeat static dependence tests entirely.
+        </li>
+      </ul>
+      <p>
+        Because of all this, languages give programmers ways to <em>promise</em> what the compiler cannot prove.
+        C's <code>restrict</code> asserts non-aliasing; <code>#pragma omp simd</code> and
+        <code>#pragma omp parallel for</code> assert that a loop is safe to vectorize or parallelize; alignment
+        attributes assert address alignment. These hints don't make the compiler smarter — they shift the
+        <em>proof obligation</em> onto the programmer, letting the compiler proceed where its own analysis had to
+        give up.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="What exactly is SLP vectorization, if not loop vectorization?">
+      <p>
+        <strong>Superword-Level Parallelism (SLP)</strong> vectorizes <em>straight-line</em> code, no loop
+        required. Imagine transforming an RGBA pixel: <code>r2 = r*s; g2 = g*s; b2 = b*s; a2 = a*s</code> — four
+        independent scalar multiplies by the same factor. An SLP pass spots that these isomorphic operations can
+        be bundled into a single 4-wide vector multiply, packing the four scalars into one vector register. It is
+        the perfect complement to loop vectorization: loop vectorization finds parallelism <em>across</em>
+        iterations, SLP finds it <em>within</em> a basic block among sibling operations. Modern compilers run
+        both, and much hand-written "SIMD intrinsics" code is really just doing by hand what an SLP vectorizer
+        does automatically.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! One loop-carried dependence kills the whole vectorization">
+      <p>
+        Vectorization is all-or-nothing per loop: pack four iterations into one vector step and they execute
+        <em>simultaneously</em>, so if <em>any</em> of those four needs a value another of the four is still
+        computing, the result is wrong. A single true loop-carried dependence — one <code>A[i] = A[i-1] + …</code>
+        anywhere in the body — is enough to block the entire loop, even if every other statement is embarrassingly
+        parallel (the cure is often loop <em>fission</em> to split the serial statement out). Two more traps
+        follow close behind. <strong>Reductions</strong> look like blocking dependences but are legal to
+        parallelize <em>only</em> when the operator is associative — and for floating point that means accepting a
+        different rounding, so it needs an explicit fast-math opt-in. And <strong>alignment/remainder</strong>:
+        the vector body handles iterations in chunks of the vector width, so a scalar remainder loop must mop up
+        the leftover <primer-math>n \bmod W</primer-math> iterations — forget it and you either crash on a bad
+        access or silently skip elements.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "vecQuiz@1": {
+          "intro": "Vectorizing and parallelizing compilers map independent loop iterations onto SIMD lanes and cores. Numbers change every attempt.",
+          "simdQ": "Auto-vectorization maps a loop onto…",
+          "vLanes": "SIMD lanes — several iterations processed by one vector instruction",
+          "vDisk": "disk sectors",
+          "vThreads": "always separate operating-system processes",
+          "vCache": "cache lines only",
+          "doallQ": "A DOALL loop is one that…",
+          "dNone": "has no loop-carried dependence, so all iterations are independent",
+          "dOne": "has exactly one loop-carried dependence",
+          "dSum": "always accumulates into a single variable",
+          "dSmall": "has fewer than four iterations",
+          "carriedQ": "A loop-carried dependence is a dependence that…",
+          "cLater": "flows from one iteration to a later iteration",
+          "cSame": "stays entirely within a single iteration",
+          "cType": "is only about types",
+          "cCache": "is only about cache misses",
+          "blockQ": "How many true loop-carried dependences does it take to block vectorization of a loop?",
+          "b1": "one is enough",
+          "bAll": "all of them must be present",
+          "bHalf": "at least half the statements",
+          "bNone": "vectorization is never blocked",
+          "reduceQ": "A reduction like sum = sum + a[i] can be parallelized because…",
+          "rAssoc": "the combining operator is associative, so partial sums can be combined at the end",
+          "rNoDep": "it has no dependence at all",
+          "rSmall": "the array is small",
+          "rType": "sum is an integer",
+          "fpQ": "Why do compilers reassociate a FLOATING-POINT reduction only under a fast-math flag?",
+          "fRound": "floating-point addition is not associative, so reassociation can change the rounded result",
+          "fSlow": "it is always slower",
+          "fInt": "floats cannot be added",
+          "fNever": "they never do it at all",
+          "gcdQ": "The GCD test concludes there is NO dependence when…",
+          "gNoDiv": "gcd of the subscript coefficients does not divide the constant difference",
+          "gDiv": "gcd divides the difference (that proves a dependence)",
+          "gEven": "the loop count is even",
+          "gPrime": "the coefficients are prime",
+          "gcdPassQ": "If the GCD test's divisibility condition is SATISFIED (gcd divides the gap), the compiler should…",
+          "gpStay": "stay conservative — a dependence is possible, not proven absent",
+          "gpVec": "definitely vectorize, dependence is impossible",
+          "gpErr": "report a compile error",
+          "gpParallel": "always run on all cores",
+          "aliasQ": "The single most common reason a loop fails to vectorize is…",
+          "aAlias": "possible aliasing between the array pointers",
+          "aSmall": "the array being too small",
+          "aName": "bad variable names",
+          "aClock": "a slow clock",
+          "hintQ": "A hint like C's restrict or #pragma omp simd works by…",
+          "hProof": "shifting the proof obligation to the programmer, letting the compiler proceed where analysis gave up",
+          "hFast": "raising the clock frequency",
+          "hMagic": "making the compiler's analysis smarter automatically",
+          "hType": "changing the variable types",
+          "gcdNumQ": "GCD test: subscripts have coefficients {a} and {b}. What is gcd of {a} and {b}?",
+          "remQ": "A loop runs {n} iterations vectorized in chunks of width {w}. How many iterations does the scalar remainder loop handle?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="vecQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/advanced/loop-transformations-and-the-polyhedral-model"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  registerGeometryScene("simdLanes", ({ board, step, colors }) => {
+    const box = (cx, cy, w, h, col, name) => {
+      board.create("polygon", [
+        [cx - w / 2, cy - h / 2], [cx + w / 2, cy - h / 2],
+        [cx + w / 2, cy + h / 2], [cx - w / 2, cy + h / 2],
+      ], { strokeColor: col, strokeWidth: 2, fillColor: col, fillOpacity: 0.12, fixed: true, highlight: false,
+           vertices: { visible: false }, borders: { strokeColor: col } });
+      board.create("text", [cx, cy, name], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    const lbl = (x, y, text, col) =>
+      board.create("text", [x, y, text], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false, strokeColor: col, color: col,
+      });
+    const arrow = (a, b, col) =>
+      board.create("arrow", [a, b], { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false, lastArrow: { size: 5 } });
+
+    // LEFT: DOALL, four independent iterations -> four SIMD lanes.
+    step("DOALL loop a[i]=b[i]+c[i]: four independent iterations.", () => {
+      lbl(-4.5, 3.4, "DOALL: independent", colors.cat[0]);
+      for (let k = 0; k < 4; k++) box(-4.5, 2 - k * 1.3, 2.4, 1.0, colors.cat[0], `i = ${k}`);
+    });
+    step("They drop into four SIMD lanes and run in one vector step.", () => {
+      box(-4.5, -4.4, 2.9, 1.0, colors.cat[2], "1 vector op");
+      for (let k = 0; k < 4; k++) arrow([-4.5, 2 - k * 1.3 - 0.5], [-4.5, -3.9]);
+    });
+    // RIGHT: recurrence, chained dependence.
+    step("Recurrence a[i]=a[i-1]+b[i]: each iteration needs the previous one.", () => {
+      lbl(4.5, 3.4, "carried dep: serial", colors.cat[3]);
+      for (let k = 0; k < 4; k++) box(4.5, 2 - k * 1.3, 2.4, 1.0, colors.cat[3], `i = ${k}`);
+    });
+    step("The dependence arrows chain the iterations — no parallel lanes.", () => {
+      for (let k = 0; k < 3; k++) arrow([4.5, 2 - k * 1.3 - 0.5], [4.5, 2 - (k + 1) * 1.3 + 0.5]);
+      lbl(4.5, -4.4, "must run in order", colors.cat[3]);
+    });
+  }, { boundingbox: [-7, 4, 7, -5.4], keepAspect: false, title: "DOALL → SIMD lanes vs a serial loop-carried recurrence" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  function gcd(a, b) { a = Math.abs(a); b = Math.abs(b); while (b) { [a, b] = [b, a % b]; } return a; }
+
+  registerQuiz("vecQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("simdQ"),
+      options: [
+        { text: () => sceneStrings("vLanes"), correct: true },
+        { text: () => sceneStrings("vDisk"), correct: false },
+        { text: () => sceneStrings("vThreads"), correct: false },
+        { text: () => sceneStrings("vCache"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("doallQ"),
+      options: [
+        { text: () => sceneStrings("dNone"), correct: true },
+        { text: () => sceneStrings("dOne"), correct: false },
+        { text: () => sceneStrings("dSum"), correct: false },
+        { text: () => sceneStrings("dSmall"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("carriedQ"),
+      options: [
+        { text: () => sceneStrings("cLater"), correct: true },
+        { text: () => sceneStrings("cSame"), correct: false },
+        { text: () => sceneStrings("cType"), correct: false },
+        { text: () => sceneStrings("cCache"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("blockQ"),
+      options: [
+        { text: () => sceneStrings("b1"), correct: true },
+        { text: () => sceneStrings("bAll"), correct: false },
+        { text: () => sceneStrings("bHalf"), correct: false },
+        { text: () => sceneStrings("bNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("reduceQ"),
+      options: [
+        { text: () => sceneStrings("rAssoc"), correct: true },
+        { text: () => sceneStrings("rNoDep"), correct: false },
+        { text: () => sceneStrings("rSmall"), correct: false },
+        { text: () => sceneStrings("rType"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fpQ"),
+      options: [
+        { text: () => sceneStrings("fRound"), correct: true },
+        { text: () => sceneStrings("fSlow"), correct: false },
+        { text: () => sceneStrings("fInt"), correct: false },
+        { text: () => sceneStrings("fNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gcdQ"),
+      options: [
+        { text: () => sceneStrings("gNoDiv"), correct: true },
+        { text: () => sceneStrings("gDiv"), correct: false },
+        { text: () => sceneStrings("gEven"), correct: false },
+        { text: () => sceneStrings("gPrime"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gcdPassQ"),
+      options: [
+        { text: () => sceneStrings("gpStay"), correct: true },
+        { text: () => sceneStrings("gpVec"), correct: false },
+        { text: () => sceneStrings("gpErr"), correct: false },
+        { text: () => sceneStrings("gpParallel"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("aliasQ"),
+      options: [
+        { text: () => sceneStrings("aAlias"), correct: true },
+        { text: () => sceneStrings("aSmall"), correct: false },
+        { text: () => sceneStrings("aName"), correct: false },
+        { text: () => sceneStrings("aClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hintQ"),
+      options: [
+        { text: () => sceneStrings("hProof"), correct: true },
+        { text: () => sceneStrings("hFast"), correct: false },
+        { text: () => sceneStrings("hMagic"), correct: false },
+        { text: () => sceneStrings("hType"), correct: false },
+      ],
+    },
+    {
+      // gcd of the two coefficients.
+      prompt: (v) => sceneStrings("gcdNumQ", v),
+      variables: "a=[2:12] b=[2:12]",
+      answer: (v) => gcd(v.a, v.b),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // remainder = n mod w.
+      prompt: (v) => sceneStrings("remQ", v),
+      variables: "n=[10:40] w=[2,4,8]",
+      answer: (v) => v.n % v.w,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

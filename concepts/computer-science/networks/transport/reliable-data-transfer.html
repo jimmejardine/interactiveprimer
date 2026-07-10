@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Reliable Data Transfer</primer-title>
+
+    <primer-card>
+      <p>
+        You want to send a friend a hundred-page document, one page at a time, through a post office that
+        <em>sometimes loses letters</em>, <em>sometimes smudges them into gibberish</em>, and
+        <em>occasionally delivers them out of order</em> — and you have no way to know which fate befell any
+        particular page. How do you guarantee your friend ends up with all hundred pages, correct and in order?
+      </p>
+      <p>
+        This is the central problem of transport. Underneath TCP sits an
+        <primer-ref soft to="computer-science/networks/transport/udp">unreliable</primer-ref> channel that can
+        corrupt, drop, or reorder anything. On top, applications demand a channel that <em>never</em> does. The
+        set of techniques that bridge that gap is called <strong>reliable data transfer (rdt)</strong>, and it
+        is built from a small, beautiful toolkit — checksums, acknowledgements, sequence numbers, timers and
+        retransmission — assembled with increasing cleverness until the pipe is both correct <em>and</em> fast.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The five tools of reliability</h2>
+      <p>
+        Every reliable protocol, from a 1970s modem link to modern TCP, is built from the same five ingredients.
+        Each one answers a specific failure of the channel:
+      </p>
+      <ul>
+        <li><strong>Checksum</strong> — detects <em>corruption</em>. Bits flipped in transit are caught so the
+          receiver can reject a damaged packet instead of trusting it.</li>
+        <li><strong>Acknowledgement (ACK)</strong> — the receiver tells the sender "I got it." Without feedback,
+          the sender is blind. A <strong>NAK</strong> ("I got something broken") is the explicit negative.</li>
+        <li><strong>Sequence number</strong> — a label on each packet so the receiver can spot
+          <em>duplicates</em> and restore <em>order</em>. This is the tool that makes the others safe.</li>
+        <li><strong>Timer + retransmission</strong> — handles outright <em>loss</em>. If no ACK arrives before
+          a timeout, the sender assumes the worst and sends again.</li>
+        <li><strong>Windowing / pipelining</strong> — lets many packets be in flight at once, which is what
+          turns a correct-but-crawling protocol into a fast one.</li>
+      </ul>
+      <p>
+        A subtle point about NAKs: most modern protocols (TCP included) drop explicit NAKs and instead use a
+        <strong>duplicate ACK</strong>. The receiver simply re-acknowledges the last good in-order packet; a
+        <em>run</em> of identical ACKs is itself the "something's missing" signal. Fewer message types, same
+        information.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Stop-and-wait, and its dreadful utilisation</h2>
+      <p>
+        The simplest correct protocol is <strong>stop-and-wait</strong>: send one packet, then <em>stop</em>
+        and wait for its ACK before sending the next. Lose a packet? The timer fires and you resend. It works —
+        and it is agonisingly slow, because the link sits idle for an entire round trip on every single packet.
+      </p>
+      <p>
+        The damage is easy to quantify. Let the link have bandwidth <primer-math>R</primer-math>, a packet be
+        <primer-math>L</primer-math> bits, and the round-trip time be <primer-math>\text{RTT}</primer-math>.
+        The sender is busy transmitting for only <primer-math>L/R</primer-math> seconds, then waits about a
+        whole RTT for the ACK. The fraction of time the link is actually working — the
+        <strong>utilisation</strong> — is:
+      </p>
+      <primer-math display>U_{\text{stop-and-wait}} = \frac{L/R}{\text{RTT} + L/R}</primer-math>
+      <p>
+        Plug in a fast, long link — say 1 Gbps, a 1 KB packet, 30 ms RTT — and you get a utilisation of well
+        under one percent. You bought a gigabit pipe and are using it like a trickle. The cure is to stop
+        waiting: keep the pipe <em>full</em>.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "rdtLoss": {
+            "title": "Stop-and-wait with a lost packet, caught by a timeout",
+            "senderCol": "SENDER",
+            "receiverCol": "RECEIVER",
+            "p0": "send pkt 0",
+            "a0": "ACK 0 comes back",
+            "p1lost": "send pkt 1 — LOST in the network",
+            "timeout": "timer expires: no ACK 1",
+            "p1re": "retransmit pkt 1",
+            "a1": "ACK 1 arrives at last"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="rdtLoss"
+        caption="A sender/receiver timeline. Packet 0 is sent and acknowledged. Packet 1 is sent but lost in the network, so no ACK returns. After a timeout the sender retransmits packet 1, which is then acknowledged. It shows loss handled by timer-driven retransmission."
+      ></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Pipelining: keep the pipe full</h2>
+      <p>
+        <strong>Pipelining</strong> means launching several packets before waiting for the first one's ACK.
+        Instead of one packet per RTT, you keep a <em>window</em> of <primer-math>N</primer-math> packets in
+        flight. Utilisation multiplies by roughly <primer-math>N</primer-math> (until you saturate the link),
+        turning that sub-1% into full throughput. The demo makes the contrast vivid:
+      </p>
+
+      <primer-code run>
+        // Compare link utilisation: stop-and-wait vs an N-packet pipelined window.
+        const R = 1_000_000_000;   // 1 Gbps link
+        const L = 8_000;           // 8000-bit (1 KB) packet
+        const RTT = 0.030;         // 30 ms round trip
+
+        const txTime = L / R;                          // time to push one packet onto the wire
+        const cycle = RTT + txTime;                    // one send-then-wait cycle
+
+        const uStopWait = txTime / cycle;
+        console.log("Transmit time per packet:", (txTime * 1e6).toFixed(2), "microseconds");
+        console.log("Round-trip time:         ", (RTT * 1e3).toFixed(1), "ms");
+        console.log("\nStop-and-wait utilisation:", (uStopWait * 100).toFixed(4) + "%");
+
+        // With a window of N packets we send N per cycle instead of 1 (capped at 100%).
+        for (const N of [1, 3, 10, 100, 1000]) {
+          const u = Math.min(1, (N * txTime) / cycle);
+          const bar = "#".repeat(Math.round(u * 40));
+          console.log(`  window N=${String(N).padStart(4)}  U = ${(u * 100).toFixed(2).padStart(6)}%  ${bar}`);
+        }
+        console.log("\nOnce N*txTime reaches a full cycle, the pipe is full — 100% utilised.");
+      </primer-code>
+
+      <p>
+        Pipelining creates a new problem, though: with many packets in flight, some may be lost or reordered
+        <em>mid-window</em>. How the protocol reacts to a gap defines the two great families of
+        <strong>Automatic Repeat reQuest (ARQ)</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Go-Back-N vs Selective Repeat</h2>
+      <p>
+        Both keep a sliding window of unacknowledged packets; they differ entirely in <em>how they recover from
+        a loss in the middle of that window</em>.
+      </p>
+      <ul>
+        <li>
+          <strong>Go-Back-N (GBN).</strong> The receiver is <em>simple</em>: it accepts packets strictly in
+          order and discards anything out of order, sending only <strong>cumulative ACKs</strong> ("I have
+          everything up through <primer-math>n</primer-math>"). When a packet is lost, everything after it is
+          thrown away, and on timeout the sender <strong>re-sends the whole window</strong> from the lost
+          packet onward. Cheap receiver, wasteful on loss — a single drop forces a flurry of retransmissions.
+        </li>
+        <li>
+          <strong>Selective Repeat (SR).</strong> The receiver is <em>smart</em>: it <strong>buffers</strong>
+          out-of-order packets and ACKs each one <strong>individually</strong>. When a packet is lost, the
+          sender retransmits <strong>only that one</strong>, and the receiver slots it into the gap it was
+          holding open. More memory and bookkeeping at the receiver, far less wasted bandwidth on loss.
+        </li>
+      </ul>
+      <p>
+        The trade-off is the classic one: GBN spends bandwidth to keep the receiver dumb; SR spends receiver
+        memory to save bandwidth. Real TCP is a pragmatic hybrid — cumulative ACKs like GBN, but with
+        <strong>selective acknowledgement (SACK)</strong> options and fast retransmit that give it much of SR's
+        efficiency, retransmitting a single lost segment rather than the whole window.
+      </p>
+
+      <primer-theorem name="The two ARQ families">
+        <ul>
+          <li><strong>Go-Back-N:</strong> cumulative ACKs, receiver discards out-of-order packets, sender
+            re-sends from the loss onward. Simple receiver, more retransmission.</li>
+          <li><strong>Selective Repeat:</strong> individual ACKs, receiver buffers out-of-order packets, sender
+            resends only the lost one. Complex receiver, minimal retransmission.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Sequence numbers do more than count</h2>
+      <p>
+        It is tempting to think sequence numbers exist merely to put packets back in order. Their subtler and
+        more important job is to detect <strong>duplicates</strong> — and duplicates arise even on a channel
+        that never truly loses anything.
+      </p>
+
+      <primer-vignette title="Watch out! — a retransmitted-but-not-lost packet must still be handled">
+        <p>
+          Here is the case that breaks naïve protocols. The sender transmits packet 1. It arrives fine, and the
+          receiver sends ACK 1 — but that <em>ACK</em> is lost or merely <strong>slow</strong>. The sender's
+          timer fires (a <em>premature timeout</em>), so it <strong>retransmits packet 1</strong>. Now the
+          receiver has <em>two copies</em> of packet 1. Without sequence numbers it would deliver the same page
+          to the application twice, silently corrupting the stream.
+        </p>
+        <p>
+          The sequence number saves the day: the receiver sees the duplicate's number, recognises "I already
+          have this one," <strong>discards the copy, and re-sends the ACK</strong>. This is exactly why ACKs
+          themselves carry the number they acknowledge, and why a run of
+          <strong>duplicate ACKs</strong> is meaningful. The lesson: a packet arriving twice is <em>normal</em>,
+          not exotic — timeouts fire early, ACKs get lost — and a correct protocol must treat "I've seen this
+          before" as a first-class event, not an error. Reliability is as much about <em>tolerating
+          duplicates</em> as it is about recovering losses.
+        </p>
+      </primer-vignette>
+
+      <primer-vignette title="How many sequence numbers do you actually need?">
+        <p>
+          You don't need a number per packet forever — you can reuse them, as long as you have <em>enough</em>
+          that an old straggler can't be mistaken for a fresh packet. For stop-and-wait, astonishingly, a
+          <strong>single bit</strong> suffices: alternating 0, 1, 0, 1… (the "alternating-bit protocol"),
+          because only one packet is ever in flight. For a window of size
+          <primer-math>N</primer-math>, Go-Back-N needs at least <primer-math>N+1</primer-math> distinct
+          numbers, while Selective Repeat needs at least <primer-math>2N</primer-math> — the SR receiver's
+          buffer makes it easier to confuse a new packet with an old one, so it needs a bigger number space to
+          stay unambiguous.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "rdtQuiz@1": { "instructions": "Check your grasp of reliable data transfer: the rdt toolkit, stop-and-wait utilisation, pipelining, Go-Back-N vs Selective Repeat, and why sequence numbers detect duplicates." } }
+    </script>
+    <primer-quiz name="rdtQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/networks/transport/udp"],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // A stop-and-wait sender/receiver timeline: pkt 0 acked, pkt 1 lost, timeout,
+  // retransmit, then acked. Two vertical spines; diagonal arrows cross between them.
+  registerGeometryScene("rdtLoss", ({ board, step, colors, sceneStrings }) => {
+    const SX = -3, RX = 3;
+    const header = (x, y, s, col) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 13, fixed: true,
+        highlight: false, strokeColor: col, color: col, cssStyle: "font-weight:700",
+      });
+    const note = (x, y, s, col) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true,
+        highlight: false, strokeColor: col, color: col,
+        cssStyle: "text-align:center; width:200px; display:inline-block",
+      });
+
+    header(SX, 5.3, sceneStrings("senderCol"), colors.cat[0]);
+    header(RX, 5.3, sceneStrings("receiverCol"), colors.cat[1]);
+    board.create("segment", [[SX, 5], [SX, -5]], { strokeColor: colors.line, strokeOpacity: 0.3, fixed: true, highlight: false });
+    board.create("segment", [[RX, 5], [RX, -5]], { strokeColor: colors.line, strokeOpacity: 0.3, fixed: true, highlight: false });
+
+    // pkt 0 delivered and acked
+    step(sceneStrings("p0"), () => {
+      board.create("arrow", [[SX, 4.4], [RX, 3.6]], { strokeColor: colors.cat[0], strokeWidth: 2, fixed: true, highlight: false });
+      note(0, 4.4, sceneStrings("p0"), colors.ink);
+    });
+    step(sceneStrings("a0"), () => {
+      board.create("arrow", [[RX, 3.4], [SX, 2.6]], { strokeColor: colors.cat[1], strokeWidth: 2, dash: 2, fixed: true, highlight: false });
+      note(0, 3.2, sceneStrings("a0"), colors.ink);
+    });
+
+    // pkt 1 lost
+    step(sceneStrings("p1lost"), () => {
+      board.create("arrow", [[SX, 2.0], [0.4, 1.4]], { strokeColor: colors.cat[2], strokeWidth: 2, fixed: true, highlight: false });
+      board.create("text", [0.7, 1.3, "✗"], { anchorX: "middle", anchorY: "middle", fontSize: 20, fixed: true, highlight: false, strokeColor: colors.cat[2], color: colors.cat[2] });
+      note(-1.2, 2.1, sceneStrings("p1lost"), colors.cat[2]);
+    });
+
+    // timeout
+    step(sceneStrings("timeout"), () => {
+      board.create("segment", [[SX - 0.4, 0.4], [SX + 0.4, 0.4]], { strokeColor: colors.ink, strokeWidth: 1, dash: 1, fixed: true, highlight: false });
+      note(SX - 1.4, 0.4, sceneStrings("timeout"), colors.ink);
+    });
+
+    // retransmit
+    step(sceneStrings("p1re"), () => {
+      board.create("arrow", [[SX, 0.0], [RX, -0.8]], { strokeColor: colors.cat[0], strokeWidth: 2, fixed: true, highlight: false });
+      note(0, 0.0, sceneStrings("p1re"), colors.ink);
+    });
+    step(sceneStrings("a1"), () => {
+      board.create("arrow", [[RX, -1.0], [SX, -1.8]], { strokeColor: colors.cat[1], strokeWidth: 2, dash: 2, fixed: true, highlight: false });
+      note(0, -1.2, sceneStrings("a1"), colors.ink);
+    });
+  }, {
+    boundingbox: [-6, 5.8, 6, -5.4],
+    keepAspect: false,
+    title: () => makeStrings("rdtLoss")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("rdtQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "Which rdt tool specifically detects data CORRUPTION?",
+      options: [
+        { text: "the checksum", correct: true },
+        { text: "the sequence number", correct: false },
+        { text: "the retransmission timer", correct: false },
+        { text: "the sliding window", correct: false },
+      ] },
+
+    { prompt: "Which rdt tool primarily handles outright LOSS of a packet?",
+      options: [
+        { text: "a timer plus retransmission", correct: true },
+        { text: "the checksum alone", correct: false },
+        { text: "the source port", correct: false },
+        { text: "the UDP length field", correct: false },
+      ] },
+
+    { prompt: "What is the primary purpose of sequence numbers?",
+      options: [
+        { text: "to detect duplicates and restore correct order", correct: true },
+        { text: "to encrypt the payload", correct: false },
+        { text: "to measure link bandwidth", correct: false },
+        { text: "to compress repeated data", correct: false },
+      ] },
+
+    { prompt: "Modern protocols like TCP often replace explicit NAKs with…",
+      options: [
+        { text: "duplicate ACKs — re-acknowledging the last good in-order packet", correct: true },
+        { text: "a special corruption interrupt", correct: false },
+        { text: "closing the connection", correct: false },
+        { text: "a larger checksum", correct: false },
+      ] },
+
+    { prompt: "The utilisation of stop-and-wait is (L/R) / (RTT + L/R). On a fast, long link this is…",
+      options: [
+        { text: "very low — the link sits idle for a whole RTT per packet", correct: true },
+        { text: "always close to 100%", correct: false },
+        { text: "exactly 50%", correct: false },
+        { text: "independent of RTT", correct: false },
+      ] },
+
+    { prompt: "Pipelining improves utilisation by…",
+      options: [
+        { text: "sending a window of N packets before waiting for the first ACK", correct: true },
+        { text: "making the RTT shorter", correct: false },
+        { text: "shrinking each packet to 1 byte", correct: false },
+        { text: "removing the checksum", correct: false },
+      ] },
+
+    { prompt: "In Go-Back-N, when a packet is lost the receiver…",
+      options: [
+        { text: "discards everything out of order and sends cumulative ACKs", correct: true },
+        { text: "buffers out-of-order packets and ACKs each individually", correct: false },
+        { text: "closes the connection immediately", correct: false },
+        { text: "asks the sender to slow down", correct: false },
+      ] },
+
+    { prompt: "In Go-Back-N, on a timeout the sender…",
+      options: [
+        { text: "re-sends the whole window from the lost packet onward", correct: true },
+        { text: "re-sends only the single lost packet", correct: false },
+        { text: "sends nothing and waits forever", correct: false },
+        { text: "halves its window and stops", correct: false },
+      ] },
+
+    { prompt: "In Selective Repeat, the receiver…",
+      options: [
+        { text: "buffers out-of-order packets and ACKs each one individually", correct: true },
+        { text: "discards any packet that isn't the next expected", correct: false },
+        { text: "sends only cumulative ACKs", correct: false },
+        { text: "never sends ACKs at all", correct: false },
+      ] },
+
+    { prompt: "In Selective Repeat, on loss the sender retransmits…",
+      options: [
+        { text: "only the single lost packet", correct: true },
+        { text: "the entire window", correct: false },
+        { text: "every packet twice", correct: false },
+        { text: "nothing until the receiver reconnects", correct: false },
+      ] },
+
+    { prompt: "The core trade-off between GBN and SR is…",
+      options: [
+        { text: "GBN spends bandwidth to keep the receiver simple; SR spends receiver memory to save bandwidth", correct: true },
+        { text: "GBN is always faster and SR is always slower", correct: false },
+        { text: "SR needs no sequence numbers", correct: false },
+        { text: "GBN cannot recover from any loss", correct: false },
+      ] },
+
+    { prompt: "A packet can arrive at the receiver TWICE even with no true loss because…",
+      options: [
+        { text: "a slow or lost ACK causes a premature timeout and retransmission", correct: true },
+        { text: "the receiver duplicates every packet on purpose", correct: false },
+        { text: "checksums create copies", correct: false },
+        { text: "TCP always sends everything twice", correct: false },
+      ] },
+
+    { prompt: "When a receiver gets a duplicate packet, a correct protocol should…",
+      options: [
+        { text: "discard the duplicate and re-send the ACK", correct: true },
+        { text: "deliver the duplicate to the application again", correct: false },
+        { text: "reset the whole connection", correct: false },
+        { text: "raise an error and disconnect", correct: false },
+      ] },
+
+    { prompt: "The alternating-bit protocol shows that stop-and-wait needs only…",
+      options: [
+        { text: "a single sequence bit (0,1,0,1…) since one packet is in flight at a time", correct: true },
+        { text: "32-bit sequence numbers", correct: false },
+        { text: "no sequence numbers at all", correct: false },
+        { text: "one number per byte", correct: false },
+      ] },
+
+    { prompt: "How does real TCP get much of Selective Repeat's efficiency?",
+      options: [
+        { text: "cumulative ACKs plus SACK options and fast retransmit of a single lost segment", correct: true },
+        { text: "by re-sending the entire window on every loss", correct: false },
+        { text: "by using UDP underneath", correct: false },
+        { text: "by disabling all acknowledgements", correct: false },
+      ] },
+  ]);
+</script>

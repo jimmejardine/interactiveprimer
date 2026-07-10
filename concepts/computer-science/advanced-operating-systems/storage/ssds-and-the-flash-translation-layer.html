@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>SSDs and the Flash Translation Layer</primer-title>
+
+    <primer-card>
+      <p>
+        A solid-state drive presents the same face to the
+        <primer-ref to="computer-science/advanced-operating-systems/storage/the-block-io-layer">block layer</primer-ref>
+        as a hard disk — "here are N logical 4 KiB blocks, read and write them by number." That interface is a
+        <em>lie</em>, and a beautiful one. Underneath, NAND flash obeys physics utterly unlike a rewritable disk:
+        you can read a page, you can write (program) a fresh page, but you <strong>cannot overwrite a page in
+        place</strong>. To reuse a page you must first <em>erase</em> the whole large block it lives in — hundreds
+        of pages at once — and each cell survives only a few thousand of those erase cycles before it wears out.
+      </p>
+      <p>
+        Bridging that gap between the clean block interface and the messy flash reality is the job of the
+        <strong>Flash Translation Layer</strong> (FTL) — a tiny log-structured operating system running on the
+        drive's own controller. Understanding the FTL explains everything on an SSD datasheet: write
+        amplification, over-provisioning, endurance ratings, TRIM, and why your drive sometimes stutters. If you
+        have met <primer-ref to="computer-science/advanced-operating-systems/filesystems/log-structured-file-systems">log-structured
+        file systems</primer-ref>, you already know the tune; the FTL plays it in silicon.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The three flash operations and their brutal asymmetry</h2>
+      <p>
+        NAND flash has three primitives, and their costs and granularities differ by orders of magnitude — this
+        asymmetry <em>is</em> the reason the FTL exists.
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th>Operation</th><th>Granularity</th><th>Rough latency</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Read</strong></td><td>a page (4–16 KiB)</td><td>~25–100 µs</td></tr>
+            <tr><td><strong>Program (write)</strong></td><td>a page — but only if erased</td><td>~200–900 µs</td></tr>
+            <tr><td><strong>Erase</strong></td><td>a whole block (~128–256 pages)</td><td>~2–5 ms</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The killer constraints: you program at <strong>page</strong> granularity but erase at <strong>block</strong>
+        granularity, and <strong>program can only turn 1→0</strong>, so a page must be <em>erased</em> (all 1s)
+        before it can be written. You cannot flip one byte of a stored page; to change it you must write the new
+        version <em>somewhere else</em> and mark the old one stale. Sound familiar? It is exactly the append-only
+        log discipline — forced on you by the hardware.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the FTL mapping + GC figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "ftl": {
+          "title": "The FTL maps logical blocks to physical pages; overwrites append + invalidate; GC erases & compacts",
+          "lba": "Logical block address (what the OS sees)",
+          "map": "FTL mapping table (logical → physical)",
+          "phys": "Physical NAND (pages grouped into erase blocks)",
+          "valid": "valid",
+          "stale": "stale (superseded)",
+          "free": "free (erased)",
+          "gc": "GC: copy the few valid pages out, then erase the block"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The FTL: a log with a map</h2>
+      <p>
+        The FTL keeps a <strong>mapping table</strong> from logical block address (what the OS names) to the
+        physical page currently holding that data. On a write, it does <em>not</em> touch the old page. It:
+      </p>
+      <ul>
+        <li>writes the new data to the next <strong>free, already-erased</strong> page (append to the log);</li>
+        <li>updates the mapping so the logical address now points at the new physical page;</li>
+        <li>marks the old physical page <strong>stale</strong> (invalid) — dead weight until reclaimed.</li>
+      </ul>
+      <primer-geometry scene="ftl"></primer-geometry>
+      <p>
+        Because writes wander, the drive slowly fills with stale pages. <strong>Garbage collection</strong>
+        reclaims them: pick a victim erase-block, copy its still-<em>valid</em> pages out to the log, then erase
+        the whole block back to free. That copying is pure overhead — I/O the host never asked for. Meanwhile,
+        <strong>wear leveling</strong> ensures the controller spreads erases across <em>all</em> blocks (not just
+        the frequently-rewritten ones), so no single block wears out years before the rest, and
+        <strong>TRIM</strong> lets the file system tell the drive "this logical block is now unused," letting GC
+        drop that data instead of dutifully copying dead bytes forward.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Write amplification — the number that governs your SSD's life</h2>
+      <p>
+        Every valid page GC copies forward is a flash write the host never requested. So the flash does
+        <em>more</em> writing than the host asked for. The ratio is <strong>write amplification</strong>:
+      </p>
+      <primer-math display>\text{WAF} \;=\; \frac{\text{bytes actually written to NAND}}{\text{bytes written by the host}} \;\ge\; 1</primer-math>
+      <p>
+        A WAF of 3 means every 1 GB you write costs the flash 3 GB of wear. Since endurance is a fixed budget of
+        program/erase cycles, WAF divides your drive's lifetime. And WAF depends sharply on how <em>full</em> the
+        drive is: when GC victim blocks are mostly valid, it must copy a lot to reclaim a little. This is why
+        drives ship with <strong>over-provisioning</strong> — hidden spare capacity (say 7–28%) the host cannot
+        see — that keeps a healthy pool of free blocks so GC always has slack and WAF stays low.
+      </p>
+      <primer-code run>
+        // Write amplification from garbage collection.
+        // A drive of `blocks` erase-blocks, each `pagesPerBlock` pages. To reclaim a victim block that is
+        // `validFrac` valid, GC must copy that many valid pages elsewhere before erasing.
+        const pagesPerBlock = 128;
+
+        function wafForFullness(validFrac: number): number {
+          // Reclaiming one block frees pagesPerBlock pages but only (1 - validFrac) of them are "new" space.
+          // Host-useful writes per GC cycle = free pages produced; NAND writes = those + copied valid pages.
+          const copied = validFrac * pagesPerBlock;          // GC copy-forward writes
+          const freed = (1 - validFrac) * pagesPerBlock;     // space made available for host data
+          if (freed === 0) return Infinity;
+          return (freed + copied) / freed;                   // total NAND writes / host writes
+        }
+
+        console.log("victim valid %   ->   write amplification (WAF)");
+        for (const vf of [0.2, 0.5, 0.7, 0.9]) {
+          const waf = wafForFullness(vf);
+          console.log(`  ${(vf * 100).toFixed(0)}% valid   ->   WAF ≈ ${waf.toFixed(2)}`);
+        }
+        console.log("\nFuller victim blocks (more valid pages) => higher WAF => faster wear.");
+        console.log("Over-provisioning keeps victims emptier, holding WAF down.");
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="How long does a consumer SSD actually last?">
+      <p>
+        Endurance is quoted as <strong>P/E cycles</strong> (program/erase per block) or as <strong>TBW</strong>
+        (terabytes written). A modern TLC cell tolerates roughly <strong>1 000–3 000</strong> P/E cycles (QLC
+        fewer, ~1 000; old SLC ~100 000). Take a 1 TB TLC drive rated 600 TBW. Even writing a hefty 50 GB every
+        single day, that is <primer-math>600{,}000 / 50 \approx 12{,}000</primer-math> days — about
+        <strong>33 years</strong>. For almost all users the drive is obsolete long before its flash wears out.
+        The workloads that <em>do</em> kill SSDs are write-amplifying ones — tiny random overwrites on a nearly
+        full drive with poor over-provisioning — which is exactly why datacentres run enterprise drives with 28%
+        OP and care intensely about keeping WAF near 1.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Deleting' a file does not tell the SSD anything — that's what TRIM is for">
+      <p>
+        A classic surprise: when you delete a file, the file system merely marks its blocks free in <em>its own</em>
+        metadata. The SSD's FTL has no idea — as far as the drive knows, those logical blocks still hold valid
+        data, so GC keeps dutifully copying them forward, inflating write amplification for no reason. The fix is
+        <strong>TRIM</strong> (the <code>discard</code> command): the file system explicitly tells the drive "these
+        logical blocks are dead, you may forget them." Only then can the FTL mark those pages stale and let GC drop
+        them. Without TRIM an SSD slowly degrades as its internal view of "valid" data drifts far above the truth —
+        which is why <code>fstrim</code> and the <code>discard</code> mount option exist, and why the FTL cannot
+        simply infer freeing on its own.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The picture, stated as laws</h2>
+      <primer-theorem name="Flash & the FTL — the essentials">
+        <ul>
+          <li>flash <strong>reads/programs a page</strong> but <strong>erases a whole block</strong>, and a page
+            must be erased before it can be rewritten — <strong>no in-place overwrite</strong>;</li>
+          <li>the <strong>FTL</strong> is log-structured: it maps logical→physical, appends new writes, invalidates
+            the old page, and <strong>garbage-collects</strong> stale pages;</li>
+          <li><strong>write amplification</strong> = NAND writes ÷ host writes ≥ 1; GC copy-forward drives it up,
+            and it worsens as the drive gets fuller;</li>
+          <li><strong>over-provisioning</strong> lowers WAF (more free slack); <strong>wear leveling</strong>
+            spreads erases; <strong>TRIM</strong> lets the FS mark blocks dead; endurance is a fixed budget of
+            <strong>P/E cycles</strong>.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Quiz: flash mechanics + FTL/GC/WAF concepts + numeric WAF/capacity/endurance calcs.
+         Variables avoid evaluator collisions (host, nand, cap, op, pe, valid). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "ssdQuiz@1": {
+          "intro": "NAND flash (read/program page, erase block, no in-place overwrite); the log-structured FTL, garbage collection, wear leveling, TRIM, over-provisioning, and write amplification.",
+          "eraseQ": "Why can't an SSD overwrite a 4 KiB page in place?",
+          "erRight": "flash programs at page granularity but must erase the whole surrounding block first",
+          "erWrong1": "the page cache forbids it",
+          "erWrong2": "the block layer blocks overwrites",
+          "erWrong3": "pages are read-only forever",
+          "ftlQ": "The Flash Translation Layer primarily…",
+          "ftRight": "maps logical block addresses to physical pages and hides flash's erase-before-write rule",
+          "ftWrong1": "compresses all data before storage",
+          "ftWrong2": "spins the platters faster",
+          "ftWrong3": "encrypts the OS kernel",
+          "writeQ": "When the FTL receives a write to an already-used logical block, it…",
+          "wrRight": "writes new data to a fresh page, remaps, and marks the old page stale",
+          "wrWrong1": "erases just that one page and rewrites it",
+          "wrWrong2": "refuses the write",
+          "wrWrong3": "overwrites the bytes directly",
+          "gcQ": "Garbage collection on an SSD…",
+          "gcRight": "copies valid pages out of a victim block, then erases the whole block to reclaim it",
+          "gcWrong1": "deletes user files older than a week",
+          "gcWrong2": "defragments the mapping table only",
+          "gcWrong3": "never runs on modern drives",
+          "wafQ": "Write amplification (WAF) is defined as…",
+          "waRight": "bytes actually written to NAND divided by bytes written by the host (≥ 1)",
+          "waWrong1": "host bytes divided by NAND bytes (≤ 1)",
+          "waWrong2": "the drive's capacity divided by its speed",
+          "waWrong3": "reads divided by writes",
+          "opQ": "Over-provisioning reduces write amplification by…",
+          "opRight": "reserving hidden spare capacity so GC always has emptier victim blocks",
+          "opWrong1": "making the drive report more capacity",
+          "opWrong2": "disabling garbage collection",
+          "opWrong3": "increasing the P/E cycle limit of each cell",
+          "trimQ": "TRIM (discard) exists because…",
+          "trRight": "the FTL otherwise can't know a deleted file's blocks are free and keeps copying them",
+          "trWrong1": "flash cells need periodic voltage refresh",
+          "trWrong2": "the OS needs to defragment the disk head",
+          "trWrong3": "it encrypts freed blocks",
+          "wearQ": "Wear leveling ensures that…",
+          "weRight": "erases are spread across all blocks so none wears out far ahead of the others",
+          "weWrong1": "hot data is always kept in one block",
+          "weWrong2": "the drive never needs garbage collection",
+          "weWrong3": "reads are faster than writes",
+          "peQ": "Endurance measured in 'P/E cycles' refers to…",
+          "peRight": "how many program/erase cycles a flash block tolerates before wearing out",
+          "peWrong1": "the peak read speed of the drive",
+          "peWrong2": "the number of partitions allowed",
+          "peWrong3": "power-on hours before failure",
+          "wafNumQ": "The host writes {host} GB and the flash actually writes {nand} GB to NAND. What is the write amplification factor (WAF)? (answer to 2 dp)",
+          "opNumQ": "A drive has {cap} GB of raw NAND but exposes {usable} GB to the host. How many GB are used for over-provisioning?",
+          "peNumQ": "A block tolerates {pe} P/E cycles. With perfect wear leveling and no amplification, if the whole drive is fully rewritten once per cycle, how many full-drive rewrites can it survive? (answer = pe)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="ssdQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/storage/the-block-io-layer"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- FTL mapping + GC: three stacked bands (LBA row, mapping table, physical NAND grid of valid/stale/free
+     pages). Static BASE content, visible on load. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "ftl",
+    ({ board, colors, sceneStrings }) => {
+      // Physical NAND: two erase blocks of 4 pages each, coloured valid/stale/free.
+      const states = [
+        ["valid", "stale", "valid", "stale"],   // block 0 (a GC candidate: half stale)
+        ["valid", "free", "free", "free"],       // block 1 (mostly free)
+      ];
+      const colorFor = (s) => s === "valid" ? colors.cat[0] : s === "stale" ? colors.cat[1] : colors.bg;
+      const opFor = (s) => s === "valid" ? 0.32 : s === "stale" ? 0.3 : 0.08;
+
+      const PW = 1.1, PH = 1.0, bx = 0.4, by = 0.6, bgap = 0.5;
+      states.forEach((blk, b) => {
+        const x0 = bx + b * (4 * PW + bgap);
+        blk.forEach((s, p) => {
+          board.create("polygon",
+            [[x0 + p * PW, by], [x0 + p * PW + PW, by], [x0 + p * PW + PW, by + PH], [x0 + p * PW, by + PH]], {
+            fillColor: colorFor(s), fillOpacity: opFor(s),
+            borders: { strokeColor: colors.line, strokeWidth: 1, dash: s === "free" ? 2 : 0, highlight: false },
+            vertices: { visible: false }, fixed: true, highlight: false,
+          });
+        });
+        board.create("text", [x0 + 2 * PW, by - 0.35, `erase block ${b}`], {
+          strokeColor: colors.ink, fontSize: 10, anchorX: "middle", fixed: true, highlight: false,
+        });
+      });
+      board.create("text", [bx, by + PH + 0.45, sceneStrings("phys")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "left", fixed: true, highlight: false, cssStyle: "font-weight:600",
+      });
+
+      // Legend.
+      const leg = [["valid", "valid"], ["stale", "stale"], ["free", "free"]];
+      leg.forEach(([s, key], i) => {
+        const lx = bx + i * 3.0, ly = 5.4;
+        board.create("polygon", [[lx, ly], [lx + 0.5, ly], [lx + 0.5, ly + 0.5], [lx, ly + 0.5]], {
+          fillColor: colorFor(s), fillOpacity: opFor(s),
+          borders: { strokeColor: colors.line, strokeWidth: 1, dash: s === "free" ? 2 : 0, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [lx + 0.7, ly + 0.25, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 10, anchorX: "left", anchorY: "middle", fixed: true, highlight: false,
+        });
+      });
+
+      // Mapping-table label above.
+      board.create("text", [bx, 6.7, sceneStrings("map")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "left", fixed: true, highlight: false, cssStyle: "font-weight:600",
+      });
+      board.create("text", [bx, 7.4, sceneStrings("lba")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "left", fixed: true, highlight: false, cssStyle: "font-weight:600",
+      });
+      // Arrows LBA -> map -> physical.
+      board.create("arrow", [[bx + 3, 7.25], [bx + 3, 6.9]], { strokeColor: colors.cat[2], strokeWidth: 2, lastArrow: { size: 5 }, fixed: true, highlight: false });
+      board.create("arrow", [[bx + 3, 6.5], [bx + 3, by + PH + 0.7]], { strokeColor: colors.cat[2], strokeWidth: 2, lastArrow: { size: 5 }, fixed: true, highlight: false });
+
+      // GC note pointing at block 0.
+      board.create("text", [bx + 2, -0.2, sceneStrings("gc")], {
+        strokeColor: colors.ink, fontSize: 9, anchorX: "middle", fixed: true, highlight: false, cssStyle: "max-width:300px; opacity:0.9",
+      });
+    },
+    {
+      boundingbox: [-0.6, 8.0, 11.6, -0.9],
+      keepAspect: false,
+      title: () => makeStrings("ftl")("title"),
+    },
+  );
+
+  registerQuiz("ssdQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("eraseQ"), options: [
+      { text: () => sceneStrings("erRight"), correct: true },
+      { text: () => sceneStrings("erWrong1"), correct: false },
+      { text: () => sceneStrings("erWrong2"), correct: false },
+      { text: () => sceneStrings("erWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("ftlQ"), options: [
+      { text: () => sceneStrings("ftRight"), correct: true },
+      { text: () => sceneStrings("ftWrong1"), correct: false },
+      { text: () => sceneStrings("ftWrong2"), correct: false },
+      { text: () => sceneStrings("ftWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("writeQ"), options: [
+      { text: () => sceneStrings("wrRight"), correct: true },
+      { text: () => sceneStrings("wrWrong1"), correct: false },
+      { text: () => sceneStrings("wrWrong2"), correct: false },
+      { text: () => sceneStrings("wrWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("gcQ"), options: [
+      { text: () => sceneStrings("gcRight"), correct: true },
+      { text: () => sceneStrings("gcWrong1"), correct: false },
+      { text: () => sceneStrings("gcWrong2"), correct: false },
+      { text: () => sceneStrings("gcWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("wafQ"), options: [
+      { text: () => sceneStrings("waRight"), correct: true },
+      { text: () => sceneStrings("waWrong1"), correct: false },
+      { text: () => sceneStrings("waWrong2"), correct: false },
+      { text: () => sceneStrings("waWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("opQ"), options: [
+      { text: () => sceneStrings("opRight"), correct: true },
+      { text: () => sceneStrings("opWrong1"), correct: false },
+      { text: () => sceneStrings("opWrong2"), correct: false },
+      { text: () => sceneStrings("opWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("trimQ"), options: [
+      { text: () => sceneStrings("trRight"), correct: true },
+      { text: () => sceneStrings("trWrong1"), correct: false },
+      { text: () => sceneStrings("trWrong2"), correct: false },
+      { text: () => sceneStrings("trWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("wearQ"), options: [
+      { text: () => sceneStrings("weRight"), correct: true },
+      { text: () => sceneStrings("weWrong1"), correct: false },
+      { text: () => sceneStrings("weWrong2"), correct: false },
+      { text: () => sceneStrings("weWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("peQ"), options: [
+      { text: () => sceneStrings("peRight"), correct: true },
+      { text: () => sceneStrings("peWrong1"), correct: false },
+      { text: () => sceneStrings("peWrong2"), correct: false },
+      { text: () => sceneStrings("peWrong3"), correct: false },
+    ] },
+    {
+      // WAF = nand / host.
+      prompt: (v) => sceneStrings("wafNumQ", v),
+      variables: "host=[100,200,250] nand=[300,500,600]",
+      answer: (v) => Math.round((v.nand / v.host) * 100) / 100,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // OP = cap - usable.
+      prompt: (v) => sceneStrings("opNumQ", v),
+      variables: "cap=[512,1024] usable=[400,480,900,960]",
+      constraints: "usable < cap",
+      answer: (v) => v.cap - v.usable,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Full-drive rewrites = pe.
+      prompt: (v) => sceneStrings("peNumQ", v),
+      variables: "pe=[1000,1500,3000]",
+      answer: (v) => v.pe,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

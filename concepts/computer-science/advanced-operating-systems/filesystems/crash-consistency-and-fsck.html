@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Crash Consistency and fsck</primer-title>
+
+    <primer-card>
+      <p>
+        Here is the problem that haunts every file system and drives the next three lessons. You know that a single file
+        operation — say, <strong>appending one block</strong> to a file — is <em>logically</em> one action. But on disk it
+        is <strong>several separate writes</strong>: the new <strong>data block</strong> itself, the
+        <strong>inode</strong> (updated size and a new block pointer), and the <strong>free-space bitmap</strong> (that
+        block flipped from free to used). Three writes, and the disk does them one at a time, in whatever order it likes.
+      </p>
+      <p>
+        Now pull the power cord in the middle. Some of those three writes made it to the platter; some did not. The
+        file system reboots into a state that <em>no correct sequence of operations could ever have produced</em> — a
+        bitmap that disagrees with the inodes, an inode pointing at a block marked free, a used block that no file owns.
+        This is the <strong>crash-consistency problem</strong>, and it is fundamental: it exists because a disk gives you
+        <em>single-block</em> atomicity but a file operation needs <em>multi-block</em> atomicity, and the two do not
+        match. Everything that follows — journaling, log-structured, copy-on-write — is an answer to this one question.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The canonical example: appending a block</h2>
+      <p>
+        Take a file with one block, and append a second. The file system must perform three writes:
+      </p>
+      <primer-theorem name="Three writes, any subset may survive a crash">
+        <ul>
+          <li><strong>Db</strong> — write the new <em>data block</em> with your bytes;</li>
+          <li><strong>I</strong> — write the <em>inode</em> with its new size and a pointer to Db;</li>
+          <li><strong>B</strong> — write the <em>data bitmap</em> marking Db as allocated.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        There are <primer-math>2^3 = 8</primer-math> possible outcomes for which subset of writes survives. Two are fine
+        (none landed → as if nothing happened; all landed → success). The other six are trouble, and they are trouble in
+        <em>different</em> ways — some merely leak space, some hand out a block that is still in use, some leave the inode
+        pointing at garbage. This variety is exactly why the problem is subtle.
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th>What landed</th><th>Resulting state</th></tr></thead>
+          <tbody>
+            <tr><td>only <strong>I</strong></td><td>inode points at a block the bitmap calls free → will be handed to another file → corruption</td></tr>
+            <tr><td>only <strong>B</strong></td><td>block marked used but no inode owns it → <em>space leak</em> (lost forever)</td></tr>
+            <tr><td>only <strong>Db</strong></td><td>bytes on disk but nothing references them → harmless, but the append is lost</td></tr>
+            <tr><td><strong>I + Db</strong>, no B</td><td>inode and data agree, but bitmap says free → block can be double-allocated → corruption</td></tr>
+            <tr><td><strong>I + B</strong>, no Db</td><td>metadata consistent, but the data block holds <em>garbage</em> (stale bytes)</td></tr>
+            <tr><td><strong>B + Db</strong>, no I</td><td>block used and written, but no inode points to it → space leak</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <!-- Strings for the partial-write timeline figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "crash": {
+          "title": "An append is three writes on a timeline — a crash can land any prefix, leaving the FS inconsistent",
+          "time": "time →",
+          "wB": "write B (bitmap: block used)",
+          "wI": "write I (inode: size + pointer)",
+          "wDb": "write Db (data bytes)",
+          "landed": "landed ✓",
+          "lost": "lost ✗ (crash before this write)",
+          "boom": "CRASH",
+          "s1": "The three writes an append requires, issued in some order",
+          "s2": "The crash lands a PREFIX — here B and I survived, Db did not",
+          "s3": "Result: metadata says the block is used and pointed-to, but it holds garbage"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>See a crash land a prefix</h2>
+      <p>
+        Lay the three writes on a timeline. A crash draws a vertical line somewhere along it: everything to the left made
+        it to disk, everything to the right vanished. Depending on <em>where</em> the line falls — and the order the disk
+        chose to do the writes — you land in one of the eight states above.
+      </p>
+      <primer-geometry scene="crash"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Enumerate the damage</h2>
+      <p>
+        The model below runs through all eight subsets of {B, I, Db} and classifies each outcome — <em>consistent</em>,
+        a <em>space leak</em>, or outright <em>corruption</em>. Read the output and you have the whole crash-consistency
+        problem in front of you: most partial outcomes are broken, and they are broken in incompatible ways, so there is
+        no single simple patch.
+      </p>
+      <primer-code run>
+        // Enumerate every subset of the three writes an append needs, and classify the crash outcome.
+        // B = bitmap marks the block used, I = inode points at it, Db = data bytes are written.
+        type W = { B: boolean; I: boolean; Db: boolean };
+
+        function classify(w: W): string {
+          if (!w.B &amp;&amp; !w.I &amp;&amp; !w.Db) return "consistent  (nothing happened — append simply lost)";
+          if (w.B &amp;&amp; w.I &amp;&amp; w.Db) return "consistent  (full success)";
+          // Metadata cross-checks:
+          if (w.I &amp;&amp; !w.B) return "CORRUPTION  (inode points to a block the bitmap calls free)";
+          if (w.B &amp;&amp; !w.I) return "SPACE LEAK  (block marked used but owned by no inode)";
+          if (w.I &amp;&amp; w.B &amp;&amp; !w.Db) return "consistent-metadata but GARBAGE data in the block";
+          if (w.Db &amp;&amp; !w.I &amp;&amp; !w.B) return "consistent  (orphan bytes, referenced by nobody)";
+          return "unclassified";
+        }
+
+        for (const B of [false, true])
+          for (const I of [false, true])
+            for (const Db of [false, true]) {
+              const tag = `${B ? "B" : "-"}${I ? "I" : "-"}${Db ? "d" : "-"}`;
+              console.log(`landed ${tag} : ${classify({ B, I, Db })}`);
+            }
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>fsck: the scan-and-repair sledgehammer</h2>
+      <p>
+        The oldest answer is not to <em>prevent</em> inconsistency but to <em>detect and repair</em> it after the fact.
+        <strong>fsck</strong> (file-system check) runs at boot after an unclean shutdown and walks the <em>entire</em>
+        file system, rebuilding the metadata to a self-consistent state:
+      </p>
+      <ul>
+        <li>scan every inode to learn which blocks are truly in use, then <strong>recompute the bitmap</strong> from
+          scratch (so leaked and double-marked blocks are fixed);</li>
+        <li>recount how many directory entries point at each inode and <strong>fix link counts</strong>;</li>
+        <li>find inodes that are allocated but referenced by no directory and dump them in
+          <primer-math>\texttt{lost+found}</primer-math>;</li>
+        <li>sanity-check sizes, pointer ranges, and the superblock.</li>
+      </ul>
+      <p>
+        It works — but it has two brutal limitations. First, it is <strong>O(size of the file system)</strong>: it must
+        read every inode and often every block, so on a multi-terabyte disk a full <primer-math>\texttt{fsck}</primer-math>
+        can take <em>hours</em>, during which the machine is down. As disks grew from megabytes to terabytes, this went
+        from "a few seconds at boot" to "unacceptable," and it is the direct historical reason journaling was invented.
+      </p>
+      <p>
+        Second, and worse: <strong>fsck restores <em>consistency</em>, not <em>correctness</em>.</strong> It can make the
+        bitmap agree with the inodes, but if the crash left your inode pointing at a block that was never written, fsck
+        cannot conjure the data you meant to save — it can only make the file system <em>coherent</em> about the fact that
+        the data is garbage. Your last transaction is simply gone. fsck saves the file system; it cannot save your file.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If the disk writes one block atomically, why can't the file system just write everything at once?">
+      <p>
+        Because "everything" is scattered across the disk — the inode lives in the inode table, the bitmap in the
+        allocation area, the data block out in the data region — and a disk can only guarantee that a <em>single</em>
+        sector (or block) is written all-or-nothing. There is no hardware primitive that says "write these three
+        far-apart blocks together or not at all." You could try to make them adjacent, but a file's inode, its bitmap,
+        and its data <em>fundamentally</em> live in different structures. The entire field of crash consistency exists to
+        build multi-block atomicity out of the single-block atomicity the hardware gives you — by logging intentions
+        first (journaling), by never overwriting (copy-on-write), or by turning all writes into one sequential stream
+        (log-structured). Each is a different bridge across the same gap.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Consistent' does not mean 'your data is safe'">
+      <p>
+        The single most dangerous misreading of this topic is to treat crash <em>consistency</em> as a durability
+        guarantee. They are different promises. A crash-consistent file system guarantees only that after recovery its
+        structures are <em>coherent</em> — no dangling pointers, no double-allocated blocks — so it will not corrupt
+        <em>other</em> files or crash the kernel. It says <strong>nothing</strong> about whether <em>your</em> just-written
+        data survived; the whole transaction may have vanished, and after fsck the file system is perfectly happy about
+        that. If you need "this data is definitely on stable media before I continue," that is a <em>durability</em>
+        request — you must call <primer-math>\texttt{fsync}</primer-math>, the subject of a later lesson. Confusing the
+        two is behind a long list of real-world data-loss bugs.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Where this leads</h2>
+      <p>
+        fsck's two flaws — it is O(disk) slow, and it cannot recover lost updates — motivate everything that comes next.
+        <primer-ref forward to="computer-science/advanced-operating-systems/filesystems/journaling-file-systems">Journaling</primer-ref>
+        writes intentions to a small log first, so recovery replays only the log instead of scanning the whole disk.
+        <primer-ref forward to="computer-science/advanced-operating-systems/filesystems/log-structured-file-systems">Log-structured</primer-ref>
+        and
+        <primer-ref forward to="computer-science/advanced-operating-systems/filesystems/copy-on-write-file-systems">copy-on-write</primer-ref>
+        file systems go further and make inconsistency structurally impossible. Keep the eight-outcome picture in mind —
+        each design is a different way of collapsing those six bad states.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: crash-consistency concepts + a couple of numeric (subset count, fsck scan time). Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "crashQuiz@1": {
+          "intro": "One logical op = several disk writes; a crash lands a subset, leaving inconsistency. fsck is O(disk) and restores consistency, not lost data.",
+          "rootQ": "The crash-consistency problem exists because…",
+          "roRight": "a single file operation needs several disk writes, but the disk only makes one block atomic",
+          "roWrong1": "disks are too slow to write anything",
+          "roWrong2": "file systems are written in C",
+          "roWrong3": "users unplug their computers on purpose",
+          "appendQ": "Appending one block to a file typically requires which three writes?",
+          "apRight": "the data block, the inode, and the free-space bitmap",
+          "apWrong1": "three copies of the same data block",
+          "apWrong2": "the CPU, the RAM, and the disk",
+          "apWrong3": "only the data block",
+          "leakQ": "A crash leaves the bitmap marking a block USED but no inode points to it. This is…",
+          "lkRight": "a space leak — the block is lost until fsck reclaims it",
+          "lkWrong1": "immediate data corruption of another file",
+          "lkWrong2": "a perfectly correct successful append",
+          "lkWrong3": "impossible",
+          "corruptQ": "A crash lands the inode pointer but NOT the bitmap update. The danger is…",
+          "coRight": "the block looks free, so it can be handed to another file → two files share it → corruption",
+          "coWrong1": "nothing — this is safe",
+          "coWrong2": "the inode is deleted",
+          "coWrong3": "the disk speeds up",
+          "fsckWhatQ": "fsck repairs a file system by…",
+          "fwRight": "scanning inodes to recompute the bitmap and fix link counts into a consistent state",
+          "fwWrong1": "restoring your lost data from a hidden backup",
+          "fwWrong2": "reformatting the disk",
+          "fwWrong3": "asking the disk to undo the crash",
+          "fsckCostQ": "Why is fsck considered too slow for modern large disks?",
+          "fcRight": "it is O(size of the file system) — it must read every inode and often every block",
+          "fcWrong1": "it needs an internet connection",
+          "fcWrong2": "it runs only once per year",
+          "fcWrong3": "it recompiles the kernel each time",
+          "fsckLimitQ": "The fundamental limit of fsck is that it restores…",
+          "flRight": "consistency, not correctness — it cannot recover data the crash never wrote",
+          "flWrong1": "correctness fully — no data is ever lost",
+          "flWrong2": "nothing at all",
+          "flWrong3": "only the superblock",
+          "consistVsDurQ": "'Crash-consistent' guarantees that after recovery…",
+          "cvRight": "the file-system structures are coherent — but your last update may be gone",
+          "cvWrong1": "every write you issued is durably saved",
+          "cvWrong2": "the disk cannot fail again",
+          "cvWrong3": "fsck is never needed",
+          "orphanQ": "fsck puts inodes that are allocated but referenced by no directory into…",
+          "orRight": "lost+found",
+          "orWrong1": "the trash bin",
+          "orWrong2": "swap space",
+          "orWrong3": "the journal",
+          "subsetNumQ": "A logical operation needs {nw} separate disk writes. How many possible crash outcomes (subsets that may survive) are there?",
+          "fsckTimeNumQ": "fsck scans a {ng} GB disk at {gs} GB per minute. How many minutes does the scan take?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="crashQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/filesystems/inode-design-and-block-allocation"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Partial-write timeline: a time arrow, three write markers (B, I, Db), a crash line after the second,
+     with landed/lost captions. Revealed in steps. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "crash",
+    ({ board, colors, step, sceneStrings }) => {
+      const writeBox = (cx, key, ci, landed) => {
+        board.create("polygon", [[cx - 1.1, 2.3], [cx + 1.1, 2.3], [cx + 1.1, 3.5], [cx - 1.1, 3.5]], {
+          fillColor: colors.cat[ci % 6], fillOpacity: landed ? 0.28 : 0.12,
+          borders: { strokeColor: colors.line, strokeWidth: 1.4, dash: landed ? 0 : 2, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [cx, 2.9, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "max-width:150px",
+        });
+        board.create("text", [cx, 1.75, sceneStrings(landed ? "landed" : "lost")], {
+          strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "opacity:0.85",
+        });
+      };
+
+      // Base: the time arrow.
+      board.create("arrow", [[-0.3, 0.9], [11.3, 0.9]], {
+        strokeColor: colors.line, strokeWidth: 2, lastArrow: { size: 6 }, fixed: true, highlight: false,
+      });
+      board.create("text", [11.0, 0.55, sceneStrings("time")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "right", anchorY: "middle", fixed: true, highlight: false,
+      });
+
+      const xs = [1.6, 4.6, 8.6];
+      step(sceneStrings("s1"), () => {
+        writeBox(xs[0], "wB", 2, true);
+        writeBox(xs[1], "wI", 3, true);
+        writeBox(xs[2], "wDb", 4, false);
+      });
+
+      step(sceneStrings("s2"), () => {
+        const cx = 6.6; // crash line between I and Db
+        board.create("line", [[cx, 0.9], [cx, 4.2]], {
+          strokeColor: colors.cat[1], strokeWidth: 3, dash: 3, straightFirst: false, straightLast: false,
+          fixed: true, highlight: false,
+        });
+        board.create("text", [cx, 4.5, sceneStrings("boom")], {
+          strokeColor: colors.cat[1], fontSize: 13, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:700",
+        });
+      });
+
+      step(sceneStrings("s3"), () => {
+        board.create("text", [5.5, 0.1, sceneStrings("s3")], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "max-width:640px; opacity:0.9",
+        });
+      });
+    },
+    {
+      boundingbox: [-0.6, 5.1, 11.8, -0.5],
+      keepAspect: false,
+      title: () => makeStrings("crash")("title"),
+    },
+  );
+
+  registerQuiz("crashQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("rootQ"), options: [
+      { text: () => sceneStrings("roRight"), correct: true },
+      { text: () => sceneStrings("roWrong1"), correct: false },
+      { text: () => sceneStrings("roWrong2"), correct: false },
+      { text: () => sceneStrings("roWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("appendQ"), options: [
+      { text: () => sceneStrings("apRight"), correct: true },
+      { text: () => sceneStrings("apWrong1"), correct: false },
+      { text: () => sceneStrings("apWrong2"), correct: false },
+      { text: () => sceneStrings("apWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("leakQ"), options: [
+      { text: () => sceneStrings("lkRight"), correct: true },
+      { text: () => sceneStrings("lkWrong1"), correct: false },
+      { text: () => sceneStrings("lkWrong2"), correct: false },
+      { text: () => sceneStrings("lkWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("corruptQ"), options: [
+      { text: () => sceneStrings("coRight"), correct: true },
+      { text: () => sceneStrings("coWrong1"), correct: false },
+      { text: () => sceneStrings("coWrong2"), correct: false },
+      { text: () => sceneStrings("coWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fsckWhatQ"), options: [
+      { text: () => sceneStrings("fwRight"), correct: true },
+      { text: () => sceneStrings("fwWrong1"), correct: false },
+      { text: () => sceneStrings("fwWrong2"), correct: false },
+      { text: () => sceneStrings("fwWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fsckCostQ"), options: [
+      { text: () => sceneStrings("fcRight"), correct: true },
+      { text: () => sceneStrings("fcWrong1"), correct: false },
+      { text: () => sceneStrings("fcWrong2"), correct: false },
+      { text: () => sceneStrings("fcWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fsckLimitQ"), options: [
+      { text: () => sceneStrings("flRight"), correct: true },
+      { text: () => sceneStrings("flWrong1"), correct: false },
+      { text: () => sceneStrings("flWrong2"), correct: false },
+      { text: () => sceneStrings("flWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("consistVsDurQ"), options: [
+      { text: () => sceneStrings("cvRight"), correct: true },
+      { text: () => sceneStrings("cvWrong1"), correct: false },
+      { text: () => sceneStrings("cvWrong2"), correct: false },
+      { text: () => sceneStrings("cvWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("orphanQ"), options: [
+      { text: () => sceneStrings("orRight"), correct: true },
+      { text: () => sceneStrings("orWrong1"), correct: false },
+      { text: () => sceneStrings("orWrong2"), correct: false },
+      { text: () => sceneStrings("orWrong3"), correct: false },
+    ] },
+    {
+      // Subsets of nw writes = 2^nw.
+      prompt: (v) => sceneStrings("subsetNumQ", v),
+      variables: "nw=[2:6]",
+      answer: (v) => 2 ** v.nw,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Scan time = ng / gs minutes (gs divides ng).
+      prompt: (v) => sceneStrings("fsckTimeNumQ", v),
+      variables: "gs=[2,4] ng=[8,16,24,32]",
+      answer: (v) => v.ng / v.gs,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

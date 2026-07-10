@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Lock-Free and Wait-Free Data Structures</primer-title>
+
+    <primer-card>
+      <p>
+        A lock has a dark secret: if the thread holding it is pre-empted, crashes, or is simply slow, <em>every
+        other thread that wants the lock stops dead</em>. One stalled thread freezes the whole structure. For a
+        kernel data path or a real-time system, that is unacceptable. <strong>Lock-free</strong> programming throws
+        the lock away entirely and coordinates with nothing but atomic
+        <primer-ref to="computer-science/advanced-operating-systems/concurrency/kernel-locks-and-mcs">read-modify-write</primer-ref>
+        instructions — usually <strong>compare-and-swap (CAS)</strong> — so that the failure or delay of any one
+        thread can never block the others.
+      </p>
+      <p>
+        This is some of the hardest code humans write. It lives in kernels, garbage collectors, database engines,
+        and lock-free queues between threads. To reason about it you need a precise vocabulary of
+        <strong>progress guarantees</strong>, two canonical algorithms (the <strong>Treiber stack</strong> and the
+        <strong>Michael–Scott queue</strong>), and a healthy fear of the <strong>ABA problem</strong> and of
+        <primer-ref to="computer-science/computer-architecture/multicore/memory-consistency-models">memory
+        ordering</primer-ref>. Get any of them wrong and the bug appears once a week, on one machine, under load.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Three progress guarantees, nested</h2>
+      <p>
+        "Non-blocking" is not one property but a hierarchy of increasingly strong promises about <em>which</em>
+        threads are guaranteed to make progress, and <em>when</em>. They nest: every wait-free algorithm is
+        lock-free, and every lock-free algorithm is obstruction-free — but not the reverse.
+      </p>
+      <primer-theorem name="Progress guarantees (weakest to strongest)">
+        <ul>
+          <li><strong>Obstruction-free</strong> — a thread makes progress <em>if it runs alone</em> for long
+            enough (all others paused). The weakest promise; concurrent threads may repeatedly abort each other
+            (livelock) but no locks are held;</li>
+          <li><strong>Lock-free</strong> — <em>some</em> thread always makes progress in a bounded number of
+            system-wide steps. The system as a whole never stalls, though an <em>individual</em> unlucky thread may
+            starve, retrying forever while others succeed;</li>
+          <li><strong>Wait-free</strong> — <em>every</em> thread completes its operation in a bounded number of
+            <em>its own</em> steps, regardless of what others do. The strongest promise: no starvation, no
+            unbounded retries — and the hardest and usually slowest to build.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The distinction is about the system versus the individual. Lock-free guarantees the <em>machine</em> keeps
+        moving; wait-free guarantees <em>you personally</em> keep moving. Most practical structures aim for
+        lock-free — it captures the crucial "one stalled thread can't freeze everyone" property at a reasonable
+        cost — and reserve wait-free for hard real-time paths where a per-operation bound is mandatory.
+      </p>
+      <primer-geometry scene="progress"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The Treiber stack: a lock-free push and pop</h2>
+      <p>
+        The classic lock-free structure is the <strong>Treiber stack</strong> (1986). A stack is a single
+        <primer-math>\texttt{head}</primer-math> pointer to a chain of nodes. The whole trick is the
+        <strong>optimistic CAS loop</strong>: read the current head, prepare your change, and CAS the head from the
+        value-you-read to your new value. If someone else changed the head in between, the CAS fails, you re-read,
+        and retry. To <strong>push</strong>:
+      </p>
+      <ol>
+        <li>read <primer-math>h = \texttt{head}</primer-math>;</li>
+        <li>set your new node's <primer-math>\texttt{next} = h</primer-math>;</li>
+        <li><primer-math>\texttt{CAS(head, } h\texttt{, newNode)}</primer-math> — succeed and you're done; fail and
+          loop from step 1.</li>
+      </ol>
+      <p>
+        Pop is symmetric: read <primer-math>h</primer-math>, read <primer-math>h.\texttt{next}</primer-math>, then
+        <primer-math>\texttt{CAS(head, } h, h.\texttt{next)}</primer-math>. No lock is ever held; if your CAS fails
+        it's only because <em>someone else made progress</em>, which is exactly the lock-free promise. It is not
+        wait-free — a very unlucky thread could lose the CAS race indefinitely — but the stack as a whole never
+        stalls.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the progress-guarantee nesting figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "progress": {
+          "title": "Progress guarantees nest: wait-free ⊂ lock-free ⊂ obstruction-free ⊂ blocking",
+          "block": "Blocking (locks): one stalled thread can freeze everyone",
+          "obs": "Obstruction-free: progress if run in isolation",
+          "lf": "Lock-free: SOME thread always progresses",
+          "wf": "Wait-free: EVERY thread progresses in bounded steps"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Watch a CAS race play out</h2>
+      <p>
+        Let's run a Treiber stack against interference. The simulation pushes and pops, and deliberately injects a
+        concurrent modification between a pop's read and its CAS so you can see the CAS <em>fail and retry</em> —
+        the heartbeat of every lock-free algorithm. Nothing blocks; the loser simply loops and tries again.
+      </p>
+      <primer-code run>
+        // A lock-free (Treiber) stack. The only synchronisation is compareAndSwap on `head`.
+        interface Node { value: number; next: Node | null; }
+
+        class AtomicRef {
+          private ref: Node | null = null;
+          load(): Node | null { return this.ref; }
+          // Atomic CAS: if head === expected, set to next and report success.
+          cas(expected: Node | null, next: Node | null): boolean {
+            if (this.ref === expected) { this.ref = next; return true; }
+            return false;
+          }
+        }
+
+        const head = new AtomicRef();
+        let casAttempts = 0, casFailures = 0;
+
+        function push(value: number): void {
+          const node: Node = { value, next: null };
+          for (;;) {
+            const h = head.load();          // 1. read current head
+            node.next = h;                  // 2. point new node at it
+            casAttempts++;
+            if (head.cas(h, node)) return;  // 3. swing head -> success
+            casFailures++;                  // someone beat us: retry
+          }
+        }
+
+        function pop(interfere?: () => void): number | null {
+          for (;;) {
+            const h = head.load();
+            if (h === null) return null;
+            const next = h.next;
+            if (interfere) interfere();     // simulate another thread acting between read and CAS
+            casAttempts++;
+            if (head.cas(h, next)) return h.value;
+            casFailures++;                  // head moved under us: retry
+          }
+        }
+
+        push(10); push(20); push(30);
+        console.log("pushed 10, 20, 30");
+
+        // Pop, but between our read and our CAS another thread pushes 99 -> our CAS fails once, then retries.
+        let once = true;
+        const v = pop(() => { if (once) { once = false; push(99); } });
+        console.log(`pop returned ${v} (retried after interference)`);
+        console.log(`remaining top = ${head.load()?.value}`);
+        console.log(`CAS attempts=${casAttempts}, failures(retries)=${casFailures}`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The Michael–Scott queue</h2>
+      <p>
+        A stack touches one pointer; a FIFO <strong>queue</strong> touches two (head and tail) and is far subtler.
+        The <strong>Michael–Scott queue</strong> (1996) is <em>the</em> lock-free queue — it is what Java's
+        <primer-math>\texttt{ConcurrentLinkedQueue}</primer-math> and countless kernels use. Its cleverness is a
+        <strong>dummy head node</strong> (so head and tail never alias even when empty) and a two-step enqueue:
+        first CAS the last node's <primer-math>\texttt{next}</primer-math> to point at the newcomer, then CAS the
+        tail forward. Because those two steps aren't atomic together, a thread may find the tail
+        "lagging" — pointing at a node that already has a successor — and any thread that notices this
+        <strong>helps</strong> by swinging the tail forward before proceeding. This <em>helping</em> is the
+        signature of lock-free design: instead of waiting for a stalled thread, you finish its job for it, so the
+        structure never blocks.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Structure</th><th>Pointers</th><th>Guarantee</th><th>Used in</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Treiber stack</td><td>1 (head)</td><td>lock-free</td><td>free-lists, memory allocators</td></tr>
+            <tr><td>Michael–Scott queue</td><td>2 (head, tail)</td><td>lock-free (with helping)</td><td>Java <code>ConcurrentLinkedQueue</code></td></tr>
+            <tr><td>Wait-free queue (Kogan–Petrank)</td><td>2 + per-thread state</td><td>wait-free</td><td>hard real-time paths</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-card>
+      <h2>The ABA problem: when "unchanged" is a lie</h2>
+      <p>
+        Here is the trap that has bitten every lock-free programmer. CAS checks a <em>value</em>, not a
+        <em>history</em>. Your pop reads <primer-math>\texttt{head} = A</primer-math> and plans to CAS it to
+        <primer-math>A.\texttt{next} = B</primer-math>. Before your CAS runs, another thread pops
+        <primer-math>A</primer-math>, pops <primer-math>B</primer-math>, frees them, then pushes a
+        <em>recycled</em> node that reuses <primer-math>A</primer-math>'s address back on top. Your CAS sees
+        <primer-math>\texttt{head} == A</primer-math>, concludes "nothing changed," and succeeds — installing a
+        stale <primer-math>B</primer-math> that has since been freed. The structure is now corrupt. The value went
+        <primer-math>A \to B \to A</primer-math>, and CAS could not tell.
+      </p>
+      <primer-code run>
+        // The ABA problem: CAS on a bare value cannot see A -> B -> A.
+        // A version-tagged pointer fixes it: the counter changes even when the pointer returns to A.
+        interface Tagged { ptr: string; tag: number; }
+        class TaggedRef {
+          private cur: Tagged;
+          constructor(ptr: string) { this.cur = { ptr, tag: 0 }; }
+          load(): Tagged { return { ...this.cur }; }
+          cas(exp: Tagged, nextPtr: string): boolean {
+            if (this.cur.ptr === exp.ptr &amp;&amp; this.cur.tag === exp.tag) {
+              this.cur = { ptr: nextPtr, tag: exp.tag + 1 };   // bump the tag on every change
+              return true;
+            }
+            return false;
+          }
+        }
+
+        // --- Naive CAS on the bare pointer: ABA slips through ---
+        let head = "A";                       // bare pointer
+        const myView = head;                  // reader observes A, plans CAS(A -> B)
+        head = "B"; head = "A";               // another thread: A -> B -> A (recycled address!)
+        const naiveSucceeds = (head === myView);
+        console.log(`naive CAS sees head==A -> succeeds? ${naiveSucceeds}  <-- WRONG, world changed`);
+
+        // --- Tagged pointer: the same A->B->A now carries a different tag ---
+        const ref = new TaggedRef("A");
+        const view = ref.load();              // {ptr:'A', tag:0}
+        ref.cas(ref.load(), "B");             // A -> B, tag 1
+        ref.cas(ref.load(), "A");             // B -> A, tag 2   (pointer back to A, tag moved!)
+        const taggedSucceeds = ref.cas(view, "Z");  // expects {A,0} but current is {A,2}
+        console.log(`tagged CAS with stale {A,0} -> succeeds? ${taggedSucceeds}  <-- correctly REJECTED`);
+      </primer-code>
+      <p>
+        Two standard fixes. <strong>Tagged (versioned) pointers</strong>: glue a counter to the pointer and bump it
+        on every change, so a recycled <primer-math>A</primer-math> carries a different tag and the CAS fails
+        (this needs a double-width CAS, e.g. x86's <primer-math>\texttt{CMPXCHG16B}</primer-math>).
+        <strong>Hazard pointers</strong>: each thread publishes the pointers it is currently using, and memory is
+        not reclaimed until no hazard pointer references it — so <primer-math>A</primer-math> can never be freed
+        and reused underneath you in the first place. Linux's
+        <primer-ref forward to="computer-science/advanced-operating-systems/concurrency/read-copy-update-rcu">RCU</primer-ref>
+        is a third, deferred-reclamation answer to the same underlying question: <em>when is it safe to free?</em>
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why memory ordering is not optional here</h2>
+      <p>
+        Lock-free code lives or dies by the
+        <primer-ref to="computer-science/computer-architecture/multicore/memory-consistency-models">memory
+        consistency model</primer-ref>. When you push a node, you write its <primer-math>\texttt{value}</primer-math>
+        and <primer-math>\texttt{next}</primer-math> fields <em>and then</em> publish it by CAS-ing the head. On a
+        weakly-ordered CPU (ARM, POWER), another core can see the new head pointer <em>before</em> it sees the
+        node's field writes — reading uninitialised garbage. A lock hid this from you, because acquiring and
+        releasing a lock imply full memory barriers. Strip the lock away and you must place the fences yourself: a
+        <strong>release</strong> on the publishing CAS (so the field writes are visible before the pointer) paired
+        with an <strong>acquire</strong> on the reader's load. "Lock-free" never means "fence-free" — it means
+        <em>you</em> are now responsible for the ordering the lock used to guarantee.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Is lock-free actually faster than a good lock? Often not.">
+      <p>
+        The word "lock-free" sells the wrong dream. Its guarantee is about <em>progress</em> — one stalled thread
+        can't freeze the rest — not about <em>speed</em>. Under heavy contention a Treiber stack's CAS loop can
+        thrash worse than a well-tuned lock, because every failed CAS still paid for a coherence transaction on the
+        head's cache line (the same ping-pong that plagues spinlocks). Benchmarks routinely show a good MCS lock or
+        a flat-combining design beating a naive lock-free structure at high core counts. Reach for lock-free when
+        you genuinely need its <em>fault-tolerance and progress</em> properties — real-time deadlines, signal
+        handlers, code that runs where a thread might be paused arbitrarily — not as a reflexive "locks are slow"
+        optimisation. The correct question is never "lock or lock-free?" but "what progress property does this path
+        actually require?"
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Lock-free does not mean wait-free, and it does not mean starvation-free">
+      <p>
+        A common conflation: "my structure is lock-free, so no thread can starve." False. Lock-free guarantees only
+        that <em>the system</em> makes progress — <em>some</em> thread completes each round. A specific unlucky
+        thread can lose the CAS race again and again, retrying forever while faster threads keep succeeding; that
+        is starvation, and it is perfectly compatible with lock-freedom. Only <strong>wait-free</strong> rules it
+        out, by bounding <em>every</em> thread's own step count. If you have a per-operation latency requirement — a
+        packet that must be processed within a deadline no matter what — lock-free is not enough; you need
+        wait-free (and will pay for it in complexity and average-case throughput). Know which one your problem
+        demands before you write a line.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: progress guarantees, Treiber, MS-queue helping, ABA + fixes, memory ordering. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "lockFreeQuiz@1": {
+          "intro": "Wait-free ⊂ lock-free ⊂ obstruction-free. Treiber stack = optimistic CAS loop on head. ABA = CAS can't see A→B→A; fix with tagged pointers or hazard pointers. Lock-free still needs fences.",
+          "obsQ": "An 'obstruction-free' algorithm guarantees a thread makes progress…",
+          "obRight": "only if it runs in isolation for long enough (all others paused)",
+          "obEvery": "for every thread in bounded steps",
+          "obSome": "for some thread in bounded steps regardless of others",
+          "obNever": "never — it always deadlocks",
+          "lfQ": "'Lock-free' precisely means…",
+          "lfRight": "some thread always makes progress in a bounded number of system-wide steps",
+          "lfEvery": "every thread finishes in a bounded number of its own steps",
+          "lfNoAtom": "the code uses no atomic instructions",
+          "lfFast": "it is always faster than a lock",
+          "wfQ": "'Wait-free' is stronger than lock-free because it guarantees…",
+          "wfRight": "EVERY thread completes in a bounded number of its own steps — no starvation",
+          "wfSame": "exactly the same thing as lock-free",
+          "wfSome": "only that some thread eventually finishes",
+          "wfIso": "progress only when run in isolation",
+          "nestQ": "Which nesting of guarantees is correct?",
+          "neRight": "wait-free ⊂ lock-free ⊂ obstruction-free",
+          "neRev": "obstruction-free ⊂ lock-free ⊂ wait-free",
+          "neFlat": "they are all equivalent",
+          "neNone": "lock-free ⊂ wait-free ⊂ obstruction-free",
+          "treiberQ": "The core mechanism of a Treiber stack push is…",
+          "trRight": "read head, set new node's next to it, then CAS head to the new node; retry on failure",
+          "trLock": "acquire a spinlock, then update head",
+          "trTwo": "two separate atomic increments",
+          "trNone": "a plain non-atomic store to head",
+          "retryQ": "When a Treiber stack's CAS fails, it means…",
+          "reRight": "another thread changed the head first — so retry from a fresh read",
+          "reErr": "the data structure is permanently corrupt",
+          "reDead": "the thread must block until woken",
+          "reCrash": "the program must crash",
+          "msQ": "In the Michael–Scott queue, 'helping' means a thread…",
+          "msRight": "swings a lagging tail forward for another thread instead of waiting for it",
+          "msLock": "takes a lock on the tail node",
+          "msSkip": "skips the enqueue entirely",
+          "msCopy": "copies the whole queue before enqueuing",
+          "abaQ": "The ABA problem is that a CAS can wrongly succeed because…",
+          "abRight": "the value changed A→B→A, so CAS sees the original value and assumes nothing happened",
+          "abSlow": "CAS is too slow to run",
+          "abNever": "CAS can never succeed on multicore",
+          "abRam": "memory runs out",
+          "tagQ": "A tagged (versioned) pointer defeats ABA by…",
+          "tgRight": "attaching a counter bumped on every change, so a recycled address carries a different tag",
+          "tgLock": "taking a lock around the CAS",
+          "tgBig": "making the pointer larger so it can't be reused",
+          "tgNone": "ignoring the pointer value entirely",
+          "hazardQ": "Hazard pointers prevent ABA (and use-after-free) by…",
+          "hzRight": "letting threads publish pointers in use so that memory isn't reclaimed while referenced",
+          "hzLock": "locking the entire structure on every access",
+          "hzTag": "adding a version tag to each node",
+          "hzCopy": "copying the structure on every read",
+          "fenceQ": "Why does lock-free code on a weakly-ordered CPU need explicit memory fences?",
+          "feRight": "a reader could see the published pointer before the node's field writes without a release/acquire pair",
+          "feNo": "it does not — atomics imply no ordering ever matters",
+          "feSlow": "fences make the code faster",
+          "feRam": "to save memory",
+          "fastQ": "Compared with a well-tuned lock, a lock-free structure under heavy contention is…",
+          "faRight": "not necessarily faster — failed CAS loops still cause cache-line ping-pong",
+          "faAlways": "always dramatically faster",
+          "faFree": "always free of any coherence traffic",
+          "faNever": "always slower in every case"
+        }
+      }
+    </script>
+
+    <primer-quiz name="lockFreeQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/concurrency/kernel-locks-and-mcs",
+      "computer-science/computer-architecture/multicore/memory-consistency-models"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Progress-guarantee nesting: concentric rectangles (blocking outermost, then obstruction-free, lock-free,
+     wait-free innermost), each labelled. Static base content. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "progress",
+    ({ board, colors, sceneStrings }) => {
+      // Concentric boxes from outer (blocking) to inner (wait-free). Label each near its top edge.
+      const rings = [
+        { x0: 0.2, y0: 0.2, x1: 11.8, y1: 7.8, ci: 3, key: "block" },
+        { x0: 1.2, y0: 1.1, x1: 10.8, y1: 6.6, ci: 2, key: "obs" },
+        { x0: 2.4, y0: 2.0, x1: 9.6, y1: 5.5, ci: 1, key: "lf" },
+        { x0: 3.8, y0: 2.9, x1: 8.2, y1: 4.5, ci: 0, key: "wf" },
+      ];
+      rings.forEach((r) => {
+        board.create("polygon", [[r.x0, r.y0], [r.x1, r.y0], [r.x1, r.y1], [r.x0, r.y1]], {
+          fillColor: colors.cat[r.ci], fillOpacity: 0.16, strokeColor: colors.line, strokeWidth: 1.5,
+          fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        board.create("text", [(r.x0 + r.x1) / 2, r.y1 - 0.34, sceneStrings(r.key)], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+          cssStyle: "font-weight:600; max-width:300px",
+        });
+      });
+    },
+    { boundingbox: [-0.4, 8.4, 12.4, -0.4], keepAspect: false, title: () => makeStrings("progress")("title") },
+  );
+
+  registerQuiz("lockFreeQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("obsQ"),
+      options: [
+        { text: () => sceneStrings("obRight"), correct: true },
+        { text: () => sceneStrings("obEvery"), correct: false },
+        { text: () => sceneStrings("obSome"), correct: false },
+        { text: () => sceneStrings("obNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lfQ"),
+      options: [
+        { text: () => sceneStrings("lfRight"), correct: true },
+        { text: () => sceneStrings("lfEvery"), correct: false },
+        { text: () => sceneStrings("lfNoAtom"), correct: false },
+        { text: () => sceneStrings("lfFast"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("wfQ"),
+      options: [
+        { text: () => sceneStrings("wfRight"), correct: true },
+        { text: () => sceneStrings("wfSame"), correct: false },
+        { text: () => sceneStrings("wfSome"), correct: false },
+        { text: () => sceneStrings("wfIso"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("nestQ"),
+      options: [
+        { text: () => sceneStrings("neRight"), correct: true },
+        { text: () => sceneStrings("neRev"), correct: false },
+        { text: () => sceneStrings("neFlat"), correct: false },
+        { text: () => sceneStrings("neNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("treiberQ"),
+      options: [
+        { text: () => sceneStrings("trRight"), correct: true },
+        { text: () => sceneStrings("trLock"), correct: false },
+        { text: () => sceneStrings("trTwo"), correct: false },
+        { text: () => sceneStrings("trNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("retryQ"),
+      options: [
+        { text: () => sceneStrings("reRight"), correct: true },
+        { text: () => sceneStrings("reErr"), correct: false },
+        { text: () => sceneStrings("reDead"), correct: false },
+        { text: () => sceneStrings("reCrash"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("msQ"),
+      options: [
+        { text: () => sceneStrings("msRight"), correct: true },
+        { text: () => sceneStrings("msLock"), correct: false },
+        { text: () => sceneStrings("msSkip"), correct: false },
+        { text: () => sceneStrings("msCopy"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("abaQ"),
+      options: [
+        { text: () => sceneStrings("abRight"), correct: true },
+        { text: () => sceneStrings("abSlow"), correct: false },
+        { text: () => sceneStrings("abNever"), correct: false },
+        { text: () => sceneStrings("abRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tagQ"),
+      options: [
+        { text: () => sceneStrings("tgRight"), correct: true },
+        { text: () => sceneStrings("tgLock"), correct: false },
+        { text: () => sceneStrings("tgBig"), correct: false },
+        { text: () => sceneStrings("tgNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hazardQ"),
+      options: [
+        { text: () => sceneStrings("hzRight"), correct: true },
+        { text: () => sceneStrings("hzLock"), correct: false },
+        { text: () => sceneStrings("hzTag"), correct: false },
+        { text: () => sceneStrings("hzCopy"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fenceQ"),
+      options: [
+        { text: () => sceneStrings("feRight"), correct: true },
+        { text: () => sceneStrings("feNo"), correct: false },
+        { text: () => sceneStrings("feSlow"), correct: false },
+        { text: () => sceneStrings("feRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fastQ"),
+      options: [
+        { text: () => sceneStrings("faRight"), correct: true },
+        { text: () => sceneStrings("faAlways"), correct: false },
+        { text: () => sceneStrings("faFree"), correct: false },
+        { text: () => sceneStrings("faNever"), correct: false },
+      ],
+    },
+  ]);
+</script>

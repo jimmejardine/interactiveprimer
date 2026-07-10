@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Concurrent Servers</primer-title>
+
+    <primer-card>
+      <p>
+        Your echo server works beautifully. You demo it, one client connects, types "hello", gets "hello"
+        back. Then you launch it for real and the second visitor sits staring at a spinner — because your
+        server is still deep inside a blocking <code>read()</code>, waiting on the <em>first</em> visitor, who
+        wandered off to make tea. A server that talks to one client at a time is not a server; it is a queue of
+        disappointed people. The entire art of server engineering is answering one question: <strong>how do you
+        serve many clients at once?</strong>
+      </p>
+      <p>
+        Recall the shape of the <primer-ref soft to="computer-science/networks/programming/the-socket-api">socket
+        API</primer-ref>: <code>accept()</code> blocks until a client arrives, <code>read()</code> blocks until
+        bytes come, <code>write()</code> can block when the send buffer is full. A single thread marching through
+        <code>accept → read → process → write</code> for one client is, for that whole conversation,
+        <strong>deaf to everyone else</strong>. This page surveys the classic ways out — process-per-connection,
+        thread-per-connection, and worker pools — and the famous wall they all eventually hit: the
+        <strong>C10K problem</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The trap: a serial accept-then-serve loop</h2>
+      <p>
+        Here is the naïve server, and it is worth seeing exactly why it fails to scale. It is not that it is
+        <em>slow</em> per client — it is that it does clients strictly <strong>one after another</strong>.
+      </p>
+
+      <primer-code lang="typescript">
+        // SERIAL server: correct, tiny, and hopelessly unscalable.
+        const listener = listen(8080);
+        while (true) {
+          const conn = listener.accept();   // BLOCK until a client connects
+          handle(conn);                      // ...then spend the WHOLE conversation here
+          conn.close();                      // only NOW do we loop back to accept the next one
+        }
+      </primer-code>
+
+      <p>
+        While <code>handle(conn)</code> runs — reading a request, hitting a database, writing a reply — no other
+        client can even be <em>accepted</em>, let alone served. If each conversation takes 100&nbsp;ms, this
+        server can handle at most 10 clients per second, no matter how many CPU cores sit idle. And a single
+        <em>slow</em> or malicious client that connects and never sends can freeze it forever. The fix in every
+        case is the same idea: <strong>hand each accepted connection to its own unit of execution</strong>, and
+        loop straight back to <code>accept()</code>. What that "unit of execution" is gives us the classic
+        models.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The classic concurrency models</h2>
+      <p>
+        These four designs are the canon. Each trades differently between isolation, memory cost, and
+        complexity — and the choice hinges on your understanding of
+        <primer-ref soft to="computer-science/concurrency/threads-vs-processes">threads vs processes</primer-ref>.
+      </p>
+      <ul>
+        <li>
+          <strong>Process per connection (<code>fork</code>).</strong> On each <code>accept()</code>,
+          <code>fork()</code> a whole new process to handle that client. <em>Strength:</em> total isolation — a
+          crash or memory corruption in one connection cannot touch another, and there are no shared-memory
+          data races. This is the classic Apache <code>prefork</code> / inetd model. <em>Weakness:</em> a
+          process is <strong>heavy</strong> — its own address space, its own file descriptors, and expensive
+          context switches. Thousands of them exhaust memory fast.
+        </li>
+        <li>
+          <strong>Thread per connection.</strong> Same shape, but spawn a <em>thread</em> instead of a process.
+          <em>Strength:</em> far lighter than a process — threads share the one address space, so they start
+          faster and use less memory, and they can share caches and state directly. <em>Weakness:</em> that
+          shared memory is a loaded gun — every shared structure now needs
+          <primer-ref soft to="computer-science/concurrency/locks-and-mutexes">locks</primer-ref>, and you inherit
+          the full menagerie of
+          <primer-ref soft to="computer-science/concurrency/race-conditions">race conditions</primer-ref> and
+          <primer-ref soft to="computer-science/concurrency/deadlock-and-livelock">deadlocks</primer-ref>. And
+          threads, though lighter than processes, still are not free.
+        </li>
+        <li>
+          <strong>Thread/worker pool.</strong> Instead of spawning per connection, start a <em>fixed</em> pool
+          of N worker threads at boot. The <code>accept()</code> loop drops each new socket onto a shared
+          <strong>queue</strong>; idle workers pull from it. <em>Strength:</em> <strong>bounded resources</strong>
+          — you never have more than N threads no matter how many clients arrive, so memory and scheduling stay
+          predictable; a load spike grows the <em>queue</em>, not the thread count. This is the workhorse design
+          for most application servers. <em>Weakness:</em> if all N workers are stuck on slow work, new
+          connections wait in the queue; you must size the pool to the workload.
+        </li>
+        <li>
+          <strong>Pre-forking.</strong> A hybrid: fork a pool of <em>processes</em> up front, and let them all
+          <code>accept()</code> on the shared listening socket (the kernel hands each connection to one of
+          them). You get process isolation <em>and</em> a bounded, pre-warmed pool with no per-connection fork
+          cost. This is how production Apache/nginx worker models and many WSGI servers (Gunicorn) run.
+        </li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>The wall: the C10K problem</h2>
+      <p>
+        "Just spawn a thread per connection" feels like it should scale forever — but around
+        <strong>ten thousand concurrent connections</strong> (the famous "C10K" figure, coined by Dan Kegel in
+        1999) the thread-per-connection model falls apart. The reasons are structural, not a matter of buying a
+        bigger machine:
+      </p>
+      <ul>
+        <li>
+          <strong>Memory.</strong> Each thread reserves a stack — often ~1&nbsp;MB by default. Ten thousand
+          threads is ~10&nbsp;GB of stacks before you have processed a single byte of actual data.
+        </li>
+        <li>
+          <strong>Context-switch cost.</strong> The OS scheduler must time-slice among all runnable threads.
+          The more threads, the more time the CPU spends <em>switching between</em> them (saving/restoring
+          registers, flushing caches, walking the scheduler's run queue) rather than doing useful work.
+        </li>
+        <li>
+          <strong>Scheduler pressure.</strong> Most of those ten thousand threads are <em>blocked</em> waiting
+          on I/O at any instant. Keeping ten thousand mostly-idle threads alive just to represent "connections
+          that might have data soon" is enormously wasteful — you are paying full thread price for connections
+          that are doing nothing.
+        </li>
+      </ul>
+      <p>
+        The counter-intuitive punchline: past a point, <strong>adding threads makes throughput go <em>down</em></strong>.
+        The chart contrasts the fantasy (throughput scales linearly with concurrency) against the reality
+        (throughput rises, plateaus, then falls as overhead dominates). Drag toward the right and watch the
+        realistic curve turn over.
+      </p>
+
+      <primer-chart scene="c10k" caption="Throughput versus the number of concurrent worker threads. The dashed 'ideal' line rises linearly and races off the top of the chart. The solid 'realistic' curve rises, reaches a peak around a couple of dozen threads, then declines as context-switching and memory overhead outweigh the added parallelism — the C10K effect."></primer-chart>
+
+      <p>
+        The realistic curve is the <strong>Universal Scalability Law</strong> in action: useful throughput
+        <primer-math>T(n) = \dfrac{n}{1 + \alpha(n-1) + \beta\, n(n-1)}</primer-math> where the
+        <primer-math>\alpha</primer-math> term is serialisation (contention on shared locks) and the
+        <primer-math>\beta</primer-math> term is <em>crosstalk</em> — the coordination and context-switch cost
+        that grows with the <em>square</em> of the thread count, and eventually drags the whole curve back down.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Modelling a bounded worker pool</h2>
+      <p>
+        The pool design exists precisely to sit near the <em>top</em> of that curve rather than sliding down its
+        right-hand slope. Let's model it. Suppose each request needs a base amount of work, but running many
+        workers concurrently inflates every worker's effective time by a small per-worker context-switch
+        overhead. Then throughput is <code>workers / effective-time-per-job</code> — and there is a
+        <strong>sweet spot</strong> beyond which more workers are self-defeating.
+      </p>
+
+      <primer-code run>
+        // Universal Scalability Law: contention (alpha) and crosstalk (beta) overhead.
+        // alpha serialises shared work; beta is context-switch cost, growing with n^2.
+        const ALPHA = 0.03, BETA = 0.006;
+
+        // Throughput relative to one worker. Ideal would be exactly n (linear speedup).
+        function throughput(n) {
+          return n / (1 + ALPHA * (n - 1) + BETA * n * (n - 1));
+        }
+
+        console.log("workers | throughput | vs ideal (linear n)");
+        console.log("--------+------------+--------------------");
+        let best = { workers: 0, tp: 0 };
+        for (const w of [1, 2, 4, 8, 16, 32, 64, 128, 256]) {
+          const tp = throughput(w);
+          const pct = ((tp / w) * 100).toFixed(0);       // ideal linear speedup is exactly w
+          console.log(`  ${String(w).padStart(4)}  |   ${tp.toFixed(2)}     |  ${pct}% of ideal`);
+          if (tp &gt; best.tp) best = { workers: w, tp };
+        }
+
+        console.log(`\nPeak throughput near ${best.workers} workers (${best.tp.toFixed(2)}).`);
+        console.log("Past the peak, every doubling ADDS threads while REMOVING throughput —");
+        console.log("crosstalk (the n^2 term) takes over. That is the C10K wall.");
+      </primer-code>
+
+      <p>
+        Notice the efficiency column collapsing: at 256 workers you are running 256 threads to do the work of a
+        handful, because each one now spends most of its life being switched in and out. A bounded pool sized to
+        the peak gives you the most work for the least resource — and a load spike simply lengthens the queue,
+        which is a far cheaper thing to grow than the thread count.
+      </p>
+
+      <primer-vignette title="Watch out! — more threads is NOT more throughput">
+        <p>
+          The seductive intuition is linear: "twice the threads, twice the work." It is wrong, and believing it
+          is how servers fall over under load. Past the sweet spot, every extra thread <em>adds</em>
+          memory pressure and context-switch overhead while <em>subtracting</em> from the CPU time available for
+          real work — so throughput <strong>peaks and then declines</strong>. Spawning a thread per connection
+          and hoping to reach ten thousand of them is the textbook way to hit this wall (C10K). The cures are
+          <strong>bound the concurrency</strong> (a fixed worker pool with a queue) and, when even that isn't
+          enough, stop using a thread-per-connection at all —
+          <primer-ref soft to="computer-science/networks/programming/nonblocking-and-event-driven-io">serve
+          thousands of connections from a single thread</primer-ref> with non-blocking I/O and an event loop,
+          the subject of the next page.
+        </p>
+      </primer-vignette>
+
+      <primer-vignette title="If threads hit a wall, how does anyone serve a million connections?">
+        <p>
+          Two escapes. The first, above, is to abandon "one thread per connection": an
+          <strong>event loop</strong> keeps just a handful of threads and multiplexes tens of thousands of
+          sockets over them, paying almost nothing for an idle connection. The second is to make the threads
+          themselves radically cheaper: <strong>green threads / goroutines / async tasks</strong> (Go, Erlang,
+          Rust/async, Java's Project Loom) are user-space "threads" that cost a few kilobytes, not a megabyte,
+          and are scheduled by a runtime onto a small pool of real OS threads. Both answers reject the premise
+          that a connection needs a whole kernel thread to wait on it — which, once you have met the event loop,
+          feels obvious.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "concServerQuiz@1": { "instructions": "Check your grasp of concurrent-server models: why serial loops fail, process/thread/pool/pre-fork tradeoffs, and the C10K wall." } }
+    </script>
+    <primer-quiz name="concServerQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/programming/the-socket-api",
+      "computer-science/concurrency/threads-vs-processes"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts } from "primer";
+
+  // Ideal linear speedup (dashed, races off the top) vs realistic Universal
+  // Scalability Law throughput (rises, peaks, then declines) — the C10K effect.
+  registerCharts(
+    [{
+      name: "c10k",
+      f: [
+        (n) => n,                                                   // ideal: linear speedup, unbounded
+        (n) => n / (1 + 0.03 * (n - 1) + 0.006 * n * (n - 1)),      // realistic USL: peaks then falls
+      ],
+      line: (colors, i) =>
+        i === 0
+          ? { strokeColor: colors.line, strokeOpacity: 0.5, dash: 2 }
+          : { strokeColor: colors.cat[0], strokeWidth: 2 },
+      legend: ["ideal: linear (off the top)", "reality: peaks then falls (C10K)"],
+    }],
+    { xmin: 1, xmax: 60, ymin: 0, ymax: 10, xaxisname: "concurrent threads", yaxisname: "throughput" },
+  );
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("concServerQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "Why does a serial accept-then-serve loop fail to scale?",
+      options: [
+        { text: "It serves clients strictly one at a time — no other client can be accepted until the current conversation finishes", correct: true },
+        { text: "accept() can only be called a fixed number of times", correct: false },
+        { text: "TCP limits a server to one connection per port", correct: false },
+        { text: "It uses too much memory per connection", correct: false },
+      ] },
+
+    { prompt: "The general fix shared by all concurrency models is to…",
+      options: [
+        { text: "hand each accepted connection to its own unit of execution and loop straight back to accept()", correct: true },
+        { text: "make each read() faster", correct: false },
+        { text: "switch every server to UDP", correct: false },
+        { text: "accept all connections first, then serve them in a batch at the end", correct: false },
+      ] },
+
+    { prompt: "The main STRENGTH of process-per-connection (fork) is…",
+      options: [
+        { text: "isolation — a crash or corruption in one connection cannot affect another; no shared-memory races", correct: true },
+        { text: "the lowest possible memory use per connection", correct: false },
+        { text: "that processes share memory for fast communication", correct: false },
+        { text: "that it needs no accept() call", correct: false },
+      ] },
+
+    { prompt: "Thread-per-connection is lighter than process-per-connection, but its main DANGER is…",
+      options: [
+        { text: "shared memory — every shared structure now needs locks, exposing you to races and deadlocks", correct: true },
+        { text: "that threads cannot handle network I/O", correct: false },
+        { text: "that threads are fully isolated and cannot share caches", correct: false },
+        { text: "that threads require a separate address space each", correct: false },
+      ] },
+
+    { prompt: "The key advantage of a fixed worker/thread pool is that…",
+      options: [
+        { text: "resources are BOUNDED — never more than N threads; a load spike grows the queue, not the thread count", correct: true },
+        { text: "it can spawn unlimited threads instantly", correct: false },
+        { text: "it removes the need for any accept() loop", correct: false },
+        { text: "each request runs in its own isolated process", correct: false },
+      ] },
+
+    { prompt: "What is 'pre-forking'?",
+      options: [
+        { text: "Fork a pool of processes up front that all accept() on the shared listening socket — isolation plus a bounded, pre-warmed pool", correct: true },
+        { text: "Forking a new process only after the client disconnects", correct: false },
+        { text: "Running every connection on a single thread with callbacks", correct: false },
+        { text: "Pre-computing responses before any client connects", correct: false },
+      ] },
+
+    { prompt: "The 'C10K problem' refers to…",
+      options: [
+        { text: "the difficulty of handling ~10,000 concurrent connections, where thread-per-connection hits memory and scheduling limits", correct: true },
+        { text: "a 10-kilobyte limit on TCP message size", correct: false },
+        { text: "needing 10,000 CPU cores to run a web server", correct: false },
+        { text: "a bug that appears only after 10,000 requests", correct: false },
+      ] },
+
+    { prompt: "Which is a structural reason thread-per-connection breaks down at ~10K connections?",
+      options: [
+        { text: "Each thread reserves a large stack (~1 MB), so ten thousand threads cost gigabytes before doing any work", correct: true },
+        { text: "TCP forbids more than 10,000 sockets per machine", correct: false },
+        { text: "The compiler refuses to create more than 10,000 threads", correct: false },
+        { text: "Threads cannot block on I/O", correct: false },
+      ] },
+
+    { prompt: "As you push a thread-per-connection server well past its sweet spot, throughput…",
+      options: [
+        { text: "peaks and then DECLINES, because context-switch and memory overhead outweigh the added parallelism", correct: true },
+        { text: "keeps rising linearly with the thread count", correct: false },
+        { text: "stays exactly flat forever", correct: false },
+        { text: "doubles every time you double the threads", correct: false },
+      ] },
+
+    { prompt: "In the Universal Scalability Law, the β (crosstalk) term grows with…",
+      options: [
+        { text: "the SQUARE of the thread count — coordination/context-switch cost — which eventually drags throughput down", correct: true },
+        { text: "the logarithm of the thread count, so it never matters", correct: false },
+        { text: "the size of each message", correct: false },
+        { text: "the number of CPU cores only", correct: false },
+      ] },
+
+    { prompt: "Why does a bounded pool handle a sudden load spike gracefully?",
+      options: [
+        { text: "The thread count stays fixed; the spike lengthens the QUEUE, which is far cheaper to grow than the thread count", correct: true },
+        { text: "It spawns one new thread per waiting client instantly", correct: false },
+        { text: "It drops all connections above the pool size", correct: false },
+        { text: "It switches to processes automatically", correct: false },
+      ] },
+
+    { prompt: "One malicious client connects and never sends any data. On a serial single-thread server this…",
+      options: [
+        { text: "freezes the whole server — it is blocked in read() and cannot serve anyone else", correct: true },
+        { text: "is automatically timed out by TCP after one second", correct: false },
+        { text: "only affects that one connection; others are fine", correct: false },
+        { text: "causes the server to fork a new process to recover", correct: false },
+      ] },
+
+    { prompt: "Besides an event loop, what other approach makes serving huge connection counts feasible?",
+      options: [
+        { text: "Green threads / goroutines / async tasks — user-space 'threads' costing kilobytes, multiplexed onto a few OS threads", correct: true },
+        { text: "Giving every connection its own physical CPU core", correct: false },
+        { text: "Increasing the default thread stack size to 1 GB", correct: false },
+        { text: "Disabling the OS scheduler entirely", correct: false },
+      ] },
+
+    { prompt: "Compared with processes, threads within one process…",
+      options: [
+        { text: "share the same address space — lighter and able to share state directly, but needing locks to stay safe", correct: true },
+        { text: "each get a fully separate address space", correct: false },
+        { text: "cannot run concurrently on multiple cores", correct: false },
+        { text: "are always slower to create than processes", correct: false },
+      ] },
+  ]);
+</script>

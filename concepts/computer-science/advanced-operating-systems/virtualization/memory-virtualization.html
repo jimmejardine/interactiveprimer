@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Memory Virtualization</primer-title>
+
+    <primer-card>
+      <p>
+        You know how an OS gives each process a private virtual address space: the page tables map
+        <em>virtual</em> pages to <em>physical</em> frames, and the
+        <primer-ref to="computer-science/computer-architecture/memory/the-tlb">TLB</primer-ref> caches the hot
+        translations so the MMU rarely has to walk the tables. Now put a hypervisor underneath. The guest OS
+        <em>also</em> runs its own page tables, mapping guest-virtual to what it believes is physical memory —
+        but "guest physical" is itself a fiction the VMM invented. There are now <strong>two</strong> levels of
+        translation stacked on top of each other, and reconciling them cheaply is one of the hardest problems in
+        virtualization. This lesson is how VMMs solve it — first in software (shadow page tables), then in
+        hardware (nested paging).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The two-level translation problem</h2>
+      <p>
+        Follow a single guest memory access. The guest application touches a <strong>guest-virtual
+        address</strong> (GVA). Two translations must happen before the CPU can reach real DRAM:
+      </p>
+      <primer-math display>\text{GVA} \;\xrightarrow{\text{guest page tables}}\; \text{GPA} \;\xrightarrow{\text{VMM mapping}}\; \text{HPA}</primer-math>
+      <ul>
+        <li><strong>GVA → GPA:</strong> the guest's own page tables map guest-virtual to
+          <strong>guest-physical</strong> — the address space the guest <em>thinks</em> is real RAM.</li>
+        <li><strong>GPA → HPA:</strong> but guest-physical is virtual too! The VMM has scattered the guest's
+          "physical" memory across real <strong>host-physical</strong> frames (and may have paged some out, or
+          shared some). So a <em>second</em> map, owned by the VMM, turns GPA into the true HPA.</li>
+      </ul>
+      <p>
+        The hardware TLB, though, only understands <em>one</em> mapping: virtual → host-physical. The whole
+        problem is: how do we collapse two logical translations into what the MMU and TLB can actually cache?
+        Two answers, a decade apart.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Answer 1 — shadow page tables (software)</h2>
+      <p>
+        The pre-hardware trick: the VMM maintains a hidden set of <strong>shadow page tables</strong> that map
+        guest-virtual <em>directly</em> to host-physical (GVA → HPA), <em>composing</em> the two levels in
+        advance. These shadows — not the guest's own tables — are what the VMM loads into the real
+        <primer-math>\texttt{cr3}</primer-math>, so the hardware TLB caches GVA → HPA and memory access at
+        steady state is <strong>native speed</strong>. Lovely — until the guest edits its page tables.
+      </p>
+      <ul>
+        <li>The guest thinks it owns its page tables, so when it writes a PTE the VMM <em>must</em> notice and
+          update the shadow to match. The VMM <strong>write-protects</strong> the guest's page-table pages; each
+          guest PTE write faults into the VMM, which patches the shadow and resumes. This is the dreaded
+          <em>page-table-update</em> trap storm.</li>
+        <li>Every guest process needs its <em>own</em> shadow (a different GVA→HPA map), so the VMM keeps a pool
+          of shadows and rebuilds/switches them on guest context switch — heavy memory and CPU overhead.</li>
+      </ul>
+      <p>
+        Shadow paging makes <em>reads</em> fast but <em>page-table writes</em> and <em>context switches</em>
+        painfully expensive — a workload that forks and maps a lot (a build server, say) can spend a huge
+        fraction of its time in the VMM keeping shadows in sync.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the 2D nested page-walk grid figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "nestedWalk": {
+          "title": "The 2-D page walk — each guest page-table level is itself translated by a full nested (EPT) walk",
+          "guestAxis": "guest page-table walk  (GVA → GPA):  L4 → L3 → L2 → L1 → page",
+          "hostAxis": "nested / EPT walk\n(GPA → HPA)",
+          "cell": "a real memory access",
+          "data": "the actual\ndata",
+          "count": "up to 24 memory accesses for ONE TLB miss (4-level guest × 4-level host)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Answer 2 — nested / extended page tables (hardware)</h2>
+      <p>
+        Intel's <strong>EPT</strong> (Extended Page Tables) and AMD's <strong>NPT</strong> (Nested Page Tables)
+        put the second map in silicon. The guest keeps and freely edits its <em>own</em> GVA→GPA page tables
+        (no write-protection, no traps on PTE writes!). The VMM installs a <em>second</em> hardware table, the
+        EPT/NPT, mapping GPA→HPA. On a TLB miss the MMU now performs a <strong>two-dimensional page walk</strong>,
+        consulting <em>both</em> tables, entirely in hardware — no VM-exit.
+      </p>
+      <p>
+        The cost is that the walk is much longer. On x86-64 the guest page table has <strong>4 levels</strong>.
+        But every guest-physical pointer the walker touches — including the pointers <em>inside</em> each guest
+        page-table level — is itself a GPA that must be translated by a full 4-level EPT walk. Lay the guest
+        walk along one axis and the EPT walk along the other and you get a grid:
+      </p>
+      <primer-geometry scene="nestedWalk"></primer-geometry>
+      <p>
+        For 4-level tables this is up to <primer-math>(4+1)\times(4+1) - 1 = 24</primer-math> memory accesses
+        for a <em>single</em> TLB miss, versus 4 on bare metal. This is why the TLB (and large pages, and the
+        page-walk caches) matter enormously under virtualization: a TLB <em>hit</em> costs the same virtualized
+        or not, so the whole game is keeping the hit rate high so those 24-access walks stay rare. Nested paging
+        trades a slow miss for eliminating the shadow-paging trap storm — and for almost all workloads that is a
+        decisive win.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Shadow vs nested, at a glance</h2>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th></th><th>Shadow page tables</th><th>Nested paging (EPT / NPT)</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Who composes GVA→HPA</td><td>the VMM, in software</td><td>the hardware MMU, on each walk</td></tr>
+            <tr><td>TLB miss cost</td><td>4 accesses (native-length walk)</td><td>up to 24 accesses (2-D walk)</td></tr>
+            <tr><td>Guest PTE write</td><td><strong>traps</strong> into the VMM (write-protected)</td><td>free — no trap</td></tr>
+            <tr><td>Guest context switch</td><td>expensive — switch/rebuild shadows</td><td>cheap — hardware handles it</td></tr>
+            <tr><td>Memory overhead</td><td>a shadow per guest process</td><td>one EPT per VM</td></tr>
+            <tr><td>Verdict</td><td>fast reads, costly updates</td><td>slower miss, but no trap storm — wins in practice</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-card>
+      <h2>Reclaiming memory: overcommit, ballooning, and page sharing</h2>
+      <p>
+        The GPA→HPA indirection buys the VMM a superpower the guest can't see: it can hand out <em>more</em>
+        guest-physical memory than the host truly has — <strong>memory overcommit</strong> — betting that not
+        every guest uses its full allotment at once (just as an airline overbooks seats). But when the bet goes
+        bad and host RAM runs low, who gives memory back? Three classic mechanisms:
+      </p>
+      <ul>
+        <li><strong>Ballooning.</strong> A tiny <em>balloon driver</em> installed inside the guest is told by
+          the VMM to "inflate" — it allocates guest pages and pins them. The guest's own memory manager, feeling
+          the pressure, pages out its least-useful data to free those pages, which the VMM then reclaims as host
+          frames. The genius is that <em>the guest chooses what to evict</em> (it knows best), without the VMM
+          having to guess. Deflate the balloon to give memory back.</li>
+        <li><strong>Transparent page sharing (content-based dedup).</strong> Many VMs run the same OS and
+          libraries, so identical pages abound. The VMM hashes guest pages, finds duplicates, and maps them all
+          <strong>copy-on-write</strong> to a single host frame — reclaiming the rest. VMware's ESX pioneered
+          this; a rack of near-identical Linux VMs can share a large fraction of memory.</li>
+        <li><strong>Hypervisor swapping.</strong> The blunt fallback: the VMM pages guest memory to its own swap
+          file. It works but is slow and <em>uninformed</em> — the VMM might evict a page the guest is about to
+          use (double paging), which is exactly why ballooning (guest-informed) is preferred.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>Compute the walk cost</h2>
+      <p>
+        The simulation makes the 2-D walk concrete: it computes memory accesses per TLB miss for shadow vs
+        nested paging at a given page-table depth, then folds in a TLB hit rate to get the <em>effective</em>
+        average cost per memory reference. Watch how a high hit rate hides even a 24-access nested miss.
+      </p>
+      <primer-code run>
+        // Effective memory-access cost under virtualization: shadow vs nested paging.
+        const levels = 4;          // x86-64 has 4 page-table levels
+        const tlbHitRate = 0.99;   // 99% of references hit the TLB (cost ~1)
+        const ACCESS = 100;        // cycles for one DRAM access on a walk step
+        const HIT = 1;             // a TLB hit is ~free
+
+        // Accesses per TLB MISS:
+        const shadowMiss = levels;                       // native-length walk (VMM pre-composed)
+        const nestedMiss = (levels + 1) * (levels + 1) - 1;  // 2-D walk
+
+        function effective(missAccesses: number): number {
+          const missCost = missAccesses * ACCESS;
+          return tlbHitRate * HIT + (1 - tlbHitRate) * missCost;
+        }
+
+        console.log(`page-table levels     : ${levels}`);
+        console.log(`shadow  miss walk     : ${shadowMiss} accesses`);
+        console.log(`nested  miss walk     : ${nestedMiss} accesses  (the '2-D walk')`);
+        console.log(`TLB hit rate          : ${(tlbHitRate * 100).toFixed(0)}%`);
+        console.log(`\neffective cost/ref (shadow): ${effective(shadowMiss).toFixed(2)} cycles`);
+        console.log(`effective cost/ref (nested): ${effective(nestedMiss).toFixed(2)} cycles`);
+        console.log("\nBUT shadow paging TRAPS on every guest PTE write; nested paging does not.");
+        console.log("=> nested trades a rare, longer miss for eliminating the page-table trap storm — usually a win.");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The design law</h2>
+      <primer-theorem name="Virtualizing memory">
+        <ul>
+          <li>Under a hypervisor there are <strong>two</strong> translations: GVA→GPA (guest page tables) and
+            GPA→HPA (VMM map). The hardware TLB caches only the composed GVA→HPA.</li>
+          <li><strong>Shadow page tables</strong> pre-compose GVA→HPA in software: native-speed reads, but every
+            guest page-table write <em>traps</em> and every guest context switch is costly.</li>
+          <li><strong>Nested paging (EPT/NPT)</strong> lets hardware walk both tables — a
+            <em>2-D page walk</em> of up to <primer-math>(L+1)^2-1</primer-math> accesses per TLB miss (24 for
+            <primer-math>L=4</primer-math>) — but with no PTE-write traps; it wins on most workloads.</li>
+          <li>The GPA→HPA indirection enables <strong>overcommit</strong>, reclaimed via <strong>ballooning</strong>
+            (guest-informed eviction), <strong>transparent page sharing</strong> (copy-on-write dedup), and
+            hypervisor swapping (last resort).</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="If the balloon driver just 'steals' memory, why not have the VMM grab pages directly?">
+      <p>
+        Because the VMM is <em>blind to guest importance</em>. From outside, every guest page looks the same —
+        the VMM cannot tell the guest's hot database buffer from a stale cached file. If it swaps out the wrong
+        page, the guest immediately faults it back in, and you get <strong>double paging</strong>: the page is
+        on the VMM's swap disk <em>and</em> the guest tries to page it to its own swap — two disk trips for one
+        eviction, catastrophic. Ballooning cleverly sidesteps this by pushing the decision <em>into</em> the
+        guest: the balloon driver allocates pages, so the guest's own, fully-informed memory manager decides
+        what to evict using all its knowledge (LRU, dirty bits, working sets). The VMM gets memory back without
+        ever guessing. It's a beautiful example of putting the policy where the information is.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Guest physical' memory is NOT physical — it's another layer of virtual">
+      <p>
+        The word "physical" in <em>guest-physical address</em> fools many students. Inside the VM, the guest OS
+        genuinely believes GPA 0 is the first byte of real DRAM and manages "its RAM" accordingly — but GPA is
+        just another virtual space the VMM invented. GPA 0 might live at host-physical frame 9 million, might be
+        <em>shared</em> copy-on-write with three other VMs, or might currently be swapped out to the VMM's disk
+        and not resident at all. Only the <em>host-physical</em> address is real silicon. Keeping the three
+        spaces straight — GVA (guest-virtual), GPA (guest-physical/really-virtual), HPA (host-physical/real) —
+        is the single most important discipline for reasoning about memory virtualization.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Where next</h2>
+      <p>
+        We have virtualized the CPU and memory. The last hardware resource is
+        <primer-ref forward to="computer-science/advanced-operating-systems/virtualization/io-virtualization">I/O
+        devices</primer-ref> — disks and network cards — where the choices between full emulation, paravirtual
+        drivers (virtio), and direct hardware passthrough echo everything you've seen here.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: two-level translation, shadow vs nested, the 2-D walk count, ballooning/sharing/overcommit. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "memvQuiz@1": {
+          "intro": "GVA→GPA→HPA; shadow page tables vs nested paging (EPT/NPT); the 2-D walk; overcommit, ballooning, page sharing.",
+          "twoQ": "Under a hypervisor, a guest memory access needs which two translations?",
+          "twoRight": "GVA→GPA (guest page tables) then GPA→HPA (VMM mapping)",
+          "twoWrong1": "just GVA→HPA, the same as native",
+          "twoWrong2": "GPA→GVA then HPA→GPA",
+          "twoWrong3": "virtual→virtual only, no physical involved",
+          "gpaQ": "A 'guest-physical address' (GPA) is…",
+          "gpaRight": "what the guest THINKS is real RAM, but is itself mapped by the VMM to host-physical",
+          "gpaWrong1": "a true hardware DRAM address",
+          "gpaWrong2": "an address on the guest's disk",
+          "gpaWrong3": "the same as a guest-virtual address",
+          "shadowQ": "A shadow page table maps…",
+          "shadowRight": "guest-virtual directly to host-physical (GVA→HPA), composing both levels in software",
+          "shadowWrong1": "guest-physical to guest-virtual",
+          "shadowWrong2": "host-virtual to host-physical",
+          "shadowWrong3": "disk blocks to memory frames",
+          "shadowcostQ": "The main cost of shadow page tables is…",
+          "shadowcostRight": "guest PTE writes trap into the VMM, and context switches must rebuild/switch shadows",
+          "shadowcostWrong1": "each TLB miss needs 24 memory accesses",
+          "shadowcostWrong2": "they cannot run more than one guest",
+          "shadowcostWrong3": "they need a modified guest kernel",
+          "nestedQ": "Nested paging (EPT/NPT) works by…",
+          "nestedRight": "having hardware walk BOTH the guest tables and the VMM's GPA→HPA table with no VM-exit",
+          "nestedWrong1": "making the guest issue a hypercall on every access",
+          "nestedWrong2": "disabling the guest's page tables",
+          "nestedWrong3": "interpreting every memory access in software",
+          "walkQ": "For 4-level guest and host tables, one TLB miss under nested paging costs up to…",
+          "walkRight": "24 memory accesses (the 2-D page walk)",
+          "walkWrong1": "4 memory accesses, same as native",
+          "walkWrong2": "exactly 1 access",
+          "walkWrong3": "256 memory accesses",
+          "nestedadvQ": "The big advantage of nested paging over shadow paging is that…",
+          "nestedadvRight": "guest page-table writes no longer trap into the VMM (no trap storm)",
+          "nestedadvWrong1": "TLB misses become cheaper than native",
+          "nestedadvWrong2": "it needs no TLB at all",
+          "nestedadvWrong3": "the guest must be paravirtualized",
+          "overQ": "'Memory overcommit' means…",
+          "overRight": "handing guests more total guest-physical memory than the host physically has",
+          "overWrong1": "reserving twice the RAM each guest asks for",
+          "overWrong2": "disabling swapping entirely",
+          "overWrong3": "giving each guest its own DRAM chips",
+          "balloonQ": "The point of a balloon driver is to…",
+          "balloonRight": "let the guest's own memory manager choose which pages to give back to the VMM",
+          "balloonWrong1": "inflate the guest's disk size",
+          "balloonWrong2": "encrypt guest memory",
+          "balloonWrong3": "speed up the TLB",
+          "shareQ": "Transparent page sharing reclaims memory by…",
+          "shareRight": "mapping identical guest pages copy-on-write to a single shared host frame",
+          "shareWrong1": "compressing every guest page",
+          "shareWrong2": "deleting duplicate files on the guest disk",
+          "shareWrong3": "moving pages to the GPU",
+          "doubleQ": "'Double paging' (a hazard of hypervisor swapping) is…",
+          "doubleRight": "the VMM swaps out a page the guest then immediately faults back and re-swaps",
+          "doubleWrong1": "using two page sizes at once",
+          "doubleWrong2": "having two TLBs",
+          "doubleWrong3": "mapping a page twice for speed",
+          "tlbimpQ": "Why does the TLB matter even MORE under virtualization?",
+          "tlbimpRight": "a hit costs the same as native, but a miss can trigger a 24-access 2-D walk",
+          "tlbimpWrong1": "the TLB is disabled inside a VM",
+          "tlbimpWrong2": "virtualization makes every access a TLB miss",
+          "tlbimpWrong3": "the TLB stores guest disk blocks",
+          "walkNumQ": "Page tables have ${lv}$ levels. How many memory accesses does one nested (2-D) TLB-miss walk take, i.e. $(lv+1)^2-1$?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="memvQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/virtualization/hardware-assisted-virtualization"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The 2-D page walk as a 5x5 grid of memory-access cells: columns = guest walk (L4..L1, page),
+     rows = the nested EPT walk translating each guest-physical pointer. 24 cells + the data cell.
+     Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "nestedWalk",
+    ({ board, colors, step, sceneStrings }) => {
+      const n = 5;                 // (L+1) for L=4
+      const x0 = 1.6, y0 = 1.4;    // bottom-left of grid
+      const cell = 1.1;            // cell size
+      const gap = 0.08;
+
+      // Base grid of cells. The last cell (top-right) is the real data.
+      for (let r = 0; r < n; r++) {
+        for (let c = 0; c < n; c++) {
+          const isData = (r === n - 1 && c === n - 1);
+          const bx = x0 + c * cell, by = y0 + r * cell;
+          board.create("polygon",
+            [[bx + gap, by + gap], [bx + cell - gap, by + gap], [bx + cell - gap, by + cell - gap], [bx + gap, by + cell - gap]], {
+              fillColor: isData ? colors.cat[1] : colors.cat[0],
+              fillOpacity: isData ? 0.5 : 0.22,
+              borders: { strokeColor: colors.line, strokeWidth: 1, highlight: false },
+              vertices: { visible: false }, fixed: true, highlight: false,
+            });
+          if (isData)
+            board.create("text", [bx + cell / 2, by + cell / 2, sceneStrings("data")], {
+              strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle",
+              fixed: true, highlight: false, cssStyle: "white-space:pre-line; text-align:center; font-weight:700",
+            });
+        }
+      }
+
+      // Axis labels.
+      board.create("text", [x0 + n * cell / 2, y0 - 0.55, sceneStrings("guestAxis")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle",
+        fixed: true, highlight: false, cssStyle: "max-width:520px; text-align:center",
+      });
+      board.create("text", [x0 - 0.55, y0 + n * cell / 2, sceneStrings("hostAxis")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle",
+        fixed: true, highlight: false, cssStyle: "white-space:pre-line; text-align:center; max-width:140px",
+      });
+      board.create("text", [x0 + n * cell / 2, y0 + n * cell + 0.5, sceneStrings("count")], {
+        strokeColor: colors.ink, fontSize: 11.5, anchorX: "middle", anchorY: "middle",
+        fixed: true, highlight: false, cssStyle: "font-weight:700; max-width:540px; text-align:center",
+      });
+    },
+    {
+      boundingbox: [-0.6, 8.2, 8.2, 0.2],
+      keepAspect: true,
+      title: () => makeStrings("nestedWalk")("title"),
+    },
+  );
+
+  registerQuiz("memvQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("twoQ"), options: [
+      { text: () => sceneStrings("twoRight"), correct: true },
+      { text: () => sceneStrings("twoWrong1"), correct: false },
+      { text: () => sceneStrings("twoWrong2"), correct: false },
+      { text: () => sceneStrings("twoWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("gpaQ"), options: [
+      { text: () => sceneStrings("gpaRight"), correct: true },
+      { text: () => sceneStrings("gpaWrong1"), correct: false },
+      { text: () => sceneStrings("gpaWrong2"), correct: false },
+      { text: () => sceneStrings("gpaWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("shadowQ"), options: [
+      { text: () => sceneStrings("shadowRight"), correct: true },
+      { text: () => sceneStrings("shadowWrong1"), correct: false },
+      { text: () => sceneStrings("shadowWrong2"), correct: false },
+      { text: () => sceneStrings("shadowWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("shadowcostQ"), options: [
+      { text: () => sceneStrings("shadowcostRight"), correct: true },
+      { text: () => sceneStrings("shadowcostWrong1"), correct: false },
+      { text: () => sceneStrings("shadowcostWrong2"), correct: false },
+      { text: () => sceneStrings("shadowcostWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("nestedQ"), options: [
+      { text: () => sceneStrings("nestedRight"), correct: true },
+      { text: () => sceneStrings("nestedWrong1"), correct: false },
+      { text: () => sceneStrings("nestedWrong2"), correct: false },
+      { text: () => sceneStrings("nestedWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("walkQ"), options: [
+      { text: () => sceneStrings("walkRight"), correct: true },
+      { text: () => sceneStrings("walkWrong1"), correct: false },
+      { text: () => sceneStrings("walkWrong2"), correct: false },
+      { text: () => sceneStrings("walkWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("nestedadvQ"), options: [
+      { text: () => sceneStrings("nestedadvRight"), correct: true },
+      { text: () => sceneStrings("nestedadvWrong1"), correct: false },
+      { text: () => sceneStrings("nestedadvWrong2"), correct: false },
+      { text: () => sceneStrings("nestedadvWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("overQ"), options: [
+      { text: () => sceneStrings("overRight"), correct: true },
+      { text: () => sceneStrings("overWrong1"), correct: false },
+      { text: () => sceneStrings("overWrong2"), correct: false },
+      { text: () => sceneStrings("overWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("balloonQ"), options: [
+      { text: () => sceneStrings("balloonRight"), correct: true },
+      { text: () => sceneStrings("balloonWrong1"), correct: false },
+      { text: () => sceneStrings("balloonWrong2"), correct: false },
+      { text: () => sceneStrings("balloonWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("shareQ"), options: [
+      { text: () => sceneStrings("shareRight"), correct: true },
+      { text: () => sceneStrings("shareWrong1"), correct: false },
+      { text: () => sceneStrings("shareWrong2"), correct: false },
+      { text: () => sceneStrings("shareWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("doubleQ"), options: [
+      { text: () => sceneStrings("doubleRight"), correct: true },
+      { text: () => sceneStrings("doubleWrong1"), correct: false },
+      { text: () => sceneStrings("doubleWrong2"), correct: false },
+      { text: () => sceneStrings("doubleWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("tlbimpQ"), options: [
+      { text: () => sceneStrings("tlbimpRight"), correct: true },
+      { text: () => sceneStrings("tlbimpWrong1"), correct: false },
+      { text: () => sceneStrings("tlbimpWrong2"), correct: false },
+      { text: () => sceneStrings("tlbimpWrong3"), correct: false },
+    ] },
+    {
+      // nested 2-D walk accesses = (lv+1)^2 - 1
+      prompt: (v) => sceneStrings("walkNumQ", v),
+      variables: "lv=[2:5]",
+      answer: (v) => (v.lv + 1) * (v.lv + 1) - 1,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

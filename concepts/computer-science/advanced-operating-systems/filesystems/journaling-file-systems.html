@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Journaling File Systems</primer-title>
+
+    <primer-card>
+      <p>
+        The
+        <primer-ref to="computer-science/advanced-operating-systems/filesystems/crash-consistency-and-fsck">crash-consistency
+        problem</primer-ref> left us with two bad options: overwrite structures in place and risk a corrupt file system,
+        or run a full <primer-math>\texttt{fsck}</primer-math> that scans the whole disk at every boot. <strong>Journaling</strong>
+        borrows the idea that saved databases decades earlier — <strong>write-ahead logging</strong> — and gives file
+        systems atomic multi-block updates with recovery that touches only a tiny log instead of the entire disk.
+      </p>
+      <p>
+        The principle is almost embarrassingly simple, and it is one of the most important ideas in systems: <strong>before
+        you touch the real structures, write down what you are <em>about</em> to do</strong> in a dedicated on-disk log
+        (the journal). Only once that intention is safely recorded do you go and modify the actual inodes, bitmaps, and
+        data in place. If you crash midway, recovery reads the log and either <em>replays</em> the intention (if it was
+        fully recorded) or <em>discards</em> it (if it wasn't). Either way you end up in a state that <em>could</em> have
+        happened — never a torn one. ext3, ext4, XFS, JFS, and NTFS all live by this.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Write-ahead logging: the three phases</h2>
+      <p>
+        A journaled update is a <strong>transaction</strong> that moves through three phases. The magic is entirely in
+        the <em>ordering barrier</em> between phase 2 and phase 3.
+      </p>
+      <primer-theorem name="The journal protocol">
+        <ul>
+          <li><strong>1. Journal write</strong> — write the transaction's blocks (a begin marker, the new metadata/data,
+            an end marker) into the log. The real locations are untouched;</li>
+          <li><strong>2. Commit</strong> — once the journal write is <em>durable</em>, write a single
+            <strong>commit record</strong>. This one atomic block is the moment the transaction becomes "official";</li>
+          <li><strong>3. Checkpoint</strong> — later, at leisure, copy the journaled blocks to their real in-place
+            locations. Afterwards the journal space is <strong>freed</strong> for reuse.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Recovery is then trivial and fast: after a crash, scan the journal. For every transaction that has a valid commit
+        record, <strong>replay</strong> it (re-do the checkpoint) — this is safe even if it already partly happened,
+        because re-writing the same blocks is <em>idempotent</em>. Any transaction <em>without</em> a commit record is
+        thrown away as if it never began. Crucially, recovery time is proportional to the <em>journal</em> size (a few
+        megabytes), not the disk size — that is the whole win over <primer-math>\texttt{fsck}</primer-math>.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the journal timeline figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "journal": {
+          "title": "The journal protocol: log the intention, commit atomically, then checkpoint in place",
+          "jw": "1. Journal write  (TxB · blocks · TxE → log)",
+          "cm": "2. Commit  (write commit record)",
+          "cp": "3. Checkpoint  (copy blocks to real locations)",
+          "fr": "4. Free journal space",
+          "barrier": "ordering barrier: commit only AFTER journal write is durable",
+          "time": "time →",
+          "s1": "Write the whole intention into the log first",
+          "s2": "A single atomic commit record makes it official",
+          "s3": "Only now touch the real inodes/bitmaps/data — safely replayable"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>See the timeline</h2>
+      <p>
+        Watch the barrier. The commit record must not hit the disk until the journal-write blocks are <em>all</em> durable
+        — otherwise recovery might trust a commit for a transaction whose data never arrived. This single ordering
+        constraint (enforced with the write barriers of a later lesson) is what makes the whole scheme correct.
+      </p>
+      <primer-geometry scene="journal"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Replay a journal after a crash</h2>
+      <p>
+        The model below is a miniature journaling file system. Several transactions sit in the journal; some have a commit
+        record, some were interrupted by the crash and do not. Recovery replays only the committed ones onto the "disk."
+        Notice the uncommitted transaction is silently dropped — exactly the behaviour that keeps the file system
+        consistent.
+      </p>
+      <primer-code run>
+        // A tiny journal. Each transaction lists (block -> value) writes and whether its commit record landed.
+        type Tx = { id: number; writes: [string, string][]; committed: boolean };
+
+        const journal: Tx[] = [
+          { id: 1, writes: [["inode/7", "size=8KB"], ["bitmap", "blk42=used"]], committed: true },
+          { id: 2, writes: [["data/blk42", "hello world"]], committed: true },
+          // Crash struck mid-way: transaction 3's blocks reached the log but the commit record never did.
+          { id: 3, writes: [["inode/9", "size=1MB"], ["bitmap", "blk99=used"]], committed: false },
+        ];
+
+        const disk: Record&lt;string, string&gt; = {};
+        console.log("Recovery: scanning the journal…");
+        for (const tx of journal) {
+          if (tx.committed) {
+            for (const [blk, val] of tx.writes) disk[blk] = val;
+            console.log(`  tx#${tx.id}: COMMITTED  -> replayed ${tx.writes.length} write(s)`);
+          } else {
+            console.log(`  tx#${tx.id}: no commit  -> DISCARDED (as if it never happened)`);
+          }
+        }
+        console.log("Final disk state:");
+        for (const k of Object.keys(disk)) console.log(`  ${k} = ${disk[k]}`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The double-write cost — and the modes that dodge it</h2>
+      <p>
+        Journaling has an obvious price: every journaled block is written <strong>twice</strong> — once to the log, once
+        to its real home. For a file system that logged <em>all</em> data, that halves write bandwidth. So real systems
+        offer three modes trading safety against that cost. ext3/ext4 name them exactly:
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th>Mode</th><th>What is journaled</th><th>Trade-off</th></tr></thead>
+          <tbody>
+            <tr><td><strong>data</strong> (journal)</td><td>metadata <em>and</em> data</td><td>safest; every data byte written twice</td></tr>
+            <tr><td><strong>ordered</strong> (default)</td><td>metadata only; data forced to disk <em>before</em> the metadata commits</td><td>fast + safe: no stale-data exposure</td></tr>
+            <tr><td><strong>writeback</strong></td><td>metadata only; data written whenever</td><td>fastest; a crash can expose <em>stale</em> bytes in a newly-grown file</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Almost everyone runs <strong>ordered</strong> mode. It journals only metadata (so the double-write hits just the
+        small structures, not your gigabytes of data), yet by forcing the data blocks to their final home <em>before</em>
+        the metadata that points at them is committed, it guarantees a committed inode never points at a block full of
+        someone else's old bytes. Metadata-only journaling is the default of the whole industry for exactly this reason.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Batching: amortising the log</h2>
+      <p>
+        Committing a transaction per <primer-math>\texttt{write()}</primer-math> would drown the journal in commit
+        records. Instead, file systems <strong>batch</strong>: they buffer many logical operations over a short window
+        (ext3 uses ~5 seconds) into <em>one</em> compound transaction with a single commit. If the same block is touched
+        ten times in that window, it is journaled <em>once</em> with its final value — a huge saving, and the reason
+        journaling's real-world overhead is far below the naive "everything twice." The cost is a small durability
+        window: work in the current batch that hasn't committed yet is lost on a crash (unless you forced it with
+        <primer-math>\texttt{fsync}</primer-math>).
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why does the commit record have to be one single block?">
+      <p>
+        Because the commit record is the one place the scheme leans directly on the hardware's single-block atomicity. The
+        whole protocol reduces "did this multi-block transaction happen?" to "did this <em>one</em> block — the commit
+        record — make it to disk?" A single block is exactly the thing the disk promises to write all-or-nothing, so the
+        answer is never ambiguous: either the commit block is there (replay) or it isn't (discard). If the commit needed
+        two blocks you would be back to the original problem — a torn commit — one level up. This is a recurring trick in
+        systems: build a big atomic action by funnelling its "did it happen?" decision through a single atomic write. (Real
+        implementations also add a checksum so a commit record that is present but <em>corrupt</em> is treated as absent.)
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Journaling protects consistency, not necessarily your latest data">
+      <p>
+        A journaled file system will never boot into a corrupt state — but that does not mean your last
+        <primer-math>\texttt{write()}</primer-math> survived. If your write is still sitting in an uncommitted batch when
+        the power fails, journaling <em>correctly</em> discards it, and the file system is perfectly consistent without
+        it. Consistency and durability are still different promises (as they were with fsck). Journaling makes recovery
+        <em>fast</em> and keeps the structures <em>coherent</em>; it does not, by itself, promise that a particular write
+        is on disk. For that you still need <primer-math>\texttt{fsync}</primer-math> — which forces the current
+        transaction to commit now. Don't let "my file system is journaled" lull you into skipping it.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: WAL protocol, modes, recovery, batching + numeric (double-write bytes, replay time). Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "journalQuiz@1": {
+          "intro": "Write-ahead logging: journal the intention, commit atomically, then checkpoint. Recovery replays committed transactions only. Ordered mode journals metadata only.",
+          "walQ": "The write-ahead logging principle is…",
+          "waRight": "write your intention to a log BEFORE modifying the real structures in place",
+          "waWrong1": "modify the structures first, then log what you did",
+          "waWrong2": "never write to disk at all",
+          "waWrong3": "keep two copies of every file forever",
+          "phaseQ": "The correct order of the three journal phases is…",
+          "phRight": "journal write → commit → checkpoint",
+          "phWrong1": "checkpoint → commit → journal write",
+          "phWrong2": "commit → journal write → checkpoint",
+          "phWrong3": "checkpoint → journal write → commit",
+          "recoverQ": "After a crash, journal recovery…",
+          "reRight": "replays transactions that have a valid commit record and discards those that don't",
+          "reWrong1": "scans and rebuilds the entire disk like fsck",
+          "reWrong2": "replays every transaction whether committed or not",
+          "reWrong3": "deletes the whole journal untouched",
+          "recoverTimeQ": "Journaling recovery is fast because its cost is proportional to…",
+          "rtRight": "the size of the journal (a few MB), not the size of the disk",
+          "rtWrong1": "the number of CPU cores",
+          "rtWrong2": "the size of the whole file system",
+          "rtWrong3": "the number of users logged in",
+          "commitQ": "Why is the commit record a single block?",
+          "cmRight": "so the 'did it happen?' decision rests on the disk's single-block atomicity",
+          "cmWrong1": "to save disk space only",
+          "cmWrong2": "because blocks cannot be larger",
+          "cmWrong3": "it is actually spread over many blocks",
+          "orderedQ": "In ext4 'ordered' mode, data blocks are…",
+          "orRight": "written to their final location BEFORE the metadata that points to them commits",
+          "orWrong1": "journaled twice like the metadata",
+          "orWrong2": "never written to disk",
+          "orWrong3": "written after the metadata commits, allowing stale data",
+          "dataModeQ": "Full 'data' journaling mode is the safest but…",
+          "dmRight": "writes every data byte twice — halving write bandwidth",
+          "dmWrong1": "loses data on every crash",
+          "dmWrong2": "cannot recover after a crash",
+          "dmWrong3": "is faster than all other modes",
+          "batchQ": "Transaction batching helps by…",
+          "baRight": "combining many operations into one compound transaction with a single commit",
+          "baWrong1": "committing after every single write",
+          "baWrong2": "disabling the journal",
+          "baWrong3": "writing each block ten times",
+          "whyMetaQ": "Why do most systems journal metadata only (not data)?",
+          "wmRight": "the double-write then hits only the small structures, not the bulk data",
+          "wmWrong1": "data can never be corrupted",
+          "wmWrong2": "metadata is unimportant",
+          "wmWrong3": "data is stored in the CPU",
+          "doubleNumQ": "In full data-journaling mode, writing {mb} MB of data means how many MB actually hit the disk (data written twice)?",
+          "replayNumQ": "A {jm} MB journal is replayed at {js} MB per second on recovery. How many seconds does replay take?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="journalQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/filesystems/crash-consistency-and-fsck"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Journal timeline: four phase boxes left→right along a time arrow, with a barrier marker between
+     journal-write and commit. Revealed in steps. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "journal",
+    ({ board, colors, step, sceneStrings }) => {
+      const phase = (cx, w, key, ci) => {
+        board.create("polygon", [[cx - w, 2.2], [cx + w, 2.2], [cx + w, 3.6], [cx - w, 3.6]], {
+          fillColor: colors.cat[ci % 6], fillOpacity: 0.24,
+          borders: { strokeColor: colors.line, strokeWidth: 1.4, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [cx, 2.9, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "max-width:180px",
+        });
+      };
+
+      // Base: time arrow.
+      board.create("arrow", [[-0.3, 1.2], [13.3, 1.2]], {
+        strokeColor: colors.line, strokeWidth: 2, lastArrow: { size: 6 }, fixed: true, highlight: false,
+      });
+      board.create("text", [13.0, 0.85, sceneStrings("time")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "right", anchorY: "middle", fixed: true, highlight: false,
+      });
+
+      step(sceneStrings("s1"), () => phase(2.0, 1.7, "jw", 2));
+      step(sceneStrings("s2"), () => {
+        // Barrier line between journal-write and commit.
+        board.create("line", [[4.0, 1.2], [4.0, 4.0]], {
+          strokeColor: colors.cat[1], strokeWidth: 2, dash: 3, straightFirst: false, straightLast: false,
+          fixed: true, highlight: false,
+        });
+        board.create("text", [4.0, 4.25, sceneStrings("barrier")], {
+          strokeColor: colors.cat[1], fontSize: 10, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "max-width:260px; font-weight:600",
+        });
+        phase(5.7, 1.4, "cm", 3);
+      });
+      step(sceneStrings("s3"), () => {
+        phase(9.2, 1.7, "cp", 4);
+        phase(12.3, 1.0, "fr", 5);
+      });
+    },
+    {
+      boundingbox: [-0.6, 4.8, 13.8, 0.4],
+      keepAspect: false,
+      title: () => makeStrings("journal")("title"),
+    },
+  );
+
+  registerQuiz("journalQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("walQ"), options: [
+      { text: () => sceneStrings("waRight"), correct: true },
+      { text: () => sceneStrings("waWrong1"), correct: false },
+      { text: () => sceneStrings("waWrong2"), correct: false },
+      { text: () => sceneStrings("waWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("phaseQ"), options: [
+      { text: () => sceneStrings("phRight"), correct: true },
+      { text: () => sceneStrings("phWrong1"), correct: false },
+      { text: () => sceneStrings("phWrong2"), correct: false },
+      { text: () => sceneStrings("phWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("recoverQ"), options: [
+      { text: () => sceneStrings("reRight"), correct: true },
+      { text: () => sceneStrings("reWrong1"), correct: false },
+      { text: () => sceneStrings("reWrong2"), correct: false },
+      { text: () => sceneStrings("reWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("recoverTimeQ"), options: [
+      { text: () => sceneStrings("rtRight"), correct: true },
+      { text: () => sceneStrings("rtWrong1"), correct: false },
+      { text: () => sceneStrings("rtWrong2"), correct: false },
+      { text: () => sceneStrings("rtWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("commitQ"), options: [
+      { text: () => sceneStrings("cmRight"), correct: true },
+      { text: () => sceneStrings("cmWrong1"), correct: false },
+      { text: () => sceneStrings("cmWrong2"), correct: false },
+      { text: () => sceneStrings("cmWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("orderedQ"), options: [
+      { text: () => sceneStrings("orRight"), correct: true },
+      { text: () => sceneStrings("orWrong1"), correct: false },
+      { text: () => sceneStrings("orWrong2"), correct: false },
+      { text: () => sceneStrings("orWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dataModeQ"), options: [
+      { text: () => sceneStrings("dmRight"), correct: true },
+      { text: () => sceneStrings("dmWrong1"), correct: false },
+      { text: () => sceneStrings("dmWrong2"), correct: false },
+      { text: () => sceneStrings("dmWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("batchQ"), options: [
+      { text: () => sceneStrings("baRight"), correct: true },
+      { text: () => sceneStrings("baWrong1"), correct: false },
+      { text: () => sceneStrings("baWrong2"), correct: false },
+      { text: () => sceneStrings("baWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("whyMetaQ"), options: [
+      { text: () => sceneStrings("wmRight"), correct: true },
+      { text: () => sceneStrings("wmWrong1"), correct: false },
+      { text: () => sceneStrings("wmWrong2"), correct: false },
+      { text: () => sceneStrings("wmWrong3"), correct: false },
+    ] },
+    {
+      // Data journaling writes data twice: 2 * mb.
+      prompt: (v) => sceneStrings("doubleNumQ", v),
+      variables: "mb=[10:80]",
+      answer: (v) => 2 * v.mb,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Replay time = jm / js seconds (js divides jm).
+      prompt: (v) => sceneStrings("replayNumQ", v),
+      variables: "js=[2,4] jm=[8,16,32,64]",
+      answer: (v) => v.jm / v.js,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

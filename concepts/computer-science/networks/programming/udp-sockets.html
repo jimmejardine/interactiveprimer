@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>UDP Sockets</primer-title>
+
+    <primer-card>
+      <p>
+        You are on a video call. Someone's face freezes for a quarter-second, a syllable turns to static, and
+        then — without anyone asking — the picture snaps back to the present moment. Nobody rewound. The lost
+        frame was simply <em>abandoned</em>: by the time it could have been re-sent, it was already stale, and
+        a fresh frame had taken its place. That "throw it away and move on" behaviour is the whole personality
+        of the protocol underneath: <strong>UDP</strong>, the User Datagram Protocol, and the sockets you use
+        to speak it.
+      </p>
+      <p>
+        You have already met the <primer-ref soft to="computer-science/networks/programming/the-socket-api">socket
+        API</primer-ref> through its most common guise — the reliable, ordered <strong>stream</strong> socket
+        backed by TCP. This page is about its wilder sibling: the <strong>datagram socket</strong>
+        (<code>SOCK_DGRAM</code>), backed by <primer-ref soft to="computer-science/networks/transport/udp">UDP</primer-ref>.
+        A datagram socket trades away TCP's guarantees — no connection, no handshake, no retransmission, no
+        ordering — for two things you cannot get any other way: <strong>speed</strong>, and <strong>message
+        boundaries that are actually preserved</strong>. The programming model is smaller, but the
+        responsibilities it hands back to <em>you</em> are larger. Both halves of that bargain are the subject
+        of this page.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A different shape of API: no connection to set up</h2>
+      <p>
+        Recall the seven-call TCP dance: <code>socket → bind → listen → accept</code> on the server,
+        <code>socket → connect</code> on the client, then <code>read</code>/<code>write</code>, then
+        <code>close</code>. UDP throws most of that away. There is <strong>no connection</strong>, so there is
+        nothing to establish and nothing to accept. A UDP program calls <code>socket()</code>, optionally
+        <code>bind()</code>s a port (a server must; a client usually needn't), and then simply
+        <strong>sends and receives datagrams</strong> — each one carrying its destination (or source) address
+        <em>with it</em>, packet by packet.
+      </p>
+      <p>
+        The two workhorse calls are <code>sendto()</code> and <code>recvfrom()</code>:
+      </p>
+      <ul>
+        <li>
+          <strong><code>sendto(sock, bytes, dest_addr)</code></strong> — fire one datagram at
+          <code>dest_addr</code>. There is no prior <code>connect()</code>, so you name the destination on
+          <em>every</em> send. The call returns as soon as the datagram is handed to the kernel; it does
+          <em>not</em> wait for, or even learn of, delivery.
+        </li>
+        <li>
+          <strong><code>recvfrom(sock) → (bytes, src_addr)</code></strong> — receive <em>exactly one</em>
+          datagram, and learn <em>who sent it</em>. That returned <code>src_addr</code> is how a connectionless
+          server knows where to reply — it did not <code>accept()</code> a per-client socket, so it must read
+          the sender's address off each packet.
+        </li>
+      </ul>
+      <p>
+        Because there is no connection, one UDP socket can converse with <em>thousands</em> of peers at once
+        through a single file descriptor — every datagram is self-addressed. There is no <code>accept()</code>
+        spawning a socket per client, and often no per-client state in the kernel at all. This is exactly why
+        <strong>DNS</strong> resolvers, which field a torrent of tiny independent queries from everywhere, live
+        on UDP.
+      </p>
+
+      <primer-theorem name="Stream socket vs datagram socket">
+        <ul>
+          <li>
+            A <strong>stream socket</strong> (TCP) is <em>connection-oriented</em> and delivers a
+            <strong>reliable, ordered byte stream</strong> — but it does <em>not</em> preserve the boundaries
+            between your writes.
+          </li>
+          <li>
+            A <strong>datagram socket</strong> (UDP) is <em>connectionless</em> and delivers
+            <strong>independent, self-contained messages</strong> that may be lost, duplicated or reordered —
+            but each <code>recvfrom()</code> returns <em>one whole datagram</em>, exactly as it was sent.
+          </li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The two lifecycles, side by side</h2>
+      <p>
+        Put the TCP and UDP server loops next to each other and the missing machinery jumps out. UDP has no
+        <code>listen()</code>, no <code>accept()</code>, no handshake, and no per-connection socket — just a
+        bound port and a <code>recvfrom</code>/<code>sendto</code> loop.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "udpLifecycle": {
+            "title": "TCP's connection setup vs UDP's connectionless send/receive",
+            "tcpCol": "TCP (stream)",
+            "udpCol": "UDP (datagram)",
+            "tcpSocket": "socket()",
+            "tcpBind": "bind() — claim a port",
+            "tcpListen": "listen() — open the queue",
+            "tcpAccept": "accept() — BLOCK, get a per-client socket",
+            "tcpHandshake": "SYN / SYN-ACK / ACK handshake",
+            "tcpRW": "read() / write() the byte stream",
+            "tcpClose": "close() — tear down",
+            "udpSocket": "socket()",
+            "udpBind": "bind() — claim a port",
+            "udpRecv": "recvfrom() — BLOCK, get 1 datagram + sender",
+            "udpSend": "sendto(sender) — reply to that address",
+            "udpLoop": "…loop: no connection, no teardown",
+            "gap": "no listen · no accept · no handshake"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="udpLifecycle"
+        caption="Two vertical server timelines. The TCP side runs socket, bind, listen, accept (which blocks and yields a per-client socket after a SYN/SYN-ACK/ACK handshake), then read/write, then close. The UDP side runs only socket, bind, then a recvfrom/sendto loop with no listen, no accept, and no handshake."
+      ></primer-geometry>
+
+      <p>
+        Here is a UDP echo server and client as illustrative (non-runnable) code — real datagrams need a real
+        network, which the sandbox does not have. Notice the address travelling <em>with</em> each call:
+      </p>
+
+      <primer-code lang="typescript">
+        // --- UDP SERVER --- one socket serves everyone; no accept, no per-client state
+        const sock = createDatagramSocket();
+        sock.bind(5353);                                  // claim a port
+        while (true) {
+          const [data, from] = sock.recvfrom();           // ONE whole datagram + its sender
+          sock.sendto(data, from);                        // echo it back to that exact address
+        }
+
+        // --- UDP CLIENT --- no connect(); name the destination on every send
+        const c = createDatagramSocket();
+        c.sendto("ping", { host: "server.example", port: 5353 });
+        const [reply, _from] = c.recvfrom();              // one datagram back, or block forever if lost
+        console.log(reply.toString());                    // "ping"
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The good news: message boundaries survive</h2>
+      <p>
+        The single most painful bug in TCP programming is that <code>write("hello")</code> then
+        <code>write("world")</code> can arrive as <code>helloworld</code>, or <code>hel</code> then
+        <code>loworld</code> — TCP is a <em>faucet of bytes</em> and does not remember where one write ended.
+        UDP is the exact opposite. <strong>One <code>sendto</code> becomes one datagram becomes one
+        <code>recvfrom</code>.</strong> The message you sent is the message that comes out, whole, or it does
+        not come out at all — never smeared into its neighbours.
+      </p>
+      <p>
+        The demo below models both protocols over the <em>same</em> three logical messages, so you can watch
+        the boundaries dissolve under TCP and hold under UDP.
+      </p>
+
+      <primer-code run>
+        // Three application-level messages.
+        const messages = ["LOGIN alice", "MSG hi there", "LOGOUT"];
+
+        // --- TCP model: writes are concatenated into ONE stream, chunked arbitrarily ---
+        const stream = messages.join("");
+        const tcpArrivals = ["LOGIN aliceMSG h", "i ther", "eLOGOUT"];  // how bytes happen to land
+        console.log("TCP (stream): a naive '1 read = 1 message' reader sees...");
+        for (const chunk of tcpArrivals) console.log(`  recv -> "${chunk}"`);
+        console.log(`  ...boundaries GONE: ${messages.length} messages smeared into ${tcpArrivals.length} reads.\n`);
+
+        // --- UDP model: each sendto is a self-contained datagram; each recvfrom returns one ---
+        const datagrams = messages.map((m) =&gt; ({ payload: m }));  // one datagram per message
+        console.log("UDP (datagram): each recvfrom() returns exactly one whole message...");
+        for (const d of datagrams) console.log(`  recvfrom -> "${d.payload}"`);
+        console.log("  ...boundaries PRESERVED: no framing code needed. What you sent is what you get.");
+      </primer-code>
+
+      <p>
+        Read that contrast carefully. On TCP you <em>must</em> add your own
+        <primer-ref soft to="computer-science/networks/programming/serialization-and-framing">framing</primer-ref>
+        to recover messages. On UDP the framing is free — the datagram <em>is</em> the frame. If your data is
+        naturally message-shaped (a DNS query, a sensor reading, a game state update), that alone can make UDP
+        the more honest fit.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The bad news: everything else is now your job</h2>
+      <p>
+        UDP hands you message boundaries and then walks away. The network is free to <strong>lose</strong> your
+        datagram, <strong>duplicate</strong> it, or <strong>reorder</strong> it relative to its siblings, and
+        UDP will never tell you. If your application needs any of the guarantees TCP gave away, you must rebuild
+        them yourself — on top of UDP.
+      </p>
+      <ul>
+        <li>
+          <strong>Loss.</strong> No retransmission. If it matters, add a sequence number and an acknowledgement,
+          and re-send on timeout — you are now re-implementing a slice of TCP. (Sometimes loss is <em>fine</em>:
+          a dropped audio frame is better dropped than delivered late.)
+        </li>
+        <li>
+          <strong>Reordering.</strong> Datagram #3 can arrive before datagram #2. If order matters, number them
+          and re-sequence at the receiver with a small reorder buffer.
+        </li>
+        <li>
+          <strong>Duplication.</strong> A datagram can arrive twice (e.g. a retransmit whose original wasn't
+          actually lost). Idempotent handling, or a "seen this sequence number already" set, protects you.
+        </li>
+        <li>
+          <strong>No flow or congestion control.</strong> UDP will happily let you blast a receiver, or the
+          network, into collapse. Well-behaved UDP protocols add their own pacing.
+        </li>
+      </ul>
+      <p>
+        This is why the modern web's fast transport, <strong>QUIC</strong> (the basis of HTTP/3), is built
+        <em>on UDP</em>: it wanted to design its own reliability, ordering, and congestion control from scratch
+        — without waiting for a decade of TCP to change in every operating-system kernel — so it started from
+        the blank slate UDP provides.
+      </p>
+
+      <primer-vignette title="Watch out! — reliability, ordering AND size are now on you">
+        <p>
+          Two traps snare almost everyone the first time. <strong>First, you own reliability.</strong> UDP will
+          silently lose, reorder and duplicate datagrams and never say a word; a client that does a single
+          <code>recvfrom()</code> and waits for a reply that was dropped will <em>block forever</em>. If your
+          data must arrive, you must add sequence numbers, acknowledgements, timeouts and de-duplication —
+          i.e. you must build the reliability TCP would have given you for free.
+        </p>
+        <p>
+          <strong>Second, size matters.</strong> A datagram is <em>one</em> packet's worth of payload. Send one
+          larger than the path's <primer-ref todo to="mtu">MTU</primer-ref> (~1500 bytes on typical Ethernet,
+          often safely ~1200 for internet paths) and IP must <strong>fragment</strong> it into several packets
+          — and if <em>any one fragment</em> is lost, the <em>whole</em> datagram is discarded, sharply raising
+          your loss rate. Worse, some middleboxes just drop fragments outright. The rule of thumb: keep UDP
+          payloads comfortably under the MTU, and if you need to send more, split it into MTU-sized,
+          individually-recoverable messages yourself.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>So when do you actually choose UDP?</h2>
+      <p>
+        The decision is really about what <em>lateness</em> costs you. TCP guarantees delivery, but the price of
+        that guarantee is <strong>waiting</strong>: a lost segment stalls everything behind it until it is
+        re-sent (head-of-line blocking). For some data, a late byte is worse than a missing one.
+      </p>
+      <ul>
+        <li>
+          <strong>Choose UDP when freshness beats completeness.</strong> Live voice and video, online-game
+          state, live telemetry: a frame that arrives late is useless, so drop it and show the next one. UDP's
+          "no retransmission" is a <em>feature</em> here.
+        </li>
+        <li>
+          <strong>Choose UDP for short, independent request/reply.</strong> DNS is the classic: one small query,
+          one small answer, no benefit to a connection you'd immediately tear down. The occasional lost query is
+          cheaply retried by the client.
+        </li>
+        <li>
+          <strong>Choose UDP as a foundation to build on.</strong> When you want <em>custom</em> transport
+          semantics (QUIC, many VPNs, multiplayer netcode), UDP is the minimal substrate that stays out of your
+          way.
+        </li>
+        <li>
+          <strong>Stay with TCP</strong> when you need every byte, in order, and can tolerate the wait — file
+          transfer, web pages, email, most APIs. Don't reinvent reliability you can get for free.
+        </li>
+      </ul>
+
+      <primer-vignette title="Why does UDP have a checksum but no anything-else?">
+        <p>
+          UDP's header is a mere <strong>8 bytes</strong>: source port, destination port, length, and a
+          checksum. That checksum lets the receiver <em>detect</em> a corrupted datagram (and silently drop it)
+          — but there is no field for a sequence number, an acknowledgement, or a window, because UDP has no
+          notion of ordering, delivery or flow. The design philosophy, straight from its 1980 spec (RFC 768),
+          is "a thin shim over IP that adds just ports and error-detection, and gets out of the way." Everything
+          richer is left to the application — which is precisely the freedom that lets QUIC, DNS and your
+          favourite game all live on the same eight-byte header.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "udpQuiz@1": { "instructions": "Check your grasp of datagram sockets: the connectionless API, preserved message boundaries, the guarantees you must rebuild yourself, and when UDP is the right tool." } }
+    </script>
+    <primer-quiz name="udpQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/programming/the-socket-api",
+      "computer-science/networks/transport/udp"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // Two side-by-side server timelines: TCP (connection setup + handshake + per-client
+  // socket) on the left, UDP (just bind + recvfrom/sendto loop) on the right. The point
+  // is the MISSING machinery on the UDP side.
+  registerGeometryScene("udpLifecycle", ({ board, step, colors, sceneStrings }) => {
+    const TX = -3.4, UX = 3.4;
+
+    const box = (x, y, s, col) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true,
+        highlight: false, strokeColor: col, color: col,
+        cssStyle: "font-weight:600; text-align:center; width:170px; display:inline-block",
+      });
+
+    // headers (always-visible base content)
+    box(TX, 4.7, sceneStrings("tcpCol"), colors.cat[0]);
+    box(UX, 4.7, sceneStrings("udpCol"), colors.cat[1]);
+    board.create("segment", [[TX, 4.2], [TX, -4.0]], { strokeColor: colors.line, strokeOpacity: 0.3, fixed: true, highlight: false, straightFirst: false, straightLast: false });
+    board.create("segment", [[UX, 4.2], [UX, -4.0]], { strokeColor: colors.line, strokeOpacity: 0.3, fixed: true, highlight: false, straightFirst: false, straightLast: false });
+
+    // TCP column
+    step(sceneStrings("tcpSocket"),    () => box(TX, 3.6,  sceneStrings("tcpSocket"), colors.ink));
+    step(sceneStrings("tcpBind"),      () => box(TX, 2.7,  sceneStrings("tcpBind"), colors.ink));
+    step(sceneStrings("tcpListen"),    () => box(TX, 1.8,  sceneStrings("tcpListen"), colors.ink));
+    step(sceneStrings("tcpAccept"),    () => box(TX, 0.9,  sceneStrings("tcpAccept"), colors.ink));
+    step(sceneStrings("tcpHandshake"), () => box(TX, 0.0,  sceneStrings("tcpHandshake"), colors.cat[2]));
+    step(sceneStrings("tcpRW"),        () => box(TX, -0.9, sceneStrings("tcpRW"), colors.ink));
+    step(sceneStrings("tcpClose"),     () => box(TX, -1.8, sceneStrings("tcpClose"), colors.ink));
+
+    // UDP column — deliberately short
+    step(sceneStrings("udpSocket"), () => box(UX, 3.6, sceneStrings("udpSocket"), colors.ink));
+    step(sceneStrings("udpBind"),   () => box(UX, 2.7, sceneStrings("udpBind"), colors.ink));
+    step(sceneStrings("udpRecv"),   () => box(UX, 1.8, sceneStrings("udpRecv"), colors.ink));
+    step(sceneStrings("udpSend"),   () => box(UX, 0.9, sceneStrings("udpSend"), colors.ink));
+    step(sceneStrings("udpLoop"),   () => box(UX, 0.0, sceneStrings("udpLoop"), colors.cat[1]));
+
+    // the gap: highlight what UDP omits
+    step(sceneStrings("gap"), () => {
+      board.create("arrow", [[TX + 0.8, 1.35], [UX - 0.8, 1.35]], { strokeColor: colors.cat[2], strokeWidth: 1.5, dash: 2, fixed: true, highlight: false });
+      box(0, 1.7, sceneStrings("gap"), colors.cat[2]);
+    });
+  }, {
+    boundingbox: [-6.4, 5.2, 6.4, -4.4],
+    keepAspect: false,
+    title: () => makeStrings("udpLifecycle")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("udpQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "Which two calls are the workhorses of a UDP (datagram) socket?",
+      options: [
+        { text: "sendto() and recvfrom() — the destination/source address travels with each call", correct: true },
+        { text: "connect() and accept()", correct: false },
+        { text: "listen() and bind()", correct: false },
+        { text: "read() and write() on a connected stream", correct: false },
+      ] },
+
+    { prompt: "Why does a UDP server not call listen() or accept()?",
+      options: [
+        { text: "UDP is connectionless — there is no connection to queue or accept; one socket serves all peers", correct: true },
+        { text: "Those calls exist but are optional performance tuning", correct: false },
+        { text: "UDP replaces them with a mandatory handshake instead", correct: false },
+        { text: "The kernel calls them automatically for UDP", correct: false },
+      ] },
+
+    { prompt: "What does a single recvfrom() on a UDP socket return?",
+      options: [
+        { text: "exactly one whole datagram, plus the address of whoever sent it", correct: true },
+        { text: "as many bytes as are currently buffered, from any senders, merged together", correct: false },
+        { text: "a new socket dedicated to that client", correct: false },
+        { text: "only the sender's address; the data comes from a separate call", correct: false },
+      ] },
+
+    { prompt: "Compared with TCP, how does UDP treat message boundaries?",
+      options: [
+        { text: "It preserves them: one sendto = one datagram = one recvfrom", correct: true },
+        { text: "It smears them together exactly like TCP does", correct: false },
+        { text: "It splits every message into fixed 64-byte chunks", correct: false },
+        { text: "It preserves them only on localhost", correct: false },
+      ] },
+
+    { prompt: "A UDP datagram you sent never arrives. What does UDP do about it?",
+      options: [
+        { text: "Nothing — no retransmission, no notification; recovery is entirely the application's job", correct: true },
+        { text: "It automatically re-sends the datagram up to three times", correct: false },
+        { text: "It returns an error to the sender's next call", correct: false },
+        { text: "It buffers it and delivers it once the network recovers", correct: false },
+      ] },
+
+    { prompt: "Which of these does UDP NOT provide, forcing you to build it yourself if needed?",
+      options: [
+        { text: "reliable delivery, ordering, duplicate suppression, and flow/congestion control", correct: true },
+        { text: "port numbers to demultiplex to the right socket", correct: false },
+        { text: "a checksum to detect corrupted datagrams", correct: false },
+        { text: "the ability to send a message to a given address", correct: false },
+      ] },
+
+    { prompt: "You send a UDP datagram larger than the path MTU. What is the risk?",
+      options: [
+        { text: "IP must fragment it, and losing any one fragment discards the whole datagram (some paths drop fragments entirely)", correct: true },
+        { text: "The kernel silently splits it into ordered TCP segments", correct: false },
+        { text: "UDP compresses it to fit, losing precision", correct: false },
+        { text: "Nothing — UDP datagrams can be any size with no downside", correct: false },
+      ] },
+
+    { prompt: "Why is DNS a natural fit for UDP?",
+      options: [
+        { text: "Short independent query/reply pairs with no benefit from a connection; a rare lost query is cheaply retried", correct: true },
+        { text: "DNS needs a guaranteed reliable ordered byte stream", correct: false },
+        { text: "DNS answers are too large for any TCP segment", correct: false },
+        { text: "UDP encrypts DNS by default", correct: false },
+      ] },
+
+    { prompt: "For live voice/video, why is UDP's lack of retransmission an advantage?",
+      options: [
+        { text: "A frame that arrives late is useless, so dropping it and showing the next one beats waiting for a re-send", correct: true },
+        { text: "Retransmission would corrupt the audio codec", correct: false },
+        { text: "UDP retransmits faster than TCP, so it is never needed", correct: false },
+        { text: "Voice data never gets lost on real networks", correct: false },
+      ] },
+
+    { prompt: "QUIC (the basis of HTTP/3) is built on UDP because…",
+      options: [
+        { text: "it wanted to design its own reliability/ordering/congestion control on a minimal substrate, deployable without kernel changes", correct: true },
+        { text: "UDP is always faster than TCP for bulk file transfer", correct: false },
+        { text: "TCP cannot carry encrypted data", correct: false },
+        { text: "UDP guarantees in-order delivery, which HTTP requires", correct: false },
+      ] },
+
+    { prompt: "How can a single UDP socket serve thousands of different clients at once?",
+      options: [
+        { text: "Every datagram is self-addressed, so one connectionless socket can send/receive to any peer with no per-client socket", correct: true },
+        { text: "The kernel opens a hidden socket per client behind the scenes", correct: false },
+        { text: "UDP multiplexes them onto one TCP connection", correct: false },
+        { text: "It cannot — UDP allows only one peer per socket", correct: false },
+      ] },
+
+    { prompt: "A connectionless UDP server needs to reply to a client. How does it know where to send the reply?",
+      options: [
+        { text: "recvfrom() returned the sender's address, which it passes to sendto()", correct: true },
+        { text: "It calls accept() to get the client's socket", correct: false },
+        { text: "The reply is broadcast to every machine on the LAN", correct: false },
+        { text: "The kernel remembers the last connect() target", correct: false },
+      ] },
+
+    { prompt: "UDP's header is only 8 bytes. What does it contain?",
+      options: [
+        { text: "source port, destination port, length, and a checksum — nothing about ordering or delivery", correct: true },
+        { text: "sequence number, acknowledgement number, and a sliding window", correct: false },
+        { text: "the full source and destination IP addresses", correct: false },
+        { text: "a retransmission timer and congestion window", correct: false },
+      ] },
+
+    { prompt: "When should you generally prefer TCP over UDP?",
+      options: [
+        { text: "When you need every byte delivered in order and can tolerate waiting for re-sends", correct: true },
+        { text: "When you are streaming live video with a strict latency budget", correct: false },
+        { text: "When you want to design custom transport semantics from scratch", correct: false },
+        { text: "When each message is small, independent, and loss-tolerant", correct: false },
+      ] },
+
+    { prompt: "A naive UDP client does one sendto() then one recvfrom() and waits. What can go wrong?",
+      options: [
+        { text: "If the request or reply is lost, recvfrom() blocks forever — the client must add a timeout and retry", correct: true },
+        { text: "UDP will automatically retry the request until it succeeds", correct: false },
+        { text: "The second call fails because UDP allows only one operation per socket", correct: false },
+        { text: "Nothing — UDP guarantees the reply will arrive", correct: false },
+      ] },
+  ]);
+</script>

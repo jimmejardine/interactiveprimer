@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Automated Verification and SMT</primer-title>
+
+    <primer-card>
+      <p>
+        Hand-proving a Hoare triple is illuminating once and tedious forever. The dream is to hand a program —
+        annotated with its specification — to a tool, and get back either a green tick ("proved correct for
+        <em>all</em> inputs") or a concrete counterexample. That dream is real, and it runs on two engines bolted
+        together: a <strong>verification-condition generator</strong> that turns "is this program correct?" into
+        a pile of pure logic formulas, and an <strong>SMT solver</strong> that decides whether those formulas are
+        true.
+      </p>
+      <p>
+        The bridge between them is the <primer-ref todo to="computer-science/complexity-and-correctness/verification/weakest-preconditions">weakest-precondition</primer-ref>
+        calculus. Where <primer-ref to="computer-science/complexity-and-correctness/correctness/hoare-logic">Hoare
+        logic</primer-ref> gives rules a human stacks by hand, <em>wp</em> makes those rules a mechanical
+        function: feed it the code and the postcondition, and it computes exactly the logical obligations that
+        must hold. Those obligations are the <strong>verification conditions</strong>, and discharging them is a
+        job for a machine.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>From code + annotations to verification conditions</h2>
+      <p>
+        Recall the weakest precondition <primer-math>\mathrm{wp}(C, Q)</primer-math>: the least restrictive
+        assertion on the pre-state that guarantees <primer-math>Q</primer-math> after running
+        <primer-math>C</primer-math>. Its defining equations are the engine of VC generation:
+      </p>
+      <primer-theorem name="Weakest preconditions, mechanically">
+        <ul>
+          <li><strong>Assignment:</strong> <primer-math>\mathrm{wp}(x := E,\ Q) = Q[x := E]</primer-math> —
+            substitute <primer-math>E</primer-math> for <primer-math>x</primer-math> in <primer-math>Q</primer-math>.</li>
+          <li><strong>Sequence:</strong> <primer-math>\mathrm{wp}(C_1; C_2,\ Q) = \mathrm{wp}(C_1,\ \mathrm{wp}(C_2, Q))</primer-math> —
+            push the postcondition backwards through the program.</li>
+          <li><strong>Conditional:</strong> <primer-math>\mathrm{wp}(\texttt{if } b\ C_1\ C_2,\ Q) = (b \Rightarrow \mathrm{wp}(C_1,Q)) \wedge (\neg b \Rightarrow \mathrm{wp}(C_2,Q))</primer-math>.</li>
+          <li><strong>Loop</strong> (needs a supplied invariant <primer-math>I</primer-math>): the loop is
+            <em>cut</em> at <primer-math>I</primer-math>, generating three VCs — <em>establishment</em>,
+            <em>preservation</em>, and <em>usefulness</em> (below).</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        To verify a routine <primer-math>\{P\}\,C\,\{Q\}</primer-math>, the tool computes
+        <primer-math>\mathrm{wp}(C, Q)</primer-math> and emits the single verification condition
+        <primer-math>P \Rightarrow \mathrm{wp}(C, Q)</primer-math>. If that formula is
+        <strong>valid</strong> (true in every interpretation), the program meets its spec. Loops break the
+        program into finite straight-line chunks at each invariant, so even a program with unbounded loops
+        produces a <em>finite</em> set of loop-free VCs.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A worked VC</h2>
+      <p>
+        Take a routine that computes an absolute value, annotated with its contract and — because there is a
+        branch, not a loop — needing no invariant:
+      </p>
+      <primer-code lang="typescript">
+// requires: true
+// ensures:  result &gt;= 0  &amp;&amp;  (result === x || result === -x)
+function abs(x: number): number {
+  let result: number;
+  if (x &gt;= 0) {
+    result = x;
+  } else {
+    result = -x;
+  }
+  return result;   // Q(result):  result &gt;= 0 &amp;&amp; (result === x || result === -x)
+}
+      </primer-code>
+      <p>
+        Applying <em>wp</em> to the conditional against the postcondition
+        <primer-math>Q \equiv r \ge 0 \wedge (r = x \vee r = -x)</primer-math> gives one VC:
+      </p>
+      <primer-math display>
+        \underbrace{\texttt{true}}_{P} \Rightarrow
+        \big(\, x \ge 0 \Rightarrow Q[r := x] \,\big) \wedge
+        \big(\, x &lt; 0 \Rightarrow Q[r := -x] \,\big)
+      </primer-math>
+      <p>
+        which after substitution is
+        <primer-math>(x \ge 0 \Rightarrow x \ge 0 \wedge (x = x \vee \dots)) \wedge (x &lt; 0 \Rightarrow -x \ge 0 \wedge (\dots \vee -x = -x))</primer-math>.
+        Each conjunct is a fact of <strong>linear arithmetic over the reals</strong>: from
+        <primer-math>x &lt; 0</primer-math> we get <primer-math>-x &gt; 0 \ge 0</primer-math>, and so on. A solver
+        checks it in microseconds. For a loop program you would additionally discharge the three loop VCs —
+        establishment <primer-math>P \Rightarrow I</primer-math>, preservation
+        <primer-math>I \wedge b \Rightarrow \mathrm{wp}(\text{body}, I)</primer-math>, and usefulness
+        <primer-math>I \wedge \neg b \Rightarrow Q</primer-math>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Discharging VCs: SAT versus SMT</h2>
+      <p>
+        A verification condition is a logic formula; deciding validity is the same as deciding whether its
+        negation is <em>unsatisfiable</em>. The workhorse for satisfiability is the
+        <strong>SAT</strong> solver — decide whether a purely Boolean formula can be made true — the canonical
+        <primer-ref to="computer-science/theory-of-computation/complexity-classes-p-np-pspace">NP-complete</primer-ref>
+        problem, yet astonishingly fast in practice on real instances.
+      </p>
+      <p>
+        But VCs are not purely Boolean. They talk about integers, reals, arrays and functions:
+        <primer-math>x + 2y \le 7</primer-math>, <primer-math>a[i] = a[j]</primer-math>,
+        <primer-math>f(u) = f(v)</primer-math>. <strong>SMT</strong> — Satisfiability Modulo Theories — is SAT
+        extended with <em>background theories</em> that give meaning to these symbols. The solver's Boolean
+        engine handles the propositional skeleton and hands atoms like <primer-math>x + 2y \le 7</primer-math> to
+        a specialised <em>theory solver</em> that knows arithmetic.
+      </p>
+      <primer-theorem name="Common SMT background theories">
+        <ul>
+          <li><strong>Linear arithmetic</strong> over integers (LIA) or reals (LRA) — inequalities and sums; the
+            bread and butter of program verification.</li>
+          <li><strong>Arrays</strong> — the <primer-math>\text{read}/\text{write}</primer-math> axioms
+            (<primer-math>\text{read}(\text{write}(a,i,v),i) = v</primer-math>) model the heap and memory.</li>
+          <li><strong>Bit-vectors</strong> — fixed-width machine integers with exact overflow and bitwise
+            operations, for reasoning about real hardware and low-level code.</li>
+          <li><strong>Uninterpreted functions</strong> (EUF) — functions known only to be <em>consistent</em>
+            (<primer-math>u = v \Rightarrow f(u) = f(v)</primer-math>); they abstract away code you don't want to
+            unfold.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        <strong>Z3</strong> (Microsoft Research) is the best-known SMT solver; CVC5 and Yices are peers. Combining
+        theories (the Nelson–Oppen framework) lets a single query mix arithmetic, arrays and functions at once —
+        which is exactly what a VC over real code needs.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If the underlying problem is NP-complete (or worse), how do these solvers ever finish?">
+      <p>
+        Two answers. First, <em>worst case is not typical case</em>: modern SAT/SMT solvers (CDCL — conflict-driven
+        clause learning) exploit the structure of real formulas so effectively that instances with millions of
+        variables routinely fall in seconds, even though a crafted adversarial instance could stall them.
+        Verification conditions are highly structured, not random. Second, <em>expressiveness is traded against
+        decidability</em>: pure linear integer arithmetic is decidable; add multiplication of variables and you
+        reach the undecidable, so tools restrict what you may write, or return "unknown". A solver's honest
+        possible answers are <strong>sat</strong> (here's a counterexample), <strong>unsat</strong> (proved), and
+        <strong>unknown</strong> — the price of touching an undecidable fragment.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The tool landscape</h2>
+      <p>
+        You rarely write VCs by hand; a verification tool sits between your annotated source and the solver:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Tool</th><th>Role</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Boogie</strong></td><td>An intermediate verification language: front-ends compile to it, it generates VCs and calls Z3. The plumbing many others reuse.</td></tr>
+            <tr><td><strong>Dafny</strong></td><td>A verification-aware programming language (compiles to Boogie→Z3). You write code with <code>requires</code>/<code>ensures</code>/<code>invariant</code>/<code>decreases</code> and it proves them as you type.</td></tr>
+            <tr><td><strong>Why3</strong></td><td>A platform with its own language (WhyML) that dispatches VCs to <em>many</em> back-end provers (SMT solvers and interactive ones).</td></tr>
+            <tr><td><strong>Frama-C</strong></td><td>Analyses real C annotated in ACSL; its WP plug-in generates weakest-precondition VCs for industrial C code.</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The consistent theme: annotate, generate VCs by <em>wp</em>, discharge with SMT. What the human still
+        owes the tool is the <em>creative</em> part — the loop invariants and termination measures — because those
+        cannot in general be inferred.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! A green tick only proves the code matches the annotations you wrote">
+      <p>
+        Automated verification is not magic correctness. Two gaps bite constantly. First, <strong>the loop
+        invariant is your job</strong>: the tool needs it to cut each loop into loop-free VCs, and if you supply a
+        weak or wrong invariant the proof simply fails (or, if it is too weak to imply the postcondition, gets
+        stuck) — the solver won't invent the right one for you. Second, and more dangerous, <strong>the
+        specification itself is trusted, not checked</strong>. If your <code>ensures</code> clause is wrong,
+        incomplete, or vacuously satisfiable, a proof against it certifies nothing useful — the code is proved to
+        meet a spec that doesn't say what you meant. "Verified" always means "verified <em>against these
+        annotations</em>", never "verified to do the right thing". Garbage spec in, green tick out.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "smtQuiz@1": {
+          "intro": "VC generation via wp, SAT vs SMT and its theories, and what the human still owes the tool."
+        }
+      }
+    </script>
+
+    <primer-quiz name="smtQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/complexity-and-correctness/verification/weakest-preconditions"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("smtQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    { prompt: "A verification condition (VC) is…",
+      options: [
+        { text: "a pure logic formula whose validity means the code meets its spec", correct: true },
+        { text: "a runtime assertion checked during testing", correct: false },
+        { text: "a compiler warning", correct: false },
+        { text: "a type annotation", correct: false },
+      ] },
+    { prompt: "To verify $\\{P\\}\\,C\\,\\{Q\\}$, a wp-based tool emits which verification condition?",
+      options: [
+        { text: "$P \\Rightarrow \\mathrm{wp}(C, Q)$", correct: true },
+        { text: "$\\mathrm{wp}(C, Q) \\Rightarrow P$", correct: false },
+        { text: "$Q \\Rightarrow P$", correct: false },
+        { text: "$P \\wedge Q$", correct: false },
+      ] },
+    { prompt: "$\\mathrm{wp}(x := E,\\ Q)$ equals…",
+      options: [
+        { text: "$Q[x := E]$ (substitute E for x in Q)", correct: true },
+        { text: "$Q[E := x]$", correct: false },
+        { text: "$Q \\wedge (x = E)$", correct: false },
+        { text: "$E$", correct: false },
+      ] },
+    { prompt: "The 'M' in SMT stands for 'modulo theories'. What do the theories provide?",
+      options: [
+        { text: "Meaning for non-Boolean symbols (arithmetic, arrays, bit-vectors, functions)", correct: true },
+        { text: "A faster Boolean SAT algorithm", correct: false },
+        { text: "A way to write loops", correct: false },
+        { text: "Random test inputs", correct: false },
+      ] },
+    { prompt: "Which is a background theory an SMT solver typically supports?",
+      options: [
+        { text: "Linear integer/real arithmetic", correct: true },
+        { text: "HTTP request routing", correct: false },
+        { text: "Garbage collection scheduling", correct: false },
+        { text: "Register allocation", correct: false },
+      ] },
+    { prompt: "The array theory's defining axiom is essentially…",
+      options: [
+        { text: "$\\text{read}(\\text{write}(a,i,v),i) = v$", correct: true },
+        { text: "$a[i] = i$ for all i", correct: false },
+        { text: "arrays are always sorted", correct: false },
+        { text: "$\\text{length}(a) = 0$", correct: false },
+      ] },
+    { prompt: "Uninterpreted functions (EUF) assume only that…",
+      options: [
+        { text: "equal arguments give equal results ($u=v \\Rightarrow f(u)=f(v)$)", correct: true },
+        { text: "$f$ is the identity function", correct: false },
+        { text: "$f$ is linear", correct: false },
+        { text: "$f$ always returns zero", correct: false },
+      ] },
+    { prompt: "Which SMT solver, from Microsoft Research, is the best known?",
+      options: [
+        { text: "Z3", correct: true },
+        { text: "Boogie", correct: false },
+        { text: "Dafny", correct: false },
+        { text: "Frama-C", correct: false },
+      ] },
+    { prompt: "Deciding validity of a VC is equivalent to deciding that…",
+      options: [
+        { text: "its negation is unsatisfiable", correct: true },
+        { text: "its negation is satisfiable", correct: false },
+        { text: "it contains no loops", correct: false },
+        { text: "it type-checks", correct: false },
+      ] },
+    { prompt: "For a program with a loop, the wp-based tool needs the human to supply…",
+      options: [
+        { text: "a loop invariant (and a termination measure for total correctness)", correct: true },
+        { text: "the number of test cases", correct: false },
+        { text: "the machine's clock speed", correct: false },
+        { text: "nothing — loops are handled fully automatically", correct: false },
+      ] },
+    { prompt: "An SMT solver's three honest possible answers are…",
+      options: [
+        { text: "sat, unsat, and unknown", correct: true },
+        { text: "pass, fail, and retry", correct: false },
+        { text: "yes and no only", correct: false },
+        { text: "compile, link, run", correct: false },
+      ] },
+    { prompt: "A tool reports 'verified'. What has actually been established?",
+      options: [
+        { text: "The code meets the annotations you wrote — which may be wrong or incomplete", correct: true },
+        { text: "The code is bug-free for all conceivable purposes", correct: false },
+        { text: "The code is the fastest possible", correct: false },
+        { text: "The specification is guaranteed to capture your intent", correct: false },
+      ] },
+    { prompt: "Which tool is an intermediate verification language that other front-ends compile down to?",
+      options: [
+        { text: "Boogie", correct: true },
+        { text: "Frama-C", correct: false },
+        { text: "Z3", correct: false },
+        { text: "CVC5", correct: false },
+      ] },
+  ]);
+</script>

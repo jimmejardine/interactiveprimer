@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Load Balancing</primer-title>
+
+    <primer-card>
+      <p>
+        One server can only do so much. When a website outgrows a single machine — too many requests, or the
+        need to survive a machine dying — the answer is to run <em>many</em> identical servers and spread the
+        traffic across them. The thing that does the spreading is a <strong>load balancer</strong>: a traffic
+        cop sitting in front of a fleet of backends, deciding, request by request, "you go to server 3, you go
+        to server 7." Done well, it is invisible — the site just feels fast and never goes down. Done badly, it
+        sends everyone to the one server that is on fire, or scatters a user's shopping session across five
+        machines that each remember nothing.
+      </p>
+      <p>
+        Load balancing is where <primer-ref soft to="computer-science/networks/client-server-and-the-web">the
+        client–server model</primer-ref> meets
+        <primer-ref soft to="computer-science/distributed-systems/fault-tolerance">fault
+        tolerance</primer-ref>: it is simultaneously how you <em>scale out</em> (add capacity by adding
+        machines) and how you <em>stay up</em> (route around a dead machine). This page is about how it actually
+        decides — the layers it can work at, the algorithms it uses, and one algorithm, <strong>consistent
+        hashing</strong>, so elegant it is worth building from scratch.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Layer 4 vs layer 7: how much does the balancer understand?</h2>
+      <p>
+        Load balancers come in two broad kinds, named after the
+        <primer-ref soft to="computer-science/networks/protocol-stacks-and-the-osi-model">OSI layer</primer-ref>
+        they operate at — and the difference is essentially <em>how much of the traffic they bother to read</em>.
+      </p>
+      <ul>
+        <li>
+          <strong>Layer 4 (transport-level).</strong> The balancer works with TCP/UDP connections. It sees IP
+          addresses and ports, not the contents. When a connection arrives it picks a backend and forwards
+          every packet of that connection there, blindly and very fast — it never parses the HTTP inside. Think
+          of it as sorting sealed envelopes by weight without opening them. Cheap, extremely high throughput,
+          but it cannot make decisions based on <em>what</em> the request is asking for.
+        </li>
+        <li>
+          <strong>Layer 7 (application-level).</strong> The balancer terminates the connection and reads the
+          actual HTTP request — the URL path, headers, cookies. Now it can route intelligently:
+          <code>/images/*</code> to the image servers, <code>/api/*</code> to the API fleet, a request carrying
+          a certain cookie to a specific backend. It can also do TLS termination, compression, and rewriting.
+          More work per request, but far smarter. This is what an
+          <primer-ref soft to="computer-science/networks/application/http">HTTP</primer-ref>-aware balancer or
+          reverse proxy (nginx, HAProxy, Envoy) does.
+        </li>
+      </ul>
+      <p>
+        The rule of thumb: L4 for raw speed and protocol-agnostic forwarding; L7 when routing decisions depend
+        on the content of the request.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The algorithms: how to pick a backend</h2>
+      <p>
+        Given a fleet of healthy backends, which one gets the next request? Several strategies, in rough order
+        of sophistication:
+      </p>
+      <ul>
+        <li>
+          <strong>Round robin.</strong> Hand requests out in rotation: 1, 2, 3, 1, 2, 3, … Dead simple, and
+          fine when all backends are equal and all requests cost about the same.
+        </li>
+        <li>
+          <strong>Weighted round robin.</strong> Give beefier servers a bigger share — a machine with twice the
+          cores gets weight 2 and receives twice as many requests. Handles a heterogeneous fleet.
+        </li>
+        <li>
+          <strong>Least connections.</strong> Send the next request to whichever backend currently has the
+          <em>fewest</em> open connections. This adapts to reality: if one request happens to be slow and ties
+          up a server, that server stops receiving new work until it catches up. Better than round robin when
+          request costs vary a lot.
+        </li>
+        <li>
+          <strong>Hashing.</strong> Compute a hash of some key (the client IP, or a cache key) and use it to
+          pick the backend deterministically, so the <em>same</em> key always lands on the <em>same</em> server.
+          This is essential for caches and sticky routing — and it is where the interesting problem lives.
+        </li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>The trap in <code>hash % N</code></h2>
+      <p>
+        Suppose you have <em>N</em> cache servers and you want each key to have a fixed home so you can find it
+        again. The obvious scheme:
+      </p>
+      <primer-math display>\text{server}(\text{key}) = \operatorname{hash}(\text{key}) \bmod N</primer-math>
+      <p>
+        It works beautifully — until <em>N</em> changes. Add one server (N: 4 → 5), or lose one to a crash
+        (N: 4 → 3), and the modulus changes for <em>almost every key at once</em>. A key that hashed to
+        <code>17</code> was on server <code>17 mod 4 = 1</code>; now it is on <code>17 mod 5 = 2</code>. Do the
+        arithmetic across all keys and you find that roughly <strong>all but 1/N of them move to a different
+        server</strong>. For a cache, that is a catastrophe: nearly every lookup suddenly misses, every miss
+        stampedes the origin database, and the moment you needed to add capacity — a traffic spike — is exactly
+        when you trigger a cache-wide meltdown.
+      </p>
+      <p>
+        <strong>Consistent hashing</strong> fixes this with a lovely geometric idea. Instead of mapping keys to
+        <em>N</em> buckets, map both keys <em>and</em> servers onto the same circle — a <strong>ring</strong> of
+        hash values, say 0 to 360°. To find a key's home, start at the key's position and walk
+        <strong>clockwise</strong> until you hit the first server; that server owns the key. When a server is
+        added or removed, only the keys in the <em>arc</em> between it and its neighbour are affected —
+        everything else keeps its home. Adding one node to a ring of <em>N</em> disturbs only about
+        <em>1/N</em> of the keys, not all of them.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "ring": {
+            "title": "The consistent-hashing ring: each key walks clockwise to the next node",
+            "ringLbl": "hash ring (0–360°)",
+            "n0": "Node A",
+            "n1": "Node B",
+            "n2": "Node C",
+            "n3": "Node D",
+            "k1": "key1",
+            "k2": "key2",
+            "k3": "key3"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="ring"
+        caption="A circle representing the hash ring from 0 to 360 degrees. Four nodes A, B, C, D sit at four positions around the ring. Three keys sit at other positions; an arrow from each key runs clockwise to the first node it reaches, which is the node that owns that key. Adding or removing a node only changes ownership of the keys in the arc up to the next node."
+      ></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Build consistent hashing and see the difference</h2>
+      <p>
+        Talk is cheap; let's measure it. Below we place nodes and keys on a ring, map each key to the next node
+        clockwise, then <strong>add one node</strong> and count how many keys changed owner — for
+        <em>both</em> schemes. Watch <code>hash % N</code> reshuffle almost everything while consistent hashing
+        moves only a small slice.
+      </p>
+
+      <primer-code run>
+        // A tiny deterministic string hash → an integer in [0, RING).
+        const RING = 3600;
+        function hash(s: string): number {
+          let h = 2166136261;
+          for (let i = 0; i &lt; s.length; i++) { h ^= s.charCodeAt(i); h = (h * 16777619) &gt;&gt;&gt; 0; }
+          return h % RING;
+        }
+
+        const keys = Array.from({ length: 2000 }, (_, i) =&gt; "key" + i);
+
+        // ---- Scheme 1: hash % N (map keys straight into N buckets) ----
+        function mapMod(nodeCount: number): Map&lt;string, number&gt; {
+          const m = new Map&lt;string, number&gt;();
+          for (const k of keys) m.set(k, hash(k) % nodeCount);
+          return m;
+        }
+
+        // ---- Scheme 2: consistent hashing (nodes + keys on the same ring) ----
+        function ringPositions(nodes: string[]): { node: string; pos: number }[] {
+          return nodes.map((n) =&gt; ({ node: n, pos: hash(n) })).sort((a, b) =&gt; a.pos - b.pos);
+        }
+        function mapRing(nodes: string[]): Map&lt;string, string&gt; {
+          const ring = ringPositions(nodes);
+          const m = new Map&lt;string, string&gt;();
+          for (const k of keys) {
+            const h = hash(k);
+            // first node clockwise (pos >= h); wrap to the first node if none
+            const owner = ring.find((r) =&gt; r.pos &gt;= h) ?? ring[0];
+            m.set(k, owner.node);
+          }
+          return m;
+        }
+
+        function moved&lt;T&gt;(before: Map&lt;string, T&gt;, after: Map&lt;string, T&gt;): number {
+          let n = 0;
+          for (const k of keys) if (before.get(k) !== after.get(k)) n++;
+          return n;
+        }
+
+        // Start with 4 nodes, then ADD a 5th, and compare the churn.
+        const nodes4 = ["A", "B", "C", "D"];
+        const nodes5 = ["A", "B", "C", "D", "E"];
+
+        const modBefore = mapMod(4), modAfter = mapMod(5);
+        const ringBefore = mapRing(nodes4), ringAfter = mapRing(nodes5);
+
+        const modMoved = moved(modBefore, modAfter);
+        const ringMoved = moved(ringBefore, ringAfter);
+        const pct = (x: number) =&gt; ((100 * x) / keys.length).toFixed(1) + "%";
+
+        console.log(`Adding one node to a fleet of 4, over ${keys.length} keys:\n`);
+        console.log(`  hash % N        moved ${modMoved} keys  (${pct(modMoved)})  ← almost everything!`);
+        console.log(`  consistent hash moved ${ringMoved} keys  (${pct(ringMoved)})  ← only ~1/N`);
+        console.log(`\nIdeal churn when going 4 → 5 nodes is about 1/5 = 20%.`);
+      </primer-code>
+
+      <p>
+        The numbers speak for themselves: <code>hash % N</code> typically moves ~80% of keys, while consistent
+        hashing moves close to the theoretical minimum of ~1/N. That single property is why consistent hashing
+        underpins distributed caches (memcached clients), sharded databases, and
+        <primer-ref soft to="computer-science/distributed-systems/the-cap-theorem">Dynamo-style</primer-ref>
+        stores.
+      </p>
+
+      <primer-vignette title="One more refinement: virtual nodes">
+        <p>
+          Plain consistent hashing has a wrinkle: with only a handful of nodes hashed onto the ring, their
+          positions are uneven, so one node might own a giant arc (and get hammered) while another owns a sliver.
+          The fix is <strong>virtual nodes</strong>: hash each physical server to the ring <em>many</em> times
+          (say 150 points each, "A#1", "A#2", …). Now each physical node owns 150 small scattered arcs instead
+          of one big one, the load evens out by the law of large numbers, and when a node dies its share is
+          redistributed smoothly across <em>all</em> the others rather than dumped entirely on its single
+          clockwise neighbour. Real systems always use virtual nodes.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Health checks, sticky sessions, and where the balancer lives</h2>
+      <p>
+        Choosing a backend is only half the job. Three more concerns make a load balancer real:
+      </p>
+      <ul>
+        <li>
+          <strong>Health checks.</strong> A balancer must not send traffic to a dead server. So it continually
+          probes each backend — a periodic <code>GET /health</code> or a TCP connect — and takes any backend
+          that fails out of the rotation, adding it back only once it passes again. This is the mechanism that
+          turns "a server crashed" into "nobody noticed": the balancer simply stops routing there. It is the
+          concrete face of fault tolerance.
+        </li>
+        <li>
+          <strong>Session affinity (sticky sessions).</strong> If a server keeps a user's session
+          <em>in its own memory</em>, then that user's every request must return to the <em>same</em> backend,
+          or they'll appear logged out. A balancer can pin a user to a backend (by a cookie or by hashing their
+          IP). But stickiness fights scalability: a pinned user cannot be moved off a hot server, and if that
+          server dies the session is lost. The better cure is to make servers <strong>stateless</strong> —
+          push session state into a shared store (a database or Redis) so <em>any</em> backend can serve
+          <em>any</em> request, and stickiness becomes unnecessary. Statelessness is what makes a fleet freely
+          load-balanceable.
+        </li>
+        <li>
+          <strong>Where the balancing happens.</strong> It can live at several places at once:
+          <em>DNS-based</em> (return different server IPs to different clients — cheap and global, but coarse
+          and slow to react because DNS is cached); a <em>dedicated load balancer</em> (a box or service in
+          front of the fleet — precise, health-aware, the workhorse); and <em>anycast</em> (many data centres
+          announce the <em>same</em> IP, and the internet's routing delivers each user to the nearest one —
+          used by CDNs and big DNS providers to steer traffic geographically). Large systems layer all three.
+        </li>
+      </ul>
+
+      <primer-vignette title="Watch out! — hash % N looks fine until the day you add a server">
+        <p>
+          The seductive thing about <code>server = hash(key) % N</code> is that it works <em>perfectly</em> in
+          every test, every demo, every steady-state day. It only detonates at the exact moment you change
+          <em>N</em> — add a shard to grow, or lose one to a crash — and then it moves <strong>nearly every
+          key at once</strong>. For a cache that means a near-total miss storm slamming your origin database
+          precisely when you were already under load; for a sharded datastore it means moving almost all your
+          data to rebalance a single new node. The mistake is invisible until the worst possible moment. Reach
+          for <strong>consistent hashing</strong> (with virtual nodes) whenever keys must map to a
+          <em>changing</em> set of servers — it caps the churn at ~1/N instead of ~all. Plain
+          <code>hash % N</code> is only safe when N genuinely never changes.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "lbQuiz@1": { "instructions": "Check your grasp of load balancing: L4 vs L7, the scheduling algorithms, why hash % N is a trap, how consistent hashing fixes it, health checks and sticky sessions." } }
+    </script>
+    <primer-quiz name="lbQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/client-server-and-the-web",
+      "computer-science/distributed-systems/fault-tolerance"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // The consistent-hashing ring: a circle with four node dots and three key dots;
+  // each key has an arrow running clockwise to the node that owns it. Static base
+  // content so it shows fully on load.
+  registerGeometryScene("ring", ({ board, colors, sceneStrings }) => {
+    const R = 3;
+    const at = (deg) => [R * Math.cos((deg * Math.PI) / 180), R * Math.sin((deg * Math.PI) / 180)];
+
+    board.create("circle", [[0, 0], R], { strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false, fillOpacity: 0 });
+
+    const dot = (deg, col, size) => {
+      const [x, y] = at(deg);
+      return board.create("point", [x, y], { name: "", fixed: true, highlight: false, size, fillColor: col, strokeColor: col });
+    };
+    const lbl = (deg, s, col, r = R + 0.7) => {
+      const x = r * Math.cos((deg * Math.PI) / 180), y = r * Math.sin((deg * Math.PI) / 180);
+      board.create("text", [x, y, s], { anchorX: "middle", anchorY: "middle", fontSize: 13, fixed: true, highlight: false, strokeColor: col, color: col, cssStyle: "font-weight:700" });
+    };
+
+    // Nodes at 90, 20, -70, 200 degrees (clockwise means DECREASING angle here)
+    const nodes = [
+      { deg: 90,  key: "n0" }, { deg: 20,  key: "n1" },
+      { deg: -70, key: "n2" }, { deg: 200, key: "n3" },
+    ];
+    for (const n of nodes) { dot(n.deg, colors.cat[0], 5); lbl(n.deg, sceneStrings(n.key), colors.cat[0]); }
+
+    // Keys, each mapping clockwise (decreasing angle) to the next node.
+    const keys = [
+      { deg: 130, key: "k1", owner: 90 },   // walks clockwise to Node A (90)
+      { deg: 55,  key: "k2", owner: 20 },   // to Node B (20)
+      { deg: -20, key: "k3", owner: -70 },  // to Node C (-70)
+    ];
+    for (const k of keys) {
+      dot(k.deg, colors.cat[1], 3);
+      lbl(k.deg, sceneStrings(k.key), colors.cat[1], R - 0.75);
+      const [kx, ky] = at(k.deg);
+      const [ox, oy] = at(k.owner);
+      board.create("arrow", [[kx, ky], [ox, oy]], { strokeColor: colors.cat[1], strokeWidth: 1.5, dash: 2, fixed: true, highlight: false });
+    }
+
+    board.create("text", [0, 0, sceneStrings("ringLbl")], { anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false, strokeColor: colors.ink, color: colors.ink });
+  }, {
+    boundingbox: [-5, 5, 5, -5],
+    keepAspect: true,
+    title: () => makeStrings("ring")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("lbQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "What is the core job of a load balancer?",
+      options: [
+        { text: "Spread incoming traffic across a fleet of backend servers", correct: true },
+        { text: "Store the database's data on multiple disks", correct: false },
+        { text: "Encrypt every request end to end", correct: false },
+        { text: "Compile the server code before deployment", correct: false },
+      ] },
+
+    { prompt: "A LAYER 4 (transport) load balancer…",
+      options: [
+        { text: "forwards TCP/UDP connections by IP and port without reading the request contents — fast but content-blind", correct: true },
+        { text: "reads the HTTP path and cookies to route by content", correct: false },
+        { text: "only works for encrypted HTTPS traffic", correct: false },
+        { text: "runs the application code itself", correct: false },
+      ] },
+
+    { prompt: "A LAYER 7 (application) load balancer can do what an L4 one cannot?",
+      options: [
+        { text: "Route by the HTTP request's URL path, headers, or cookies (e.g. /api/* to the API fleet)", correct: true },
+        { text: "Forward packets faster because it does less work", correct: false },
+        { text: "Work without ever terminating the connection", correct: false },
+        { text: "Balance UDP without reading any application data", correct: false },
+      ] },
+
+    { prompt: "The 'least connections' algorithm sends the next request to…",
+      options: [
+        { text: "the backend with the fewest currently-open connections", correct: true },
+        { text: "the next backend in a fixed rotation", correct: false },
+        { text: "a backend chosen uniformly at random every time", correct: false },
+        { text: "the backend that has been up the longest", correct: false },
+      ] },
+
+    { prompt: "Why is 'weighted round robin' useful?",
+      options: [
+        { text: "A heterogeneous fleet — a more powerful server gets a bigger share of requests", correct: true },
+        { text: "It guarantees each user always returns to the same server", correct: false },
+        { text: "It reads the HTTP body to decide routing", correct: false },
+        { text: "It removes dead servers from rotation automatically", correct: false },
+      ] },
+
+    { prompt: "Why is 'server = hash(key) % N' catastrophic when N changes?",
+      options: [
+        { text: "Changing N changes the modulus for almost every key, so nearly all keys move servers at once", correct: true },
+        { text: "The hash function stops being deterministic", correct: false },
+        { text: "Only the newest key moves; the rest are unaffected", correct: false },
+        { text: "It always sends every key to server 0", correct: false },
+      ] },
+
+    { prompt: "For a CACHE, why is mass key movement on an N change especially dangerous?",
+      options: [
+        { text: "Nearly every lookup suddenly misses, and the miss storm stampedes the origin database", correct: true },
+        { text: "The cache servers physically overheat", correct: false },
+        { text: "The keys are permanently lost and cannot be recomputed", correct: false },
+        { text: "Nothing bad happens; caches are immune", correct: false },
+      ] },
+
+    { prompt: "In consistent hashing, how do you find which node owns a key?",
+      options: [
+        { text: "Place keys and nodes on one ring; walk clockwise from the key to the first node", correct: true },
+        { text: "Compute hash(key) % N over the current node count", correct: false },
+        { text: "Send the key to whichever node has the fewest connections", correct: false },
+        { text: "Broadcast the key to all nodes and let one volunteer", correct: false },
+      ] },
+
+    { prompt: "Adding one node to a consistent-hashing ring of N nodes disturbs about…",
+      options: [
+        { text: "1/N of the keys (just the arc up to the next node)", correct: true },
+        { text: "all of the keys, same as hash % N", correct: false },
+        { text: "exactly half of the keys", correct: false },
+        { text: "none of the keys, ever", correct: false },
+      ] },
+
+    { prompt: "What problem do VIRTUAL NODES solve in consistent hashing?",
+      options: [
+        { text: "Uneven load — hashing each server to many ring points spreads its share into many small arcs", correct: true },
+        { text: "They encrypt the keys before hashing", correct: false },
+        { text: "They eliminate the need for health checks", correct: false },
+        { text: "They let a node own exactly one huge contiguous arc", correct: false },
+      ] },
+
+    { prompt: "What does a load balancer's HEALTH CHECK accomplish?",
+      options: [
+        { text: "It probes backends and pulls failing ones out of rotation, so traffic avoids dead servers", correct: true },
+        { text: "It measures how fast each request is encrypted", correct: false },
+        { text: "It counts how many keys moved after a rebalance", correct: false },
+        { text: "It compresses responses to save bandwidth", correct: false },
+      ] },
+
+    { prompt: "Why do sticky sessions fight against scalability, and what's the better fix?",
+      options: [
+        { text: "A pinned user can't be moved and is lost if their server dies; make servers stateless via a shared session store", correct: true },
+        { text: "Sticky sessions are always ideal and never cause problems", correct: false },
+        { text: "The fix is to disable health checks so sessions never migrate", correct: false },
+        { text: "The fix is to use layer 4 instead of layer 7", correct: false },
+      ] },
+
+    { prompt: "A stateless server fleet is easy to load-balance because…",
+      options: [
+        { text: "any backend can serve any request, so no user needs pinning to a particular machine", correct: true },
+        { text: "stateless servers never crash", correct: false },
+        { text: "each server keeps its own private copy of the session", correct: false },
+        { text: "it makes hash % N safe to use", correct: false },
+      ] },
+
+    { prompt: "What is ANYCAST used for in load balancing?",
+      options: [
+        { text: "Many data centres announce the SAME IP, and internet routing delivers each user to the nearest one", correct: true },
+        { text: "Broadcasting a request to every server in the fleet at once", correct: false },
+        { text: "Assigning each backend a unique private IP", correct: false },
+        { text: "Encrypting traffic between data centres", correct: false },
+      ] },
+
+    { prompt: "A drawback of DNS-based load balancing is that…",
+      options: [
+        { text: "DNS answers are cached, so it is coarse and slow to react when a backend dies", correct: true },
+        { text: "it can read the HTTP path and route by content", correct: false },
+        { text: "it requires terminating TLS on the client", correct: false },
+        { text: "it can only ever return one server IP", correct: false },
+      ] },
+
+    { prompt: "When is plain 'hash % N' actually safe to use?",
+      options: [
+        { text: "When N (the number of servers) genuinely never changes", correct: true },
+        { text: "Whenever you are using a cache", correct: false },
+        { text: "Whenever you add servers during a traffic spike", correct: false },
+        { text: "Only with virtual nodes enabled", correct: false },
+      ] },
+  ]);
+</script>

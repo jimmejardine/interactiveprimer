@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The Virtual File System Layer</primer-title>
+
+    <primer-card>
+      <p>
+        As an undergraduate you learned how <em>one</em>
+        <primer-ref to="computer-science/operating-systems/file-systems">file system</primer-ref>
+        lays bytes onto a disk — inodes, blocks, directories. But your laptop is not running one file system. Right
+        now it is almost certainly running <strong>ext4</strong> on the root disk, <strong>tmpfs</strong> in RAM for
+        <primer-math>\texttt{/tmp}</primer-math>, <strong>procfs</strong> behind
+        <primer-math>\texttt{/proc}</primer-math>, a FAT partition on the USB stick you just plugged in, and maybe an
+        <strong>NFS</strong> mount from a server three racks away. And yet your program opens all of them with the
+        <em>same</em> five system calls: <primer-math>\texttt{open}</primer-math>,
+        <primer-math>\texttt{read}</primer-math>, <primer-math>\texttt{write}</primer-math>,
+        <primer-math>\texttt{lseek}</primer-math>, <primer-math>\texttt{close}</primer-math>. It never asks which file
+        system it is talking to.
+      </p>
+      <p>
+        That miracle of indifference is the <strong>Virtual File System</strong> (VFS) — the kernel layer, born in Sun's
+        SunOS in 1985, that sits between the system-call interface and the dozens of concrete file-system drivers. It
+        defines an <em>abstract</em> file system: a handful of object types and a table of operations each driver must
+        implement. Write your file system to that contract and the whole of userspace, and every tool that has ever been
+        compiled, works with it for free. This lesson is about that contract — the great polymorphic dispatcher at the
+        heart of Unix.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Four objects model every file system</h2>
+      <p>
+        The VFS is an exercise in <strong>object-oriented programming written in C</strong>: a small family of structs,
+        each carrying a table of function pointers (its "operations"). Learn these four and you have the whole mental
+        model — every concrete file system is just a different implementation of the same four interfaces.
+      </p>
+      <primer-theorem name="The VFS core objects">
+        <ul>
+          <li><strong>superblock</strong> — one per <em>mounted</em> file system; holds the on-disk layout parameters,
+            the free-space maps, and <primer-math>\texttt{s\_op}</primer-math> (mount, sync, allocate-inode);</li>
+          <li><strong>inode</strong> — one per <em>file object</em> (regular file, directory, device, pipe); holds the
+            metadata and <primer-math>\texttt{i\_op}</primer-math> (create, lookup, link, rename);</li>
+          <li><strong>dentry</strong> (directory entry) — one per <em>path component</em>; the in-memory glue that binds
+            a name like <primer-math>\texttt{ann}</primer-math> to its inode and to its parent dentry, forming the tree;</li>
+          <li><strong>file</strong> — one per <em>open</em> file description; holds the current offset and
+            <primer-math>\texttt{f\_op}</primer-math> (read, write, mmap, ioctl). This is what a file descriptor points at.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The split between <em>inode</em> and <em>file</em> is the subtle one, and it is worth pausing on. An inode is the
+        file itself — unique, shared, on disk. A <strong>file</strong> object is a single <em>open session</em> against
+        it. Two processes that both open <primer-math>\texttt{/etc/passwd}</primer-math> get two file objects (two
+        independent offsets) pointing at the <em>one</em> inode. That is why one process reading does not move the
+        other's read position.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the VFS dispatch block diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "vfs": {
+          "title": "The VFS dispatches one syscall interface to many concrete file-system drivers",
+          "app": "User process — open() · read() · write() · close()",
+          "sys": "System-call layer (traps into the kernel)",
+          "vfsL": "VFS — superblock · inode · dentry · file  (the abstract contract: f_op, i_op, s_op)",
+          "ext4": "ext4",
+          "xfs": "XFS",
+          "nfs": "NFS (network)",
+          "proc": "procfs (virtual)",
+          "dev": "Block layer · disks · network",
+          "drivers": "Concrete drivers each implement the same operation tables",
+          "dispatch": "A read() is dispatched through file->f_op->read to the right driver"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>One interface, many implementations</h2>
+      <p>
+        When your program calls <primer-math>\texttt{read(fd, buf, n)}</primer-math>, the kernel finds the
+        <strong>file</strong> object behind <primer-math>\texttt{fd}</primer-math> and calls
+        <primer-math>\texttt{file->f\_op->read(...)}</primer-math> — an <em>indirect</em> call through a function
+        pointer that ext4, NFS, and procfs each filled in differently. ext4 walks extents on a local disk; NFS packages
+        an RPC and waits for a server; procfs runs a function that <em>invents</em> the bytes on the spot (there is no
+        <primer-math>\texttt{/proc/cpuinfo}</primer-math> file on any disk). Same call site, wildly different behaviour —
+        that is polymorphism, and it is the entire point.
+      </p>
+      <primer-geometry scene="vfs"></primer-geometry>
+      <p>
+        Follow a <primer-math>\texttt{read}</primer-math> down: the trap enters the syscall layer, which hands to the
+        VFS, which reads the file object's <primer-math>\texttt{f\_op}</primer-math> table and jumps into whichever
+        driver owns this file. The VFS itself knows nothing about extents, RPC, or disk geometry — it only knows the
+        <em>shape</em> of the contract.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The dentry cache — where path lookup actually lives</h2>
+      <p>
+        Resolving <primer-math>\texttt{/home/ann/notes.txt}</primer-math> naively means four directory reads: read
+        <primer-math>\texttt{/}</primer-math> to find <primer-math>\texttt{home}</primer-math>, read that to find
+        <primer-math>\texttt{ann}</primer-math>, and so on — each a potential disk trip. Do that on <em>every</em> path
+        in every syscall and the machine drowns. The <strong>dentry cache</strong> (dcache) is the VFS's answer: an
+        in-memory hash table mapping <primer-math>(\text{parent dentry},\ \text{name}) \to \text{dentry}</primer-math>,
+        so a hot path resolves at memory speed without touching the concrete file system at all.
+      </p>
+      <p>
+        The dcache even remembers <em>failures</em> — a <strong>negative dentry</strong> records that a name does
+        <em>not</em> exist, so a program that stats a missing config file a thousand times a second (they do this
+        constantly) is answered instantly instead of pounding the disk. The dcache is one of the most performance-critical
+        data structures in the whole kernel; its scalability under many cores was a decade-long engineering saga (RCU
+        lookups, per-dentry seqlocks).
+      </p>
+      <primer-code run>
+        // A toy VFS. Each "file system" is just an object implementing the same read operation.
+        // The mount table maps a path prefix to a driver — exactly what file->f_op->read dispatches to.
+        interface FileOps {
+          read(path: string): string;
+        }
+
+        const ext4: FileOps = { read: (p) =&gt; `ext4    : walk extents on local disk for ${p}` };
+        const procfs: FileOps = { read: (p) =&gt; `procfs  : SYNTHESISE ${p} on the fly (no disk block exists)` };
+        const nfs: FileOps = { read: (p) =&gt; `nfs     : send an RPC to the server for ${p}` };
+
+        // Longest-prefix-first so /proc beats the root "/" mount.
+        const mounts: { prefix: string; ops: FileOps }[] = [
+          { prefix: "/proc", ops: procfs },
+          { prefix: "/mnt/nfs", ops: nfs },
+          { prefix: "/", ops: ext4 },
+        ];
+
+        function vfsRead(path: string): string {
+          for (const m of mounts) if (path.startsWith(m.prefix)) return m.ops.read(path);
+          return "ENOENT: no file system mounted here";
+        }
+
+        // One call site, three totally different drivers do the work:
+        for (const p of ["/home/ann/notes.txt", "/proc/cpuinfo", "/mnt/nfs/report.pdf"]) {
+          console.log(`read("${p}")  ->  ${vfsRead(p)}`);
+        }
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Mounting — grafting one tree onto another</h2>
+      <p>
+        A file system does not appear at a drive letter; it is <strong>mounted</strong> onto a <em>directory</em> of an
+        already-visible tree. After <primer-math>\texttt{mount /dev/sdb1 /mnt/usb}</primer-math>, a lookup that reaches
+        the <primer-math>\texttt{/mnt/usb}</primer-math> dentry is transparently redirected to the <em>root</em> dentry
+        of the new file system. The mount table is what makes a machine's many file systems look like a single unified
+        namespace hanging off one root <primer-math>\texttt{/}</primer-math> — no <primer-math>\texttt{C:}</primer-math>,
+        no <primer-math>\texttt{D:}</primer-math>, just one tree.
+      </p>
+      <p>
+        This is also the mechanism behind modern containers: give a process its own <strong>mount namespace</strong> and
+        it sees an entirely different tree, without any other process noticing. Bind mounts, overlay file systems, and
+        <primer-math>\texttt{chroot}</primer-math> jails are all just clever bookkeeping in the VFS mount layer.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why is everything in Unix a file — even the mouse and the kernel's own guts?">
+      <p>
+        "Everything is a file" is the VFS taken to its logical extreme. Because reading is just
+        <primer-math>\texttt{f->f\_op->read}</primer-math>, <em>anything</em> that can define a read/write function can
+        masquerade as a file. So your keyboard is <primer-math>\texttt{/dev/input/event0}</primer-math>, a random-number
+        source is <primer-math>\texttt{/dev/urandom}</primer-math>, a running process's memory map is
+        <primer-math>\texttt{/proc/1234/maps}</primer-math>, and you can tune the kernel by echoing a number into
+        <primer-math>\texttt{/proc/sys/...}</primer-math>. Plan 9, Unix's research successor, pushed this even further —
+        the network stack, the window system, even remote machines were <em>all</em> mounted as files. The reward is
+        colossal: every tool that manipulates files — <primer-math>\texttt{cat}</primer-math>,
+        <primer-math>\texttt{grep}</primer-math>, shell redirection, permissions — instantly works on devices, kernel
+        state, and network endpoints, with no new API to learn.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The inode is the file; the dentry and the file object are not">
+      <p>
+        Three objects sound almost synonymous, and beginners melt them together. Keep them distinct. The
+        <strong>inode</strong> <em>is</em> the file — one per file, holding the metadata and block pointers; delete it and
+        the data is gone. A <strong>dentry</strong> is merely a <em>name</em> pointing at an inode, and a single inode can
+        have many (that is exactly what a <em>hard link</em> is — two dentries, one inode, link count 2). A
+        <strong>file object</strong> is a transient <em>open session</em> with its own offset; close it and the inode is
+        untouched. So "how many names does this file have?" is a dentry/link-count question; "where is this reader up to?"
+        is a file-object question; and "how big is it, who owns it?" is an inode question. Confusing them makes hard links,
+        shared offsets, and <primer-math>\texttt{unlink}</primer-math>-while-open behaviour seem like magic when they are
+        just three different objects doing three different jobs.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Why this layer matters for everything ahead</h2>
+      <p>
+        Every remaining lesson in this module — inode design, crash consistency, journaling, log-structured and
+        copy-on-write file systems, <primer-math>\texttt{fsync}</primer-math> — plugs in <em>below</em> the VFS. When we
+        say ext4 journals its metadata or ZFS never overwrites a block, we mean their implementation of the same
+        <primer-math>\texttt{s\_op}</primer-math>/<primer-math>\texttt{i\_op}</primer-math>/<primer-math>\texttt{f\_op}</primer-math>
+        contract does so. The VFS is the stable stage on which all the interesting drama plays out; keep its four objects
+        in your head as you descend.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: VFS objects, dispatch, dcache, mount, everything-is-a-file. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "vfsQuiz@1": {
+          "intro": "The VFS: four objects (superblock, inode, dentry, file), polymorphic dispatch through f_op, the dcache, mounts, everything-is-a-file.",
+          "purposeQ": "The core purpose of the Virtual File System layer is to…",
+          "pRight": "let one system-call interface (open/read/write) serve many different concrete file systems",
+          "pWrong1": "encrypt every file automatically before it hits the disk",
+          "pWrong2": "replace the disk with RAM to make files faster",
+          "pWrong3": "compile file systems into the CPU's microcode",
+          "dispatchQ": "When a process calls read(fd, …), how does the kernel reach the right file system's code?",
+          "dRight": "an indirect call through the file object's f_op table (a function pointer)",
+          "dWrong1": "it recompiles the program for that file system",
+          "dWrong2": "it asks the user which driver to use",
+          "dWrong3": "every file system shares one hard-coded read function",
+          "inodeVsFileQ": "Two processes each open the SAME file. How many inodes and file objects exist?",
+          "ivRight": "one inode (the file), but two file objects (two independent offsets)",
+          "ivWrong1": "two inodes and one file object",
+          "ivWrong2": "one inode and one shared file object with one offset",
+          "ivWrong3": "two inodes and two file objects",
+          "dentryQ": "A dentry (directory entry) primarily binds…",
+          "deRight": "a path-component name to its inode and its parent, forming the tree",
+          "deWrong1": "a disk block to a physical sector",
+          "deWrong2": "a process to a CPU core",
+          "deWrong3": "an open file's current byte offset",
+          "dcacheQ": "The main job of the dentry cache (dcache) is to…",
+          "dcRight": "resolve hot path lookups from memory instead of re-reading directories from the file system",
+          "dcWrong1": "store the contents of every file in RAM",
+          "dcWrong2": "encrypt directory names",
+          "dcWrong3": "keep a backup copy of the disk",
+          "negQ": "A 'negative dentry' in the dcache records that…",
+          "negRight": "a name does NOT exist, so repeated failed lookups are answered instantly",
+          "negWrong1": "a file has negative permissions",
+          "negWrong2": "the disk is full",
+          "negWrong3": "a file was recently deleted and can be undeleted",
+          "mountQ": "Mounting a file system in Unix means…",
+          "mRight": "grafting its root onto a directory of an already-visible tree, keeping one unified namespace",
+          "mWrong1": "assigning it a drive letter like D:",
+          "mWrong2": "copying all its files into the root file system",
+          "mWrong3": "loading it entirely into RAM",
+          "esfQ": "'Everything is a file' is possible because…",
+          "esRight": "anything that implements read/write operations can be dispatched through the VFS like a file",
+          "esWrong1": "every device secretly stores its data on the boot disk",
+          "esWrong2": "the CPU treats all memory as files",
+          "esWrong3": "files and devices use completely separate system calls",
+          "procQ": "Reading /proc/cpuinfo differs from reading a regular file because procfs…",
+          "prRight": "synthesises the bytes on the fly — there is no disk block backing them",
+          "prWrong1": "reads them from a hidden partition",
+          "prWrong2": "downloads them from Intel",
+          "prWrong3": "is stored inside the CPU cache",
+          "objectQ": "Which VFS object holds an open file's current read/write offset?",
+          "oRight": "the file object",
+          "oWrong1": "the inode",
+          "oWrong2": "the superblock",
+          "oWrong3": "the dentry",
+          "sbQ": "The superblock object corresponds to…",
+          "sbRight": "one mounted file system (its layout, free maps, and s_op)",
+          "sbWrong1": "one open file",
+          "sbWrong2": "one directory entry",
+          "sbWrong3": "one CPU core",
+          "hardlinkQ": "A hard link is best described in VFS terms as…",
+          "hlRight": "two dentries pointing at the same inode (link count 2)",
+          "hlWrong1": "two inodes sharing one dentry",
+          "hlWrong2": "a copy of the file's data blocks",
+          "hlWrong3": "a second superblock",
+          "polyQ": "The VFS is often called 'object-oriented C' because it…",
+          "poRight": "uses structs carrying tables of function pointers, one implementation per file system",
+          "poWrong1": "is written in C++ with real classes",
+          "poWrong2": "stores objects on disk as JSON",
+          "poWrong3": "requires every file system to be identical"
+        }
+      }
+    </script>
+
+    <primer-quiz name="vfsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/operating-systems/file-systems"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- VFS dispatch block diagram: three full-width stacked layers (app, syscall, VFS) as base content, then the
+     concrete-driver boxes and dispatch arrows revealed in steps. Colours only from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "vfs",
+    ({ board, colors, step, sceneStrings }) => {
+      const W = 12;
+      const bar = (y0, y1, key, ci, weight) => {
+        board.create(
+          "polygon",
+          [[0, y0], [W, y0], [W, y1], [0, y1]],
+          {
+            fillColor: colors.cat[ci], fillOpacity: 0.2,
+            borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+            vertices: { visible: false }, fixed: true, highlight: false,
+          },
+        );
+        board.create("text", [W / 2, (y0 + y1) / 2, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: `font-weight:${weight}; max-width:520px`,
+        });
+      };
+      // Base content: the always-visible stack (app -> syscall -> VFS).
+      bar(8.4, 9.6, "app", 0, 600);
+      bar(7.0, 8.2, "sys", 0, 400);
+      bar(5.2, 6.8, "vfsL", 1, 600);
+
+      // The concrete drivers: four boxes side by side, revealed together, with dispatch arrows from the VFS.
+      const boxes = [
+        { key: "ext4", ci: 2 },
+        { key: "xfs", ci: 3 },
+        { key: "nfs", ci: 4 },
+        { key: "proc", ci: 5 },
+      ];
+      const bw = W / boxes.length;
+      step(sceneStrings("drivers"), () => {
+        boxes.forEach((b, i) => {
+          const x0 = i * bw + 0.25, x1 = (i + 1) * bw - 0.25;
+          board.create("polygon", [[x0, 2.9], [x1, 2.9], [x1, 4.1], [x0, 4.1]], {
+            fillColor: colors.cat[b.ci % 6], fillOpacity: 0.22,
+            borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+            vertices: { visible: false }, fixed: true, highlight: false,
+          });
+          board.create("text", [(x0 + x1) / 2, 3.5, sceneStrings(b.key)], {
+            strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle",
+            fixed: true, highlight: false, cssStyle: "font-weight:600",
+          });
+        });
+      });
+
+      step(sceneStrings("dispatch"), () => {
+        boxes.forEach((b, i) => {
+          const cx = i * bw + bw / 2;
+          board.create("arrow", [[cx, 5.1], [cx, 4.15]], {
+            strokeColor: colors.cat[1], strokeWidth: 2, lastArrow: { size: 6 }, fixed: true, highlight: false,
+          });
+        });
+      });
+
+      // Base device layer at the bottom.
+      bar(1.2, 2.4, "dev", 0, 400);
+      step(sceneStrings("dispatch"), () => {
+        const bw2 = W / boxes.length;
+        boxes.forEach((b, i) => {
+          const cx = i * bw2 + bw2 / 2;
+          board.create("arrow", [[cx, 2.85], [cx, 2.45]], {
+            strokeColor: colors.line, strokeWidth: 1.5, lastArrow: { size: 5 }, fixed: true, highlight: false,
+          });
+        });
+      });
+    },
+    {
+      boundingbox: [-0.6, 10.2, 12.8, 0.6],
+      keepAspect: false,
+      title: () => makeStrings("vfs")("title"),
+    },
+  );
+
+  registerQuiz("vfsQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("purposeQ"), options: [
+      { text: () => sceneStrings("pRight"), correct: true },
+      { text: () => sceneStrings("pWrong1"), correct: false },
+      { text: () => sceneStrings("pWrong2"), correct: false },
+      { text: () => sceneStrings("pWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dispatchQ"), options: [
+      { text: () => sceneStrings("dRight"), correct: true },
+      { text: () => sceneStrings("dWrong1"), correct: false },
+      { text: () => sceneStrings("dWrong2"), correct: false },
+      { text: () => sceneStrings("dWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("inodeVsFileQ"), options: [
+      { text: () => sceneStrings("ivRight"), correct: true },
+      { text: () => sceneStrings("ivWrong1"), correct: false },
+      { text: () => sceneStrings("ivWrong2"), correct: false },
+      { text: () => sceneStrings("ivWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dentryQ"), options: [
+      { text: () => sceneStrings("deRight"), correct: true },
+      { text: () => sceneStrings("deWrong1"), correct: false },
+      { text: () => sceneStrings("deWrong2"), correct: false },
+      { text: () => sceneStrings("deWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dcacheQ"), options: [
+      { text: () => sceneStrings("dcRight"), correct: true },
+      { text: () => sceneStrings("dcWrong1"), correct: false },
+      { text: () => sceneStrings("dcWrong2"), correct: false },
+      { text: () => sceneStrings("dcWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("negQ"), options: [
+      { text: () => sceneStrings("negRight"), correct: true },
+      { text: () => sceneStrings("negWrong1"), correct: false },
+      { text: () => sceneStrings("negWrong2"), correct: false },
+      { text: () => sceneStrings("negWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("mountQ"), options: [
+      { text: () => sceneStrings("mRight"), correct: true },
+      { text: () => sceneStrings("mWrong1"), correct: false },
+      { text: () => sceneStrings("mWrong2"), correct: false },
+      { text: () => sceneStrings("mWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("esfQ"), options: [
+      { text: () => sceneStrings("esRight"), correct: true },
+      { text: () => sceneStrings("esWrong1"), correct: false },
+      { text: () => sceneStrings("esWrong2"), correct: false },
+      { text: () => sceneStrings("esWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("procQ"), options: [
+      { text: () => sceneStrings("prRight"), correct: true },
+      { text: () => sceneStrings("prWrong1"), correct: false },
+      { text: () => sceneStrings("prWrong2"), correct: false },
+      { text: () => sceneStrings("prWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("objectQ"), options: [
+      { text: () => sceneStrings("oRight"), correct: true },
+      { text: () => sceneStrings("oWrong1"), correct: false },
+      { text: () => sceneStrings("oWrong2"), correct: false },
+      { text: () => sceneStrings("oWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("sbQ"), options: [
+      { text: () => sceneStrings("sbRight"), correct: true },
+      { text: () => sceneStrings("sbWrong1"), correct: false },
+      { text: () => sceneStrings("sbWrong2"), correct: false },
+      { text: () => sceneStrings("sbWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("hardlinkQ"), options: [
+      { text: () => sceneStrings("hlRight"), correct: true },
+      { text: () => sceneStrings("hlWrong1"), correct: false },
+      { text: () => sceneStrings("hlWrong2"), correct: false },
+      { text: () => sceneStrings("hlWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("polyQ"), options: [
+      { text: () => sceneStrings("poRight"), correct: true },
+      { text: () => sceneStrings("poWrong1"), correct: false },
+      { text: () => sceneStrings("poWrong2"), correct: false },
+      { text: () => sceneStrings("poWrong3"), correct: false },
+    ] },
+  ]);
+</script>

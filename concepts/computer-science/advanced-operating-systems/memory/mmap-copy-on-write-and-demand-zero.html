@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>mmap, Copy-on-Write and Demand-Zero</primer-title>
+
+    <primer-card>
+      <p>
+        Call <primer-math>\texttt{fork()}</primer-math> on a process using
+        <primer-math>4\,\text{GB}</primer-math> of memory and the child appears essentially
+        <em>instantly</em> — with its own private, full copy of all four gigabytes. Copying four gigabytes takes
+        far longer than <primer-math>\texttt{fork}</primer-math> takes to return, so the copy plainly did not
+        happen. The whole illusion rests on the same lazy principle behind
+        <primer-ref to="computer-science/advanced-operating-systems/memory/demand-paging-and-thrashing">demand
+        paging</primer-ref>: <strong>don't do the work until someone actually needs it</strong>. This lesson
+        collects the family of tricks the OS plays on the
+        <primer-ref to="computer-science/advanced-operating-systems/memory/address-translation-in-depth">page
+        table</primer-ref> to make copies, mappings and blank memory nearly free — <strong>mmap</strong>,
+        <strong>copy-on-write</strong>, <strong>demand-zero</strong>, shared memory and huge pages.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>mmap: the address space is a set of mappings</h2>
+      <p>
+        Underneath, a process's address space is not a flat block — it is a collection of <strong>regions</strong>
+        (Linux calls them VMAs, virtual memory areas), each created by a mapping. The
+        <primer-math>\texttt{mmap()}</primer-math> system call is how they come into being, and there are two
+        flavours:
+      </p>
+      <ul>
+        <li><strong>File-backed</strong>: map a file into memory. Reading the mapped bytes faults the
+          corresponding file blocks in on demand (from the page cache); the pages <em>are</em> the file. This is
+          how programs and shared libraries are loaded, and how databases read files without
+          <primer-math>\texttt{read()}</primer-math> calls.</li>
+        <li><strong>Anonymous</strong>: memory backed by nothing on disk (until swapped) — this is what
+          <primer-math>\texttt{malloc}</primer-math> uses for large allocations, and what the heap and stack are.
+          Its pages start as <strong>demand-zero</strong> (below).</li>
+      </ul>
+      <p>
+        Each mapping is also either <strong>private</strong> (writes stay local, via copy-on-write) or
+        <strong>shared</strong> (writes are visible to everyone mapping it, and, for a file, written back). Those
+        two axes — file/anonymous × private/shared — describe almost every page in the system.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Demand-zero: a single blank page for everyone</h2>
+      <p>
+        Fresh anonymous memory must read as zero (leaking a previous owner's data would be a security hole). But
+        <em>eagerly</em> zeroing a gigabyte of freshly-allocated heap the moment
+        <primer-math>\texttt{malloc}</primer-math> returns would be wasteful — most of it may never be touched. So
+        the OS uses <strong>demand-zero</strong> pages: every not-yet-written anonymous page is mapped, read-only,
+        to one shared physical <strong>zero page</strong>. Reads of any such page return zeros for free, from that
+        single frame. Only when the process <em>writes</em> does a fault fire, at which point the OS allocates a
+        real frame, zeroes just that one, and maps it writable. You pay for a blank page only if you dirty it.
+      </p>
+      <primer-theorem name="Lazy sharing of pages">
+        <ul>
+          <li><strong>Demand-zero</strong>: unwritten anonymous pages share one read-only zero frame; the first
+            write faults in a private, zeroed frame;</li>
+          <li><strong>Copy-on-write (COW)</strong>: after <primer-math>\texttt{fork}</primer-math>, parent and
+            child share every page read-only; the first write by either faults, copies that one page, and gives
+            the writer a private copy;</li>
+          <li>both defer expensive work (zeroing, copying) to the moment of first write, and both rely on a
+            <strong>write-protect fault</strong> plus a per-frame <strong>reference count</strong>.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Strings for the copy-on-write divergence figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "cow": {
+          "title": "Copy-on-write: parent and child share a read-only page, until one writes and diverges",
+          "parent": "Parent PTE → (read-only)",
+          "child": "Child PTE → (read-only)",
+          "shared": "Shared frame\nrefcount = 2, RO",
+          "copy": "Child's private copy\nrefcount = 1, writable",
+          "wr": "child writes → COW fault → copy this one page",
+          "after": "After the write: parent keeps the original (now refcount 1, writable again); child owns the copy."
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Copy-on-write: the star of the show</h2>
+      <p>
+        Copy-on-write makes <primer-math>\texttt{fork}</primer-math> cheap. Instead of duplicating the parent's
+        pages, the kernel makes parent and child <strong>share every page</strong>, marks all of them
+        <strong>read-only</strong> in <em>both</em> page tables, and bumps each frame's reference count to 2. As
+        long as both processes only read, they read the same physical frames — no copying, ever. The moment
+        <em>either</em> writes, the write-protection triggers a fault; the kernel sees the page is COW, allocates a
+        fresh frame, copies the contents, maps the <em>writer's</em> PTE to the new frame (writable), and drops
+        the old frame's refcount. Only the pages that are actually written ever get copied. Step through the
+        divergence:
+      </p>
+      <primer-geometry scene="cow"></primer-geometry>
+      <p>
+        Watch the refcount, because it carries the logic. When a COW fault hits a frame whose refcount is still
+        <primer-math>&gt; 1</primer-math>, the writer must get a private copy. But when the refcount has already
+        fallen to <primer-math>1</primer-math> (everyone else has diverged or exited), there is no one left to
+        protect — the kernel can simply <em>re-enable write</em> on the existing frame with no copy at all. The
+        reference count is the whole decision procedure.
+      </p>
+      <primer-code run>
+        // Copy-on-write after fork(): one shared page, tracked by a reference count.
+        // A write to a shared (refcount>1) frame copies; a write to a private (refcount==1) frame does not.
+        let nextFrame = 100;
+        const frame = { id: 42, refcount: 1, writable: true }; // parent's page, initially private
+        let copies = 0;
+
+        function fork(): { parent: typeof frame; childRefsFrame: number } {
+          frame.refcount = 2;      // now shared by parent and child
+          frame.writable = false;  // write-protect in BOTH page tables
+          console.log(`fork(): share frame ${frame.id}, refcount=${frame.refcount}, marked read-only`);
+          return { parent: frame, childRefsFrame: frame.id };
+        }
+
+        function write(who: string, f: { id: number; refcount: number; writable: boolean }): number {
+          if (f.writable) { console.log(`${who} writes frame ${f.id}: already private, no copy`); return f.id; }
+          if (f.refcount &gt; 1) {
+            const nf = { id: nextFrame++, refcount: 1, writable: true }; // COW: allocate + copy this page
+            f.refcount--; copies++;
+            console.log(`${who} writes shared frame ${f.id}: COW fault -> copy to frame ${nf.id}; old refcount now ${f.refcount}`);
+            if (f.refcount === 1) f.writable = true; // last sharer: re-enable write, no future copy needed
+            return nf.id;
+          }
+          f.writable = true;
+          console.log(`${who} writes last-sharer frame ${f.id}: re-enable write, no copy`);
+          return f.id;
+        }
+
+        fork();
+        write("child",  frame);  // first write by child -> triggers the copy
+        write("parent", frame);  // parent is now the lone owner -> no copy
+        console.log(`total physical copies made: ${copies} (out of a whole shared address space)`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Shared memory and huge pages</h2>
+      <p>
+        Not all sharing is temporary. A <strong>shared</strong> mapping (<primer-math>\texttt{MAP\_SHARED}</primer-math>,
+        or System V / POSIX shared memory) is the deliberate opposite of COW: two processes map the
+        <em>same</em> physical frames writable, and a store by one is instantly visible to the other. It is the
+        fastest possible inter-process communication — no copying, no syscalls per message — and the substrate for
+        databases' shared buffer pools and <primer-math>\texttt{/dev/shm}</primer-math>.
+      </p>
+      <p>
+        <strong>Huge pages</strong> attack a different cost. A program with a multi-gigabyte working set, mapped in
+        <primer-math>4\,\text{KiB}</primer-math> pages, needs millions of PTEs and blows out the
+        <primer-ref to="computer-science/computer-architecture/memory/the-tlb">TLB</primer-ref> — every few
+        accesses miss and pay a page walk. Mapping the same region in <primer-math>2\,\text{MiB}</primer-math> (or
+        <primer-math>1\,\text{GiB}</primer-math>) huge pages means one TLB entry covers
+        <primer-math>512\times</primer-math> (or <primer-math>262{,}144\times</primer-math>) as much memory, so the
+        TLB's <em>reach</em> explodes and misses plummet. A single <primer-math>2\,\text{MiB}</primer-math> page
+        also short-circuits translation by one level (the PD entry points straight at the data), so the walk is
+        shorter too. The price is coarser granularity: COW or eviction of a huge page moves
+        <primer-math>2\,\text{MiB}</primer-math> at a time, and they need contiguous physical memory, which
+        fragmentation can make scarce.
+      </p>
+      <primer-vignette title="If fork is copy-on-write, why is fork()+exec() still considered wasteful?">
+        <p>
+          COW makes <primer-math>\texttt{fork}</primer-math> cheap, but the classic
+          <primer-math>\texttt{fork()}</primer-math>-then-<primer-math>\texttt{exec()}</primer-math> pattern still
+          does needless work: <primer-math>\texttt{fork}</primer-math> dutifully write-protects the parent's
+          <em>entire</em> address space and sets up all those COW mappings — and then
+          <primer-math>\texttt{exec}</primer-math> immediately throws the whole lot away to load a new program.
+          You paid to build COW machinery you never used. That is why <primer-math>\texttt{vfork()}</primer-math>
+          (borrow the parent's address space briefly, promise to <primer-math>\texttt{exec}</primer-math>
+          immediately) and, better, <primer-math>\texttt{posix\_spawn()}</primer-math> exist; and why forking a
+          many-gigabyte process (a big JVM, Redis taking a snapshot) can still stutter — even at one COW mapping
+          per page, a huge address space is a lot of page-table fiddling.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-vignette title="Watch out! A copy-on-write page is shared and read-only — the copy happens on WRITE, not on read">
+      <p>
+        The name says it, yet it is constantly misremembered. After <primer-math>\texttt{fork}</primer-math>, no
+        memory has been copied — parent and child genuinely share the <em>same</em> physical frames, and reads
+        from either touch identical bytes at zero cost. Copying is triggered <strong>only by a write</strong>, and
+        only for the <em>one page</em> written, at the moment it is written. So a child that only reads a huge
+        inherited buffer costs nothing; a child that scribbles one byte into each page slowly copies the whole
+        thing. This also explains a real gotcha: a garbage collector or reference-count update that <em>writes</em>
+        to objects (even just touching a header) in a forked child will silently copy pages you thought were
+        shared — the reason Redis and CoW-based snapshotting care so much about not dirtying pages. "Copy-on-write"
+        is a promise about writes; reads are always free.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: mmap / COW / demand-zero / huge-page concepts + a small refcount numeric. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "cowQuiz@1": {
+          "intro": "fork shares pages COW (read-only); the first write copies one page. Demand-zero shares one blank frame until written.",
+          "forkQ": "Why does fork() of a large process return almost instantly?",
+          "forkRight": "it shares the parent's pages copy-on-write instead of copying them",
+          "forkWrong1": "it copies memory faster than the CPU can address it",
+          "forkWrong2": "it discards the parent's memory",
+          "forkWrong3": "the child gets no memory at all",
+          "cowWhenQ": "In copy-on-write, a physical page is actually copied…",
+          "cowWhenRight": "only when a process WRITES to a shared page (and only that page)",
+          "cowWhenWrong1": "immediately at fork, for every page",
+          "cowWhenWrong2": "whenever the page is read",
+          "cowWhenWrong3": "never — pages are always shared",
+          "cowMechQ": "What hardware event lets the kernel intercept the first write to a COW page?",
+          "cowMechRight": "a write-protection fault, because the page is mapped read-only in both processes",
+          "cowMechWrong1": "a TLB hit",
+          "cowMechWrong2": "a timer interrupt",
+          "cowMechWrong3": "a system call the program makes explicitly",
+          "dzQ": "A demand-zero page is…",
+          "dzRight": "an unwritten anonymous page mapped read-only to one shared zero frame until first written",
+          "dzWrong1": "a page permanently filled with random data",
+          "dzWrong2": "a page stored on disk",
+          "dzWrong3": "a page that can never be written",
+          "mmapQ": "A file-backed mmap mapping means…",
+          "mmapRight": "the mapped pages ARE the file's contents, faulted in from the page cache on demand",
+          "mmapWrong1": "a private copy of the whole file is made immediately",
+          "mmapWrong2": "the file is deleted",
+          "mmapWrong3": "the mapping cannot be read",
+          "sharedQ": "A MAP_SHARED (shared) mapping differs from a private (COW) one because…",
+          "sharedRight": "writes are visible to all processes mapping it — there is no copy",
+          "sharedWrong1": "it is always read-only",
+          "sharedWrong2": "it uses more page tables",
+          "sharedWrong3": "it disables the TLB",
+          "hugeQ": "The main benefit of huge pages (e.g. 2 MiB) is…",
+          "hugeRight": "one TLB entry covers far more memory, so TLB reach grows and misses fall",
+          "hugeWrong1": "they use less physical RAM per byte",
+          "hugeWrong2": "they make every page copy-on-write",
+          "hugeWrong3": "they remove the page table",
+          "refQ": "The reference count on a COW frame is used to decide…",
+          "refRight": "whether a write must copy (refcount > 1) or can just re-enable write (refcount == 1)",
+          "refWrong1": "how many bytes to zero",
+          "refWrong2": "which CPU to shoot down",
+          "refWrong3": "the page's disk address",
+          "vforkQ": "vfork() / posix_spawn() exist because…",
+          "vforkRight": "fork()+exec() wastefully builds COW mappings that exec immediately discards",
+          "vforkWrong1": "fork() is not allowed on modern systems",
+          "vforkWrong2": "they copy memory faster",
+          "vforkWrong3": "COW does not work with exec",
+          "reachNumQ": "A {hp} MiB huge page covers how many 4 KiB base pages? (hp·1024/4)",
+          "copiesNumQ": "After fork, the child writes to {w} distinct shared pages and reads {r} others. How many pages get copied?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="cowQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/kernel/the-process-address-space",
+      "computer-science/advanced-operating-systems/memory/address-translation-in-depth"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Copy-on-write divergence diagram: parent + child PTEs both point to a shared read-only frame (base),
+     then a step reveals the child's private copy after a write. Colours only from themeColors(). Plus quiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "cow",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = ([x, y], w, h, label, cat, fs = 12) => {
+        board.create("polygon", [[x, y], [x + w, y], [x + w, y + h], [x, y + h]], {
+          fillColor: cat, fillOpacity: 0.22,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [x + w / 2, y + h / 2, label], {
+          strokeColor: colors.ink, fontSize: fs, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:600; white-space:pre; text-align:center; max-width:150px",
+        });
+        return { x, y, w, h };
+      };
+
+      // Parent and child PTE boxes (left), shared frame (middle).
+      const P = box([-0.3, 3.2], 2.6, 1.0, sceneStrings("parent"), colors.cat[0]);
+      const C = box([-0.3, 0.4], 2.6, 1.0, sceneStrings("child"), colors.cat[0]);
+      const S = box([4.2, 1.8], 2.6, 1.2, sceneStrings("shared"), colors.cat[1]);
+
+      // Base arrows: both PTEs -> shared frame.
+      board.create("arrow", [[P.x + P.w, P.y + P.h / 2], [S.x, S.y + S.h / 2 + 0.2]], {
+        strokeColor: colors.line, strokeWidth: 2, lastArrow: { type: 1, size: 5 }, highlight: false, fixed: true,
+      });
+      board.create("arrow", [[C.x + C.w, C.y + C.h / 2], [S.x, S.y + S.h / 2 - 0.2]], {
+        strokeColor: colors.line, strokeWidth: 2, lastArrow: { type: 1, size: 5 }, highlight: false, fixed: true,
+      });
+
+      // Step: the child writes -> a private copy appears (far right), child's arrow diverges to it.
+      step(sceneStrings("wr"), () => {
+        const K = box([8.4, 0.4], 2.8, 1.2, sceneStrings("copy"), colors.cat[2]);
+        board.create("arrow", [[C.x + C.w, C.y + C.h / 2 - 0.15], [K.x, K.y + K.h / 2]], {
+          strokeColor: colors.cat[2], strokeWidth: 2.5, dash: 2, lastArrow: { type: 1, size: 5 }, highlight: false, fixed: true,
+        });
+        board.create("text", [6.0, 3.4, sceneStrings("after")], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "max-width:460px; text-align:center",
+        });
+      });
+    },
+    {
+      boundingbox: [-0.8, 4.6, 11.6, -0.2],
+      keepAspect: false,
+      title: () => makeStrings("cow")("title"),
+    },
+  );
+
+  registerQuiz("cowQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("forkQ"),
+      options: [
+        { text: () => sceneStrings("forkRight"), correct: true },
+        { text: () => sceneStrings("forkWrong1"), correct: false },
+        { text: () => sceneStrings("forkWrong2"), correct: false },
+        { text: () => sceneStrings("forkWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cowWhenQ"),
+      options: [
+        { text: () => sceneStrings("cowWhenRight"), correct: true },
+        { text: () => sceneStrings("cowWhenWrong1"), correct: false },
+        { text: () => sceneStrings("cowWhenWrong2"), correct: false },
+        { text: () => sceneStrings("cowWhenWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cowMechQ"),
+      options: [
+        { text: () => sceneStrings("cowMechRight"), correct: true },
+        { text: () => sceneStrings("cowMechWrong1"), correct: false },
+        { text: () => sceneStrings("cowMechWrong2"), correct: false },
+        { text: () => sceneStrings("cowMechWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dzQ"),
+      options: [
+        { text: () => sceneStrings("dzRight"), correct: true },
+        { text: () => sceneStrings("dzWrong1"), correct: false },
+        { text: () => sceneStrings("dzWrong2"), correct: false },
+        { text: () => sceneStrings("dzWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("mmapQ"),
+      options: [
+        { text: () => sceneStrings("mmapRight"), correct: true },
+        { text: () => sceneStrings("mmapWrong1"), correct: false },
+        { text: () => sceneStrings("mmapWrong2"), correct: false },
+        { text: () => sceneStrings("mmapWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sharedQ"),
+      options: [
+        { text: () => sceneStrings("sharedRight"), correct: true },
+        { text: () => sceneStrings("sharedWrong1"), correct: false },
+        { text: () => sceneStrings("sharedWrong2"), correct: false },
+        { text: () => sceneStrings("sharedWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hugeQ"),
+      options: [
+        { text: () => sceneStrings("hugeRight"), correct: true },
+        { text: () => sceneStrings("hugeWrong1"), correct: false },
+        { text: () => sceneStrings("hugeWrong2"), correct: false },
+        { text: () => sceneStrings("hugeWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("refQ"),
+      options: [
+        { text: () => sceneStrings("refRight"), correct: true },
+        { text: () => sceneStrings("refWrong1"), correct: false },
+        { text: () => sceneStrings("refWrong2"), correct: false },
+        { text: () => sceneStrings("refWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("vforkQ"),
+      options: [
+        { text: () => sceneStrings("vforkRight"), correct: true },
+        { text: () => sceneStrings("vforkWrong1"), correct: false },
+        { text: () => sceneStrings("vforkWrong2"), correct: false },
+        { text: () => sceneStrings("vforkWrong3"), correct: false },
+      ],
+    },
+    {
+      // hp MiB / 4 KiB = hp*256 base pages (2 MiB -> 512, 1024 MiB=1 GiB -> 262144).
+      prompt: (v) => sceneStrings("reachNumQ", v),
+      variables: "hp=[2,1024]",
+      answer: (v) => v.hp * 256,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Only written pages are copied; reads are free.
+      prompt: (v) => sceneStrings("copiesNumQ", v),
+      variables: "w=[1:20] r=[1:20]",
+      answer: (v) => v.w,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

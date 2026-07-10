@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Loop-Invariant Code Motion</primer-title>
+
+    <primer-card>
+      <p>
+        Programs spend almost all of their time in loops, so a computation that lands <em>inside</em> a loop is
+        the most expensive real estate in the whole procedure — run it a million times and you pay a million
+        times over. Yet loops are full of work that does not actually depend on the loop. Inside
+        <code>for (i = 0; i &lt; n; i++) a[i] = x * y + i;</code>, the product <code>x * y</code> is recomputed
+        on every iteration even though <code>x</code> and <code>y</code> never change. <strong>Loop-invariant
+        code motion</strong> (LICM, also called <em>hoisting</em>) is the optimisation that spots such a
+        computation and lifts it <em>out</em> of the loop, so it runs once instead of <primer-math>n</primer-math>
+        times.
+      </p>
+      <p>
+        The pay-off is enormous, but the reasoning is delicate: move the wrong thing, or move it to the wrong
+        place, and you change what the program computes — or make it crash on an input where it used to run
+        fine. LICM is therefore a small masterclass in the compiler's central discipline: <em>an optimisation
+        is only worth doing if it is provably safe on every path</em>. Getting the safety conditions exactly
+        right is what this page is about.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>First, what <em>is</em> a loop?</h2>
+      <p>
+        Before you can move code out of a loop, the compiler must identify the loop in the raw control-flow
+        graph — there is no <code>for</code> keyword left by this stage. The precise, structural definition
+        rests on <strong>dominators</strong>. A node <primer-math>d</primer-math> <em>dominates</em> a node
+        <primer-math>n</primer-math> if every path from the entry to <primer-math>n</primer-math> goes through
+        <primer-math>d</primer-math>.
+      </p>
+      <primer-theorem name="Natural loops">
+        <ul>
+          <li>A <strong>back edge</strong> is a CFG edge <primer-math>n \to h</primer-math> whose head
+            <primer-math>h</primer-math> <em>dominates</em> its tail <primer-math>n</primer-math>;</li>
+          <li>the <strong>header</strong> <primer-math>h</primer-math> is the single entry point of the loop —
+            it dominates every node in the loop;</li>
+          <li>the <strong>natural loop</strong> of the back edge <primer-math>n \to h</primer-math> is
+            <primer-math>h</primer-math> together with every node that can reach <primer-math>n</primer-math>
+            without passing through <primer-math>h</primer-math>.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        A single-entry header is what makes hoisting well-defined: there is one place, just before the header,
+        where hoisted code can live and be sure to run exactly once per entry to the loop. That place does not
+        exist yet, so we create it — the <strong>preheader</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The preheader: a landing pad for hoisted code</h2>
+      <p>
+        A <strong>preheader</strong> is a fresh basic block inserted on the edge(s) entering the header from
+        <em>outside</em> the loop; every such entry edge is redirected through it, while the loop's back edge
+        still targets the header directly. It is the one block that dominates the header and runs once before
+        the loop begins — the natural home for anything we lift out.
+      </p>
+      <primer-geometry scene="licmLoop"></primer-geometry>
+      <p>
+        Reveal the diagram: the raw loop (header <primer-math>B_2</primer-math>, body
+        <primer-math>B_3</primer-math>, back edge <primer-math>B_3 \to B_2</primer-math>) first gets a
+        preheader spliced onto its entry edge, and then the invariant statement <code>t = x * y</code> migrates
+        up into it. Inside the loop, the body now just reads <code>t</code>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Which computations are invariant?</h2>
+      <p>
+        A statement in the loop computes a <strong>loop-invariant</strong> value if — no matter which iteration
+        you are on — its operands always have the same value. Formally, an operand is invariant if it is:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>An operand is loop-invariant if…</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>it is a <strong>literal constant</strong>, or</td></tr>
+            <tr><td>all of its <strong>reaching definitions</strong> lie <strong>outside</strong> the loop, or</td></tr>
+            <tr><td>it has exactly <strong>one</strong> reaching definition, and that definition is itself a
+              statement already marked loop-invariant.</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        That last clause is recursive, so you compute the invariant set by <strong>iteration to a fixed
+        point</strong>: repeatedly sweep the loop marking any statement whose operands are all now invariant,
+        until a sweep marks nothing new. It leans directly on
+        <primer-ref to="computer-science/compiler-design/optimization/reaching-definitions">reaching definitions</primer-ref>
+        to answer "where could this operand have come from?", and it composes with
+        <primer-ref to="computer-science/compiler-design/optimization/available-expressions">available expressions</primer-ref>,
+        which catches the redundancy across iterations.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Marking invariants, in code</h2>
+      <p>
+        The engine below takes a loop body as a list of three-address statements, plus the set of variables
+        defined <em>outside</em> the loop, and marks the invariant statements by fixed-point iteration —
+        exactly the recursive rule above.
+      </p>
+      <primer-code run>
+        type Stmt = { dst: string; args: string[] };   // dst = f(args...)
+
+        // Variables whose reaching definitions are all OUTSIDE the loop.
+        const outside = new Set(["x", "y", "n"]);
+        const isNum = (s: string) =&gt; /^-?\d+$/.test(s);
+
+        // Loop body:  t = x * y;  s = t + n;  a = i * 4;  i = i + 1;
+        const body: Stmt[] = [
+          { dst: "t", args: ["x", "y"] },
+          { dst: "s", args: ["t", "n"] },
+          { dst: "a", args: ["i", "4"] },
+          { dst: "i", args: ["i", "1"] },
+        ];
+
+        // A variable is defined inside the loop if some body statement writes it.
+        const definedInside = new Set(body.map((st) =&gt; st.dst));
+        const invariantStmts = new Set&lt;number&gt;();
+
+        // An operand is invariant if: a literal, or defined only outside,
+        // or its single in-loop def is an already-invariant statement.
+        const operandInvariant = (v: string): boolean =&gt; {
+          if (isNum(v)) return true;
+          if (!definedInside.has(v)) return outside.has(v);      // reaches from outside
+          // find the in-loop def(s) of v
+          const defs = body.map((st, i) =&gt; (st.dst === v ? i : -1)).filter((i) =&gt; i &gt;= 0);
+          return defs.length === 1 &amp;&amp; invariantStmts.has(defs[0]);
+        };
+
+        let changed = true, rounds = 0;
+        while (changed) {
+          changed = false;
+          rounds++;
+          body.forEach((st, i) =&gt; {
+            if (invariantStmts.has(i)) return;
+            if (st.args.every(operandInvariant)) { invariantStmts.add(i); changed = true; }
+          });
+        }
+
+        console.log(`fixed point in ${rounds} sweeps`);
+        body.forEach((st, i) =&gt; {
+          const tag = invariantStmts.has(i) ? "INVARIANT -> hoist" : "varies (stays in loop)";
+          console.log(`${st.dst} = ${st.args.join(" op ")}    ${tag}`);
+        });
+      </primer-code>
+      <p>
+        <code>t = x * y</code> is invariant (both operands come from outside), and then
+        <code>s = t + n</code> becomes invariant on the <em>next</em> sweep because its only in-loop operand,
+        <code>t</code>, was just marked — the fixed point in action. But <code>a = i * 4</code> and
+        <code>i = i + 1</code> stay put: <code>i</code> is redefined every iteration, so they vary.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Invariant is necessary, not sufficient — the safety conditions</h2>
+      <p>
+        Here is the deep point: <strong>a statement being loop-invariant does not by itself make it safe to
+        hoist.</strong> Move it to the preheader and it will now execute <em>unconditionally, once, before the
+        loop</em> — even if, in the original program, some iterations (or all of them) would have skipped it.
+        For the transformation to preserve meaning, the statement <primer-math>d\!:\ t = u \circ v</primer-math>
+        (defining <primer-math>t</primer-math>) must satisfy all three:
+      </p>
+      <primer-theorem name="When it is safe to hoist d: t = u ∘ v">
+        <ul>
+          <li><primer-math>d</primer-math>'s block <strong>dominates all exits</strong> of the loop (every loop
+            exit is reached only through <primer-math>d</primer-math>) — so if the loop is entered,
+            <primer-math>d</primer-math> would definitely have run;</li>
+          <li><primer-math>t</primer-math> is <strong>not assigned elsewhere</strong> in the loop —
+            <primer-math>d</primer-math> is the only definition of <primer-math>t</primer-math> in it;</li>
+          <li><primer-math>d</primer-math> <strong>dominates every use</strong> of <primer-math>t</primer-math>
+            in the loop — so no use ever reads a different, pre-hoist value.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The first condition is the one people forget, and it is the one that protects <em>correctness of
+        outcome</em>. If <primer-math>d</primer-math> sits inside an <code>if</code> within the loop, or after a
+        possible early exit, then some run of the loop might never have executed
+        <primer-math>d</primer-math> at all. Hoisting it forces it to run — and if it can <strong>fault</strong>
+        (divide by zero, dereference a null, index out of bounds), you have just introduced a crash into a
+        program that was previously correct. Domination of exits is exactly the guarantee that "the loop ran
+        <primer-math>\Rightarrow</primer-math> <primer-math>d</primer-math> ran", which is what lets you safely
+        run <primer-math>d</primer-math> up front.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A companion: strength reduction of induction variables</h2>
+      <p>
+        Hoisting has a famous sibling that also exploits loop structure. An <strong>induction variable</strong>
+        is one that changes by a fixed amount each iteration — the loop counter <primer-math>i</primer-math>,
+        and any variable of the form <primer-math>j = c_1 \cdot i + c_2</primer-math> derived from it.
+        <strong>Strength reduction</strong> replaces the expensive recomputation
+        <primer-math>j = 4 \cdot i</primer-math> (a multiply, every iteration) with a cheap running update
+        <primer-math>j \mathrel{+}= 4</primer-math> (an add), seeded once in the preheader:
+      </p>
+      <primer-math display>\underbrace{j = 4 \cdot i}_{\text{multiply each pass}} \quad\longrightarrow\quad \underbrace{j = j + 4}_{\text{add each pass, }j\text{ init'd in preheader}}.</primer-math>
+      <p>
+        It is not invariant code — <primer-math>j</primer-math> genuinely changes every iteration — but it uses
+        the same loop analysis (finding the header, the preheader, and the basic induction variable
+        <primer-math>i</primer-math>) to trade a costly operation for a cheap one. Array-address arithmetic in
+        tight loops is the classic beneficiary, which is why LICM and strength reduction are almost always run
+        together.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why insert a preheader at all — why not just hoist into the block before the loop?">
+      <p>
+        Because a loop header can have several predecessors from <em>outside</em> the loop (think two
+        <code>if</code> arms that both fall into the same <code>while</code>). If you hoisted into one of them,
+        the code would not run when control entered through the other — and if you hoisted into all of them you
+        would duplicate it and risk running it when the loop is never entered from a third path. The preheader
+        solves this cleanly: it is a single block on the <em>combined</em> entry, dominating the header,
+        guaranteed to run exactly once each time the loop is entered and never otherwise. Creating it is cheap,
+        and it gives every subsequent loop optimisation (LICM, strength reduction, invariant guards) a canonical
+        place to deposit setup code.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Invariant is not enough — a conditional or faulting statement must not be hoisted blindly">
+      <p>
+        The classic bug: you find <code>t = a / b</code> loop-invariant (both <code>a</code> and <code>b</code>
+        defined outside) and hoist it — but in the original loop that statement sat inside
+        <code>if (b != 0) { … }</code>, so it only ran when <code>b</code> was non-zero. Hoisted to the
+        preheader it runs <em>unconditionally</em>, and on an input where the loop body's guard would have kept
+        <code>b == 0</code> away from the division, your "optimised" program now divides by zero and crashes.
+        The guardrail is the dominance condition: hoist <primer-math>d</primer-math> only if its block
+        <strong>dominates all loop exits</strong> (so entering the loop guarantees <primer-math>d</primer-math>
+        would have executed). A statement buried in a conditional inside the loop does <em>not</em> dominate the
+        exits, so it is <strong>not</strong> a legal hoist — invariance notwithstanding. (Compilers relax this
+        only for statements proven <em>never</em> to fault and whose result is dead if the loop doesn't run —
+        "speculative" hoisting — but the default rule is: dominate the exits, or stay put.)
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: loop structure + invariance rule + safety conditions + strength reduction + counting savings. Bank of 13, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "licmQuiz@1": {
+          "intro": "LICM hoists loop-invariant computations to a preheader — but only when the statement dominates all loop exits. Numbers change every attempt.",
+          "backQ": "A back edge in a CFG is an edge n → h where…",
+          "bkDom": "h (the head) dominates n (the tail)",
+          "bkN": "n dominates h",
+          "bkEntry": "h is the entry node of the whole procedure",
+          "bkAny": "any edge that points upward in the source text",
+          "headerQ": "The header of a natural loop is the node that…",
+          "hdDom": "is the single entry of the loop and dominates every node in it",
+          "hdLast": "is the last node executed in the loop",
+          "hdExit": "is where the loop exits",
+          "hdAny": "has the most edges",
+          "preQ": "A preheader is…",
+          "prNew": "a new block inserted on the loop's entry edge, dominating the header, where hoisted code goes",
+          "prExit": "the block the loop exits to",
+          "prHeader": "just another name for the header",
+          "prBody": "the first statement of the loop body",
+          "invQ": "A statement's operand is loop-invariant if…",
+          "ivOut": "it is a constant, or all its reaching definitions are outside the loop, or its one in-loop def is itself invariant",
+          "ivAny": "it appears anywhere in the loop",
+          "ivHeader": "it is defined in the header",
+          "ivNever": "it is never redefined in the whole program",
+          "fixQ": "Why is finding the invariant set an iterative (fixed-point) computation?",
+          "fxRec": "a statement can become invariant once the statements defining its operands are marked — so you must re-sweep until nothing new is marked",
+          "fxOnce": "it isn't — one pass always suffices",
+          "fxInput": "because the loop bound is unknown",
+          "fxReg": "because registers are limited",
+          "safeQ": "Besides being invariant, when is it SAFE to hoist statement d that defines t?",
+          "sfAll": "d's block dominates all loop exits, t is not assigned elsewhere in the loop, and d dominates all uses of t in the loop",
+          "sfInv": "nothing more — invariance alone is enough",
+          "sfHead": "only if d is in the header",
+          "sfConst": "only if t is a constant",
+          "domQ": "Why must d dominate all loop exits before hoisting?",
+          "dmRun": "so that entering the loop guarantees d would have executed — hoisting can't make code run that otherwise wouldn't (and possibly fault)",
+          "dmFast": "to make the loop faster",
+          "dmReg": "to free a register",
+          "dmSize": "to reduce code size",
+          "faultQ": "Hoisting an invariant 't = a / b' out of an 'if (b != 0)' guard inside the loop is dangerous because…",
+          "flCrash": "in the preheader it runs unconditionally and may divide by zero even when the loop body never would",
+          "flSlow": "it makes the loop slower",
+          "flSame": "it is always perfectly safe",
+          "flReg": "it uses too many registers",
+          "srQ": "Strength reduction of an induction variable replaces…",
+          "srMul": "a per-iteration multiply like j = 4*i with a per-iteration add like j += 4",
+          "srAdd": "an add with a multiply",
+          "srHoist": "the whole loop with a constant",
+          "srBranch": "a branch with a jump",
+          "ivarQ": "An induction variable is one that…",
+          "ivChange": "changes by a fixed amount each iteration (e.g. the loop counter, or c1*i + c2)",
+          "ivConst": "never changes during the loop",
+          "ivOnce": "is assigned exactly once in the program",
+          "ivGlobal": "is a global variable",
+          "saveQ": "A loop runs ${n} iterations. An invariant statement is hoisted so it runs once instead of every iteration. How many executions of that statement are saved?",
+          "srSaveQ": "Strength reduction turns ${m} multiplications (one per iteration, for ${m} iterations) into ${m} additions. How many multiply operations does the loop now perform per full run (after the change)?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="licmQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/optimization/reaching-definitions",
+      "computer-science/compiler-design/optimization/available-expressions"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // CFG toolkit: rectangular basic blocks + straight and curved (back) edges.
+  function graphTools(board, colors) {
+    const box = (cx, cy, w, h, col, title, body) => {
+      board.create(
+        "polygon",
+        [[cx - w / 2, cy - h / 2], [cx + w / 2, cy - h / 2], [cx + w / 2, cy + h / 2], [cx - w / 2, cy + h / 2]],
+        { borders: { strokeColor: col, strokeWidth: 2 }, strokeColor: col, fillColor: col, fillOpacity: 0.1,
+          vertices: { visible: false }, fixed: true, highlight: false },
+      );
+      board.create("text", [cx, cy + (body ? 0.32 : 0), title], {
+        anchorX: "middle", anchorY: "middle", fontSize: 15, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+      if (body)
+        board.create("text", [cx, cy - 0.34, body], {
+          anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+          strokeColor: colors.ink, color: colors.ink,
+        });
+    };
+    const arrow = (a, b, col, text, o = {}) => {
+      const [ax, ay] = a, [bx, by] = b;
+      const dx = bx - ax, dy = by - ay, d = Math.hypot(dx, dy), ux = dx / d, uy = dy / d;
+      const g = o.gap ?? 0.85;
+      board.create("arrow", [[ax + ux * g, ay + uy * g], [bx - ux * g, by - uy * g]], {
+        strokeColor: col, strokeWidth: 2, fixed: true, highlight: false,
+      });
+      if (text)
+        board.create("text", [(ax + bx) / 2 + (o.dx ?? 0), (ay + by) / 2 + (o.dy ?? 0), text], {
+          anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+          strokeColor: col, color: col,
+        });
+    };
+    // curved back edge bowing out to the side
+    const back = (a, b, col, text, bow) => {
+      const [ax, ay] = a, [bx, by] = b;
+      const mx = (ax + bx) / 2 + bow, my = (ay + by) / 2;
+      board.create("curve", [
+        (t) => (1 - t) * (1 - t) * ax + 2 * (1 - t) * t * mx + t * t * bx,
+        (t) => (1 - t) * (1 - t) * ay + 2 * (1 - t) * t * my + t * t * by,
+        0, 1,
+      ], { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false, lastArrow: { size: 7 } });
+      if (text)
+        board.create("text", [mx + (bow > 0 ? 0.3 : -0.3), my, text], {
+          anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+          strokeColor: col, color: col,
+        });
+    };
+    return { box, arrow, back };
+  }
+
+  registerGeometryScene("licmLoop", ({ board, step, colors }) => {
+    const T = graphTools(board, colors);
+    const B1 = [-4, 3.4];            // pre-loop
+    const PRE = [-4, 1.1];           // preheader (inserted)
+    const B2 = [-4, -1.2];           // header
+    const B3 = [-4, -3.6];           // body
+    const EXIT = [2.6, -1.2];        // loop exit
+
+    // Base content: the raw loop skeleton (header, body, back edge, exit).
+    T.box(...B1, 3.4, 1.0, colors.cat[0], "B1", "x, y set");
+    T.box(...B2, 3.4, 1.1, colors.cat[2], "B2  header", "i < n ?");
+    T.box(...B3, 3.4, 1.1, colors.cat[3], "B3  body", "use t; i++");
+    T.box(...EXIT, 3.0, 1.0, colors.cat[1], "exit", "");
+    T.arrow(B2, B3, colors.line, "true", { dx: -0.6 });
+    T.arrow(B2, EXIT, colors.line, "false", { dy: 0.35 });
+    T.back(B3, B2, colors.cat[5] || colors.cat[4], "back edge", -2.3);
+
+    step("The raw loop: header B2 dominates the body B3, and B3 → B2 is the back edge.", () => {
+      T.arrow(B1, B2, colors.line, "", { gap: 0.85 });
+    });
+    step("Insert a PREHEADER on the entry edge — one block that dominates the header and runs once.", () => {
+      T.box(...PRE, 3.4, 1.0, colors.cat[4], "preheader", "(inserted)");
+      T.arrow(B1, PRE, colors.line, "");
+      T.arrow(PRE, B2, colors.line, "");
+    });
+    step("Hoist the invariant t = x*y into the preheader. It now runs ONCE; the body just reads t.", () => {
+      board.create("text", [0.3, 1.1, "t = x * y   ← hoisted here"], {
+        anchorX: "start", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+        strokeColor: colors.cat[4], color: colors.cat[4],
+      });
+    });
+  }, { boundingbox: [-6.5, 4.6, 6.5, -5], keepAspect: false, title: "Hoisting an invariant into an inserted preheader" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("licmQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("backQ"),
+      options: [
+        { text: () => sceneStrings("bkDom"), correct: true },
+        { text: () => sceneStrings("bkN"), correct: false },
+        { text: () => sceneStrings("bkEntry"), correct: false },
+        { text: () => sceneStrings("bkAny"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("headerQ"),
+      options: [
+        { text: () => sceneStrings("hdDom"), correct: true },
+        { text: () => sceneStrings("hdLast"), correct: false },
+        { text: () => sceneStrings("hdExit"), correct: false },
+        { text: () => sceneStrings("hdAny"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("preQ"),
+      options: [
+        { text: () => sceneStrings("prNew"), correct: true },
+        { text: () => sceneStrings("prExit"), correct: false },
+        { text: () => sceneStrings("prHeader"), correct: false },
+        { text: () => sceneStrings("prBody"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("invQ"),
+      options: [
+        { text: () => sceneStrings("ivOut"), correct: true },
+        { text: () => sceneStrings("ivAny"), correct: false },
+        { text: () => sceneStrings("ivHeader"), correct: false },
+        { text: () => sceneStrings("ivNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fixQ"),
+      options: [
+        { text: () => sceneStrings("fxRec"), correct: true },
+        { text: () => sceneStrings("fxOnce"), correct: false },
+        { text: () => sceneStrings("fxInput"), correct: false },
+        { text: () => sceneStrings("fxReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("safeQ"),
+      options: [
+        { text: () => sceneStrings("sfAll"), correct: true },
+        { text: () => sceneStrings("sfInv"), correct: false },
+        { text: () => sceneStrings("sfHead"), correct: false },
+        { text: () => sceneStrings("sfConst"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("domQ"),
+      options: [
+        { text: () => sceneStrings("dmRun"), correct: true },
+        { text: () => sceneStrings("dmFast"), correct: false },
+        { text: () => sceneStrings("dmReg"), correct: false },
+        { text: () => sceneStrings("dmSize"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("faultQ"),
+      options: [
+        { text: () => sceneStrings("flCrash"), correct: true },
+        { text: () => sceneStrings("flSlow"), correct: false },
+        { text: () => sceneStrings("flSame"), correct: false },
+        { text: () => sceneStrings("flReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("srQ"),
+      options: [
+        { text: () => sceneStrings("srMul"), correct: true },
+        { text: () => sceneStrings("srAdd"), correct: false },
+        { text: () => sceneStrings("srHoist"), correct: false },
+        { text: () => sceneStrings("srBranch"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ivarQ"),
+      options: [
+        { text: () => sceneStrings("ivChange"), correct: true },
+        { text: () => sceneStrings("ivConst"), correct: false },
+        { text: () => sceneStrings("ivOnce"), correct: false },
+        { text: () => sceneStrings("ivGlobal"), correct: false },
+      ],
+    },
+    {
+      // hoisting: runs once instead of n times -> saves n - 1 executions.
+      prompt: (v) => sceneStrings("saveQ", v),
+      variables: "n=[3:50]",
+      answer: (v) => v.n - 1,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // after strength reduction all m multiplies become adds -> 0 multiplies remain.
+      prompt: (v) => sceneStrings("srSaveQ", v),
+      variables: "m=[4:40]",
+      answer: 0,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Writing a Scanner</primer-title>
+
+    <primer-card>
+      <p>
+        Everything so far has been a link in one chain. Now we forge the whole thing and get a working scanner
+        out the other end. The pipeline is exactly the sequence of pages you have read:
+        <strong>regular definitions</strong> for each token →
+        <primer-ref soft to="computer-science/compiler-design/lexing/thompsons-construction">Thompson's
+        construction</primer-ref> into one big <primer-math>\varepsilon</primer-math>-NFA with each token's
+        accept state <em>tagged</em> by which token it recognises →
+        <primer-ref soft to="computer-science/compiler-design/lexing/subset-construction">subset
+        construction</primer-ref> into a DFA →
+        <primer-ref soft to="computer-science/compiler-design/lexing/dfa-minimization">minimization</primer-ref>
+        into a compact table. That table, wrapped in a driver loop, <em>is</em> the scanner. This page is about
+        the two things the theory left out: how to combine many token patterns into one machine, and the small
+        but crucial <strong>driver</strong> that turns "recognise a string" into "repeatedly bite off the next
+        token" — with the longest-match backtracking and the input buffering that make it fast and correct.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>One machine for all the tokens</h2>
+      <p>
+        A scanner does not run one automaton per token type. Instead <code>lex</code> takes the whole list of
+        patterns — <primer-math>p_1, p_2, \ldots, p_n</primer-math>, each with an action — and builds the NFA
+        for the <em>alternation</em> <primer-math>p_1 \mid p_2 \mid \cdots \mid p_n</primer-math>, but with a
+        twist: each pattern's accept state is <strong>labelled with the token it recognises</strong> (and its
+        rule number, to break ties). After subset construction, a single DFA state may therefore be accepting
+        for <em>several</em> tokens at once — it carries the set of rule numbers whose NFA accept states it
+        contains. Two rules resolve any clash, and you have met both already:
+      </p>
+      <primer-theorem name="How a combined scanner decides a token">
+        <ul>
+          <li>
+            <strong>Longest match (maximal munch).</strong> Keep running the DFA as long as it can move; the
+            token is the <em>longest</em> prefix that ended in <em>some</em> accepting state.
+          </li>
+          <li>
+            <strong>Rule priority.</strong> If that longest lexeme is accepted by several rules at once, choose
+            the one with the <em>lowest rule number</em> — the pattern listed first in the spec (so keywords,
+            listed before identifiers, win their spelling).
+          </li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The longest-match driver: run, remember, backtrack</h2>
+      <p>
+        Here is the subtlety maximal-munch forces on us. The DFA might march happily forward, pass <em>through</em>
+        an accepting state, and only later hit a dead end — by which point it has read characters past the last
+        good token. So the driver must <strong>remember the last accepting state it saw</strong> and, on getting
+        stuck, <strong>back up</strong> the input pointer to that point. The loop is:
+      </p>
+      <primer-code lang="text">
+        state ← DFA start
+        lastAccept ← none;  lastPos ← none
+        while state has a transition on the current char c:
+            state ← move(state, c)
+            advance the input pointer over c
+            if state is accepting:
+                lastAccept ← (token of state)   // remember the WIN
+                lastPos    ← current pointer     // and where it ended
+        // stuck. Retreat to the last win:
+        if lastAccept is none: report a lexical error
+        else:
+            roll the input pointer back to lastPos    // give back the over-read chars
+            emit token lastAccept for the lexeme up to lastPos
+            resume scanning from lastPos
+      </primer-code>
+      <p>
+        The "roll back" step is the whole reason a scanner needs to <em>peek ahead and retreat</em>. Consider a
+        language with both <code>&lt;</code> and <code>&lt;=</code> as tokens: reading <code>&lt;</code> then
+        <code>=</code> reaches the <code>le</code> accept, but reading <code>&lt;</code> then a letter must give
+        back that letter and emit <code>lt</code>. Without the remembered <code>lastPos</code>, the scanner
+        would either stop too early (missing <code>&lt;=</code>) or consume the letter it should have left for
+        the next token.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Table-driven vs direct-coded scanners</h2>
+      <p>
+        There are two ways to turn the DFA into a program, a classic engineering trade-off:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th></th><th>Table-driven</th><th>Direct-coded</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Form</td><td>a 2-D array <code>next[state][char]</code> read by one generic loop</td><td>the DFA compiled into control flow — a labelled block per state, <code>goto</code>/<code>switch</code> between them</td></tr>
+            <tr><td>Made by</td><td><code>lex</code>, <code>flex</code></td><td><code>re2c</code>, hand-writing</td></tr>
+            <tr><td>Size</td><td>compact table, tiny code</td><td>larger code, no table lookup</td></tr>
+            <tr><td>Speed</td><td>a memory load per character (cache misses on big tables)</td><td>faster — branches predict well, values stay in registers</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Both encode the <em>same</em> DFA and the <em>same</em> longest-match driver; they differ only in whether
+        the transition function lives in a data array or in the instruction stream. Table-driven scanners are the
+        textbook default because a generator can emit them trivially; direct-coded scanners win on raw
+        throughput, which is why performance-critical tools generate them.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Input buffering and the sentinel trick</h2>
+      <p>
+        The driver reads and occasionally <em>backs up</em> over characters, so it needs the recent input still
+        in memory — you cannot un-read from a stream. The classic solution is the <strong>two-buffer</strong>
+        scheme: two halves of a buffer, each <primer-math>N</primer-math> characters, refilled alternately. Two
+        pointers walk it — <code>lexemeBegin</code> (start of the current lexeme) and <code>forward</code> (the
+        scanning head) — and backing up is just moving <code>forward</code> back toward
+        <code>lexemeBegin</code>. The naïve version tests, on <em>every</em> character, both "have I run off the
+        end of this half?" and "is this the character I want?" — two comparisons per byte.
+      </p>
+      <p>
+        The <strong>sentinel</strong> optimisation halves that. Place a special
+        <primer-math>\texttt{eof}</primer-math> character at the end of each buffer half (and at the true end of
+        input). Now the inner loop tests only against the sentinel; only <em>when</em> it hits one does it do the
+        more expensive check of "real end of input, or just a buffer boundary to reload?". One comparison per
+        character in the common case — a measurable win in a loop that runs once per source byte.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A table-driven scanner, running</h2>
+      <p>
+        Below is the real thing in miniature: a hand-built DFA table over a tiny token set — identifiers
+        <primer-math>[a\text{-}z][a\text{-}z0\text{-}9]^{*}</primer-math>, numbers
+        <primer-math>[0\text{-}9]^{+}</primer-math>, and the single character <code>+</code> — driven by the
+        exact longest-match-with-backtracking loop above. Feed it <code>ab12+7</code> and watch it bite off one
+        token at a time.
+      </p>
+      <primer-code run>
+        // Character classes keep the table small.
+        function classOf(c: string): "letter" | "digit" | "plus" | "space" | "other" {
+          if (c &gt;= "a" &amp;&amp; c &lt;= "z") return "letter";
+          if (c &gt;= "0" &amp;&amp; c &lt;= "9") return "digit";
+          if (c === "+") return "plus";
+          if (c === " ") return "space";
+          return "other";
+        }
+
+        // DFA: state 0 = start. -1 = no transition (stuck).
+        // Accepting states carry a token name.
+        const NEXT: Record&lt;number, Partial&lt;Record&lt;string, number&gt;&gt;&gt; = {
+          0: { letter: 1, digit: 2, plus: 3, space: 4 },
+          1: { letter: 1, digit: 1 },   // identifier: letters/digits
+          2: { digit: 2 },              // number: digits
+          3: {},                        // '+'  (single char, no outgoing)
+          4: { space: 4 },              // run of whitespace
+        };
+        const ACCEPT: Record&lt;number, string&gt; = { 1: "id", 2: "num", 3: "plus", 4: "ws" };
+
+        function scan(src: string): string[] {
+          const out: string[] = [];
+          let i = 0;
+          while (i &lt; src.length) {
+            let state = 0, pos = i;
+            let lastTok: string | null = null, lastPos = i;
+            // run the DFA, remembering the last accepting position
+            while (pos &lt; src.length) {
+              const nxt = NEXT[state]?.[classOf(src[pos])];
+              if (nxt === undefined) break;           // stuck
+              state = nxt;
+              pos++;
+              if (ACCEPT[state] !== undefined) {       // a WIN — remember it
+                lastTok = ACCEPT[state];
+                lastPos = pos;
+              }
+            }
+            if (lastTok === null) throw new Error(`lexical error at '${src[i]}'`);
+            const lexeme = src.slice(i, lastPos);       // back up to the last win
+            if (lastTok !== "ws") out.push(`${lastTok}(${lexeme})`);
+            i = lastPos;                                // resume from there
+          }
+          return out;
+        }
+
+        console.log(scan("ab12 + 7").join("  "));
+        console.log(scan("hello99+42").join("  "));
+      </primer-code>
+      <p>
+        Notice <code>ab12</code> comes out as one <code>id</code> token, not <code>id</code> then
+        <code>num</code>: state 1 keeps accepting through the digits, so maximal munch swallows all four
+        characters. Whitespace is recognised (state 4) but its token is dropped before output. And each token
+        ends by rolling <code>i</code> back to <code>lastPos</code> — the remembered last-accepting position —
+        exactly the backtracking the driver spec called for.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If lex exists, why do clang and gcc hand-write their lexers?">
+      <p>
+        Production compilers almost universally <em>hand-write</em> their scanners rather than generate them,
+        and for good reasons. <strong>Speed</strong>: the lexer touches every byte of source, so it is a hot
+        loop, and a hand-tuned direct-coded scanner (careful character-class tables, sentinels, no per-token
+        allocation) beats a generic table interpreter. <strong>Error messages</strong>: a hand-written lexer can
+        emit "unterminated string literal starting here" with a caret under the exact column, recover
+        gracefully, and handle the thousand real-world quirks (digraphs, trigraphs, Unicode identifiers, raw
+        strings, <code>&gt;&gt;</code> in nested templates) that a pure regex spec makes awkward. Tools like
+        <strong>re2c</strong> sit in between — you write patterns in comments and it generates a fast
+        <em>direct-coded</em> scanner you can still read and tweak. The lesson: <code>lex</code> is a wonderful
+        way to <em>prototype</em> and to teach the theory, but the theory's real value is that it tells you
+        exactly what your hand-written loop must do — longest match, rule priority, backtrack, buffer.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The maximal-munch backtracking bug (&amp;&amp; vs &amp;)">
+      <p>
+        The driver's inner loop lives or dies by two conditions being checked <em>in the right order with the
+        right operator</em>: "am I still inside the buffer?" and "does the DFA have a move on this character?"
+        Write it as
+      </p>
+      <primer-code lang="typescript">
+        while (pos &lt; src.length &amp;&amp; NEXT[state][classOf(src[pos])] !== undefined) { … }
+      </primer-code>
+      <p>
+        and the logical <code>&amp;&amp;</code> <em>short-circuits</em>: if <code>pos</code> is past the end, the
+        second half is never evaluated, so you never index past the buffer. Swap in the bitwise
+        <code>&amp;</code> by mistake and both operands are <em>always</em> evaluated — the scanner reads
+        <code>src[pos]</code> when <code>pos</code> is out of bounds (an <code>undefined</code> character, a
+        wrong class, or a crash in a language with real arrays). Worse, <code>&amp;</code> forces both sides to
+        integers, so a truthy/falsy transition test silently becomes a numeric AND and the loop condition turns
+        to nonsense.
+      </p>
+      <p>
+        The related bug is <strong>forgetting to back up at all</strong>: if the driver emits a token at the
+        point it gets <em>stuck</em> rather than at the last <em>accepting</em> position, then
+        <code>&lt;=</code> vs <code>&lt;</code>, or <code>3.14</code> vs <code>3</code><code>.</code>, silently
+        mis-tokenise. Always emit from <code>lastPos</code> (the remembered win), never from wherever the DFA
+        happened to die.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: pipeline, tagged accepts, longest-match backtracking, table vs direct, buffering/sentinel, hand-written rationale. Bank of 12, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "scannerQuiz@1": {
+          "intro": "From spec to code: the lex pipeline, the longest-match driver, and input buffering. Numbers change each attempt.",
+          "pipeQ": "What is the correct order of the lex/flex scanner pipeline?",
+          "pipeA": "regular definitions → NFA (tagged accepts) → DFA → minimised table + driver",
+          "pipeB": "DFA → NFA → regex → parser",
+          "pipeC": "parser → tokens → regex → NFA",
+          "pipeD": "minimised table → regex → NFA → DFA",
+          "combineQ": "How are many token patterns combined into one scanner automaton?",
+          "combineA": "take the union p1|p2|…|pn, tagging each pattern's accept state with its token",
+          "combineB": "run n separate DFAs and pick the fastest",
+          "combineC": "concatenate all the patterns into one",
+          "combineD": "you cannot combine patterns",
+          "longQ": "By longest match, the token taken is…",
+          "longA": "the longest prefix that ended in some accepting state",
+          "longB": "the shortest accepting prefix",
+          "longC": "the first character only",
+          "longD": "whichever rule is listed last",
+          "tieQ": "If the longest lexeme is accepted by several rules at once, which token is chosen?",
+          "tieA": "the rule with the lowest number (listed first in the spec)",
+          "tieB": "the rule listed last",
+          "tieC": "a random one",
+          "tieD": "all of them, emitting several tokens",
+          "backQ": "Why must the driver remember the LAST accepting state and back up?",
+          "backA": "the DFA may read past a valid token before getting stuck, so it must retreat to the last win",
+          "backB": "to save memory",
+          "backC": "backing up is never needed for a DFA",
+          "backD": "to skip whitespace",
+          "emitQ": "The driver should emit a token from which position?",
+          "emitA": "the last ACCEPTING position (lastPos), not where the DFA got stuck",
+          "emitB": "wherever the DFA died",
+          "emitC": "the start of the buffer, always",
+          "emitD": "the end of the whole input",
+          "tableQ": "A TABLE-DRIVEN scanner represents the DFA as…",
+          "tableA": "a 2-D array next[state][char] read by one generic loop",
+          "tableB": "a block of code per state with gotos/switches",
+          "tableC": "a regular expression re-matched each time",
+          "tableD": "a recursive-descent parser",
+          "directQ": "A DIRECT-CODED scanner (e.g. from re2c) is usually…",
+          "directA": "faster — the DFA becomes control flow, values stay in registers",
+          "directB": "slower than table-driven in every case",
+          "directC": "unable to do longest match",
+          "directD": "the same bytes as a table-driven scanner",
+          "bufQ": "Why does a scanner use input buffering (e.g. a two-buffer scheme)?",
+          "bufA": "it backs up over characters, so recent input must stay in memory",
+          "bufB": "to compress the source file",
+          "bufC": "to run the parser in parallel",
+          "bufD": "buffering is only for output",
+          "sentQ": "What does the SENTINEL trick optimise?",
+          "sentA": "it cuts the inner loop to one comparison per character in the common case",
+          "sentB": "it doubles the buffer size",
+          "sentC": "it removes the need for accepting states",
+          "sentD": "it sorts the tokens",
+          "handQ": "Why do production compilers like clang often hand-write their lexers?",
+          "handA": "speed on the hot loop and far better error messages / recovery",
+          "handB": "because lex cannot recognise identifiers",
+          "handC": "hand-written lexers need no DFA theory",
+          "handD": "to avoid using longest match",
+          "opQ": "Using bitwise & instead of logical && in the driver's loop condition risks…",
+          "opA": "losing short-circuiting, so the buffer is indexed out of bounds",
+          "opB": "nothing — they behave identically",
+          "opC": "making the scanner faster and correct",
+          "opD": "emitting extra whitespace tokens",
+          "muncQ": "Scanning the input 'ab12' with rules id=[a-z][a-z0-9]* and num=[0-9]+, how many tokens are emitted?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="scannerQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/compiler-design/lexing/dfa-minimization"]
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("scannerQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("pipeQ"),
+      options: [
+        { text: () => sceneStrings("pipeA"), correct: true },
+        { text: () => sceneStrings("pipeB"), correct: false },
+        { text: () => sceneStrings("pipeC"), correct: false },
+        { text: () => sceneStrings("pipeD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("combineQ"),
+      options: [
+        { text: () => sceneStrings("combineA"), correct: true },
+        { text: () => sceneStrings("combineB"), correct: false },
+        { text: () => sceneStrings("combineC"), correct: false },
+        { text: () => sceneStrings("combineD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("longQ"),
+      options: [
+        { text: () => sceneStrings("longA"), correct: true },
+        { text: () => sceneStrings("longB"), correct: false },
+        { text: () => sceneStrings("longC"), correct: false },
+        { text: () => sceneStrings("longD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tieQ"),
+      options: [
+        { text: () => sceneStrings("tieA"), correct: true },
+        { text: () => sceneStrings("tieB"), correct: false },
+        { text: () => sceneStrings("tieC"), correct: false },
+        { text: () => sceneStrings("tieD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("backQ"),
+      options: [
+        { text: () => sceneStrings("backA"), correct: true },
+        { text: () => sceneStrings("backB"), correct: false },
+        { text: () => sceneStrings("backC"), correct: false },
+        { text: () => sceneStrings("backD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("emitQ"),
+      options: [
+        { text: () => sceneStrings("emitA"), correct: true },
+        { text: () => sceneStrings("emitB"), correct: false },
+        { text: () => sceneStrings("emitC"), correct: false },
+        { text: () => sceneStrings("emitD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tableQ"),
+      options: [
+        { text: () => sceneStrings("tableA"), correct: true },
+        { text: () => sceneStrings("tableB"), correct: false },
+        { text: () => sceneStrings("tableC"), correct: false },
+        { text: () => sceneStrings("tableD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("directQ"),
+      options: [
+        { text: () => sceneStrings("directA"), correct: true },
+        { text: () => sceneStrings("directB"), correct: false },
+        { text: () => sceneStrings("directC"), correct: false },
+        { text: () => sceneStrings("directD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bufQ"),
+      options: [
+        { text: () => sceneStrings("bufA"), correct: true },
+        { text: () => sceneStrings("bufB"), correct: false },
+        { text: () => sceneStrings("bufC"), correct: false },
+        { text: () => sceneStrings("bufD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sentQ"),
+      options: [
+        { text: () => sceneStrings("sentA"), correct: true },
+        { text: () => sceneStrings("sentB"), correct: false },
+        { text: () => sceneStrings("sentC"), correct: false },
+        { text: () => sceneStrings("sentD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("handQ"),
+      options: [
+        { text: () => sceneStrings("handA"), correct: true },
+        { text: () => sceneStrings("handB"), correct: false },
+        { text: () => sceneStrings("handC"), correct: false },
+        { text: () => sceneStrings("handD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("opQ"),
+      options: [
+        { text: () => sceneStrings("opA"), correct: true },
+        { text: () => sceneStrings("opB"), correct: false },
+        { text: () => sceneStrings("opC"), correct: false },
+        { text: () => sceneStrings("opD"), correct: false },
+      ],
+    },
+    {
+      // "ab12" -> one id token (maximal munch).
+      prompt: (v) => sceneStrings("muncQ", v),
+      variables: "z=[1:1]",
+      answer: () => 1,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

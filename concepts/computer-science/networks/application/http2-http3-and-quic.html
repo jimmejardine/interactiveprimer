@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>HTTP/2, HTTP/3 and QUIC</primer-title>
+
+    <primer-card>
+      <p>
+        The <primer-ref soft to="computer-science/networks/application/http">HTTP</primer-ref> you learned —
+        plain text, one request, one response — is HTTP/1.1, and it powered the web for two decades. But the
+        web it was designed for was a handful of documents. Today's web page pulls <em>hundreds</em> of
+        resources — scripts, fonts, images, trackers — and HTTP/1.1 fetches them like someone posting letters
+        one at a time and waiting for each reply before sending the next. That serial bottleneck is the story
+        of this page: how HTTP/2 and then HTTP/3 (over a new transport called <strong>QUIC</strong>) tore it
+        down, and the subtle reason the first fix wasn't enough.
+      </p>
+      <p>
+        The villain has a name that recurs at every level of networking: <strong>head-of-line (HOL)
+        blocking</strong> — one stuck item at the front of a queue holding up everything behind it, even though
+        those things are perfectly ready to go. Watch how each protocol version chases HOL blocking to a deeper
+        and deeper layer.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>HTTP/1.1's problem: one conversation at a time</h2>
+      <p>
+        On a single HTTP/1.1 connection, requests are strictly serial: send request 1, wait for response 1,
+        <em>then</em> send request 2. If response 1 is a slow 2 MB image, requests 2 and 3 — maybe tiny, maybe
+        already ready on the server — sit idle behind it. That's <strong>application-layer HOL blocking</strong>.
+      </p>
+      <p>
+        Browsers hacked around it in two ugly ways. They opened <strong>6 parallel TCP connections</strong> per
+        site (6 lanes instead of 1) — but each connection has its own
+        <primer-ref soft to="computer-science/networks/programming/the-socket-api">handshake</primer-ref> and
+        congestion-control warm-up, and 6 is an arbitrary, small cap. And developers resorted to <em>bundling</em>
+        — jamming all scripts into one giant file, stitching images into sprite sheets — purely to dodge the
+        per-request cost. On top of this, every HTTP/1.1 request re-sends the <strong>same verbose headers</strong>
+        (cookies, user-agent, accept lines) as plain text, uncompressed, thousands of times. The protocol was
+        drowning in its own overhead.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>HTTP/2: many streams, one connection</h2>
+      <p>
+        HTTP/2 (2015) kept HTTP's meaning — same methods, same status codes, same headers — but completely
+        rebuilt how it's put on the wire. Three changes matter:
+      </p>
+      <ul>
+        <li>
+          <strong>Binary framing.</strong> Messages are chopped into small binary <em>frames</em> instead of
+          one text blob, so many messages can be interleaved on the wire.
+        </li>
+        <li>
+          <strong>Multiplexed streams.</strong> A single TCP connection carries many independent
+          <strong>streams</strong> at once. Request 2 no longer waits for response 1 — their frames are
+          interleaved and travel together. One connection now does the work that needed six.
+        </li>
+        <li>
+          <strong>Header compression (HPACK)</strong> squeezes those repetitive headers down, often to a
+          handful of bytes, by remembering what was sent before. (There was also <strong>server push</strong> —
+          sending resources you hadn't asked for yet — but it proved more trouble than it was worth and has
+          largely been abandoned.)
+        </li>
+      </ul>
+      <p>
+        This <em>solves application-layer HOL blocking</em>: at the HTTP level, streams are independent and a
+        slow response no longer blocks the others. But HTTP/2 left one deeper problem untouched, and it's the
+        crux of the whole page.
+      </p>
+
+      <primer-theorem name="HTTP/2's residual flaw: TCP head-of-line blocking">
+        <ul>
+          <li>
+            All HTTP/2 streams share <strong>one TCP connection</strong>, and TCP guarantees <em>in-order
+            delivery of the whole byte stream</em>.
+          </li>
+          <li>
+            So if a single TCP packet is lost, TCP <strong>halts delivery of everything behind it</strong>
+            until that packet is retransmitted — even bytes belonging to <em>other</em>, unrelated streams that
+            arrived just fine.
+          </li>
+          <li>
+            HTTP/2 removed HOL blocking at the application layer but the streams are still trapped inside one
+            ordered TCP pipe, so <strong>transport-layer HOL blocking remains</strong>.
+          </li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Three protocols, one picture</h2>
+      <p>
+        The diagram lays the three approaches side by side on a shared time axis. Step through it to see the
+        serial stall of HTTP/1.1, HTTP/2's multiplexing (and how one lost packet still freezes every stream),
+        and how HTTP/3 finally isolates a loss to a single stream.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "holCompare": {
+            "title": "HOL blocking across HTTP/1.1, HTTP/2 and HTTP/3",
+            "h1Label": "HTTP/1.1 — one request at a time",
+            "h2Label": "HTTP/2 — multiplexed over ONE TCP connection",
+            "h3Label": "HTTP/3 — independent streams over QUIC (UDP)",
+            "timeLabel": "time →",
+            "s1": "HTTP/1.1: three requests run strictly one after another — request 3 waits for 1 and 2 (application HOL blocking).",
+            "s2": "HTTP/2: the three streams are interleaved on one connection and all finish early — application HOL blocking is gone.",
+            "s3": "HTTP/2 flaw: one lost TCP packet stalls delivery of ALL streams until it is retransmitted — transport HOL blocking.",
+            "s4": "HTTP/3 / QUIC: streams are independent, so a loss on one stream stalls only that stream; the others keep flowing.",
+            "lost": "✕ packet lost",
+            "stallAll": "all streams stall",
+            "stallOne": "only this stream stalls"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="holCompare"
+        caption="Three timelines on a shared time axis. HTTP/1.1 shows three request bars laid end to end, running serially. HTTP/2 shows three stream bars overlapping in time (multiplexed) that finish early, but a lost packet marker causes all three to stall together. HTTP/3 over QUIC shows three overlapping stream bars where a lost packet on one stream stalls only that stream while the other two finish on time."
+      ></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>QUIC: move the streams off TCP entirely</h2>
+      <p>
+        The fix for transport HOL blocking is radical: <em>stop using TCP</em>. HTTP/3 runs over
+        <strong>QUIC</strong>, a new transport built by Google (now an IETF standard) that runs on top of
+        <strong>UDP</strong> — the connectionless, no-ordering-guarantees protocol. On bare UDP that would be
+        chaos, so QUIC rebuilds the good parts of TCP (reliability, congestion control, ordering) <em>per
+        stream, in user space</em>, while deliberately leaving out the one bad part: a single global order for
+        the whole connection.
+      </p>
+      <p>
+        Because QUIC understands streams natively, a lost packet on stream A stalls <em>only stream A</em>;
+        streams B and C, whose packets arrived, are delivered immediately. That is the payoff HTTP/2 couldn't
+        reach — <strong>true per-stream independence</strong>. QUIC piles on more wins from being new and in
+        user space:
+      </p>
+      <ul>
+        <li>
+          <strong>Built-in TLS 1.3.</strong> Encryption isn't bolted on top — it's integral. The transport and
+          crypto handshakes merge, so a connection sets up in <strong>one round trip</strong> (versus TCP's
+          handshake <em>then</em> TLS's handshake), and repeat visits can use <strong>0-RTT</strong> — sending
+          data in the very first packet.
+        </li>
+        <li>
+          <strong>Connection migration.</strong> A QUIC connection is identified by a connection ID, not the
+          IP-and-port
+          <primer-ref soft to="computer-science/networks/programming/the-socket-api">4-tuple</primer-ref>. So
+          when your phone hops from Wi-Fi to cellular — changing its IP — the connection <em>survives</em>
+          instead of breaking, and your video call doesn't drop.
+        </li>
+      </ul>
+      <p>
+        And <strong>HTTP/3 is simply HTTP semantics carried over QUIC</strong>: the same methods, status codes
+        and headers you already know, now on a transport that doesn't let one lost packet block everything else.
+      </p>
+
+      <primer-vignette title="Why build a new transport in user space instead of fixing TCP?">
+        <p>
+          TCP lives in the operating-system kernel, and the whole Internet — every router, firewall and
+          middlebox — has 40 years of assumptions baked in about how TCP behaves. Changing TCP means changing
+          billions of kernels and untold middleboxes; in practice, impossible. UDP, by contrast, is a thin
+          "here's a packet" primitive that middleboxes already pass through. By building on UDP <em>in user
+          space</em> (inside the browser and server application, not the kernel), QUIC can be deployed and
+          <em>updated</em> as fast as a browser auto-update — no waiting a decade for operating systems to catch
+          up. It's protocol evolution routed around an ossified Internet.
+        </p>
+      </primer-vignette>
+
+      <primer-vignette title="Watch out! — HTTP/2 solved APPLICATION HOL blocking, not TRANSPORT HOL blocking">
+        <p>
+          The single most common misunderstanding here is "HTTP/2 has multiplexing, so it fixed head-of-line
+          blocking." It fixed <em>one</em> of them. At the <strong>application layer</strong>, yes: HTTP/2's
+          streams are independent, so a slow response no longer blocks other requests. But all those streams
+          still ride inside <em>one TCP connection</em>, and TCP insists on delivering its byte stream strictly
+          in order. So the instant a single TCP packet is lost, TCP freezes delivery of <em>every</em> stream
+          — including ones whose data already arrived — until the missing packet is retransmitted. That is
+          <strong>transport-layer HOL blocking</strong>, and HTTP/2 is powerless against it because the flaw is
+          in TCP, one layer below.
+        </p>
+        <p>
+          This is <em>exactly</em> why QUIC exists and why HTTP/3 abandoned TCP for a UDP-based transport that
+          understands streams. If you remember one thing: <strong>multiplexing over a single ordered TCP pipe
+          moves the HOL bottleneck down a layer; it doesn't remove it. Only a stream-aware transport (QUIC)
+          removes it.</strong> On a fast, loss-free network HTTP/2 and HTTP/3 perform similarly — QUIC's
+          advantage shows up precisely when packets are being lost.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "quicQuiz@1": { "instructions": "Check your grasp of HTTP evolution: HTTP/1.1's bottleneck, HTTP/2 multiplexing and its TCP HOL-blocking flaw, and how QUIC / HTTP/3 fix it." } }
+    </script>
+    <primer-quiz name="quicQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/application/http"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // Three timelines on a shared time axis contrasting HOL blocking.
+  // Row group 1 (HTTP/1.1): three bars end-to-end (serial).
+  // Row group 2 (HTTP/2): three overlapping bars (multiplexed) that finish early;
+  //   a lost-packet marker stalls all three (transport HOL blocking).
+  // Row group 3 (HTTP/3): three overlapping bars where a loss stalls only one stream.
+  registerGeometryScene("holCompare", ({ board, step, colors, sceneStrings }) => {
+    const bar = (x1, x2, y, col, w = 9) =>
+      board.create("segment", [[x1, y], [x2, y]], {
+        strokeColor: col, strokeWidth: w, fixed: true, highlight: false,
+        straightFirst: false, straightLast: false, lineCap: "butt",
+      });
+    const lab = (x, y, s, col, size = 12, bold = true) =>
+      board.create("text", [x, y, s], {
+        anchorX: "start", anchorY: "middle", fontSize: size, fixed: true, highlight: false,
+        strokeColor: col, color: col, cssStyle: bold ? "font-weight:700" : "",
+      });
+    const mark = (x, y, s, col) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true, highlight: false,
+        strokeColor: col, color: col, cssStyle: "font-weight:700",
+      });
+
+    // Base content: the three group headers + a time axis, visible on load.
+    lab(-0.5, 6.4, sceneStrings("h1Label"), colors.ink);
+    lab(-0.5, 3.4, sceneStrings("h2Label"), colors.ink);
+    lab(-0.5, 0.4, sceneStrings("h3Label"), colors.ink);
+    board.create("arrow", [[-0.5, -2.4], [10, -2.4]], { strokeColor: colors.line, strokeOpacity: 0.5, fixed: true, highlight: false });
+    lab(9, -2.0, sceneStrings("timeLabel"), colors.line, 11, false);
+
+    // Step 1 — HTTP/1.1: three serial bars.
+    step(sceneStrings("s1"), () => {
+      bar(0, 3, 5.7, colors.cat[0]);
+      bar(3, 6, 5.7, colors.cat[1]);
+      bar(6, 9, 5.7, colors.cat[2]);
+    });
+
+    // Step 2 — HTTP/2: three multiplexed bars, all finish early (~x=4).
+    step(sceneStrings("s2"), () => {
+      bar(0, 4, 3.0, colors.cat[0]);
+      bar(0, 4, 2.5, colors.cat[1]);
+      bar(0, 4, 2.0, colors.cat[2]);
+    });
+
+    // Step 3 — HTTP/2 flaw: a lost packet stalls all three streams.
+    step(sceneStrings("s3"), () => {
+      mark(2, 3.0, sceneStrings("lost"), colors.cat[0]);
+      bar(2, 4, 3.0, colors.line);   // stalled continuation (greyed) for stream 1
+      bar(2, 4, 2.5, colors.line);   // stream 2 stalls too
+      bar(2, 4, 2.0, colors.line);   // stream 3 stalls too
+      mark(6.6, 2.5, sceneStrings("stallAll"), colors.line);
+    });
+
+    // Step 4 — HTTP/3 / QUIC: loss stalls only one stream; others finish on time.
+    step(sceneStrings("s4"), () => {
+      bar(0, 4, 0.0, colors.cat[0]);          // stream 1 finishes at 4
+      bar(0, 2, -0.5, colors.cat[1]);         // stream 2 hits a loss at x=2 ...
+      mark(2, -0.5, sceneStrings("lost"), colors.cat[1]);
+      bar(2, 5.5, -0.5, colors.line);         // ... only stream 2 stalls/extends
+      bar(0, 4, -1.0, colors.cat[2]);         // stream 3 finishes at 4
+      mark(7.3, -1.0, sceneStrings("stallOne"), colors.cat[1]);
+    });
+  }, {
+    boundingbox: [-1.5, 7.2, 10.5, -3],
+    keepAspect: false,
+    title: () => makeStrings("holCompare")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("quicQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "What is 'head-of-line (HOL) blocking'?",
+      options: [
+        { text: "one stuck item at the front of a queue holds up everything behind it, even things that are ready", correct: true },
+        { text: "the server runs out of memory", correct: false },
+        { text: "a cookie is sent to the wrong site", correct: false },
+        { text: "the first byte of a file is corrupted", correct: false },
+      ] },
+
+    { prompt: "On a single HTTP/1.1 connection, why do requests bottleneck?",
+      options: [
+        { text: "requests are serial — a slow response blocks the ones queued behind it (application HOL blocking)", correct: true },
+        { text: "HTTP/1.1 cannot send more than one byte per second", correct: false },
+        { text: "each request needs a new IP address", correct: false },
+        { text: "HTTP/1.1 has no status codes", correct: false },
+      ] },
+
+    { prompt: "How did browsers work around HTTP/1.1's serial limit?",
+      options: [
+        { text: "opening several parallel TCP connections (about 6) and bundling many files into one", correct: true },
+        { text: "switching every request to UDP", correct: false },
+        { text: "disabling DNS caching", correct: false },
+        { text: "sending requests without headers", correct: false },
+      ] },
+
+    { prompt: "The core improvement of HTTP/2 is…",
+      options: [
+        { text: "multiplexing many independent streams over one TCP connection using binary framing", correct: true },
+        { text: "replacing TCP with UDP", correct: false },
+        { text: "removing status codes to save bytes", correct: false },
+        { text: "encrypting cookies", correct: false },
+      ] },
+
+    { prompt: "HPACK in HTTP/2 does what?",
+      options: [
+        { text: "compresses the repetitive request/response headers", correct: true },
+        { text: "encrypts the whole connection", correct: false },
+        { text: "assigns IP addresses to streams", correct: false },
+        { text: "guarantees packets are never lost", correct: false },
+      ] },
+
+    { prompt: "HTTP/2 multiplexing solves HOL blocking at which layer?",
+      options: [
+        { text: "the application layer — HTTP streams no longer block each other", correct: true },
+        { text: "the transport layer — TCP no longer blocks anything", correct: false },
+        { text: "the physical layer", correct: false },
+        { text: "the DNS layer", correct: false },
+      ] },
+
+    { prompt: "What is HTTP/2's remaining flaw?",
+      options: [
+        { text: "all streams share one TCP connection, so a single lost packet stalls every stream (transport HOL blocking)", correct: true },
+        { text: "it cannot compress headers", correct: false },
+        { text: "it only allows one request per connection", correct: false },
+        { text: "it drops encryption", correct: false },
+      ] },
+
+    { prompt: "Why does one lost TCP packet stall unrelated HTTP/2 streams?",
+      options: [
+        { text: "TCP delivers its byte stream strictly in order, so it holds back everything behind the gap", correct: true },
+        { text: "TCP deletes the other streams", correct: false },
+        { text: "the server closes the connection on any loss", correct: false },
+        { text: "HTTP/2 has no multiplexing", correct: false },
+      ] },
+
+    { prompt: "QUIC runs on top of which transport?",
+      options: [
+        { text: "UDP", correct: true },
+        { text: "TCP", correct: false },
+        { text: "ICMP", correct: false },
+        { text: "a brand-new layer replacing IP", correct: false },
+      ] },
+
+    { prompt: "How does QUIC avoid transport HOL blocking?",
+      options: [
+        { text: "it understands streams natively, so a loss on one stream stalls only that stream", correct: true },
+        { text: "it never loses any packets", correct: false },
+        { text: "it uses one connection per stream", correct: false },
+        { text: "it disables ordering entirely, even within a stream", correct: false },
+      ] },
+
+    { prompt: "HTTP/3 is best described as…",
+      options: [
+        { text: "HTTP semantics (same methods, status codes, headers) carried over QUIC", correct: true },
+        { text: "a completely new set of methods and status codes", correct: false },
+        { text: "HTTP/2 with bigger headers", correct: false },
+        { text: "a replacement for DNS", correct: false },
+      ] },
+
+    { prompt: "QUIC integrates TLS 1.3, which lets it…",
+      options: [
+        { text: "merge the transport and crypto handshakes, setting up in about one round trip (0-RTT on repeat visits)", correct: true },
+        { text: "skip encryption to go faster", correct: false },
+        { text: "avoid using UDP", correct: false },
+        { text: "guarantee zero packet loss", correct: false },
+      ] },
+
+    { prompt: "QUIC 'connection migration' means…",
+      options: [
+        { text: "a connection identified by a connection ID survives an IP change, e.g. Wi-Fi to cellular", correct: true },
+        { text: "the connection moves to a faster server", correct: false },
+        { text: "the data migrates to a database", correct: false },
+        { text: "the connection switches from UDP back to TCP", correct: false },
+      ] },
+
+    { prompt: "Why build QUIC on UDP in user space rather than fixing TCP?",
+      options: [
+        { text: "TCP is baked into kernels and middleboxes worldwide; UDP in user space can be deployed and updated quickly", correct: true },
+        { text: "UDP is always faster than TCP for every workload", correct: false },
+        { text: "TCP cannot carry encrypted data", correct: false },
+        { text: "user-space code cannot access the network otherwise", correct: false },
+      ] },
+
+    { prompt: "When does HTTP/3 most clearly beat HTTP/2?",
+      options: [
+        { text: "on lossy networks — QUIC's per-stream independence shines exactly when packets are lost", correct: true },
+        { text: "only on perfectly loss-free networks", correct: false },
+        { text: "never — they are identical in all conditions", correct: false },
+        { text: "only when DNS is disabled", correct: false },
+      ] },
+
+    { prompt: "The key takeaway about multiplexing over one TCP connection is…",
+      options: [
+        { text: "it moves the HOL bottleneck down a layer (to TCP); only a stream-aware transport like QUIC removes it", correct: true },
+        { text: "it removes HOL blocking completely at every layer", correct: false },
+        { text: "it makes encryption impossible", correct: false },
+        { text: "it requires six connections per site", correct: false },
+      ] },
+  ]);
+</script>

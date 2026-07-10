@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Copy-on-Write File Systems</primer-title>
+
+    <primer-card>
+      <p>
+        <primer-ref to="computer-science/advanced-operating-systems/filesystems/journaling-file-systems">Journaling</primer-ref>
+        keeps the old overwrite-in-place layout and bolts a log on the side to survive crashes — paying the double-write
+        tax. <strong>Copy-on-write</strong> (COW) file systems — ZFS (Sun, 2005) and btrfs (Linux) are the famous ones,
+        with Network Appliance's WAFL the pioneer — make a cleaner bargain: <strong>never overwrite live data at all</strong>.
+        To change a block, write a <em>new</em> copy elsewhere, thread a new path up to the root, and then flip a single
+        pointer to make the new version the official one. The old version is left entirely intact.
+      </p>
+      <p>
+        This one decision cascades into an astonishing set of benefits. Crash consistency becomes <em>free</em> — the old
+        tree is always a valid file system, so a crash mid-update simply leaves you on the old root, no journal, no fsck.
+        Snapshots become <em>nearly free</em> — the old tree you were going to abandon <em>is</em> a snapshot, sharing
+        every unchanged block. And because each pointer can carry a <strong>checksum</strong> of what it points to, the
+        file system can detect and even repair silent disk corruption. COW is the design where consistency, snapshots,
+        and integrity all fall out of a single structural rule.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The file system is a tree; update it bottom-up</h2>
+      <p>
+        Picture the whole file system as one big tree of blocks: a <strong>root</strong> block points at interior blocks,
+        which point at more, down to the <strong>leaf</strong> data blocks. To modify a leaf, COW does <em>not</em> touch
+        it in place. Instead it walks the change <strong>bottom-up</strong>:
+      </p>
+      <primer-theorem name="The copy-on-write update">
+        <ul>
+          <li>write a <strong>new copy</strong> of the changed leaf block at a free location (the old leaf is untouched);</li>
+          <li>because its parent must now point at the new leaf, write a <strong>new copy of the parent</strong> too —
+            and so on, up every level to the root;</li>
+          <li>finally, <strong>atomically flip the root pointer</strong> (ZFS's <em>uberblock</em>) from the old tree to
+            the new one. That single atomic write is the instant the update becomes visible.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Until the root flips, a reader sees the entire old tree — complete and consistent. After it flips, readers see
+        the entire new tree — complete and consistent. There is <em>no</em> in-between state a crash could expose, because
+        the only thing that changed atomically is one pointer. This is why COW file systems need no journal: the layout
+        itself is always consistent by construction.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the COW tree figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "cow": {
+          "title": "Copy-on-write: rewrite the path from changed leaf to a new root, then atomically flip the root",
+          "root": "root",
+          "rootNew": "root′ (current)",
+          "snap": "root = snapshot",
+          "s1": "The file-system tree: root → interior → leaf data blocks",
+          "s2": "Change leaf d: write a NEW copy d′ — the old d is untouched",
+          "s3": "Copy the path up: new parent R′, new root′ — sharing the untouched left subtree",
+          "s4": "Flip the root pointer atomically. The OLD root is now a free snapshot",
+          "shared": "shared (not copied)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Watch the root flip</h2>
+      <p>
+        Follow the update of a single leaf. Only the blocks on the <em>path</em> from that leaf to the root are copied;
+        every other subtree is <strong>shared</strong> between the old and new trees, untouched. When the root flips, the
+        old root does not become garbage — it becomes a perfectly usable <strong>snapshot</strong>.
+      </p>
+      <primer-geometry scene="cow"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Snapshots and clones: sharing is the whole trick</h2>
+      <p>
+        Because a COW update already leaves the old tree intact, a <strong>snapshot</strong> costs almost nothing: just
+        keep the old root and refuse to free the blocks it reaches. The snapshot and the live file system
+        <strong>share</strong> every block they have in common; only blocks that are subsequently <em>changed</em> get new
+        copies, and the changed block's old version stays alive as long as some snapshot references it. This is why you
+        can snapshot a multi-terabyte ZFS pool in <em>milliseconds</em> and it consumes essentially zero extra space
+        until data diverges.
+      </p>
+      <p>
+        A <strong>clone</strong> is a writable snapshot — start from a shared tree and let both sides COW their own
+        changes. Databases, container images (each layer a clone), and "time-machine" backups all ride on this. The
+        bookkeeping is <strong>reference counting</strong> (btrfs) or <strong>birth times</strong> (ZFS): a block may be
+        freed only when no live tree <em>or snapshot</em> still points at it.
+      </p>
+      <primer-code run>
+        // Snapshots share unchanged blocks; only the path from a changed leaf to the root is copied (COW).
+        // Tree: root -> {L, R}; L -> {a, b}; R -> {c, d}.
+        let live = new Set&lt;string&gt;(["root", "L", "R", "a", "b", "c", "d"]);
+        console.log(`live tree: ${live.size} blocks`);
+
+        // Take a snapshot: keep the current root; share ALL blocks, copy NOTHING.
+        const snapshot = new Set(live);
+        console.log(`snapshot taken -> 0 new blocks written, all ${snapshot.size} shared`);
+
+        // Modify leaf d. COW rewrites only the path d -> R -> root.
+        const path = ["d", "R", "root"];
+        const copied = path.map((b) =&gt; b + "′");
+        live = new Set(["root′", "L", "R′", "a", "b", "c", "d′"]);
+        console.log(`modify leaf d -> copied ${copied.length} blocks along the path: ${copied.join(", ")}`);
+
+        const shared = [...live].filter((b) =&gt; snapshot.has(b));
+        console.log(`still shared with the snapshot (free): ${shared.join(", ")}`);
+
+        const onDisk = new Set([...live, ...snapshot]);
+        console.log(`unique blocks on disk: ${onDisk.size}  (a full copy would need ${live.size + snapshot.size})`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Checksums: end-to-end integrity</h2>
+      <p>
+        COW hands you integrity almost for free too. Since every block already gets a fresh parent pointer on update, ZFS
+        and btrfs store the block's <strong>checksum in its parent</strong> rather than beside the data. So when you read
+        a block, you validate it against a checksum that lives <em>somewhere else on the disk</em> — a genuine
+        <strong>end-to-end</strong> check that catches not just bit-rot but misdirected writes, phantom writes, and a
+        disk returning the wrong block entirely. With a redundant copy (a mirror or RAID-Z), a failed checksum triggers
+        <strong>self-healing</strong>: read the good copy, hand the caller correct data, and rewrite the bad block. This
+        is why ZFS is trusted for archival storage — it does not just survive crashes, it detects the disk <em>lying</em>.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If nothing is overwritten, why doesn't the disk fill up instantly?">
+      <p>
+        Because the old versions are freed <em>once nothing references them</em>. When you update a leaf and flip the
+        root, the old leaf, old parent, and old root become garbage <em>unless</em> a snapshot still points at them — at
+        which point a background reclaimer (or reference-count drop) returns their space to the free pool. So COW is not
+        "keep everything forever"; it is "keep the old version alive exactly as long as some tree still needs it." The
+        cost you <em>do</em> pay is <strong>write amplification</strong>: changing one leaf forces you to rewrite every
+        block on the path to the root (a handful of blocks for one data change), and over time all this out-of-place
+        writing <strong>fragments</strong> the disk, so a file's blocks scatter and sequential reads slow down. ZFS fights
+        this with large caches (the ARC) and clever allocation; btrfs offers explicit defragmentation. It is the same
+        space-and-fragmentation trade that
+        <primer-ref to="computer-science/advanced-operating-systems/filesystems/log-structured-file-systems">log-structured
+        file systems</primer-ref> make — COW is, in a sense, LFS's tree-shaped cousin.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Updating one leaf is NOT one block write — it rewrites the whole path to the root">
+      <p>
+        The seductive picture of COW is "just write the new block somewhere else." But the parent pointer must change to
+        find that new block, which means the parent is rewritten, which changes <em>its</em> parent, all the way up. So a
+        one-byte change to a leaf in a tree of height <primer-math>h</primer-math> triggers <primer-math>h+1</primer-math>
+        block writes (the leaf plus every ancestor up to and including the new root). This <em>write amplification</em> is
+        the price of never overwriting in place, and it is why COW file systems batch many changes into a single
+        root-flip (amortising the path-to-root cost over lots of updates) and why deep trees are more expensive to modify
+        than shallow ones. Never model a COW write as a single I/O — count the path.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Where this sits</h2>
+      <p>
+        COW, journaling, and log-structured design are three answers to the one crash-consistency question, and they
+        share DNA: all three refuse to trust an in-place overwrite as atomic. But even a perfectly consistent COW file
+        system still faces the last problem in this module — when <primer-math>\texttt{write()}</primer-math> returns,
+        the new root may still be sitting in a volatile cache, not on stable media. Guaranteeing "it is really, durably
+        on disk now" is the job of
+        <primer-ref forward to="computer-science/advanced-operating-systems/filesystems/fsync-durability-and-write-barriers">fsync
+        and write barriers</primer-ref>, next.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: COW concepts + numeric (path-to-root writes, snapshot sharing). Bank of 12, draws 5.
+         Variable names: h (tree height), nb (blocks), pl (path length). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "cowQuiz@1": {
+          "intro": "COW never overwrites live data: copy the changed leaf, rewrite the path to a new root, flip the root atomically. Snapshots share unchanged blocks; checksums-in-parent give end-to-end integrity.",
+          "coreQ": "The defining rule of a copy-on-write file system is…",
+          "coRight": "never overwrite live data in place — write new blocks and flip a pointer to them",
+          "coWrong1": "overwrite blocks in place but log them first",
+          "coWrong2": "keep the entire disk in RAM",
+          "coWrong3": "compress every block before writing",
+          "flipQ": "A COW update becomes visible at the moment it…",
+          "flRight": "atomically flips the single root pointer to the new tree",
+          "flWrong1": "finishes writing the first leaf block",
+          "flWrong2": "reboots the machine",
+          "flWrong3": "runs fsck",
+          "consistQ": "COW file systems need no journal because…",
+          "csRight": "the old tree stays fully valid until the atomic root flip — there is no torn intermediate state",
+          "csWrong1": "they never crash",
+          "csWrong2": "they store two copies of every file",
+          "csWrong3": "the disk guarantees multi-block atomicity",
+          "snapQ": "A snapshot in a COW file system is cheap because it…",
+          "snRight": "just keeps the old root and shares all unchanged blocks — copying nothing up front",
+          "snWrong1": "duplicates the entire file system immediately",
+          "snWrong2": "compresses the disk",
+          "snWrong3": "deletes old data",
+          "cloneQ": "A clone differs from a snapshot in that it is…",
+          "clRight": "writable — both sides COW their own changes from a shared starting tree",
+          "clWrong1": "read-only and never changes",
+          "clWrong2": "stored on a different disk always",
+          "clWrong3": "identical in every way",
+          "freeQ": "In a COW file system, an old block may be freed only when…",
+          "frRight": "no live tree or snapshot still references it (by ref count or birth time)",
+          "frWrong1": "one second has passed",
+          "frWrong2": "the user logs out",
+          "frWrong3": "immediately after any update",
+          "checksumQ": "Storing a block's checksum in its PARENT gives…",
+          "chRight": "an end-to-end integrity check that catches bit-rot and misdirected/phantom writes",
+          "chWrong1": "faster writes only",
+          "chWrong2": "encryption of the block",
+          "chWrong3": "nothing useful",
+          "healQ": "Self-healing in ZFS means that on a checksum failure it…",
+          "heRight": "reads a redundant good copy, returns correct data, and rewrites the bad block",
+          "heWrong1": "deletes the file",
+          "heWrong2": "ignores the error",
+          "heWrong3": "reformats the disk",
+          "tradeQ": "The main cost of copy-on-write is…",
+          "trRight": "write amplification and fragmentation — rewriting the path to the root scatters blocks",
+          "trWrong1": "it cannot take snapshots",
+          "trWrong2": "it always loses data on a crash",
+          "trWrong3": "it needs a separate journal",
+          "pathNumQ": "Modifying one leaf in a COW tree of height {h} rewrites how many blocks (the leaf plus every ancestor up to the new root)?",
+          "shareNumQ": "You snapshot a {nb}-block tree, then modify one leaf whose path to the root is {pl} blocks long. How many UNIQUE blocks are now on disk?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="cowQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/filesystems/journaling-file-systems"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- COW tree update: original tree (root, two interior, four leaves) as base; steps copy leaf d -> R′ -> root′,
+     sharing the untouched left subtree; the old root becomes a snapshot. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "cow",
+    ({ board, colors, step, sceneStrings }) => {
+      const node = (x, y, label, ci, r = 0.55) => {
+        board.create("circle", [[x, y], r], {
+          fillColor: colors.cat[ci % 6], fillOpacity: 0.28,
+          strokeColor: colors.line, strokeWidth: 1.4, fixed: true, highlight: false,
+        });
+        board.create("text", [x, y, label], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      };
+      const link = (x0, y0, x1, y1, ci, dashed = false) =>
+        board.create("arrow", [[x0, y0], [x1, y1]], {
+          strokeColor: colors.cat[ci % 6], strokeWidth: 1.8, dash: dashed ? 2 : 0,
+          lastArrow: { size: 5 }, fixed: true, highlight: false,
+        });
+
+      // Positions.
+      const P = {
+        root: [4, 8], L: [2, 5.5], R: [6, 5.5],
+        a: [1, 3], b: [3, 3], c: [5, 3], d: [7, 3],
+        dN: [10, 3], RN: [9, 5.5], rootN: [7, 8],
+      };
+
+      // Base: the original tree (always visible), coloured cat[0].
+      const drawOrig = () => {
+        link(...P.root, ...P.L, 0); link(...P.root, ...P.R, 0);
+        link(...P.L, ...P.a, 0); link(...P.L, ...P.b, 0);
+        link(...P.R, ...P.c, 0); link(...P.R, ...P.d, 0);
+        node(...P.a, "a", 0, 0.45); node(...P.b, "b", 0, 0.45);
+        node(...P.c, "c", 0, 0.45); node(...P.d, "d", 0, 0.45);
+        node(...P.L, "L", 0); node(...P.R, "R", 0);
+        node(...P.root, sceneStrings("root"), 0);
+      };
+      step(sceneStrings("s1"), drawOrig);
+
+      // Step 2: new copy of the leaf d.
+      step(sceneStrings("s2"), () => {
+        node(...P.dN, "d′", 3, 0.45);
+      });
+
+      // Step 3: new parent R′ and new root′, sharing the left subtree (dashed reuse arrows).
+      step(sceneStrings("s3"), () => {
+        node(...P.RN, "R′", 3);
+        link(...P.RN, ...P.c, 3, true);   // shares old c
+        link(...P.RN, ...P.dN, 3);
+        node(...P.rootN, sceneStrings("rootNew"), 3, 0.7);
+        link(...P.rootN, ...P.L, 3, true); // shares old L subtree
+        link(...P.rootN, ...P.RN, 3);
+        board.create("text", [5.4, 4.0, sceneStrings("shared")], {
+          strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "opacity:0.85",
+        });
+      });
+
+      // Step 4: mark the old root as a snapshot.
+      step(sceneStrings("s4"), () => {
+        board.create("text", [4, 9.0, sceneStrings("snap")], {
+          strokeColor: colors.cat[1], fontSize: 11, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:600",
+        });
+      });
+    },
+    {
+      boundingbox: [-0.6, 9.8, 11.4, 2.0],
+      keepAspect: false,
+      title: () => makeStrings("cow")("title"),
+    },
+  );
+
+  registerQuiz("cowQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("coreQ"), options: [
+      { text: () => sceneStrings("coRight"), correct: true },
+      { text: () => sceneStrings("coWrong1"), correct: false },
+      { text: () => sceneStrings("coWrong2"), correct: false },
+      { text: () => sceneStrings("coWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("flipQ"), options: [
+      { text: () => sceneStrings("flRight"), correct: true },
+      { text: () => sceneStrings("flWrong1"), correct: false },
+      { text: () => sceneStrings("flWrong2"), correct: false },
+      { text: () => sceneStrings("flWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("consistQ"), options: [
+      { text: () => sceneStrings("csRight"), correct: true },
+      { text: () => sceneStrings("csWrong1"), correct: false },
+      { text: () => sceneStrings("csWrong2"), correct: false },
+      { text: () => sceneStrings("csWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("snapQ"), options: [
+      { text: () => sceneStrings("snRight"), correct: true },
+      { text: () => sceneStrings("snWrong1"), correct: false },
+      { text: () => sceneStrings("snWrong2"), correct: false },
+      { text: () => sceneStrings("snWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cloneQ"), options: [
+      { text: () => sceneStrings("clRight"), correct: true },
+      { text: () => sceneStrings("clWrong1"), correct: false },
+      { text: () => sceneStrings("clWrong2"), correct: false },
+      { text: () => sceneStrings("clWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("freeQ"), options: [
+      { text: () => sceneStrings("frRight"), correct: true },
+      { text: () => sceneStrings("frWrong1"), correct: false },
+      { text: () => sceneStrings("frWrong2"), correct: false },
+      { text: () => sceneStrings("frWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("checksumQ"), options: [
+      { text: () => sceneStrings("chRight"), correct: true },
+      { text: () => sceneStrings("chWrong1"), correct: false },
+      { text: () => sceneStrings("chWrong2"), correct: false },
+      { text: () => sceneStrings("chWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("healQ"), options: [
+      { text: () => sceneStrings("heRight"), correct: true },
+      { text: () => sceneStrings("heWrong1"), correct: false },
+      { text: () => sceneStrings("heWrong2"), correct: false },
+      { text: () => sceneStrings("heWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("tradeQ"), options: [
+      { text: () => sceneStrings("trRight"), correct: true },
+      { text: () => sceneStrings("trWrong1"), correct: false },
+      { text: () => sceneStrings("trWrong2"), correct: false },
+      { text: () => sceneStrings("trWrong3"), correct: false },
+    ] },
+    {
+      // Blocks rewritten = h + 1 (leaf plus every ancestor up to the root).
+      prompt: (v) => sceneStrings("pathNumQ", v),
+      variables: "h=[2:8]",
+      answer: (v) => v.h + 1,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Unique blocks on disk after snapshot + one path rewrite = nb + pl.
+      prompt: (v) => sceneStrings("shareNumQ", v),
+      variables: "nb=[7:20] pl=[2:5]",
+      answer: (v) => v.nb + v.pl,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

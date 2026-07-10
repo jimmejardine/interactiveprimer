@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Kernel Locks and MCS</primer-title>
+
+    <primer-card>
+      <p>
+        You have already built a lock from an
+        <primer-ref to="computer-science/computer-architecture/multicore/hardware-synchronization">atomic
+        read-modify-write</primer-ref>: spin on a compare-and-swap until the word flips from free to held. That
+        lock is <em>correct</em>. It is also, on a real 64-core server, a performance catastrophe. This lesson is
+        about the gap between a lock that <em>works</em> and a lock that <em>scales</em> — the gap the Linux kernel
+        spent two decades closing, and the reason your kernel's mutex is a small state machine and not a one-line
+        spin loop.
+      </p>
+      <p>
+        We climb a ladder of four designs. The naive <strong>test-and-set</strong> spinlock; the
+        <strong>test-and-test-and-set</strong> refinement; the <strong>ticket lock</strong> that adds fairness;
+        and the <strong>MCS queue lock</strong>, where each waiter spins on its <em>own</em> cache line — the
+        scalability fix that underlies modern kernel locks. Then we lift to user space with the
+        <strong>futex</strong>: fast in the common case, kernel-assisted only when threads actually collide.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>First question: spin or block?</h2>
+      <p>
+        Before choosing <em>which</em> lock, choose <em>what kind</em>. A <strong>spinlock</strong> busy-waits —
+        the waiting core loops, burning cycles, until the lock frees. A <strong>blocking lock</strong> (a
+        <primer-ref to="computer-science/operating-systems/synchronization-primitives">mutex</primer-ref>) instead
+        parks the waiting thread: the scheduler runs someone else and wakes the waiter later. The trade is stark
+        and it is all about the ratio of <em>wait time</em> to <em>context-switch cost</em>.
+      </p>
+      <p>
+        Parking and waking a thread costs a couple of context switches — call it a few microseconds. If the lock
+        is held for only a hundred nanoseconds, blocking is madness: you would spend microseconds of overhead to
+        avoid nanoseconds of spinning. Spin. But if the lock is held across a disk read of ten milliseconds,
+        spinning wastes an eternity of CPU that another runnable thread could have used. Block. The rule of thumb:
+        <strong>spin when the expected wait is shorter than the cost of a context switch; block otherwise.</strong>
+      </p>
+      <primer-theorem name="Spinlock vs blocking mutex">
+        <ul>
+          <li>a <strong>spinlock</strong> busy-waits on the CPU — cheap to acquire, but wastes every cycle spent
+            waiting; correct only where the holder <em>never sleeps</em> (in-kernel, interrupt context);</li>
+          <li>a <strong>blocking mutex</strong> parks the waiter and lets the scheduler reuse the core — it pays a
+            context switch, so it wins only when the critical section is long or may sleep;</li>
+          <li>the decision hinges on <primer-math>T_\text{wait}</primer-math> vs
+            <primer-math>T_\text{ctxsw}</primer-math>: spin if <primer-math>T_\text{wait} \lesssim
+            T_\text{ctxsw}</primer-math>, block otherwise;</li>
+          <li>real kernels <strong>hybridise</strong> — an <em>adaptive mutex</em> spins briefly while the holder
+            is running on another core, then parks if it sleeps.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Crucially, a spinlock is <em>forbidden</em> from holding across anything that can block: if the holder
+        sleeps while others spin, the spinners burn CPU forever and can deadlock the machine. Kernel spinlocks
+        therefore disable pre-emption (and sometimes interrupts) while held. Everything below is about making the
+        <em>spin</em> itself cheap.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The naive spinlock and its cache-line disease</h2>
+      <p>
+        Recall the test-and-set (TAS) spinlock: every waiter hammers an atomic write on the single lock word. By
+        <primer-ref to="computer-science/computer-architecture/multicore/hardware-synchronization">MESI</primer-ref>,
+        an atomic write demands the cache line in <strong>Modified</strong> state — the sole copy. So each waiter's
+        every attempt yanks the line to its own cache, invalidating everyone else. With <primer-math>n</primer-math>
+        cores spinning, the lock line <strong>ping-pongs</strong> endlessly, and each bounce is a full coherence
+        transaction across the interconnect. Worse, when the holder finally wants to <em>release</em>, it must
+        itself re-acquire the line the spinners keep stealing. Contention makes the lock <em>slower to release</em>
+        the more cores want it — the opposite of what you want.
+      </p>
+      <p>
+        <strong>Test-and-test-and-set (TTAS)</strong> is the first patch: spin on a plain <em>read</em>
+        (<primer-math>\texttt{while (lock != free)}</primer-math>), which lets every core hold the line in cheap
+        <strong>Shared</strong> state, and only attempt the atomic write when the read says it looks free. Quiet
+        reads instead of screaming writes — until the moment of release, when everyone's read fails at once and
+        they all storm the write together (a <em>thundering herd</em>). Better, but still <primer-math>O(n)</primer-math>
+        coherence traffic per handoff, and still <em>unfair</em>: nothing stops one unlucky core from being starved
+        forever while its neighbours keep winning the race.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Lock</th><th>Spin target</th><th>Traffic per handoff</th><th>Fair?</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Test-and-set (TAS)</td><td>atomic write on shared word</td><td><primer-math>O(n)</primer-math>, constant storm</td><td>no</td></tr>
+            <tr><td>Test-and-test-and-set (TTAS)</td><td>read shared word, write on release</td><td><primer-math>O(n)</primer-math> burst (herd)</td><td>no</td></tr>
+            <tr><td>Ticket lock</td><td>read one shared counter</td><td><primer-math>O(n)</primer-math> burst</td><td><strong>yes (FIFO)</strong></td></tr>
+            <tr><td>MCS queue lock</td><td><strong>own local flag</strong></td><td><primer-math>O(1)</primer-math></td><td><strong>yes (FIFO)</strong></td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-card>
+      <h2>Ticket locks: fairness, one bakery number at a time</h2>
+      <p>
+        A <strong>ticket lock</strong> borrows the deli counter. Two counters live in the lock:
+        <primer-math>\texttt{next}</primer-math> (the number handed to the next arrival) and
+        <primer-math>\texttt{owner}</primer-math> (the number now being served). To acquire, atomically
+        fetch-and-increment <primer-math>\texttt{next}</primer-math> to grab your ticket, then spin until
+        <primer-math>\texttt{owner}</primer-math> equals it. To release, increment
+        <primer-math>\texttt{owner}</primer-math>. This is strict <strong>FIFO</strong> — you are served in arrival
+        order, so no one starves. Linux used ticket spinlocks as its kernel spinlock from 2008.
+      </p>
+      <p>
+        But every waiter still spins on the <em>same</em> <primer-math>\texttt{owner}</primer-math> word, so
+        releasing it invalidates <em>all</em> spinners at once even though only one — the next ticket-holder — can
+        proceed. The coherence storm per handoff is still <primer-math>O(n)</primer-math>. Fairness solved;
+        scalability not yet.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the TTAS-vs-MCS spinning figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "spin": {
+          "title": "Where does each waiter spin? Shared word (bouncing) vs its own local flag (silent)",
+          "ttasHdr": "Ticket / TTAS: all cores spin on ONE shared word — it ping-pongs",
+          "mcsHdr": "MCS: each core spins on ITS OWN cache line — no bouncing",
+          "shared": "shared lock word",
+          "flag": "local flag",
+          "c0": "Core 0", "c1": "Core 1", "c2": "Core 2",
+          "n0": "node 0", "n1": "node 1", "n2": "node 2",
+          "bounce": "one line, invalidated on every write",
+          "quiet": "each spins locally — release pokes only the next node"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>MCS: everyone spins on their own doorbell</h2>
+      <p>
+        The <strong>MCS lock</strong> (Mellor-Crummey &amp; Scott, 1991) is the breakthrough. Instead of one word
+        everyone watches, each waiter enqueues a small <em>node</em> of its own and spins on a
+        <primer-math>\texttt{locked}</primer-math> flag <em>inside that node</em> — a cache line touched by nobody
+        else. The lock itself is just a pointer to the <strong>tail</strong> of a queue of these nodes.
+      </p>
+      <ul>
+        <li><strong>Acquire</strong>: atomically swap yourself onto the tail. If there was a predecessor, set your
+          own flag to "wait", link the predecessor to you, and spin on <em>your</em> flag;</li>
+        <li><strong>Release</strong>: if a successor is linked, flip <em>its</em> flag — a single write that
+          invalidates exactly one cache line, waking exactly one waiter.</li>
+      </ul>
+      <p>
+        The picture is the whole lesson. On the left, ticket/TTAS: three cores staring at one word that bounces
+        between them. On the right, MCS: three cores, each staring at a private flag; the release pokes only the
+        next node. Coherence traffic per handoff drops from <primer-math>O(n)</primer-math> to
+        <primer-math>O(1)</primer-math>, independent of how many cores are queued.
+      </p>
+      <primer-geometry scene="spin"></primer-geometry>
+      <p>
+        MCS is why the Linux kernel's spinlock became the <strong>qspinlock</strong> (a queued spinlock, MCS in
+        spirit) in 2014, and why big-server locks scale to hundreds of cores without collapsing. The cost is a
+        little extra bookkeeping — a per-waiter node — and slightly higher latency when <em>uncontended</em>. For
+        a lock that is only ever contended by one core, plain TTAS can still win; MCS earns its keep exactly when
+        the crowd arrives.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Simulate the handoff traffic</h2>
+      <p>
+        Let's count coherence <em>invalidations</em> per lock handoff for a ticket lock versus MCS, as the number
+        of spinning cores grows. The model is deliberately simple: releasing a ticket lock invalidates the shared
+        word in <em>every</em> spinner's cache; releasing an MCS lock writes exactly one successor's flag. Watch
+        the ticket cost climb with the crowd while MCS stays flat.
+      </p>
+      <primer-code run>
+        // Model coherence invalidations per handoff as `waiters` cores contend for one lock.
+        // Ticket lock: all waiters spin on the shared `owner` word -> release invalidates every copy.
+        // MCS lock:    each waiter spins on its own node flag -> release pokes exactly one successor.
+        function ticketInvalidations(waiters: number): number {
+          return waiters;            // O(n): the shared word is invalidated in every spinner's cache
+        }
+        function mcsInvalidations(waiters: number): number {
+          return waiters === 0 ? 0 : 1;   // O(1): only the next node's flag is written
+        }
+
+        console.log("cores   ticket   MCS");
+        for (const w of [1, 2, 4, 8, 16, 32, 64]) {
+          const t = ticketInvalidations(w);
+          const m = mcsInvalidations(w);
+          console.log(`${String(w).padStart(4)}    ${String(t).padStart(5)}   ${String(m).padStart(3)}`);
+        }
+
+        // A tiny working MCS queue lock. Each thread owns a node; it spins on node.locked.
+        interface McsNode { locked: boolean; next: McsNode | null; }
+        class McsLock {
+          private tail: McsNode | null = null;   // atomic tail pointer
+          acquire(node: McsNode): void {
+            node.next = null; node.locked = true;
+            const pred = this.tail;               // atomic swap(tail, node) in real hardware
+            this.tail = node;
+            if (pred === null) { node.locked = false; return; }  // lock was free
+            pred.next = node;                     // link ourselves behind predecessor
+            // spin on OUR OWN flag (node.locked) until the predecessor hands off
+          }
+          release(node: McsNode): void {
+            if (node.next === null) { this.tail = null; return; } // no waiter -> free the lock
+            node.next.locked = false;             // ONE write: wake exactly the next waiter
+          }
+        }
+
+        const lock = new McsLock();
+        const a: McsNode = { locked: true, next: null };
+        const b: McsNode = { locked: true, next: null };
+        lock.acquire(a); console.log(`A acquired, A.locked=${a.locked}`);
+        lock.acquire(b); console.log(`B queued behind A, B.locked=${b.locked} (spinning)`);
+        lock.release(a); console.log(`A released -> B.locked=${b.locked} (now runs)`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Futexes: the kernel only when it must</h2>
+      <p>
+        Everything so far assumed the lock lives in the kernel. But most locks a program takes are
+        <em>uncontended</em> — no one else wants them right now — so trapping into the kernel to acquire them is
+        pure waste (recall a syscall is hundreds of cycles). The Linux <strong>futex</strong> ("fast userspace
+        mutex") splits the job in two:
+      </p>
+      <ul>
+        <li><strong>Fast path, in user space</strong>: the lock is just an integer. To acquire, a single atomic
+          compare-and-swap flips it 0→1. If that succeeds — the uncontended case — you are done. <em>No syscall at
+          all.</em></li>
+        <li><strong>Slow path, into the kernel</strong>: only if the CAS <em>fails</em> (someone holds it) do you
+          call <primer-math>\texttt{futex(FUTEX\_WAIT)}</primer-math> to park until the holder calls
+          <primer-math>\texttt{futex(FUTEX\_WAKE)}</primer-math> on release.</li>
+      </ul>
+      <p>
+        So the kernel maintains no data for a lock nobody is fighting over — it learns the lock exists only the
+        instant two threads collide. This is the mechanism behind every modern <primer-math>\texttt{pthread\_mutex}</primer-math>,
+        Go's mutex, Rust's <primer-math>\texttt{std::sync::Mutex}</primer-math>, and glibc's condition variables. It
+        is the perfect embodiment of the OS design maxim: make the common case fast and pay the kernel only for the
+        rare, contended case.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why did Linux abandon a 'better' unfair lock for a fair one — then partly walk it back?">
+      <p>
+        Fairness and throughput fight each other. A strictly FIFO lock (ticket, MCS) guarantees no starvation, but
+        it forces the next owner to be a <em>specific</em> core — even if that core's cache is cold and a different,
+        cache-hot core could have taken and released the lock ten times over in the meantime. Unfair locks can hit
+        higher raw throughput by letting the lucky, cache-warm core keep "barging" in. Linux's qspinlock is FIFO;
+        but the kernel also keeps <em>adaptive</em> and <em>test-and-set</em> fallbacks for cases where fairness
+        costs more than it is worth, and the community still argues about the balance. There is no universally best
+        lock — only the best lock for a given contention level, NUMA topology, and critical-section length. This is
+        why "which lock?" is a research question, not a settled answer.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A spinlock is not automatically faster than a mutex">
+      <p>
+        A tempting fallacy: "spinlocks avoid the context-switch overhead, so they are always faster." They are
+        faster <em>only when the wait is short and the holder keeps running</em>. Spin on a lock whose holder got
+        pre-empted or went to sleep, and you burn an entire time-slice achieving nothing — and on a single core,
+        spinning for a lock held by a descheduled thread is a guaranteed livelock, since the holder can never run
+        to release it. That is exactly why user-space code should almost never use a raw spinlock: a userspace
+        thread can be pre-empted at any instant. Use a futex-backed mutex (which spins briefly, then parks) and let
+        the kernel arbitrate. Raw spinlocks belong in the kernel, where the holder disables pre-emption and the
+        critical section is provably tiny.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: spin/block choice, TAS/TTAS/ticket/MCS scaling, futex fast/slow path. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "kernLockQuiz@1": {
+          "intro": "Spin when the wait is shorter than a context switch. TAS/TTAS/ticket spin on one shared word (O(n)); MCS spins on a private flag (O(1)). Futex: user-space CAS fast path, kernel only on contention.",
+          "chooseQ": "You should prefer a SPINLOCK over a blocking mutex when…",
+          "chRight": "the critical section is very short and the holder never sleeps",
+          "chLong": "the critical section may block on disk I/O for milliseconds",
+          "chSleep": "the holder might sleep while holding the lock",
+          "chAlways": "always — spinlocks are strictly faster",
+          "blockQ": "The main cost a BLOCKING mutex pays that a spinlock avoids is…",
+          "blRight": "one or two context switches to park and later wake the waiter",
+          "blRam": "extra RAM for the lock word",
+          "blBus": "it cannot use atomic instructions",
+          "blNone": "there is no extra cost",
+          "tasQ": "Why does a naive test-and-set spinlock scale badly with many cores?",
+          "taRight": "every waiter's atomic write pulls the lock line to Modified, so it ping-pongs between caches",
+          "taSlow": "the atomic instruction is disabled on multicore",
+          "taRam": "the lock word grows with the number of cores",
+          "taNone": "it actually scales perfectly",
+          "ttasQ": "Test-and-test-and-set improves on plain test-and-set by…",
+          "ttRight": "spinning on a plain read (line stays Shared) and only writing when the lock looks free",
+          "ttWrite": "writing to the lock more aggressively",
+          "ttFair": "guaranteeing strict FIFO fairness",
+          "ttNone": "removing the atomic instruction entirely",
+          "ticketQ": "The property a ticket lock adds over test-and-test-and-set is…",
+          "tiRight": "FIFO fairness — waiters are served in arrival order, so none starve",
+          "tiScale": "O(1) coherence traffic per handoff",
+          "tiLocal": "each waiter spins on its own cache line",
+          "tiNone": "nothing — it is identical",
+          "mcsQ": "The key idea that makes an MCS lock scale to many cores is…",
+          "mcRight": "each waiter spins on a flag in its OWN queue node — a private cache line",
+          "mcShared": "all waiters spin faster on the one shared word",
+          "mcNoAtom": "it avoids atomic instructions entirely",
+          "mcSpin": "it never spins at all",
+          "mcsTrafficQ": "Coherence invalidations per lock handoff for MCS vs a ticket lock (n waiters) are…",
+          "mtRight": "MCS is O(1); ticket is O(n)",
+          "mtSame": "both are O(n)",
+          "mtBoth1": "both are O(1)",
+          "mtRev": "MCS is O(n); ticket is O(1)",
+          "mcsCostQ": "The price MCS pays for its scalability is…",
+          "mcoRight": "a per-waiter queue node and slightly higher uncontended latency",
+          "mcoUnfair": "it becomes unfair and starves waiters",
+          "mcoNoScale": "it stops working past 8 cores",
+          "mcoRam": "it needs the whole array in the kernel",
+          "futexFastQ": "On a futex's fast (uncontended) path, acquiring the lock costs…",
+          "ffRight": "a single user-space atomic compare-and-swap — no system call",
+          "ffSys": "one system call every time",
+          "ffTwo": "two context switches",
+          "ffSpin": "spinning until a timer interrupt",
+          "futexSlowQ": "A futex enters the kernel (FUTEX_WAIT) only when…",
+          "fsRight": "the user-space CAS fails because another thread holds the lock",
+          "fsAlways": "on every single acquire",
+          "fsRelease": "only on the very first release",
+          "fsNever": "never — futexes never enter the kernel",
+          "futexWhyQ": "The design principle a futex embodies is…",
+          "fwRight": "make the common (uncontended) case fast; pay the kernel only on contention",
+          "fwSlow": "always trap into the kernel for safety",
+          "fwFair": "guarantee strict fairness above all",
+          "fwSpin": "spin forever rather than block",
+          "adaptiveQ": "An 'adaptive' mutex behaves how?",
+          "adRight": "it spins briefly while the holder runs on another core, then parks if the holder sleeps",
+          "adSpin": "it only ever spins, never parks",
+          "adPark": "it only ever parks, never spins",
+          "adNone": "it disables interrupts forever"
+        }
+      }
+    </script>
+
+    <primer-quiz name="kernLockQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/operating-systems/synchronization-primitives",
+      "computer-science/computer-architecture/multicore/hardware-synchronization"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Two side-by-side panels: LEFT ticket/TTAS (3 cores all arrowed to ONE shared word that ping-pongs),
+     RIGHT MCS (3 nodes each with its own local flag, chained, only the successor poked). Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "spin",
+    ({ board, colors, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, fillIdx, txt, size) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[fillIdx], fillOpacity: 0.2, strokeColor: colors.line, strokeWidth: 1.5,
+          fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, txt], {
+          strokeColor: colors.ink, fontSize: size || 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      };
+      const cap = (x, y, key, ci) =>
+        board.create("text", [x, y, sceneStrings(key)], {
+          strokeColor: colors.cat[ci], fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600; max-width:220px",
+        });
+
+      // ---- LEFT: ticket / TTAS, one shared bouncing word ----
+      cap(2.4, 6.4, "ttasHdr", 0);
+      const lys = [0.2, 2.4, 4.6];  // three core x-positions (left panel)
+      ["c0", "c1", "c2"].forEach((k, i) => box(lys[i], 5.0, lys[i] + 1.9, 5.9, 0, sceneStrings(k)));
+      box(1.4, 2.6, 3.4, 3.5, 1, sceneStrings("shared"));
+      lys.forEach((x) => {
+        board.create("arrow", [[x + 0.95, 5.0], [2.4, 3.5]], {
+          strokeColor: colors.cat[0], strokeWidth: 2, dash: 2,
+          firstArrow: { type: 2, size: 5 }, lastArrow: { type: 2, size: 5 }, highlight: false, fixed: true,
+        });
+      });
+      board.create("text", [2.4, 2.1, sceneStrings("bounce")], { strokeColor: colors.cat[0], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+
+      // ---- RIGHT: MCS, each node with its own local flag, chained ----
+      cap(9.6, 6.4, "mcsHdr", 2);
+      const rx = [7.4, 9.0, 10.6];
+      ["n0", "n1", "n2"].forEach((k, i) => {
+        box(rx[i], 5.0, rx[i] + 1.3, 5.9, 2, sceneStrings(k));               // node
+        box(rx[i], 3.6, rx[i] + 1.3, 4.4, 3, sceneStrings("flag"), 10);      // its private flag
+        board.create("arrow", [[rx[i] + 0.65, 5.0], [rx[i] + 0.65, 4.4]], {
+          strokeColor: colors.cat[2], strokeWidth: 2, firstArrow: { type: 2, size: 4 }, lastArrow: { type: 2, size: 4 }, highlight: false, fixed: true,
+        });
+      });
+      // queue links node0 -> node1 -> node2 (only successor poked on release)
+      for (let i = 0; i < 2; i++) {
+        board.create("arrow", [[rx[i] + 1.3, 5.45], [rx[i + 1], 5.45]], {
+          strokeColor: colors.line, strokeWidth: 2, lastArrow: { type: 2, size: 5 }, highlight: false, fixed: true,
+        });
+      }
+      board.create("text", [9.6, 2.9, sceneStrings("quiet")], { strokeColor: colors.cat[2], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "max-width:240px" });
+    },
+    { boundingbox: [-0.4, 7.0, 12.2, 1.6], keepAspect: false, title: () => makeStrings("spin")("title") },
+  );
+
+  registerQuiz("kernLockQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("chooseQ"),
+      options: [
+        { text: () => sceneStrings("chRight"), correct: true },
+        { text: () => sceneStrings("chLong"), correct: false },
+        { text: () => sceneStrings("chSleep"), correct: false },
+        { text: () => sceneStrings("chAlways"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("blockQ"),
+      options: [
+        { text: () => sceneStrings("blRight"), correct: true },
+        { text: () => sceneStrings("blRam"), correct: false },
+        { text: () => sceneStrings("blBus"), correct: false },
+        { text: () => sceneStrings("blNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tasQ"),
+      options: [
+        { text: () => sceneStrings("taRight"), correct: true },
+        { text: () => sceneStrings("taSlow"), correct: false },
+        { text: () => sceneStrings("taRam"), correct: false },
+        { text: () => sceneStrings("taNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ttasQ"),
+      options: [
+        { text: () => sceneStrings("ttRight"), correct: true },
+        { text: () => sceneStrings("ttWrite"), correct: false },
+        { text: () => sceneStrings("ttFair"), correct: false },
+        { text: () => sceneStrings("ttNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ticketQ"),
+      options: [
+        { text: () => sceneStrings("tiRight"), correct: true },
+        { text: () => sceneStrings("tiScale"), correct: false },
+        { text: () => sceneStrings("tiLocal"), correct: false },
+        { text: () => sceneStrings("tiNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("mcsQ"),
+      options: [
+        { text: () => sceneStrings("mcRight"), correct: true },
+        { text: () => sceneStrings("mcShared"), correct: false },
+        { text: () => sceneStrings("mcNoAtom"), correct: false },
+        { text: () => sceneStrings("mcSpin"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("mcsTrafficQ"),
+      options: [
+        { text: () => sceneStrings("mtRight"), correct: true },
+        { text: () => sceneStrings("mtSame"), correct: false },
+        { text: () => sceneStrings("mtBoth1"), correct: false },
+        { text: () => sceneStrings("mtRev"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("mcsCostQ"),
+      options: [
+        { text: () => sceneStrings("mcoRight"), correct: true },
+        { text: () => sceneStrings("mcoUnfair"), correct: false },
+        { text: () => sceneStrings("mcoNoScale"), correct: false },
+        { text: () => sceneStrings("mcoRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("futexFastQ"),
+      options: [
+        { text: () => sceneStrings("ffRight"), correct: true },
+        { text: () => sceneStrings("ffSys"), correct: false },
+        { text: () => sceneStrings("ffTwo"), correct: false },
+        { text: () => sceneStrings("ffSpin"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("futexSlowQ"),
+      options: [
+        { text: () => sceneStrings("fsRight"), correct: true },
+        { text: () => sceneStrings("fsAlways"), correct: false },
+        { text: () => sceneStrings("fsRelease"), correct: false },
+        { text: () => sceneStrings("fsNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("futexWhyQ"),
+      options: [
+        { text: () => sceneStrings("fwRight"), correct: true },
+        { text: () => sceneStrings("fwSlow"), correct: false },
+        { text: () => sceneStrings("fwFair"), correct: false },
+        { text: () => sceneStrings("fwSpin"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("adaptiveQ"),
+      options: [
+        { text: () => sceneStrings("adRight"), correct: true },
+        { text: () => sceneStrings("adSpin"), correct: false },
+        { text: () => sceneStrings("adPark"), correct: false },
+        { text: () => sceneStrings("adNone"), correct: false },
+      ],
+    },
+  ]);
+</script>

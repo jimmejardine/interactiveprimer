@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Non-Blocking and Event-Driven I/O</primer-title>
+
+    <primer-card>
+      <p>
+        A single waiter can serve a hundred tables — but not by standing frozen at table 1 until its guests
+        decide what to order. A good waiter <strong>circulates</strong>: they glance across the room, notice
+        <em>which</em> tables have raised a hand, and attend only to those, then glance again. The tables that
+        are still reading the menu cost the waiter nothing. This is, almost exactly, how one thread can serve
+        <strong>tens of thousands</strong> of network connections — the trick the last page promised, and the
+        engine inside nginx, Node.js and Redis.
+      </p>
+      <p>
+        We saw that <primer-ref soft to="computer-science/networks/programming/concurrent-servers">one thread
+        per connection</primer-ref> hits a wall around ten thousand connections. The escape is to stop giving
+        each connection a thread to <em>block</em> on, and instead let one thread ask the kernel "which of my
+        connections are ready <em>right now</em>?" and service only those. That requires two ingredients:
+        <strong>non-blocking sockets</strong> (so a read on an idle socket returns immediately instead of
+        freezing the thread) and an <strong>I/O multiplexing</strong> system call (so the thread can wait on
+        <em>all</em> its sockets at once). Put them together and you get the <strong>event loop</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Blocking vs non-blocking</h2>
+      <p>
+        By default a socket is <strong>blocking</strong>: call <code>read()</code> when no data has arrived and
+        the calling thread is <em>parked</em> by the kernel until some does. That is fine when a thread has
+        exactly one connection to care about — but fatal when it has thousands, because parking on connection 1
+        makes it deaf to the other 9,999.
+      </p>
+      <p>
+        Flip the socket to <strong>non-blocking</strong> and the same <code>read()</code> on an empty socket
+        returns <em>instantly</em> with a special "nothing yet" signal (<code>EWOULDBLOCK</code> /
+        <code>EAGAIN</code>) instead of parking. Now the thread never gets stuck — but you have created a new
+        problem: if you just loop over all your sockets calling non-blocking <code>read()</code>, you
+        <strong>busy-spin</strong>, burning 100% CPU asking "anything? anything? anything?" of sockets that are
+        almost all idle. You need the kernel to tell you <em>which</em> sockets are worth touching. That is
+        exactly what the multiplexing calls do.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>select → poll → epoll: asking "who's ready?"</h2>
+      <p>
+        Three generations of system call answer the question "of these N sockets, which are ready to read or
+        write?" — and the story of their evolution <em>is</em> the story of solving C10K.
+      </p>
+      <ul>
+        <li>
+          <strong><code>select()</code></strong> (1983). You hand the kernel a bitmap of your sockets; it
+          returns which are ready. Two fatal limits: it <strong>scans all N</strong> sockets on every call
+          (O(N) work even if only one is ready), and the fixed-size bitmap caps you at
+          <code>FD_SETSIZE</code> (typically 1024) descriptors.
+        </li>
+        <li>
+          <strong><code>poll()</code></strong> (1986). Drops the 1024 cap by taking an array instead of a
+          bitmap. But it is still <strong>O(N)</strong>: you pass the <em>entire</em> list of sockets on every
+          single call, and the kernel walks all of them, every time, to find the few that are ready.
+        </li>
+        <li>
+          <strong><code>epoll()</code></strong> (Linux, 2002) and <strong><code>kqueue()</code></strong>
+          (BSD/macOS). The breakthrough. You register your sockets with the kernel <em>once</em>; thereafter a
+          call returns <em>only the ready ones</em>. The cost is <strong>O(number of ready events)</strong>, not
+          O(total sockets) — so a server monitoring 100,000 connections of which 50 are active does work
+          proportional to <strong>50</strong>, not 100,000. That single change is what made the C10K wall
+          crumble.
+        </li>
+      </ul>
+      <p>
+        The picture below is the whole argument. <code>select</code>/<code>poll</code> cost climbs linearly
+        with the number of connections you monitor, because they re-scan everything each time. <code>epoll</code>
+        stays flat, because its cost tracks only how many sockets are <em>actually</em> ready.
+      </p>
+
+      <primer-chart scene="epollScaling" caption="Work per event-loop iteration versus the number of monitored sockets. The select/poll curve rises linearly (O(n)) because it re-scans every socket each call. The epoll/kqueue curve stays flat and low (O(ready)) because it returns only the sockets that are actually ready, independent of the total."></primer-chart>
+
+      <primer-theorem name="Why epoll scales">
+        <ul>
+          <li>
+            <code>select</code>/<code>poll</code> are <strong>O(N)</strong> in the number of monitored
+            descriptors — you resubmit and the kernel rescans the full set on every call.
+          </li>
+          <li>
+            <code>epoll</code>/<code>kqueue</code> are <strong>O(number of ready events)</strong> — register
+            once, then pay only for sockets that actually have activity. Idle connections are effectively free.
+          </li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The event loop (reactor pattern)</h2>
+      <p>
+        Wrap all this in a loop and you have the <strong>reactor pattern</strong>, the beating heart of every
+        high-concurrency server. One thread, forever:
+      </p>
+      <ol>
+        <li><strong>Wait</strong> — ask the kernel (via <code>epoll</code>) for the set of ready sockets,
+          sleeping efficiently if none are.</li>
+        <li><strong>Dispatch</strong> — for each ready socket, call its registered <strong>callback</strong>
+          (the "handler" for that connection): read the available bytes, do a little work, maybe queue a write.</li>
+        <li><strong>Repeat.</strong></li>
+      </ol>
+      <p>
+        There is <em>no</em> per-connection thread and <em>no</em> blocking: an idle connection simply never
+        shows up in the ready set, so it costs nothing. This is precisely how <strong>Node.js</strong> (libuv),
+        <strong>nginx</strong>, and <strong>Redis</strong> serve enormous connection counts on essentially a
+        single thread. The demo below runs a miniature reactor: several ticks arrive, each with a different
+        subset of sockets ready, and the loop touches <em>only</em> the ready ones — while a comparison counts
+        what a <code>poll()</code>-style "scan everything" loop would have cost.
+      </p>
+
+      <primer-code run>
+        const N = 10000;                 // total monitored connections
+        // On each tick, only a few sockets actually have data (a realistic idle-heavy server).
+        const ticks = [ [3, 91, 5000], [42], [7, 8, 9, 9999], [], [123, 456] ];
+
+        let epollWork = 0;   // event-driven: touch ONLY ready sockets (O(ready))
+        let pollWork = 0;    // poll-style: scan ALL sockets every tick (O(N))
+
+        function handle(sock) { /* read + do a little work for this connection */ epollWork++; }
+
+        for (let t = 0; t &lt; ticks.length; t++) {
+          const ready = ticks[t];                 // the kernel hands us ONLY these (epoll)
+          for (const sock of ready) handle(sock); // dispatch to each ready socket's callback
+
+          pollWork += N;                           // poll() would have walked all N, ready or not
+          console.log(`tick ${t}: ${ready.length} ready -> epoll did ${ready.length} unit(s) of work;` +
+                      ` poll would have scanned ${N}.`);
+        }
+
+        console.log(`\nOver ${ticks.length} ticks:`);
+        console.log(`  event-driven (epoll): ${epollWork} units of work total`);
+        console.log(`  scan-everything (poll): ${pollWork} units of work total`);
+        console.log(`  epoll did ${(pollWork / Math.max(epollWork,1)).toFixed(0)}x less work — idle sockets were free.`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Readiness vs completion; and callback hell</h2>
+      <p>
+        Two refinements finish the picture. First, a subtle distinction in <em>what</em> the kernel tells you.
+      </p>
+      <ul>
+        <li>
+          <strong>Readiness model (epoll, kqueue).</strong> The kernel says "this socket is <em>ready</em> — you
+          may now read without blocking," and <em>you</em> perform the read. This is the classic reactor.
+        </li>
+        <li>
+          <strong>Completion model (io_uring on Linux, IOCP on Windows).</strong> You say "please read into this
+          buffer and tell me when it's <em>done</em>." The kernel performs the whole operation and hands you the
+          finished result. This is the <em>proactor</em> pattern, and it maps naturally onto
+          <code>async</code>/<code>await</code>.
+        </li>
+      </ul>
+      <p>
+        Second, a human problem. A reactor is built from callbacks — "when this socket is readable, run this
+        function." Chain several asynchronous steps (read request → query database → read file → write response)
+        and you get callbacks nested inside callbacks inside callbacks: the infamous <strong>"callback hell"</strong>
+        (the rightward-drifting pyramid of doom). The industry's answer was <strong>Promises/futures</strong>,
+        and then <strong><code>async</code>/<code>await</code></strong> syntax, which lets you <em>write</em> the
+        code as a flat, sequential-looking sequence while it still <em>runs</em> on the non-blocking event loop
+        underneath. The event loop never went away — <code>await</code> is just a beautiful disguise over "give
+        this socket a callback and yield the loop."
+      </p>
+
+      <primer-code lang="typescript">
+        // Same logic, two styles. The event loop is identical underneath.
+
+        // "Callback hell": each async step nests inside the previous callback.
+        readRequest(conn, (req) =&gt; {
+          queryDb(req.id, (row) =&gt; {
+            readFile(row.path, (body) =&gt; {
+              writeResponse(conn, body);   // ...drifting ever rightward
+            });
+          });
+        });
+
+        // async/await: flat and sequential to read, still non-blocking to run.
+        async function serve(conn: Conn) {
+          const req  = await readRequest(conn);
+          const row  = await queryDb(req.id);
+          const body = await readFile(row.path);
+          await writeResponse(conn, body);
+        }
+      </primer-code>
+
+      <primer-vignette title="Watch out! — a slow callback freezes EVERYONE">
+        <p>
+          The event loop's superpower — one thread for everything — is also its Achilles' heel. Because there is
+          <em>one</em> thread running <em>one</em> callback at a time, any callback that does not return
+          <strong>promptly</strong> stalls the entire server: while it runs, no other socket can be serviced, no
+          new connection accepted, nothing. Non-blocking I/O does <em>not</em> make the <em>work</em> free — it
+          only makes <em>waiting</em> free. A callback that does a heavy CPU computation (parsing a 50&nbsp;MB
+          JSON, hashing a password with a slow KDF, a tight numeric loop) or — worst of all — makes a
+          <strong>blocking</strong> call (a synchronous file read, <code>sleep</code>, a blocking DB driver)
+          holds the loop hostage, and every one of your ten thousand connections hangs at once.
+        </p>
+        <p>
+          The rules follow directly: <strong>never do heavy CPU work or any blocking/synchronous call inside the
+          event loop.</strong> Offload CPU-bound work to a worker thread/process pool, use only non-blocking
+          (async) library calls, and break large jobs into chunks that yield back to the loop. "Non-blocking"
+          describes the I/O, never your own code.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "eventIoQuiz@1": { "instructions": "Check your grasp of non-blocking I/O: blocking vs non-blocking sockets, select/poll/epoll scaling, the reactor event loop, readiness vs completion, and the slow-callback trap." } }
+    </script>
+    <primer-quiz name="eventIoQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/programming/concurrent-servers"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts } from "primer";
+
+  // select/poll cost is O(n) — it rescans every monitored socket each call — while
+  // epoll cost is O(ready): roughly constant regardless of how many idle sockets exist.
+  registerCharts(
+    [{
+      name: "epollScaling",
+      f: [
+        (n) => n,                    // select/poll: scan all n
+        (n) => Math.min(n, 50),      // epoll: only the (roughly constant) ready set
+      ],
+      line: (colors, i) =>
+        i === 0
+          ? { strokeColor: colors.cat[0], strokeWidth: 2 }
+          : { strokeColor: colors.cat[1], strokeWidth: 2 },
+      legend: ["select / poll: O(n) — scans ALL", "epoll / kqueue: O(ready) — only active"],
+    }],
+    { xmin: 0, xmax: 10000, ymin: 0, ymax: 10000, xaxisname: "monitored sockets", yaxisname: "work per loop" },
+  );
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("eventIoQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "What does read() do on a BLOCKING socket when no data has arrived?",
+      options: [
+        { text: "It parks the calling thread until data arrives — making it deaf to every other connection", correct: true },
+        { text: "It returns immediately with an error", correct: false },
+        { text: "It returns an empty result and continues", correct: false },
+        { text: "It reads from a different socket instead", correct: false },
+      ] },
+
+    { prompt: "On a NON-blocking socket, read() with no data available…",
+      options: [
+        { text: "returns instantly with a 'would block' signal (EWOULDBLOCK/EAGAIN) instead of parking", correct: true },
+        { text: "still parks the thread, just for a shorter time", correct: false },
+        { text: "raises a fatal exception that kills the process", correct: false },
+        { text: "blocks all other sockets on the machine", correct: false },
+      ] },
+
+    { prompt: "If you simply loop over thousands of non-blocking sockets calling read(), what goes wrong?",
+      options: [
+        { text: "You busy-spin, burning 100% CPU polling mostly-idle sockets — you need the kernel to tell you which are ready", correct: true },
+        { text: "The sockets automatically become blocking again", correct: false },
+        { text: "Nothing — this is the recommended design", correct: false },
+        { text: "The OS limits you to one read() per second", correct: false },
+      ] },
+
+    { prompt: "Why are select() and poll() O(N) in the number of monitored sockets?",
+      options: [
+        { text: "You resubmit the full set each call and the kernel rescans ALL of them to find the ready few", correct: true },
+        { text: "They can only check one socket per call", correct: false },
+        { text: "They sort the sockets before checking", correct: false },
+        { text: "They open a new connection for each socket", correct: false },
+      ] },
+
+    { prompt: "Why does epoll (or kqueue) scale where select/poll do not?",
+      options: [
+        { text: "You register sockets once, then each call returns only the READY ones — cost is O(ready), not O(total)", correct: true },
+        { text: "It runs on a faster CPU instruction", correct: false },
+        { text: "It compresses the socket list before scanning", correct: false },
+        { text: "It uses one thread per socket internally", correct: false },
+      ] },
+
+    { prompt: "A server monitors 100,000 connections, of which 50 are active this instant. epoll does work proportional to…",
+      options: [
+        { text: "50 — only the ready sockets", correct: true },
+        { text: "100,000 — every monitored socket", correct: false },
+        { text: "100,050 — all sockets plus the ready ones", correct: false },
+        { text: "1 — it processes only one socket per call", correct: false },
+      ] },
+
+    { prompt: "The reactor pattern's event loop, in order, does…",
+      options: [
+        { text: "wait for the set of ready sockets, dispatch each to its callback, then repeat — one thread, no blocking", correct: true },
+        { text: "spawn a thread per ready socket, then join them all", correct: false },
+        { text: "fork a process for every connection each tick", correct: false },
+        { text: "block on each socket in turn until all have data", correct: false },
+      ] },
+
+    { prompt: "In the reactor, what does an IDLE connection cost per loop iteration?",
+      options: [
+        { text: "Essentially nothing — it never appears in the ready set, so it is not touched", correct: true },
+        { text: "One full thread's worth of memory and scheduling", correct: false },
+        { text: "The same as an active connection", correct: false },
+        { text: "A blocking read() that stalls the loop", correct: false },
+      ] },
+
+    { prompt: "Which real systems use a single-threaded event loop to serve huge connection counts?",
+      options: [
+        { text: "Node.js, nginx, and Redis", correct: true },
+        { text: "Apache prefork and inetd", correct: false },
+        { text: "Any thread-per-connection Java server", correct: false },
+        { text: "A serial accept-then-serve loop", correct: false },
+      ] },
+
+    { prompt: "What distinguishes the COMPLETION model (io_uring, IOCP) from the READINESS model (epoll)?",
+      options: [
+        { text: "You ask the kernel to perform the whole operation and notify you when it's DONE, rather than being told a socket is merely ready for you to read", correct: true },
+        { text: "It only works for writes, never reads", correct: false },
+        { text: "It requires one thread per operation", correct: false },
+        { text: "It is slower because it always blocks", correct: false },
+      ] },
+
+    { prompt: "What problem do async/await (and Promises) solve relative to raw callbacks?",
+      options: [
+        { text: "'Callback hell' — deeply nested callbacks — by letting you write flat sequential-looking code that still runs on the event loop", correct: true },
+        { text: "They replace the event loop with real OS threads", correct: false },
+        { text: "They make blocking calls safe inside the loop", correct: false },
+        { text: "They eliminate the need for non-blocking sockets", correct: false },
+      ] },
+
+    { prompt: "Why does a slow callback stall an entire event-loop server?",
+      options: [
+        { text: "There is one thread running one callback at a time; while it runs, no other socket can be serviced", correct: true },
+        { text: "The OS kills the server after any slow callback", correct: false },
+        { text: "Slow callbacks corrupt the readiness set", correct: false },
+        { text: "It doesn't — other connections run on separate threads", correct: false },
+      ] },
+
+    { prompt: "Which action is SAFE to do directly inside an event-loop callback?",
+      options: [
+        { text: "A quick, non-blocking read/write and a small amount of work, then yield back to the loop", correct: true },
+        { text: "A synchronous, blocking file read", correct: false },
+        { text: "A tight multi-second CPU computation", correct: false },
+        { text: "A blocking sleep() to rate-limit the client", correct: false },
+      ] },
+
+    { prompt: "'Non-blocking I/O' means…",
+      options: [
+        { text: "the WAITING is free — but your own CPU work in a callback is not, and still blocks the single loop thread", correct: true },
+        { text: "all work in the server is now free and instantaneous", correct: false },
+        { text: "the CPU can run infinitely fast", correct: false },
+        { text: "heavy computations no longer take any time", correct: false },
+      ] },
+  ]);
+</script>

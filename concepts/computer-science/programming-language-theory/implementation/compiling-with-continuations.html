@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Compiling with Continuations</primer-title>
+
+    <primer-card>
+      <p>
+        On the last two pages we made <em>data</em> explicit — a function became a
+        <primer-ref to="computer-science/programming-language-theory/implementation/closures-and-environments">closure
+        over an environment</primer-ref> instead of borrowing the host's functions. The last of Reynolds' three
+        leaks remains: <strong>control</strong>. A direct-style interpreter still borrows the host's call stack
+        and its "return" mechanism — it never says, in its own terms, <em>what happens next</em>. To compile a
+        language faithfully, especially one with exceptions, generators, or proper tail calls, we must make
+        "what happens next" a value we can name, pass, and store. That value is a <strong>continuation</strong>,
+        and rewriting a program so every continuation is explicit is <strong>continuation-passing style</strong>
+        (CPS).
+      </p>
+      <p>
+        CPS is not merely a curiosity — it is one of the great <strong>intermediate representations</strong> of
+        compiler back ends. Guy Steele's 1978 <em>RABBIT</em> compiler for Scheme showed that if you transform
+        the whole program into CPS, then <em>"lambda is the ultimate GOTO"</em>: every jump, every return,
+        every loop is a tail call to a continuation, and code generation becomes almost mechanical because
+        control flow is already spelled out. Modern compilers — SML/NJ, and via CPS's cousin ANF, GHC and many
+        others — are built on exactly this move. This page shows what a continuation is, how CPS makes control
+        explicit, why "administrative redexes" are its main nuisance, and how ANF is the tidier sibling most
+        real compilers prefer.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A continuation is "the rest of the computation"</h2>
+      <p>
+        Fix a spot inside an evaluating expression. Everything that will still happen <em>after</em> the value
+        at that spot is produced — that whole pending remainder, as a function of the value — is its
+        <strong>continuation</strong>. In <primer-math>1 + (2 \times 3)</primer-math>, once
+        <primer-math>2 \times 3</primer-math> yields <primer-math>6</primer-math>, the rest is "add 1 to it":
+        the continuation of the subexpression <primer-math>2\times 3</primer-math> is
+        <primer-math>\kappa = \lambda v.\;1 + v</primer-math>. CPS turns this implicit "rest" into an explicit
+        extra argument that every function and primitive receives and <em>calls</em> instead of returning:
+      </p>
+      <primer-math display>\mathcal{C}[\![ e_1 + e_2 ]\!]\,\kappa \;=\; \mathcal{C}[\![ e_1 ]\!]\,\Big(\lambda a.\;\mathcal{C}[\![ e_2 ]\!]\,\big(\lambda b.\;\kappa\,(a + b)\big)\Big)</primer-math>
+      <p>
+        Read it aloud: to compute <primer-math>e_1 + e_2</primer-math> and then do
+        <primer-math>\kappa</primer-math> with the sum, first compute <primer-math>e_1</primer-math> and hand
+        its value <primer-math>a</primer-math> to a continuation that computes <primer-math>e_2</primer-math>,
+        hands <em>its</em> value <primer-math>b</primer-math> to a continuation that finally calls
+        <primer-math>\kappa</primer-math> on <primer-math>a+b</primer-math>. Two consequences fall out at once,
+        and they are why compilers love CPS: <strong>evaluation order is now written down</strong> (left before
+        right, because that is the nesting of the continuations), and <strong>every call is in tail
+        position</strong> — nothing ever waits on the stack for a call to return, because there are no returns.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>CPS linearises control into a chain of tail calls</h2>
+      <p>
+        The direct-style expression <primer-math>(a + b) \times c</primer-math> hides its control flow in the
+        tree structure — "do the inner add, then the multiply" is implicit. CPS makes it a straight
+        <strong>chain</strong>: compute the sum, pass it forward; compute the product, pass it forward; hand the
+        result to the halt continuation. Each arrow is a tail call — a <em>jump</em>, not a
+        call-that-returns. Reveal the chain:
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "cpsChain": {
+            "title": "CPS turns  (a + b) * c  into a linear chain of tail calls",
+            "caption": "In CPS every intermediate result is named and passed to the next step as a continuation. Control flow becomes a straight chain of tail calls (jumps) ending at the halt continuation — no operation waits on the stack for another to return.",
+            "start": "Start: compute a + b. Its continuation k1 will receive the sum as t0.",
+            "k1": "k1(t0): now compute t0 * c. Its continuation k2 will receive the product as t1.",
+            "k2": "k2(t1): hand t1 to the halt continuation — the whole program's result.",
+            "tail": "Every arrow is a TAIL call: a jump to the next step. Nothing is left pending on the stack, so this compiles to straight-line code / jumps."
+          }
+        }
+      </script>
+      <primer-geometry scene="cpsChain" caption="A CPS control-flow chain for (a + b) times c. A start node computes a + b and passes the result t0 to continuation k1, which computes t0 times c and passes t1 to k2, which passes t1 to the halt continuation. Each arrow is a tail call, so control flows as a straight chain with nothing pending on the stack."></primer-geometry>
+      <p>
+        That straight chain is the point. A code generator can walk it and emit one basic block after another,
+        each ending in a jump to the next — which is precisely what machine code looks like. Control flow that
+        was <em>structural</em> (nested subtrees, implicit returns) is now <em>syntactic</em> (a sequence of
+        named steps), and that is what "compiling with continuations" buys you.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The CPS converter, running</h2>
+      <p>
+        Here is a real (if small) CPS transformer for an arithmetic-and-let language, plus a CPS
+        <em>evaluator</em> that threads an explicit continuation and never returns a value the ordinary way —
+        it always calls its continuation. The transformer emits the nested-lambda CPS text so you can see the
+        structure; the evaluator proves it computes the right answer. Press <strong>Run</strong>:
+      </p>
+      <primer-code run>
+        type Expr =
+          | { kind: "lit"; n: number }
+          | { kind: "var"; name: string }
+          | { kind: "add"; left: Expr; right: Expr }
+          | { kind: "mul"; left: Expr; right: Expr };
+
+        // --- 1) CPS TRANSFORM to text: C[e] k.  k is a string naming the continuation. ---
+        let counter = 0;
+        const fresh = () =&gt; "v" + counter++;
+        function cps(e: Expr, k: (val: string) =&gt; string): string {
+          switch (e.kind) {
+            case "lit": return k(String(e.n));
+            case "var": return k(e.name);
+            case "add":
+            case "mul": {
+              const op = e.kind === "add" ? "+" : "*";
+              return cps(e.left,  (a) =&gt;
+                     cps(e.right, (b) =&gt; {
+                       const r = fresh();
+                       // "let r = a op b in <rest>" — the administrative structure of CPS.
+                       return `let ${r} = ${a} ${op} ${b} in ${k(r)}`;
+                     }));
+            }
+          }
+        }
+
+        // --- 2) CPS EVALUATOR: no returns; every step calls its continuation k. ---
+        function evalk(e: Expr, env: Record&lt;string, number&gt;, k: (n: number) =&gt; void): void {
+          switch (e.kind) {
+            case "lit": k(e.n); return;
+            case "var": k(env[e.name]); return;
+            case "add": evalk(e.left, env, (a) =&gt; evalk(e.right, env, (b) =&gt; k(a + b))); return;
+            case "mul": evalk(e.left, env, (a) =&gt; evalk(e.right, env, (b) =&gt; k(a * b))); return;
+          }
+        }
+
+        //  (a + b) * c   with a=2, b=3, c=4
+        const expr: Expr = { kind: "mul",
+          left:  { kind: "add", left: { kind: "var", name: "a" }, right: { kind: "var", name: "b" } },
+          right: { kind: "var", name: "c" } };
+
+        console.log("CPS form:  " + cps(expr, (v) =&gt; v));         // the named, sequentialised program
+        evalk(expr, { a: 2, b: 3, c: 4 }, (result) =&gt;
+          console.log("halt continuation receives:", result));    // 20
+      </primer-code>
+      <p>
+        The printed CPS form — <code>let v0 = a + b in let v1 = v0 * c in v1</code> — has named every
+        intermediate and fixed the order. The evaluator never writes <code>return someValue</code> to its
+        caller; it calls <code>k</code>. The final answer arrives at the halt continuation. Control has become
+        data.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Administrative redexes, and why ANF is the practical cousin</h2>
+      <p>
+        The naïve CPS transform sprinkles in extra <primer-math>\lambda</primer-math>s and immediately applies
+        them — <primer-math>(\lambda a.\,\ldots)\,e_1</primer-math>. These <strong>administrative redexes</strong>
+        are bookkeeping artefacts of the transform, not part of the source program's meaning, and if you leave
+        them in, the CPS code is bloated and slow. Plotkin (1975) identified them; the fix is either a
+        <em>one-pass</em> "higher-order" CPS transform that reduces them as it goes (the trick in Danvy &amp;
+        Filinski's compact converters), or to skip CPS's redundancy altogether and target
+        <strong>A-Normal Form (ANF)</strong>.
+      </p>
+      <primer-theorem name="ANF vs CPS">
+        <ul>
+          <li>
+            <strong>ANF</strong> names <em>every</em> intermediate result with a <code>let</code> and requires
+            arguments to be <em>atomic</em> (a variable or constant), so a program becomes a flat sequence of
+            <code>let x = &lt;primitive op&gt; in …</code> — exactly the <code>let v0 = a+b in let v1 = v0*c
+            in v1</code> above. It keeps the direct-style "returns" but forbids nested non-trivial subexpressions.
+          </li>
+          <li>
+            <strong>CPS</strong> goes further: it also reifies the <em>return points</em> as continuation
+            functions, so there are no returns at all — only tail calls. It exposes control (call/cc,
+            exceptions, coroutines) more directly, at the cost of those administrative redexes.
+          </li>
+          <li>
+            <strong>They are close relatives.</strong> ANF is essentially "CPS without explicitly naming the
+            continuations" — Sabry &amp; Felleisen showed the two are inter-translatable. Many compilers (GHC's
+            Core, and Flanagan et al.'s classic result "the essence of compiling with continuations") use ANF
+            because it gives most of CPS's benefits with less clutter.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Whichever you pick, the deliverable to the code generator is the same: a program where every operation
+        is named, every argument is trivial, and control flows as an explicit sequence of steps — a shape that
+        maps almost one-to-one onto basic blocks and jumps.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why tail calls fall out for free</h2>
+      <p>
+        In CPS there are no non-tail calls — <em>every</em> call is the last thing its function does, because
+        the "what to do with the result" was passed along as <primer-math>\kappa</primer-math> rather than
+        waited for. So a function call compiles to a <strong>jump</strong> that reuses the current stack frame,
+        and a loop written as tail recursion runs in constant space with no special "tail-call optimisation"
+        pass — the CPS form <em>is</em> the optimisation.
+      </p>
+      <primer-math display>\mathcal{C}[\![ f\;e ]\!]\,\kappa \;=\; \mathcal{C}[\![ e ]\!]\,\big(\lambda v.\; f\;v\;\kappa\big)</primer-math>
+      <p>
+        Look at the call <primer-math>f\;v\;\kappa</primer-math>: the function receives the argument
+        <em>and</em> the continuation, and it is in tail position in the continuation lambda. There is nothing
+        after it to come back to. This is the technical content of Steele's slogan "lambda is the ultimate
+        GOTO": once control is explicit, a procedure call and a goto are the same instruction, and the compiler
+        stops treating them differently. That single uniformity is why a CPS-based back end can generate tight,
+        loop-friendly code without a separate control-flow analysis.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="RABBIT, ORBIT, and 'Lambda: the Ultimate…'">
+      <p>
+        In 1976–78 Guy Steele and Gerald Sussman wrote a series of MIT AI-Lab memos — the "Lambda Papers" —
+        with irresistible titles: <em>Lambda: The Ultimate Imperative</em>, <em>…the Ultimate Declarative</em>,
+        <em>…the Ultimate GOTO</em>. Steele's master's thesis turned the ideas into <strong>RABBIT</strong>, the
+        first compiler to use CPS as its intermediate language, demonstrating that Scheme's function calls could
+        compile to machine jumps as efficient as any hand-written loop. The lineage continued with
+        <strong>ORBIT</strong> (Kranz et al., for the T dialect) and Appel's book <em>Compiling with
+        Continuations</em> (1992), which made CPS the backbone of the Standard ML of New Jersey compiler. The
+        provocative claim underneath all of it — that a function call is just a goto that passes arguments — is
+        now simply how compilers think.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out!">
+      <ul>
+        <li>
+          <strong>The naïve CPS transform produces administrative redexes.</strong> Those extra
+          apply-a-lambda-immediately terms are transform bookkeeping, not source meaning; left unreduced they
+          bloat the code and cost speed. Use a one-pass/higher-order CPS converter that reduces them on the fly,
+          or target ANF, which never introduces them.
+        </li>
+        <li>
+          <strong>CPS makes evaluation order explicit — so you must get it right in the transform.</strong>
+          Which continuation you nest inside which <em>is</em> the language's evaluation order. Nesting the
+          right operand's continuation inside the left's gives left-to-right; swap them and you have silently
+          defined a different, right-to-left language.
+        </li>
+        <li>
+          <strong>ANF is not "CPS with different syntax" — it keeps returns.</strong> ANF names intermediates
+          and demands atomic arguments but still uses direct-style returns; CPS abolishes returns entirely in
+          favour of tail calls to continuations. They are inter-translatable, but don't conflate them: pick ANF
+          for a leaner IR, CPS when you must reify control (call/cc, first-class continuations, coroutines).
+        </li>
+      </ul>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "cpsQuiz@1": {
+          "intro": "Continuations make 'what happens next' an explicit value; CPS is a compiler IR that linearises control into tail calls. Numbers change each attempt.",
+          "contQ": "A CONTINUATION of a subexpression is…",
+          "contA": "a function representing the rest of the computation — what happens after that subexpression's value is produced",
+          "contB": "the previous instruction executed",
+          "contC": "the garbage collector's root set",
+          "contD": "the parse tree of the program",
+          "cpsQ": "In continuation-passing style, functions and primitives…",
+          "cpsA": "take an extra continuation argument and CALL it instead of returning",
+          "cpsB": "return two values at once",
+          "cpsC": "never take arguments",
+          "cpsD": "run on a separate thread",
+          "tailQ": "A key property of a CPS program is that every call is…",
+          "tailA": "in tail position — so it compiles to a jump, not a call that must return",
+          "tailB": "recursive",
+          "tailC": "evaluated twice",
+          "tailD": "on the heap",
+          "orderQ": "How does CPS pin down evaluation order?",
+          "orderA": "by how the continuations are nested (the inner one runs later)",
+          "orderB": "alphabetically by variable name",
+          "orderC": "it does not — order stays unspecified",
+          "orderD": "by the size of each subexpression",
+          "adminQ": "ADMINISTRATIVE REDEXES are…",
+          "adminA": "extra lambda-applications introduced by the naïve CPS transform, not present in the source",
+          "adminB": "runtime errors in the continuation",
+          "adminC": "the roots of the heap graph",
+          "adminD": "optimised machine instructions",
+          "adminFixQ": "The standard remedies for administrative redexes are…",
+          "adminFixA": "a one-pass/higher-order CPS transform that reduces them, or targeting ANF instead",
+          "adminFixB": "adding more continuations",
+          "adminFixC": "reference counting",
+          "adminFixD": "disabling tail calls",
+          "anfQ": "A-Normal Form (ANF) requires that…",
+          "anfA": "every intermediate result is named by a let and every argument is atomic (a variable or constant)",
+          "anfB": "the program has no let-bindings",
+          "anfC": "all functions are anonymous",
+          "anfD": "arguments are arbitrary nested expressions",
+          "anfCpsQ": "How do ANF and CPS relate?",
+          "anfCpsA": "ANF is essentially CPS without explicitly naming continuations; they are inter-translatable",
+          "anfCpsB": "they are completely unrelated",
+          "anfCpsC": "ANF is slower than tree-walking",
+          "anfCpsD": "CPS is a subset of regular expressions",
+          "whyQ": "Why do compiler back ends like CPS (or ANF) as an intermediate representation?",
+          "whyA": "control flow becomes an explicit sequence of named steps that maps onto basic blocks and jumps",
+          "whyB": "it removes the need for a parser",
+          "whyC": "it makes the source shorter to type",
+          "whyD": "it eliminates all variables",
+          "tcoQ": "Why do proper tail calls come 'for free' in CPS?",
+          "tcoA": "there are no non-tail calls — every call is the last action, so it reuses the stack frame (a jump)",
+          "tcoB": "CPS forbids recursion",
+          "tcoC": "the heap grows instead of the stack",
+          "tcoD": "continuations are never called",
+          "steeleQ": "Guy Steele's RABBIT compiler is historically important because it…",
+          "steeleA": "was the first compiler to use CPS as its intermediate language ('lambda is the ultimate GOTO')",
+          "steeleB": "invented reference counting",
+          "steeleC": "compiled C to Scheme",
+          "steeleD": "removed the need for closures",
+          "returnQ": "In a CPS evaluator, how does a subexpression deliver its value?",
+          "returnA": "it calls its continuation k with the value; it never uses an ordinary return",
+          "returnB": "it prints the value",
+          "returnC": "it stores it in a global and returns void meaninglessly",
+          "returnD": "it throws the value as an exception",
+          "evalQ": "The CPS evaluator computes  (${a} + ${b}) * ${c}.  What value reaches the halt continuation?",
+          "sumQ": "In the CPS form  let t0 = ${a} + ${b} in let t1 = t0 * ${c} in t1,  what is t1?",
+          "atomQ": "ANF names intermediates. For  (${a} + ${b}) + (${c} + ${a}),  how many let-bound temporaries name the three additions?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="cpsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/programming-language-theory/implementation/closures-and-environments"],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // A CPS control-flow chain for (a+b)*c: start → k1 → k2 → halt, each arrow a tail call.
+  registerGeometryScene(
+    "cpsChain",
+    ({ board, colors, step, sceneStrings }) => {
+      // A labelled rounded box node; returns its centre and half-width for arrows.
+      const node = (cx, cy, w, title, sub, col) => {
+        const h = 1.0;
+        board.create("polygon",
+          [[cx - w / 2, cy + h / 2], [cx + w / 2, cy + h / 2],
+           [cx + w / 2, cy - h / 2], [cx - w / 2, cy - h / 2]], {
+            borders: { strokeColor: col, strokeWidth: 2 },
+            fillColor: col, fillOpacity: 0.12, vertices: { visible: false },
+            fixed: true, highlight: false,
+          });
+        board.create("text", [cx, cy + 0.18, title], {
+          strokeColor: colors.ink, fontSize: 14, anchorX: "middle", fixed: true, highlight: false,
+        });
+        board.create("text", [cx, cy - 0.24, sub], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", fixed: true, highlight: false,
+        });
+        return { cx, hw: w / 2, cy };
+      };
+      const jump = (from, to, label, col) => {
+        board.create("arrow", [[from.cx + from.hw, from.cy], [to.cx - to.hw, to.cy]], {
+          strokeColor: col, strokeWidth: 2.2, lastArrow: { type: 2, size: 7 },
+          fixed: true, highlight: false,
+        });
+        board.create("text", [(from.cx + from.hw + to.cx - to.hw) / 2, from.cy + 0.55, label], {
+          strokeColor: col, fontSize: 12, anchorX: "middle", fixed: true, highlight: false,
+        });
+      };
+
+      const y = 0;
+      let nStart, nK1, nK2, nHalt;
+      step(sceneStrings("start"), () => {
+        nStart = node(-6, y, 2.6, "compute a + b", "→ t0", colors.cat[1]);
+      });
+      step(sceneStrings("k1"), () => {
+        nK1 = node(-1.6, y, 2.6, "k1(t0): t0 * c", "→ t1", colors.cat[3]);
+        jump(nStart, nK1, "tail call t0", colors.cat[0]);
+      });
+      step(sceneStrings("k2"), () => {
+        nK2 = node(2.8, y, 2.6, "k2(t1)", "pass t1 on", colors.cat[4]);
+        jump(nK1, nK2, "tail call t1", colors.cat[0]);
+      });
+      step(sceneStrings("tail"), () => {
+        nHalt = node(6.8, y, 2.2, "halt", "result", colors.cat[2]);
+        jump(nK2, nHalt, "tail call", colors.cat[0]);
+        board.create("text", [0.4, -1.7, "every arrow is a tail call (a jump) — nothing pending on the stack"], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", fixed: true, highlight: false,
+        });
+      });
+    },
+    {
+      boundingbox: [-7.8, 1.6, 8.4, -2.2],
+      keepAspect: false,
+      title: () => makeStrings("cpsChain")("title"),
+      caption: () => makeStrings("cpsChain")("caption"),
+    },
+  );
+
+  registerQuiz("cpsQuiz@1", ({ sceneStrings }) => {
+    const mc = (q, a, b, c, d) => ({
+      prompt: () => sceneStrings(q),
+      options: [
+        { text: () => sceneStrings(a), correct: true },
+        { text: () => sceneStrings(b), correct: false },
+        { text: () => sceneStrings(c), correct: false },
+        { text: () => sceneStrings(d), correct: false },
+      ],
+    });
+    return [
+      { num_questions: 6, preamble: () => sceneStrings("intro") },
+
+      mc("contQ", "contA", "contB", "contC", "contD"),
+      mc("cpsQ", "cpsA", "cpsB", "cpsC", "cpsD"),
+      mc("tailQ", "tailA", "tailB", "tailC", "tailD"),
+      mc("orderQ", "orderA", "orderB", "orderC", "orderD"),
+      mc("adminQ", "adminA", "adminB", "adminC", "adminD"),
+      mc("adminFixQ", "adminFixA", "adminFixB", "adminFixC", "adminFixD"),
+      mc("anfQ", "anfA", "anfB", "anfC", "anfD"),
+      mc("anfCpsQ", "anfCpsA", "anfCpsB", "anfCpsC", "anfCpsD"),
+      mc("whyQ", "whyA", "whyB", "whyC", "whyD"),
+      mc("tcoQ", "tcoA", "tcoB", "tcoC", "tcoD"),
+      mc("steeleQ", "steeleA", "steeleB", "steeleC", "steeleD"),
+      mc("returnQ", "returnA", "returnB", "returnC", "returnD"),
+
+      // variable-driven.
+      {
+        prompt: (v) => sceneStrings("evalQ", { a: v.a, b: v.b, c: v.c }),
+        variables: "a=[1:12] b=[1:12] c=[1:12]",
+        answer: (v) => (v.a + v.b) * v.c,
+        keyboard: "geometry-lengths",
+      },
+      {
+        prompt: (v) => sceneStrings("sumQ", { a: v.a, b: v.b, c: v.c }),
+        variables: "a=[1:12] b=[1:12] c=[1:12]",
+        answer: (v) => (v.a + v.b) * v.c,
+        keyboard: "geometry-lengths",
+      },
+      {
+        prompt: (v) => sceneStrings("atomQ", { a: v.a, b: v.b, c: v.c }),
+        variables: "a=[1:9] b=[1:9] c=[1:9]",
+        answer: 3,
+        keyboard: "geometry-lengths",
+      },
+    ];
+  });
+</script>

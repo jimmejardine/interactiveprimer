@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>UDP: Connectionless Transport</primer-title>
+
+    <primer-card>
+      <p>
+        You are on a video call. Someone's face freezes for a fraction of a second, a syllable drops, and then
+        the conversation carries right on. Nobody stops to re-request the lost frame — by the time it could be
+        resent, the moment is gone; the <em>next</em> frame is what matters. This is the world UDP was built
+        for: applications that would rather <strong>lose a little data than wait</strong> for it.
+      </p>
+      <p>
+        <strong>UDP — the User Datagram Protocol</strong> — is the transport layer stripped to the bone. Where
+        <primer-ref todo to="computer-science/networks/transport/tcp-in-depth">TCP</primer-ref> is an elaborate
+        machine of handshakes, acknowledgements, timers and windows, UDP is barely more than
+        <primer-ref soft to="computer-science/networks/transport/multiplexing-and-sockets">multiplexing</primer-ref>
+        plus an optional error check. It takes your data, slaps on an eight-byte header, and throws it at the
+        network. No promises. And that radical minimalism, far from being a weakness, is precisely why UDP
+        underpins DNS, DHCP, live media, online games, and even the new HTTP/3.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The service UDP provides (and the four it doesn't)</h2>
+      <p>
+        UDP gives an application exactly two things over raw IP: <strong>multiplexing</strong> (ports, so the
+        bytes reach the right program) and an <strong>optional checksum</strong> (so gross corruption can be
+        detected). That is the entire feature list. Everything you might <em>expect</em> from a transport
+        protocol, UDP deliberately omits:
+      </p>
+      <ul>
+        <li><strong>No connection.</strong> There is no handshake, no setup, no state to establish. The very
+          first datagram carries real data. The sender and receiver keep no shared connection record.</li>
+        <li><strong>No reliability.</strong> A lost datagram is simply gone. UDP never notices, never
+          retransmits, never tells anyone.</li>
+        <li><strong>No ordering.</strong> Datagrams may arrive in a different order than they were sent, and
+          UDP delivers them in whatever order they turn up.</li>
+        <li><strong>No congestion or flow control.</strong> UDP sends as fast as the application asks, heedless
+          of whether the network or the receiver can keep up.</li>
+      </ul>
+      <p>
+        Because there is no connection and no per-connection state, a UDP socket is a single mailbox that can
+        exchange datagrams with the <em>whole world</em> at once — which is exactly why one socket on port 53
+        can serve every DNS query on the planet. The unit UDP sends is a self-contained
+        <strong>datagram</strong>: unlike a TCP byte stream, message boundaries are <em>preserved</em> — one
+        <code>send</code> becomes one <code>recv</code>. That message shape is another quiet reason
+        applications choose it.
+      </p>
+
+      <primer-theorem name="What UDP guarantees">
+        <ul>
+          <li><strong>Best-effort delivery.</strong> A datagram is delivered <em>at most once</em>, intact, to
+            the right port — or not at all. There is no in-between and no promise.</li>
+          <li><strong>Message boundaries preserved.</strong> Each datagram is delivered whole; the receiver
+            reads exactly the chunk the sender wrote (or nothing).</li>
+          <li><strong>Optional integrity.</strong> If the checksum is used and passes, the payload was
+            (very probably) not corrupted in transit.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The eight-byte header</h2>
+      <p>
+        The whole UDP header is four 16-bit fields — <strong>eight bytes</strong>, the smallest of any
+        mainstream transport protocol (TCP's is 20 bytes minimum). There is nothing to configure and nothing
+        to negotiate:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Field</th><th>Size</th><th>Meaning</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Source port</td><td>16 bits</td><td>Sender's port (may be 0 if no reply is expected)</td></tr>
+            <tr><td>Destination port</td><td>16 bits</td><td>Which socket on the destination host gets the datagram</td></tr>
+            <tr><td>Length</td><td>16 bits</td><td>Length in bytes of header + data (minimum 8)</td></tr>
+            <tr><td>Checksum</td><td>16 bits</td><td>Error-detection over header, data, and a pseudo-header</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Eight bytes of overhead per datagram versus TCP's twenty-plus is a real saving for tiny, frequent
+        messages — a game sending 60 position updates a second, or a DNS query that fits in a single packet.
+        The <em>Length</em> field is technically redundant (IP already knows the packet size), a small
+        historical wart. The interesting field is the last one.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The checksum: one's-complement arithmetic</h2>
+      <p>
+        The UDP (and TCP, and IP) checksum uses a charming old trick: treat the data as a sequence of 16-bit
+        integers, add them all up using <strong>one's-complement addition</strong>, and store the
+        <em>complement</em> (bitwise NOT) of the sum. One's-complement addition means: add normally, but
+        whenever the sum overflows past 16 bits, take the carry bit and <strong>add it back into the low
+        16 bits</strong> ("end-around carry"). The receiver adds up all the words <em>including</em> the
+        checksum; if nothing was corrupted, the result is all-ones (<code>0xFFFF</code>).
+      </p>
+      <p>
+        It's cheap enough to compute in software on every packet, and it catches all single-bit errors and
+        most burst errors — though, being only 16 bits, it is a weak check by modern standards, not a
+        cryptographic guarantee. The demo computes it step by step over a handful of 16-bit words:
+      </p>
+
+      <primer-code run>
+        // One's-complement 16-bit checksum, as used by UDP/TCP/IP.
+        // Sum the 16-bit words; fold any carry back into the low 16 bits; complement.
+        function checksum16(words: number[]): number {
+          let sum = 0;
+          for (const w of words) {
+            sum += w;                         // may exceed 16 bits
+            sum = (sum &amp; 0xffff) + (sum &gt;&gt;&gt; 16); // end-around carry (fold once)
+          }
+          // A second fold in case the last add produced a fresh carry.
+          sum = (sum &amp; 0xffff) + (sum &gt;&gt;&gt; 16);
+          return (~sum) &amp; 0xffff;              // one's complement, kept to 16 bits
+        }
+
+        const hex = (n: number) =&gt; "0x" + n.toString(16).padStart(4, "0").toUpperCase();
+
+        // Pretend these are the 16-bit words of a small datagram.
+        const data = [0x4500, 0x001c, 0x0000, 0x4011, 0xa8c0, 0x0001];
+        const cksum = checksum16(data);
+        console.log("Words:   " + data.map(hex).join(" "));
+        console.log("Checksum:", hex(cksum));
+
+        // The RECEIVER sums the same words PLUS the checksum. Result should be 0xFFFF.
+        function verify(words: number[], cksum: number): boolean {
+          let sum = cksum;
+          for (const w of words) { sum += w; sum = (sum &amp; 0xffff) + (sum &gt;&gt;&gt; 16); }
+          sum = (sum &amp; 0xffff) + (sum &gt;&gt;&gt; 16);
+          return sum === 0xffff;              // all-ones means "no error detected"
+        }
+
+        console.log("\nReceiver check (clean):    ", verify(data, cksum) ? "OK (0xFFFF)" : "CORRUPT");
+
+        // Flip one bit in transit and watch the check fail.
+        const corrupted = [...data];
+        corrupted[2] ^= 0x0001;               // single-bit error
+        console.log("Receiver check (1 bit flip):", verify(corrupted, cksum) ? "OK (0xFFFF)" : "CORRUPT — detected!");
+      </primer-code>
+
+      <primer-vignette title="Why fold the carry back in? (the end-around carry)">
+        <p>
+          One's-complement representation has two zeros (<code>+0</code> = all-zeros, <code>−0</code> =
+          all-ones) and, crucially, the arithmetic is <em>endianness-friendly</em>: you get the same checksum
+          whether you sum the words big-endian or little-endian, which let 1970s routers on different hardware
+          agree without conversion. The end-around carry is what makes the modular arithmetic work in
+          one's-complement — a carry out of the top is a "wrap around" that must be re-added at the bottom.
+          The payoff is a checksum any machine can compute and verify identically, in a few instructions per
+          word.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>So why on earth choose UDP?</h2>
+      <p>
+        If TCP does so much more, why would a serious application pick the protocol that promises nothing? Four
+        reasons, and every heavy UDP user is chasing at least one of them:
+      </p>
+      <ul>
+        <li><strong>Lower latency, no handshake.</strong> TCP spends a full round trip on its
+          <primer-ref todo to="computer-science/networks/transport/tcp-in-depth">three-way handshake</primer-ref>
+          before any data flows. A DNS lookup that fits in one packet would <em>double</em> in time if it had
+          to shake hands first. UDP's first datagram <em>is</em> the request.</li>
+        <li><strong>No head-of-line blocking.</strong> TCP delivers bytes strictly in order, so one lost
+          segment stalls <em>everything</em> behind it until it's resent. For live media or a game, a stalled
+          stream is worse than a dropped frame. UDP lets each datagram stand alone.</li>
+        <li><strong>Fine-grained control.</strong> The app decides what to do about loss. A video codec can
+          conceal a missing frame; a game can just use the newest position and ignore stale ones. They want
+          the raw channel, not TCP's one-size-fits-all recovery.</li>
+        <li><strong>Broadcast / multicast.</strong> UDP can send one datagram to many receivers at once; TCP,
+          being strictly point-to-point, cannot.</li>
+      </ul>
+      <p>
+        The classic UDP roll-call: <strong>DNS</strong> (one-shot query/response), <strong>DHCP</strong>
+        (before you even have an IP), <strong>VoIP and video</strong> (latency &gt; perfection),
+        <strong>online games</strong> (freshest state wins), <strong>SNMP/NTP</strong> (tiny periodic
+        messages), and — the plot twist — <strong>QUIC</strong>, the protocol under HTTP/3, which rebuilds
+        reliability, ordering and congestion control <em>on top of UDP in user space</em> to escape TCP's
+        limitations while keeping its guarantees. When TCP's fixed behaviour isn't the behaviour you want, you
+        start from UDP and build your own.
+      </p>
+
+      <primer-vignette title="Watch out! — 'UDP is unreliable' does not mean 'UDP always drops packets'">
+        <p>
+          "Unreliable" is a technical term here, and it trips people constantly. It does <strong>not</strong>
+          mean UDP is flaky or that datagrams usually vanish. On a healthy local network, UDP delivers the vast
+          majority of packets perfectly, often indistinguishably from TCP. "Unreliable" means only that UDP
+          makes <em>no promise</em>: it will not detect loss, will not retransmit, will not guarantee order —
+          so <em>if</em> the network drops something, UDP won't fix it for you. The correct reading is
+          "best-effort, no guarantees," not "expect failure." And when an application <em>does</em> need
+          reliability over UDP — as QUIC does — it simply <strong>adds acknowledgements, sequence numbers and
+          timers itself</strong>, at the application layer, tuned exactly to its needs. Reliability isn't
+          absent; it's <em>relocated</em>.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "udpQuiz@1": { "instructions": "Check your grasp of UDP: its minimal service, the 8-byte header, the one's-complement checksum, and when and why applications choose it." } }
+    </script>
+    <primer-quiz name="udpQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/networks/transport/multiplexing-and-sockets"],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("udpQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "Which two services does UDP actually provide over raw IP?",
+      options: [
+        { text: "multiplexing (ports) and an optional checksum", correct: true },
+        { text: "reliability and in-order delivery", correct: false },
+        { text: "congestion control and flow control", correct: false },
+        { text: "encryption and compression", correct: false },
+      ] },
+
+    { prompt: "How large is the UDP header?",
+      options: [
+        { text: "8 bytes (four 16-bit fields)", correct: true },
+        { text: "20 bytes minimum", correct: false },
+        { text: "4 bytes", correct: false },
+        { text: "16 bytes", correct: false },
+      ] },
+
+    { prompt: "Which field is NOT in the UDP header?",
+      options: [
+        { text: "Sequence number", correct: true },
+        { text: "Source port", correct: false },
+        { text: "Length", correct: false },
+        { text: "Checksum", correct: false },
+      ] },
+
+    { prompt: "UDP is 'connectionless.' This means…",
+      options: [
+        { text: "there is no handshake or setup — the first datagram carries real data", correct: true },
+        { text: "it cannot send data between two hosts", correct: false },
+        { text: "it needs a phone line to work", correct: false },
+        { text: "each datagram opens and closes a TCP connection", correct: false },
+      ] },
+
+    { prompt: "Unlike a TCP byte stream, a UDP datagram…",
+      options: [
+        { text: "preserves message boundaries — one send becomes one recv", correct: true },
+        { text: "must be reassembled from arbitrary byte chunks", correct: false },
+        { text: "is always exactly 8 bytes", correct: false },
+        { text: "guarantees in-order delivery", correct: false },
+      ] },
+
+    { prompt: "The UDP checksum uses which arithmetic?",
+      options: [
+        { text: "one's-complement 16-bit addition with end-around carry, then complement the sum", correct: true },
+        { text: "two's-complement 32-bit multiplication", correct: false },
+        { text: "SHA-256 hashing", correct: false },
+        { text: "a simple XOR of all the bytes", correct: false },
+      ] },
+
+    { prompt: "When the receiver sums all the 16-bit words INCLUDING the checksum, an uncorrupted datagram gives…",
+      options: [
+        { text: "0xFFFF (all ones)", correct: true },
+        { text: "0x0000 (all zeros)", correct: false },
+        { text: "the original checksum value", correct: false },
+        { text: "a random value each time", correct: false },
+      ] },
+
+    { prompt: "Why does the one's-complement checksum fold the carry back in (end-around carry)?",
+      options: [
+        { text: "it completes the modular arithmetic and makes the result endianness-independent", correct: true },
+        { text: "it encrypts the header", correct: false },
+        { text: "it doubles the checksum's bit length", correct: false },
+        { text: "it is required to compress the data", correct: false },
+      ] },
+
+    { prompt: "'UDP is unreliable' most accurately means…",
+      options: [
+        { text: "UDP makes no promise — it won't detect loss, retransmit, or reorder — not that it always drops packets", correct: true },
+        { text: "UDP packets are always lost on the internet", correct: false },
+        { text: "UDP corrupts data on purpose", correct: false },
+        { text: "UDP cannot be used for real applications", correct: false },
+      ] },
+
+    { prompt: "A key latency advantage of UDP over TCP is that UDP…",
+      options: [
+        { text: "has no handshake — the first datagram is the request, saving a round trip", correct: true },
+        { text: "compresses every packet automatically", correct: false },
+        { text: "uses a larger window than TCP", correct: false },
+        { text: "runs directly on the physical layer", correct: false },
+      ] },
+
+    { prompt: "Which application is a classic UDP user?",
+      options: [
+        { text: "DNS — a one-shot query/response that fits in a packet", correct: true },
+        { text: "a file transfer that must not lose a single byte", correct: false },
+        { text: "an SSH remote shell needing ordered reliable text", correct: false },
+        { text: "a bank transfer requiring exactly-once delivery", correct: false },
+      ] },
+
+    { prompt: "QUIC (under HTTP/3) is interesting because it…",
+      options: [
+        { text: "rebuilds reliability, ordering and congestion control on top of UDP in user space", correct: true },
+        { text: "replaces UDP with a brand-new link-layer protocol", correct: false },
+        { text: "removes all reliability from the web", correct: false },
+        { text: "is just TCP with a different name", correct: false },
+      ] },
+
+    { prompt: "A live video call prefers UDP partly because of 'head-of-line blocking' in TCP, which means…",
+      options: [
+        { text: "one lost TCP segment stalls all later bytes until it is retransmitted", correct: true },
+        { text: "TCP puts the newest data first", correct: false },
+        { text: "TCP drops the head of every message", correct: false },
+        { text: "UDP blocks the line while resending", correct: false },
+      ] },
+
+    { prompt: "If an application needs reliability but uses UDP, it should…",
+      options: [
+        { text: "add its own acknowledgements, sequence numbers and timers at the application layer", correct: true },
+        { text: "give up — reliability over UDP is impossible", correct: false },
+        { text: "increase the checksum to 32 bits", correct: false },
+        { text: "send every datagram twice and hope", correct: false },
+      ] },
+
+    { prompt: "A capability UDP has that point-to-point TCP does not is…",
+      options: [
+        { text: "broadcast / multicast — one datagram to many receivers", correct: true },
+        { text: "guaranteed in-order delivery", correct: false },
+        { text: "automatic retransmission", correct: false },
+        { text: "a three-way handshake", correct: false },
+      ] },
+  ]);
+</script>

@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The Page Cache and Writeback</primer-title>
+
+    <primer-card>
+      <p>
+        Here is a fact that quietly runs your whole machine: <strong>free RAM is wasted RAM</strong>, so Linux
+        spends nearly all of it caching file data. Every byte you read from or write to a file passes through the
+        <strong>page cache</strong> — a pool of RAM pages holding recently-touched file contents. The first read
+        of a file pays the full <primer-ref to="computer-science/advanced-operating-systems/storage/the-block-io-layer">block-layer</primer-ref>
+        price (~10 ms on a disk); every read after that is a <primer-ref to="computer-science/computer-architecture/memory/cache-fundamentals">cache
+        hit</primer-ref> at DRAM speed (~100 ns). That is the hundred-thousand-fold gap the entire storage module
+        has been circling, harnessed as the OS's single biggest performance lever.
+      </p>
+      <p>
+        The page cache is where the OS decides two hard questions. On reads: <em>should I fetch more than you
+        asked for, betting you'll want it?</em> (read-ahead). On writes: <em>can I lie that your data is saved,
+        keep it in RAM, and flush it to disk later?</em> (writeback). Both bets usually win big — and both have a
+        sharp edge (data loss on crash, cache pollution) that this lesson makes precise.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the clean/dirty page-state figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "pgcache": {
+          "title": "Page-cache states: pages are clean (match disk) or dirty (newer than disk, awaiting writeback)",
+          "ram": "Page cache (in RAM)",
+          "disk": "Backing store (disk / SSD)",
+          "clean": "clean (== disk)",
+          "dirty": "dirty (newer than disk)",
+          "wb": "writeback: flusher threads write dirty pages down",
+          "ra": "read-ahead: fetch ahead of the read",
+          "read": "read hit → served from RAM"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Clean and dirty: the two states of a cached page</h2>
+      <p>
+        A cached page is in one of two states. A <strong>clean</strong> page's contents are identical to what is
+        on disk — it can be dropped and reclaimed instantly, because the disk still has a good copy. A
+        <strong>dirty</strong> page has been written by a program but <em>not yet</em> persisted — RAM holds the
+        only up-to-date copy, so it must be <strong>written back</strong> to disk before its memory can be reused.
+      </p>
+      <primer-geometry scene="pgcache"></primer-geometry>
+      <p>
+        This clean/dirty split is the join between two subsystems you already know. Reclaiming <em>clean</em> pages
+        is free, so the page cache interlocks with
+        <primer-ref soft to="computer-science/operating-systems/page-replacement">page replacement</primer-ref>:
+        under memory pressure the kernel prefers to evict clean cache pages first (no I/O), and only writes back
+        and drops dirty ones when it must. Cache management and virtual-memory eviction are, in Linux, literally
+        the same LRU lists.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Read-ahead: guessing the future</h2>
+      <p>
+        When you read the first few blocks of a file <em>in order</em>, the kernel notices the pattern and
+        <strong>reads ahead</strong> — prefetching the next chunk before you ask, so by the time your next
+        <primer-math>\texttt{read()}</primer-math> arrives the data is already in RAM. For sequential access this
+        is transformative: instead of stalling on every block, you stall once and then stream from cache. If the
+        access pattern turns out to be random, the kernel notices its predictions missing and <em>shrinks</em> the
+        read-ahead window, so it doesn't waste bandwidth fetching pages nobody wants.
+      </p>
+      <p>
+        The model below streams through a file with a read-ahead window. Sequential access turns almost every
+        request into a cache hit; the one-time misses are the prefetches themselves.
+      </p>
+      <primer-code run>
+        // Read-ahead hit rate on a sequential scan.
+        // The cache prefetches `window` pages ahead whenever it services a miss.
+        const FILE_PAGES = 40;
+        const window = 8;                 // read-ahead window (pages fetched per prefetch)
+
+        const cached = new Set&lt;number&gt;();
+        let hits = 0, misses = 0, prefetched = 0;
+
+        for (let p = 0; p &lt; FILE_PAGES; p++) {
+          if (cached.has(p)) {
+            hits++;
+          } else {
+            misses++;
+            // Miss triggers a prefetch of the next `window` pages (including p).
+            for (let k = p; k &lt; Math.min(p + window, FILE_PAGES); k++) {
+              if (!cached.has(k)) { cached.add(k); prefetched++; }
+            }
+          }
+        }
+
+        const rate = (100 * hits / (hits + misses)).toFixed(1);
+        console.log(`pages read:        ${FILE_PAGES}`);
+        console.log(`cache hits:        ${hits}`);
+        console.log(`cache misses:      ${misses}   (each triggered a read-ahead)`);
+        console.log(`hit rate:          ${rate}%`);
+        console.log(`\nWith window ${window}, only ~1 in ${window} accesses actually waits on I/O.`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Writeback: the delicious, dangerous lie</h2>
+      <p>
+        When a program writes, the kernel copies the data into a page, marks it <strong>dirty</strong>, and
+        returns success <em>immediately</em> — the data is still only in RAM. This <strong>write-back</strong>
+        caching (as opposed to <strong>write-through</strong>, which would wait for the disk) is what makes writes
+        feel instant and lets the kernel batch, merge, and reorder many small writes into efficient large ones. A
+        family of kernel <strong>flusher threads</strong> later walks the dirty pages and writes them to disk,
+        governed by tunables:
+      </p>
+      <ul>
+        <li><code>dirty_background_ratio</code> — once this fraction of RAM is dirty, flushers start working in the
+          background;</li>
+        <li><code>dirty_ratio</code> — a hard ceiling: once this fraction is dirty, <em>writers themselves are
+          throttled</em> (made to flush synchronously) so dirty data can't grow without bound;</li>
+        <li><code>dirty_expire_centisecs</code> — a dirty page older than this is flushed regardless, so nothing
+          lingers unsaved forever (typically ~30 s).</li>
+      </ul>
+      <primer-theorem name="The page cache & writeback — the essentials">
+        <ul>
+          <li>the <strong>page cache</strong> holds file data in free RAM; a <strong>clean</strong> page matches
+            disk (droppable), a <strong>dirty</strong> page is newer than disk (must be written back);</li>
+          <li><strong>read-ahead</strong> prefetches sequential data, turning stalls into cache hits; it shrinks
+            on random access;</li>
+          <li><strong>write-back</strong> returns instantly and flushes later via flusher threads;
+            <strong>write-through</strong> waits for the device;</li>
+          <li>writeback is bounded by <strong>dirty ratios</strong> and an <strong>expiry</strong>;
+            <strong>O_DIRECT</strong> bypasses the cache entirely for apps that manage their own.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Why would a database ask the kernel to STOP caching its data (O_DIRECT)?">
+      <p>
+        It sounds perverse — turn off the free speed-up? But a database like PostgreSQL or Oracle already keeps
+        its own finely-tuned buffer pool in user space, with knowledge the kernel lacks: which pages are hot,
+        which must hit disk before a commit, exactly when to flush for durability. If the kernel <em>also</em>
+        caches every block, you get <strong>double buffering</strong> — the same data cached twice, wasting RAM —
+        and the kernel's generic read-ahead and writeback heuristics fight the database's careful ones.
+        <strong>O_DIRECT</strong> lets the application say "move these bytes straight between my buffer and the
+        device by DMA; do not touch the page cache." The app trades away the kernel's help for total control and
+        predictable latency. It's a recurring theme: the smartest cache is sometimes no cache, when someone above
+        knows better.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! write() returning success does NOT mean your data is on disk">
+      <p>
+        The most dangerous illusion the page cache sells: a <primer-math>\texttt{write()}</primer-math> that
+        returns <code>0</code> (success) has, by default, only copied your bytes into a <em>dirty</em> RAM page.
+        If the machine loses power in the next few seconds — before the flusher threads run — that data is simply
+        <strong>gone</strong>, even though your program was told it succeeded. To actually guarantee persistence
+        you must call <primer-math>\texttt{fsync()}</primer-math> (or open with <code>O_SYNC</code>), which blocks
+        until the dirty pages <em>and</em> the file's metadata are truly on stable storage. This is why databases
+        <primer-math>\texttt{fsync}</primer-math> the write-ahead log before acknowledging a commit, and why "did
+        you fsync?" is the first question after every corruption bug. Fast-by-default writeback and
+        durable-on-demand <primer-math>\texttt{fsync}</primer-math> are two different promises — never confuse
+        them.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: page-cache concepts + numeric hit-rate/dirty-ratio calcs.
+         Variables avoid evaluator collisions (win, tot, ram, pct, hh, mm). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "pgcacheQuiz@1": {
+          "intro": "The unified page cache in free RAM; clean vs dirty pages; read-ahead prefetching; write-back vs write-through, flusher threads and dirty ratios; and O_DIRECT to bypass the cache.",
+          "purposeQ": "The page cache exists to…",
+          "puRight": "hold recently-used file data in free RAM so repeat reads hit at DRAM speed",
+          "puWrong1": "encrypt files before they reach the disk",
+          "puWrong2": "schedule which process runs next",
+          "puWrong3": "translate virtual addresses to physical ones",
+          "cleanQ": "A 'clean' cached page is one that…",
+          "clRight": "has contents identical to disk, so it can be reclaimed instantly with no I/O",
+          "clWrong1": "has been written but not yet saved to disk",
+          "clWrong2": "contains no data",
+          "clWrong3": "is encrypted",
+          "dirtyQ": "A 'dirty' cached page…",
+          "diRight": "holds the only up-to-date copy and must be written back before its RAM is reused",
+          "diWrong1": "is identical to what is on disk",
+          "diWrong2": "can be dropped for free at any time",
+          "diWrong3": "belongs to the kernel, not any file",
+          "raQ": "Read-ahead improves sequential reads by…",
+          "raRight": "prefetching upcoming pages before they are requested, turning stalls into cache hits",
+          "raWrong1": "compressing the file on disk",
+          "raWrong2": "reading the file backwards",
+          "raWrong3": "deleting old pages faster",
+          "raShrinkQ": "When access looks random rather than sequential, the kernel…",
+          "rsRight": "shrinks the read-ahead window to avoid prefetching pages nobody will use",
+          "rsWrong1": "grows the read-ahead window to maximum",
+          "rsWrong2": "disables the page cache entirely",
+          "rsWrong3": "switches the disk to write-through",
+          "wbQ": "Write-back caching means a write()…",
+          "wbRight": "returns immediately after copying to a dirty RAM page; the disk is updated later",
+          "wbWrong1": "waits until the data is safely on disk before returning",
+          "wbWrong2": "never reaches the disk at all",
+          "wbWrong3": "is slower than write-through",
+          "wtQ": "Compared with write-back, write-through caching…",
+          "wtRight": "waits for the device on each write — safer per-write but slower",
+          "wtWrong1": "is always faster than write-back",
+          "wtWrong2": "never touches the disk",
+          "wtWrong3": "keeps no data in RAM",
+          "ratioQ": "The dirty_ratio tunable's purpose is to…",
+          "ratRight": "cap how much RAM may be dirty by throttling writers once the ceiling is hit",
+          "ratWrong1": "set the disk's rotational speed",
+          "ratWrong2": "decide the read-ahead window size",
+          "ratWrong3": "choose the I/O scheduler",
+          "directQ": "A database opens files with O_DIRECT in order to…",
+          "drRight": "bypass the page cache and manage its own buffering, avoiding double caching",
+          "drWrong1": "make every write hit the cache twice for safety",
+          "drWrong2": "encrypt its data",
+          "drWrong3": "disable fsync",
+          "fsyncQ": "After a plain write() returns success, guaranteeing the data survives a power cut requires…",
+          "fsRight": "calling fsync() (or O_SYNC) to force dirty pages and metadata to stable storage",
+          "fsWrong1": "nothing — write() already guarantees persistence",
+          "fsWrong2": "rebooting the machine",
+          "fsWrong3": "clearing the page cache",
+          "hitNumQ": "A sequential scan of {tot} pages uses a read-ahead window of {win} pages (one miss per window). Roughly how many cache MISSES occur? (misses = tot / win)",
+          "rateNumQ": "Of {tot} page accesses, {hh} are cache hits. What is the hit rate as a percentage? (answer to 1 dp)",
+          "dirtyNumQ": "A machine has {ram} GB of RAM and dirty_ratio is {pct}%. At most how many GB may be dirty before writers are throttled? (answer to 1 dp)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="pgcacheQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/storage/the-block-io-layer",
+      "computer-science/computer-architecture/memory/cache-fundamentals"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Page-cache states: a RAM band of clean/dirty pages over a disk band, with writeback arrows down and a
+     read-ahead arrow up. Static BASE content, visible on load. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "pgcache",
+    ({ board, colors, sceneStrings }) => {
+      const PW = 1.3, PH = 1.0, x0 = 1.0;
+      const ramY = 4.2, diskY = 0.4;
+      // clean = cat[0], dirty = cat[1]
+      const states = ["clean", "dirty", "clean", "clean", "dirty", "clean"];
+
+      // RAM band header.
+      board.create("text", [x0, ramY + PH + 0.4, sceneStrings("ram")], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "left", fixed: true, highlight: false, cssStyle: "font-weight:600",
+      });
+      states.forEach((s, i) => {
+        const x = x0 + i * PW;
+        const isDirty = s === "dirty";
+        board.create("polygon", [[x, ramY], [x + PW - 0.15, ramY], [x + PW - 0.15, ramY + PH], [x, ramY + PH]], {
+          fillColor: isDirty ? colors.cat[1] : colors.cat[0], fillOpacity: isDirty ? 0.34 : 0.2,
+          borders: { strokeColor: colors.line, strokeWidth: 1.2, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+      });
+      // Disk band.
+      board.create("text", [x0, diskY - 0.4, sceneStrings("disk")], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "left", fixed: true, highlight: false, cssStyle: "font-weight:600",
+      });
+      board.create("polygon", [[x0, diskY], [x0 + 6 * PW - 0.15, diskY], [x0 + 6 * PW - 0.15, diskY + PH], [x0, diskY + PH]], {
+        fillColor: colors.cat[2], fillOpacity: 0.16,
+        borders: { strokeColor: colors.line, strokeWidth: 1.2, highlight: false },
+        vertices: { visible: false }, fixed: true, highlight: false,
+      });
+
+      // Writeback arrows from the two dirty pages down to disk.
+      states.forEach((s, i) => {
+        if (s === "dirty") {
+          const cx = x0 + i * PW + (PW - 0.15) / 2;
+          board.create("arrow", [[cx, ramY - 0.1], [cx, diskY + PH + 0.1]], {
+            strokeColor: colors.cat[1], strokeWidth: 2, lastArrow: { size: 5 }, fixed: true, highlight: false,
+          });
+        }
+      });
+      board.create("text", [x0 + 6 * PW + 0.2, (ramY + diskY) / 2 + 0.3, sceneStrings("wb")], {
+        strokeColor: colors.ink, fontSize: 10, anchorX: "left", anchorY: "middle", fixed: true, highlight: false,
+        cssStyle: "max-width:170px; opacity:0.9",
+      });
+
+      // Read-ahead arrow up from disk to a clean page.
+      const rax = x0 + 3 * PW + (PW - 0.15) / 2;
+      board.create("arrow", [[rax + 0.5, diskY + PH + 0.1], [rax + 0.5, ramY - 0.1]], {
+        strokeColor: colors.cat[3], strokeWidth: 2, lastArrow: { size: 5 }, fixed: true, highlight: false,
+      });
+      board.create("text", [x0 + 6 * PW + 0.2, diskY + PH + 0.4, sceneStrings("ra")], {
+        strokeColor: colors.ink, fontSize: 10, anchorX: "left", anchorY: "middle", fixed: true, highlight: false,
+        cssStyle: "max-width:170px; opacity:0.9",
+      });
+
+      // Legend.
+      const leg = [["clean", colors.cat[0], 0.2], ["dirty", colors.cat[1], 0.34]];
+      leg.forEach(([key, col, op], i) => {
+        const lx = x0 + i * 3.2, ly = ramY + PH + 1.1;
+        board.create("polygon", [[lx, ly], [lx + 0.45, ly], [lx + 0.45, ly + 0.45], [lx, ly + 0.45]], {
+          fillColor: col, fillOpacity: op, borders: { strokeColor: colors.line, strokeWidth: 1, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [lx + 0.6, ly + 0.22, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 10, anchorX: "left", anchorY: "middle", fixed: true, highlight: false,
+        });
+      });
+    },
+    {
+      boundingbox: [-0.6, 7.2, 12.4, -1.0],
+      keepAspect: false,
+      title: () => makeStrings("pgcache")("title"),
+    },
+  );
+
+  registerQuiz("pgcacheQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("purposeQ"), options: [
+      { text: () => sceneStrings("puRight"), correct: true },
+      { text: () => sceneStrings("puWrong1"), correct: false },
+      { text: () => sceneStrings("puWrong2"), correct: false },
+      { text: () => sceneStrings("puWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cleanQ"), options: [
+      { text: () => sceneStrings("clRight"), correct: true },
+      { text: () => sceneStrings("clWrong1"), correct: false },
+      { text: () => sceneStrings("clWrong2"), correct: false },
+      { text: () => sceneStrings("clWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dirtyQ"), options: [
+      { text: () => sceneStrings("diRight"), correct: true },
+      { text: () => sceneStrings("diWrong1"), correct: false },
+      { text: () => sceneStrings("diWrong2"), correct: false },
+      { text: () => sceneStrings("diWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("raQ"), options: [
+      { text: () => sceneStrings("raRight"), correct: true },
+      { text: () => sceneStrings("raWrong1"), correct: false },
+      { text: () => sceneStrings("raWrong2"), correct: false },
+      { text: () => sceneStrings("raWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("raShrinkQ"), options: [
+      { text: () => sceneStrings("rsRight"), correct: true },
+      { text: () => sceneStrings("rsWrong1"), correct: false },
+      { text: () => sceneStrings("rsWrong2"), correct: false },
+      { text: () => sceneStrings("rsWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("wbQ"), options: [
+      { text: () => sceneStrings("wbRight"), correct: true },
+      { text: () => sceneStrings("wbWrong1"), correct: false },
+      { text: () => sceneStrings("wbWrong2"), correct: false },
+      { text: () => sceneStrings("wbWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("wtQ"), options: [
+      { text: () => sceneStrings("wtRight"), correct: true },
+      { text: () => sceneStrings("wtWrong1"), correct: false },
+      { text: () => sceneStrings("wtWrong2"), correct: false },
+      { text: () => sceneStrings("wtWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("ratioQ"), options: [
+      { text: () => sceneStrings("ratRight"), correct: true },
+      { text: () => sceneStrings("ratWrong1"), correct: false },
+      { text: () => sceneStrings("ratWrong2"), correct: false },
+      { text: () => sceneStrings("ratWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("directQ"), options: [
+      { text: () => sceneStrings("drRight"), correct: true },
+      { text: () => sceneStrings("drWrong1"), correct: false },
+      { text: () => sceneStrings("drWrong2"), correct: false },
+      { text: () => sceneStrings("drWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fsyncQ"), options: [
+      { text: () => sceneStrings("fsRight"), correct: true },
+      { text: () => sceneStrings("fsWrong1"), correct: false },
+      { text: () => sceneStrings("fsWrong2"), correct: false },
+      { text: () => sceneStrings("fsWrong3"), correct: false },
+    ] },
+    {
+      // misses = tot / win.
+      prompt: (v) => sceneStrings("hitNumQ", v),
+      variables: "tot=[32,48,64] win=[4,8,16]",
+      answer: (v) => v.tot / v.win,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // hit rate % = 100 * hh / tot, to 1 dp.
+      prompt: (v) => sceneStrings("rateNumQ", v),
+      variables: "tot=[40,50,80] hh=[30,45,72]",
+      constraints: "hh < tot",
+      answer: (v) => Math.round((100 * v.hh / v.tot) * 10) / 10,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // max dirty GB = ram * pct / 100, to 1 dp.
+      prompt: (v) => sceneStrings("dirtyNumQ", v),
+      variables: "ram=[8,16,32] pct=[10,20,40]",
+      answer: (v) => Math.round((v.ram * v.pct / 100) * 10) / 10,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Error Recovery and Parser Generators</primer-title>
+
+    <primer-card>
+      <p>
+        Every parser we have built so far shares an unspoken assumption: that the input is <em>correct</em>. Real
+        programs are not. A working day at the keyboard is a stream of missing semicolons, unbalanced brackets,
+        and typos, and the first tool to meet them is the parser. What it does next decides whether a programmer
+        sees <em>one clear message pointing at one real mistake</em>, or a wall of forty confused complaints that
+        bury the truth. Good <strong>error recovery</strong> is not a footnote to parsing — for the humans who use
+        your compiler, it may be the single most visible thing it does.
+      </p>
+      <p>
+        A parser reports a syntax error the instant the input token cannot legally continue the current
+        derivation — in a
+        <primer-ref to="computer-science/compiler-design/parsing/recursive-descent-parsing">recursive-descent</primer-ref>
+        parser at an <code>expect</code> that fails, in an
+        <primer-ref to="computer-science/compiler-design/parsing/canonical-lr1-and-lalr">LR</primer-ref>
+        parser at a blank ACTION cell. Detecting the error is easy. The hard, interesting question is what to do
+        <em>after</em>: how to dust yourself off and keep parsing so the <em>next</em> genuine error can also be
+        found in the same run.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Four families of recovery strategy</h2>
+      <p>
+        There is a spectrum, from cheap-and-crude to expensive-and-optimal:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Strategy</th><th>What it does</th><th>Cost / trade-off</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Panic-mode</strong></td>
+              <td>on error, skip input tokens until a chosen <em>synchronizing</em> token (e.g. <code>;</code>,
+                <code>}</code>, <code>end</code>), then resume</td>
+              <td>trivial to implement, never loops; may skip a large chunk and miss errors inside it</td>
+            </tr>
+            <tr>
+              <td><strong>Phrase-level</strong></td>
+              <td>locally patch the input — insert a missing token, delete an extra one, or swap two — to limp
+                past the error</td>
+              <td>gives targeted "did you forget a <code>;</code>?" messages; risks bad guesses and, if it
+                inserts without consuming, infinite loops</td>
+            </tr>
+            <tr>
+              <td><strong>Error productions</strong></td>
+              <td>bake common mistakes <em>into the grammar</em> as extra rules that match the bad construct and
+                emit a tailored diagnostic</td>
+              <td>excellent messages for anticipated errors; only catches mistakes you foresaw</td>
+            </tr>
+            <tr>
+              <td><strong>Global / minimum-distance correction</strong></td>
+              <td>find the smallest set of insertions/deletions/changes that turns the whole input into a legal
+                program</td>
+              <td>theoretically optimal, great for research; too slow and too surprising for production use</td>
+            </tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Real compilers blend these. A C or Java front end typically runs <strong>panic-mode</strong> at statement
+        and block boundaries for robustness, sprinkles <strong>phrase-level</strong> repairs for the very common
+        slips (a missing semicolon or closing paren), and adds a few <strong>error productions</strong> for
+        notorious traps ("<code>=</code> used where <code>==</code> was meant"). Minimum-distance correction is
+        mostly a beautiful idea that stays in the textbook.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>How yacc's <code>error</code> token works</h2>
+      <p>
+        LR parser generators expose recovery through a special terminal named <code>error</code>. You write it
+        into your grammar at the granularity where you want to re-synchronise, for example:
+      </p>
+      <primer-code lang="text">
+        stmt : expr ';'
+             | error ';'      /* on any error, skip to the next ';' and recover here */
+             ;
+      </primer-code>
+      <p>
+        When the parser hits an error, it does something very LR-flavoured: it <strong>pops states off the
+        stack</strong> until it finds one whose ACTION table can legally shift the <code>error</code> token, it
+        shifts <code>error</code> there, and then it <strong>discards input tokens</strong> until it finds one it
+        can shift in the new configuration (here, a <code>;</code>). In effect it is panic-mode, but with the
+        synchronising points chosen declaratively by <em>where you placed <code>error</code> in the grammar</em>.
+        To stop a flood of repeats, yacc stays quiet about further errors until it has successfully shifted three
+        real tokens — a simple, effective throttle on cascades.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Panic-mode recovery, in code</h2>
+      <p>
+        Here is a small hand-written parser for a list of assignment statements
+        (<primer-math>\textit{stmt} \to \texttt{id}\ \texttt{=}\ \textit{expr}\ \texttt{;}</primer-math>). On a
+        syntax error it records a message and then <strong>synchronises</strong> by skipping to just past the next
+        <code>;</code> — the classic panic-mode move. Watch it survive two separate errors and still parse the
+        good statements around them.
+      </p>
+      <primer-code run>
+        type Tok = { kind: string; text: string; at: number };
+
+        function lex(src: string): Tok[] {
+          const toks: Tok[] = [];
+          src.trim().split(/\s+/).forEach((w, i) =&gt; {
+            let kind = w;
+            if (/^[0-9]+$/.test(w)) kind = "num";
+            else if (/^[a-z]+$/.test(w)) kind = "id";
+            // '=', '+', ';' keep their own text as kind
+            toks.push({ kind, text: w, at: i });
+          });
+          toks.push({ kind: "eof", text: "&lt;eof&gt;", at: toks.length });
+          return toks;
+        }
+
+        class ParseError extends Error {}
+
+        class Parser {
+          private toks: Tok[];
+          private pos = 0;
+          errors: string[] = [];
+          ok = 0;                     // successfully parsed statements
+          constructor(toks: Tok[]) { this.toks = toks; }
+
+          private peek(): Tok { return this.toks[this.pos]; }
+          private atEnd(): boolean { return this.peek().kind === "eof"; }
+          private expect(kind: string): Tok {
+            if (this.peek().kind !== kind)
+              throw new ParseError(`token ${this.peek().at}: expected '${kind}' but found '${this.peek().text}'`);
+            return this.toks[this.pos++];
+          }
+
+          // Panic-mode: discard tokens up to and including the next ';'.
+          private synchronize(): void {
+            while (!this.atEnd() &amp;&amp; this.peek().kind !== ";") this.pos++;
+            if (this.peek().kind === ";") this.pos++;
+          }
+
+          parse(): void {
+            while (!this.atEnd()) {
+              try {
+                this.stmt();
+                this.ok++;
+              } catch (e) {
+                if (e instanceof ParseError) { this.errors.push(e.message); this.synchronize(); }
+                else throw e;
+              }
+            }
+          }
+
+          // stmt -> id '=' expr ';'
+          private stmt(): void {
+            this.expect("id");
+            this.expect("=");
+            this.expr();
+            this.expect(";");
+          }
+          // expr -> term ('+' term)*
+          private expr(): void {
+            this.term();
+            while (this.peek().kind === "+") { this.pos++; this.term(); }
+          }
+          // term -> num | id
+          private term(): void {
+            const k = this.peek().kind;
+            if (k === "num" || k === "id") { this.pos++; return; }
+            throw new ParseError(`token ${this.peek().at}: expected a number or identifier but found '${this.peek().text}'`);
+          }
+        }
+
+        const src = "a = 1 + 2 ; b = ; c = 3 3 ; d = 4 ;";
+        const p = new Parser(lex(src));
+        p.parse();
+        console.log(`input: ${src}`);
+        console.log(`parsed OK: ${p.ok} statements`);
+        console.log(`errors found: ${p.errors.length}`);
+        for (const e of p.errors) console.log("  - " + e);
+      </primer-code>
+      <p>
+        Two independent mistakes — an empty right-hand side in <code>b = ;</code> and a stray extra number in
+        <code>c = 3 3 ;</code> — are <em>both</em> reported in a single run, while <code>a</code> and
+        <code>d</code> parse cleanly. Without recovery the parser would have died at the first error and never
+        seen the second. That is the entire point: <strong>keep going, to find more real errors.</strong>
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Parser generators: pick your class</h2>
+      <p>
+        You rarely write LR tables by hand. A <strong>parser generator</strong> takes a grammar and emits the
+        parser — and each tool commits to a particular grammar class, which is really a statement about how much
+        of the ambiguity and lookahead problem it is willing to solve for you.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Tool</th><th>Method / class</th><th>Character</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>yacc / bison</strong></td><td>bottom-up, LALR(1) (bison also does GLR / IELR)</td><td>the classic; compact tables, the <code>error</code> token for recovery</td></tr>
+            <tr><td><strong>ANTLR</strong></td><td>top-down, LL(*) / adaptive-LL (ALL(*))</td><td>readable generated code, arbitrary lookahead, great tooling and error messages</td></tr>
+            <tr><td><strong>tree-sitter</strong></td><td>GLR (generalised LR)</td><td>handles ambiguity and, crucially, <em>incremental &amp; error-tolerant</em> parsing for editors</td></tr>
+            <tr><td><strong>PEG tools</strong> (e.g. pegjs, pest)</td><td>parsing expression grammars, packrat</td><td>ordered choice, no ambiguity by construction, linear time with memoisation</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The pattern to notice: <strong>bottom-up LR</strong> tools (yacc, bison, tree-sitter) accept a wider
+        class of grammars and shine on established languages; <strong>top-down LL</strong> tools (ANTLR, PEG)
+        generate code that reads like the hand-written recursive-descent parsers of page one, which many teams
+        prefer for readability and error messages. <strong>GLR</strong> tools sit above the whole hierarchy: by
+        forking the parse on conflicts and pruning dead branches, they accept <em>any</em> context-free grammar,
+        at some runtime cost — which is exactly why an editor like a modern IDE, needing to parse
+        half-typed, broken code on every keystroke, reaches for tree-sitter.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why do Elm and Rust get praised for their error messages when the parsing theory is the same?">
+      <p>
+        Because the theory was never the bottleneck — <em>effort</em> was. The parsing algorithms behind Elm and
+        Rust are the same LR/recursive-descent ideas everyone uses; what changed is that their teams treated the
+        error message as a <strong>designed product feature</strong>, not an afterthought. Elm's compiler, whose
+        author literally launched a "compiler errors for humans" initiative, prints the offending source line
+        with a caret under the exact span, names what it expected in plain English, and often suggests the fix
+        ("Maybe you want <code>::</code> instead of <code>:</code>?"). Rust's <code>rustc</code> does the same at
+        scale: coloured multi-line spans, notes, help text, and machine-applicable suggestions that
+        <code>cargo fix</code> can apply automatically. None of this needs a fancier parsing algorithm — it needs
+        the parser to <strong>preserve source spans</strong>, recover gracefully so it can report several errors
+        at once, and carry enough context to phrase a human sentence. The lesson for a compiler writer: the
+        distance between "syntax error" and a message a beginner actually understands is engineering care, not a
+        theorem.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Cascading spurious errors">
+      <p>
+        The great hazard of error recovery is the <strong>cascade</strong>: one real mistake throws the parser
+        out of sync, and every subsequent token looks wrong, so it spews a dozen fake errors that all trace back
+        to a single missing brace. Beginners see the flood, panic, and start "fixing" errors that do not exist.
+        The recovery machinery exists precisely to prevent this — but it can also <em>cause</em> it if tuned
+        badly (synchronise too eagerly and you skip real errors; too timidly and you cascade).
+      </p>
+      <p>
+        Two guards keep cascades in check. First, <strong>suppress secondary messages</strong> until the parser
+        has re-established solid footing — yacc's "shift three good tokens before complaining again" is the
+        canonical version. Second, <strong>choose synchronising tokens that are strong statement or block
+        delimiters</strong> (<code>;</code>, <code>}</code>, <code>end</code>) so that recovery lands cleanly at
+        a fresh construct rather than mid-expression. Keep this north star in view: the aim of recovery is
+        <em>not</em> to fix the program and it is <em>not</em> to keep the error count high — it is to keep
+        parsing far enough, and quietly enough, to surface the <strong>other genuine errors</strong> in one pass,
+        without drowning them in noise.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: recovery strategies + parser-generator classes + variable-driven error-count arithmetic. Bank of 12, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "recQuiz@1": {
+          "intro": "Error recovery lets a parser survive a syntax error and keep going to find more real errors. Panic-mode skips to a synchronizing token; the goal is clear diagnostics without cascades. Numbers change every attempt.",
+          "goalQ": "The main goal of syntax-error recovery is to…",
+          "goMore": "keep parsing so that further genuine errors are found in the same run",
+          "goFix": "silently fix the program and run it anyway",
+          "goStop": "stop at the very first error every time",
+          "goCount": "maximise the number of error messages",
+          "panicQ": "Panic-mode recovery works by…",
+          "paSkip": "skipping input tokens until a synchronizing token, then resuming",
+          "paInsert": "inserting the globally optimal set of tokens",
+          "paGram": "adding rules to the grammar",
+          "paStop": "halting the parser",
+          "phraseQ": "Phrase-level recovery works by…",
+          "phLocal": "locally patching the input — insert, delete, or swap a token",
+          "phSkip": "skipping to end of file",
+          "phGram": "computing minimum edit distance over the whole file",
+          "phStop": "printing a stack trace",
+          "epQ": "Error productions recover by…",
+          "epGram": "adding grammar rules that match common mistakes and emit tailored messages",
+          "epSkip": "skipping tokens blindly",
+          "epGlobal": "trying every possible correction",
+          "epLex": "changing the lexer",
+          "globalQ": "Global (minimum-distance) correction is…",
+          "glOpt": "optimal but usually too slow and surprising for production compilers",
+          "glFast": "the fastest and most common method",
+          "glNone": "unable to fix any error",
+          "glLex": "a lexing technique",
+          "yaccQ": "In yacc/bison, the special 'error' token causes the parser to…",
+          "yaPop": "pop states until 'error' can be shifted, then discard input until it can resume",
+          "yaStop": "stop immediately",
+          "yaIgnore": "ignore all errors",
+          "yaLex": "restart the lexer",
+          "cascadeQ": "A 'cascade' of spurious errors is…",
+          "csMany": "many fake errors triggered by one real mistake throwing the parser out of sync",
+          "csOne": "a single accurate error",
+          "csNone": "the absence of any errors",
+          "csLex": "a lexer bug",
+          "cascadeFixQ": "A standard guard against cascades is to…",
+          "cfSuppress": "suppress new messages until several good tokens have been shifted",
+          "cfLoud": "report every token as an error",
+          "cfStop": "abort on the second error",
+          "cfSkip": "skip the whole file",
+          "antlrQ": "ANTLR generates parsers of which style/class?",
+          "anLL": "top-down LL(*) / adaptive-LL",
+          "anLALR": "bottom-up LALR",
+          "anGLR": "GLR",
+          "anPEG": "PEG packrat only",
+          "tsQ": "tree-sitter uses GLR chiefly because editors need to…",
+          "tsInc": "parse half-typed, broken code incrementally and tolerantly on every keystroke",
+          "tsFast": "avoid using any grammar",
+          "tsSmall": "produce the smallest possible binary",
+          "tsLL": "force strict LL(1) input",
+          "elmQ": "Elm and Rust have famously good error messages mainly because they…",
+          "elCare": "preserve source spans and invest engineering care in the diagnostics",
+          "elAlgo": "use a fundamentally more powerful parsing algorithm",
+          "elNo": "never recover from errors",
+          "elLex": "skip parsing entirely",
+          "countQ": "A parser reports 1 message per error and finds ${e} real errors, but a cascade adds ${c} spurious ones. How many messages are printed in total?",
+          "netQ": "A recovering parser prints ${m} messages, of which ${s} are spurious cascades. How many correspond to genuine errors?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="recQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/parsing/canonical-lr1-and-lalr",
+      "computer-science/compiler-design/parsing/recursive-descent-parsing"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("recQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("goalQ"),
+      options: [
+        { text: () => sceneStrings("goMore"), correct: true },
+        { text: () => sceneStrings("goFix"), correct: false },
+        { text: () => sceneStrings("goStop"), correct: false },
+        { text: () => sceneStrings("goCount"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("panicQ"),
+      options: [
+        { text: () => sceneStrings("paSkip"), correct: true },
+        { text: () => sceneStrings("paInsert"), correct: false },
+        { text: () => sceneStrings("paGram"), correct: false },
+        { text: () => sceneStrings("paStop"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("phraseQ"),
+      options: [
+        { text: () => sceneStrings("phLocal"), correct: true },
+        { text: () => sceneStrings("phSkip"), correct: false },
+        { text: () => sceneStrings("phGram"), correct: false },
+        { text: () => sceneStrings("phStop"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("epQ"),
+      options: [
+        { text: () => sceneStrings("epGram"), correct: true },
+        { text: () => sceneStrings("epSkip"), correct: false },
+        { text: () => sceneStrings("epGlobal"), correct: false },
+        { text: () => sceneStrings("epLex"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("globalQ"),
+      options: [
+        { text: () => sceneStrings("glOpt"), correct: true },
+        { text: () => sceneStrings("glFast"), correct: false },
+        { text: () => sceneStrings("glNone"), correct: false },
+        { text: () => sceneStrings("glLex"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("yaccQ"),
+      options: [
+        { text: () => sceneStrings("yaPop"), correct: true },
+        { text: () => sceneStrings("yaStop"), correct: false },
+        { text: () => sceneStrings("yaIgnore"), correct: false },
+        { text: () => sceneStrings("yaLex"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cascadeQ"),
+      options: [
+        { text: () => sceneStrings("csMany"), correct: true },
+        { text: () => sceneStrings("csOne"), correct: false },
+        { text: () => sceneStrings("csNone"), correct: false },
+        { text: () => sceneStrings("csLex"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cascadeFixQ"),
+      options: [
+        { text: () => sceneStrings("cfSuppress"), correct: true },
+        { text: () => sceneStrings("cfLoud"), correct: false },
+        { text: () => sceneStrings("cfStop"), correct: false },
+        { text: () => sceneStrings("cfSkip"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("antlrQ"),
+      options: [
+        { text: () => sceneStrings("anLL"), correct: true },
+        { text: () => sceneStrings("anLALR"), correct: false },
+        { text: () => sceneStrings("anGLR"), correct: false },
+        { text: () => sceneStrings("anPEG"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tsQ"),
+      options: [
+        { text: () => sceneStrings("tsInc"), correct: true },
+        { text: () => sceneStrings("tsFast"), correct: false },
+        { text: () => sceneStrings("tsSmall"), correct: false },
+        { text: () => sceneStrings("tsLL"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("elmQ"),
+      options: [
+        { text: () => sceneStrings("elCare"), correct: true },
+        { text: () => sceneStrings("elAlgo"), correct: false },
+        { text: () => sceneStrings("elNo"), correct: false },
+        { text: () => sceneStrings("elLex"), correct: false },
+      ],
+    },
+    {
+      // Total messages = real + spurious.
+      prompt: (v) => sceneStrings("countQ", v),
+      variables: "e=[1:5] c=[0:6]",
+      answer: (v) => v.e + v.c,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Genuine = total - spurious.
+      prompt: (v) => sceneStrings("netQ", v),
+      variables: "m=[6:12] s=[0:5]",
+      constraints: "m > s",
+      answer: (v) => v.m - v.s,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

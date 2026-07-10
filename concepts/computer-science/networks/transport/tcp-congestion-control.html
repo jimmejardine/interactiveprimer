@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>TCP Congestion Control</primer-title>
+
+    <primer-card>
+      <p>
+        <primer-ref soft to="computer-science/networks/transport/flow-control-and-the-sliding-window">Flow
+        control</primer-ref> protects a slow <em>receiver</em>. But there is a second, larger danger, and it
+        nearly killed the early internet. In October 1986, the link between Lawrence Berkeley Lab and UC
+        Berkeley — a few hundred metres apart — saw its throughput <strong>collapse from 32 kbps to 40
+        bps</strong>, a thousandfold drop. The cause wasn't a broken cable. It was too many senders,
+        all pushing as hard as they could, filling the routers' queues until packets were dropped, triggering
+        retransmissions, which added <em>more</em> load, causing <em>more</em> drops. The network was drowning
+        in its own retransmissions.
+      </p>
+      <p>
+        This is <strong>congestion collapse</strong>, and the fix — Van Jacobson's congestion-control
+        algorithms, retrofitted into TCP in 1988 — is one of the most consequential pieces of engineering in
+        the internet's history. Its job is to protect not the receiver but <strong>the network itself</strong>:
+        to let millions of independent TCP senders, with no central coordinator, collectively find a sending
+        rate that keeps the shared links busy but not overwhelmed.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The congestion window (cwnd)</h2>
+      <p>
+        Flow control gave the sender <primer-math>\text{rwnd}</primer-math>, a limit set by the receiver.
+        Congestion control adds a <em>second</em> self-imposed limit, the <strong>congestion window</strong>
+        <primer-math>\text{cwnd}</primer-math> — the sender's own estimate of how much the <em>network</em> can
+        absorb. The sender may have at most <primer-math>\min(\text{cwnd}, \text{rwnd})</primer-math> bytes in
+        flight, obeying whichever guardian is stricter.
+      </p>
+      <p>
+        The deep problem: no router ever <em>tells</em> a sender "you're congesting me." The sender must
+        <em>infer</em> congestion from the only signal it has — <strong>packet loss</strong> (a timeout, or a
+        run of duplicate ACKs). So congestion control is a feedback loop that keeps probing: push the rate up
+        gently to look for spare capacity, and back off hard the moment loss suggests the network is full. The
+        precise dance of "up gently, down hard" is <strong>AIMD</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Slow start, then congestion avoidance</h2>
+      <p>
+        A new connection has no idea how much bandwidth is available, so it uses two phases, switched by a
+        threshold called <strong>ssthresh</strong> (slow-start threshold):
+      </p>
+      <ul>
+        <li>
+          <strong>Slow start (exponential).</strong> Begin with a tiny <primer-math>\text{cwnd}</primer-math>
+          (one or a few segments) and <em>double</em> it every RTT — one extra segment for each ACK received.
+          Despite the name, this is <strong>exponential</strong> growth, ramping up fast to quickly find the
+          rough scale of available bandwidth. It continues until <primer-math>\text{cwnd}</primer-math> reaches
+          <primer-math>\text{ssthresh}</primer-math> or a loss occurs.
+        </li>
+        <li>
+          <strong>Congestion avoidance (additive increase).</strong> Past
+          <primer-math>\text{ssthresh}</primer-math>, growth slows to <em>linear</em>: increase
+          <primer-math>\text{cwnd}</primer-math> by roughly one segment per RTT. Now that we're near capacity,
+          we probe gently, nudging the rate up a little at a time to avoid blowing straight past the limit.
+        </li>
+      </ul>
+      <p>
+        When loss <em>does</em> strike, TCP reacts with <strong>multiplicative decrease</strong>: it sets
+        <primer-math>\text{ssthresh}</primer-math> to half the current window and cuts
+        <primer-math>\text{cwnd}</primer-math> sharply. Additive increase + multiplicative decrease = AIMD, and
+        it traces the iconic <strong>sawtooth</strong>: a gentle linear climb, a sudden halving, climb again,
+        halve again — forever hunting the edge of congestion.
+      </p>
+
+      <primer-chart
+        scene="sawtooth"
+        caption="A plot of the congestion window over time (in round trips). It begins with an exponential slow-start ramp, then settles into a sawtooth: a linear additive increase followed by a halving on each loss event, repeating."
+      ></primer-chart>
+    </primer-card>
+
+    <primer-card>
+      <h2>Fast retransmit and fast recovery (TCP Reno)</h2>
+      <p>
+        Not all losses are equal. A full <strong>timeout</strong> is dire — it suggests the network went silent,
+        so TCP resets <primer-math>\text{cwnd}</primer-math> all the way to 1 and re-enters slow start. But
+        <strong>three duplicate ACKs</strong> tell a happier story: later segments <em>are</em> getting through,
+        so only one was lost and the pipe is basically fine. TCP treats this mild signal gently:
+      </p>
+      <ul>
+        <li>
+          <strong>Fast retransmit</strong> — don't wait for the timer; on the third duplicate ACK, immediately
+          resend the missing segment.
+        </li>
+        <li>
+          <strong>Fast recovery</strong> — halve <primer-math>\text{cwnd}</primer-math> (to
+          <primer-math>\text{ssthresh}</primer-math>) rather than crashing to 1, and continue in congestion
+          avoidance. This is the defining behaviour of <strong>TCP Reno</strong>: the sawtooth halves on a
+          triple-dup-ACK loss instead of collapsing, keeping throughput high.
+        </li>
+      </ul>
+      <p>
+        The runnable model below iterates the AIMD state machine — slow-start doubling, additive increase, and
+        a Reno-style halving on loss — and prints the cwnd trajectory that produces the sawtooth:
+      </p>
+
+      <primer-code run>
+        // A minimal TCP-Reno-style congestion controller: slow start, congestion
+        // avoidance, and multiplicative decrease on a (triple-dup-ACK) loss.
+        let cwnd = 1;          // congestion window, in segments
+        let ssthresh = 16;     // slow-start threshold
+        const LOSS_AT = 24;    // pretend the network drops a packet when cwnd hits this
+
+        console.log("RTT  cwnd  phase");
+        for (let rtt = 0; rtt &lt; 18; rtt++) {
+          const phase = cwnd &lt; ssthresh ? "slow-start" : "cong-avoid";
+          console.log(`${String(rtt).padStart(3)}  ${String(cwnd).padStart(4)}  ${phase}`);
+
+          if (cwnd &gt;= LOSS_AT) {
+            // loss detected via 3 dup ACKs -> multiplicative decrease (fast recovery)
+            ssthresh = Math.floor(cwnd / 2);
+            cwnd = ssthresh;                 // Reno: halve, don't crash to 1
+            console.log(`      ** loss! ssthresh -&gt; ${ssthresh}, cwnd halved **`);
+          } else if (cwnd &lt; ssthresh) {
+            cwnd = cwnd * 2;                 // slow start: exponential (double per RTT)
+          } else {
+            cwnd = cwnd + 1;                 // congestion avoidance: additive (+1 per RTT)
+          }
+        }
+        console.log("\nExponential ramp, then the classic +1 / halve sawtooth around capacity.");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why AIMD is fair, and what came after</h2>
+      <p>
+        AIMD isn't just stable — it's <strong>fair</strong>. Imagine two flows sharing a link. On each additive
+        increase both gain the same absolute amount (the "increase" line runs at 45°); on each multiplicative
+        decrease both lose the same <em>proportion</em>. Trace it and the two flows' rates converge toward
+        <em>equal shares</em>, regardless of where they started. This is why a room full of independent TCP
+        connections, with no negotiation, tends to split a bottleneck roughly evenly — a small miracle of
+        distributed control.
+      </p>
+      <p>
+        Classic Reno is <strong>loss-based</strong>: it treats loss as the one true congestion signal. That
+        assumption frays on modern networks, so newer algorithms refine the picture:
+      </p>
+      <ul>
+        <li>
+          <strong>CUBIC</strong> (the Linux default) replaces the linear increase with a <em>cubic</em> function
+          of time since the last loss — growing fast when far from the previous ceiling, cautiously near it.
+          It fills large bandwidth-delay-product pipes far better than Reno's slow linear climb.
+        </li>
+        <li>
+          <strong>BBR</strong> (Google) abandons loss as the signal entirely. It <em>models</em> the path's
+          bottleneck bandwidth and round-trip time directly and paces packets to match, avoiding the queues
+          that cause loss in the first place — great on lossy links where Reno would needlessly throttle.
+        </li>
+      </ul>
+
+      <primer-vignette title="Watch out! — a lost packet doesn't mean 'the internet is broken'">
+        <p>
+          Two misreadings to unlearn at once. First: <strong>loss is not a disaster — it's TCP's normal
+          congestion signal.</strong> A loss-based protocol like Reno <em>needs</em> to occasionally lose a
+          packet; that's how it discovers the ceiling and knows to back off. A connection that never lost a
+          single packet would never learn it was under-using the link. The sawtooth's teeth <em>are</em> losses,
+          and the connection is working perfectly. Panic over "packet loss detected!" usually misunderstands
+          what TCP is doing on purpose.
+        </p>
+        <p>
+          Second: <strong>"slow start" is not slow.</strong> The name describes the <em>starting point</em> (a
+          tiny window), not the growth rate — which is <em>exponential</em>, doubling every RTT. It is, if
+          anything, the <em>fastest</em>-accelerating phase TCP has; "slow" refers only to beginning cautiously
+          from a small window rather than blasting at full rate immediately.
+        </p>
+      </primer-vignette>
+
+      <primer-vignette title="Is loss-based control being dethroned?">
+        <p>
+          Loss-based congestion control has a well-known flaw called <strong>bufferbloat</strong>: modern
+          routers have huge buffers, so a loss-based sender keeps filling them — adding latency for everyone —
+          long before any packet is actually dropped. You've felt it: a big upload that makes every other
+          connection on your Wi-Fi laggy. BBR's bandwidth-and-delay model was designed partly to escape this by
+          keeping queues short. The debate between loss-based (CUBIC), delay/model-based (BBR) and
+          router-assisted (ECN — Explicit Congestion Notification, where routers <em>mark</em> packets instead
+          of dropping them) approaches is still very much live research.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "ccQuiz@1": { "instructions": "Check your grasp of TCP congestion control: congestion collapse, cwnd, slow start and congestion avoidance, AIMD and the sawtooth, fast retransmit/recovery, ssthresh, CUBIC/BBR, and AIMD fairness." } }
+    </script>
+    <primer-quiz name="ccQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/networks/transport/flow-control-and-the-sliding-window"],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts } from "primer";
+
+  // Precompute a cwnd trajectory: exponential slow start to ssthresh, then the
+  // additive-increase / multiplicative-decrease (Reno) sawtooth. The chart samples
+  // this array so the curve is the real state-machine output, not a hand-drawn wave.
+  const traj = [];
+  {
+    let cwnd = 1, ssthresh = 16;
+    const LOSS_AT = 24;
+    for (let t = 0; t < 42; t++) {
+      traj.push(cwnd);
+      if (cwnd >= LOSS_AT) { ssthresh = Math.floor(cwnd / 2); cwnd = ssthresh; }
+      else if (cwnd < ssthresh) { cwnd = cwnd * 2; }
+      else { cwnd = cwnd + 1; }
+    }
+  }
+
+  registerCharts(
+    [{
+      name: "sawtooth",
+      f: (x) => {
+        const i = Math.max(0, Math.min(traj.length - 1, Math.round(x)));
+        return traj[i];
+      },
+      line: (colors) => ({ strokeColor: colors.cat[0], strokeWidth: 2 }),
+    }],
+    { xmin: 0, xmax: 41, ymin: 0, ymax: 28, xaxisname: "time (round trips)", yaxisname: "cwnd" },
+  );
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("ccQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "Congestion collapse is…",
+      options: [
+        { text: "throughput crashing as senders' retransmissions pile more load onto already-full routers", correct: true },
+        { text: "a single receiver's buffer overflowing", correct: false },
+        { text: "the loss of the SYN during a handshake", correct: false },
+        { text: "sequence numbers wrapping around", correct: false },
+      ] },
+
+    { prompt: "Congestion control protects…",
+      options: [
+        { text: "the network (shared routers and links) from being overwhelmed", correct: true },
+        { text: "the receiver's buffer from a fast sender", correct: false },
+        { text: "the checksum from corruption", correct: false },
+        { text: "the port numbers from collisions", correct: false },
+      ] },
+
+    { prompt: "The congestion window (cwnd) is…",
+      options: [
+        { text: "the sender's own estimate of how much data the network can absorb", correct: true },
+        { text: "the free space in the receiver's buffer", correct: false },
+        { text: "the number of open connections", correct: false },
+        { text: "advertised by the receiver in every ACK", correct: false },
+      ] },
+
+    { prompt: "How does a TCP sender detect congestion?",
+      options: [
+        { text: "it infers it from packet loss (a timeout or duplicate ACKs)", correct: true },
+        { text: "routers explicitly send it a 'congested' message", correct: false },
+        { text: "the receiver advertises congestion in rwnd", correct: false },
+        { text: "it measures the CPU load of every router", correct: false },
+      ] },
+
+    { prompt: "Slow start grows the window…",
+      options: [
+        { text: "exponentially — doubling roughly every RTT", correct: true },
+        { text: "linearly — by one segment per RTT", correct: false },
+        { text: "not at all until a loss occurs", correct: false },
+        { text: "by halving it each RTT", correct: false },
+      ] },
+
+    { prompt: "Despite the name, 'slow start' is called slow because…",
+      options: [
+        { text: "it starts from a tiny window — the growth itself is fast (exponential)", correct: true },
+        { text: "the growth rate is the slowest TCP has", correct: false },
+        { text: "it deliberately wastes bandwidth", correct: false },
+        { text: "it only runs on slow links", correct: false },
+      ] },
+
+    { prompt: "Congestion avoidance (additive increase) grows the window…",
+      options: [
+        { text: "linearly — about one segment per RTT", correct: true },
+        { text: "exponentially — doubling each RTT", correct: false },
+        { text: "by a factor of 4 each loss", correct: false },
+        { text: "only when rwnd shrinks", correct: false },
+      ] },
+
+    { prompt: "AIMD stands for and does…",
+      options: [
+        { text: "Additive Increase, Multiplicative Decrease — climb linearly, halve on loss", correct: true },
+        { text: "Average Interval, Maximum Delay", correct: false },
+        { text: "Absolute Increase, Minimum Drop", correct: false },
+        { text: "Adaptive Interval, Multiplexed Data", correct: false },
+      ] },
+
+    { prompt: "The AIMD 'sawtooth' is the shape of…",
+      options: [
+        { text: "cwnd over time — linear climbs punctuated by sudden halvings", correct: true },
+        { text: "the RTT over time", correct: false },
+        { text: "the checksum values", correct: false },
+        { text: "the receive window advertisements", correct: false },
+      ] },
+
+    { prompt: "On a full TIMEOUT (network went silent), TCP…",
+      options: [
+        { text: "resets cwnd to 1 and re-enters slow start", correct: true },
+        { text: "merely halves cwnd and continues", correct: false },
+        { text: "ignores it and keeps growing", correct: false },
+        { text: "doubles cwnd to recover faster", correct: false },
+      ] },
+
+    { prompt: "On three duplicate ACKs, TCP Reno performs…",
+      options: [
+        { text: "fast retransmit + fast recovery — halve cwnd rather than crash to 1", correct: true },
+        { text: "a full reset to slow start", correct: false },
+        { text: "nothing — it waits for the timer", correct: false },
+        { text: "a doubling of cwnd", correct: false },
+      ] },
+
+    { prompt: "ssthresh (the slow-start threshold) marks…",
+      options: [
+        { text: "the boundary where TCP switches from exponential slow start to linear congestion avoidance", correct: true },
+        { text: "the maximum number of connections", correct: false },
+        { text: "the receiver's buffer size", correct: false },
+        { text: "the RTT timeout value", correct: false },
+      ] },
+
+    { prompt: "Why is AIMD 'fair' to competing flows?",
+      options: [
+        { text: "equal additive gains and equal proportional cuts drive flows toward equal shares", correct: true },
+        { text: "because a central controller assigns each flow a rate", correct: false },
+        { text: "because the fastest flow always wins", correct: false },
+        { text: "it isn't — AIMD is deliberately unfair", correct: false },
+      ] },
+
+    { prompt: "CUBIC differs from Reno by…",
+      options: [
+        { text: "using a cubic function of time since the last loss instead of linear increase", correct: true },
+        { text: "ignoring loss completely", correct: false },
+        { text: "removing the congestion window", correct: false },
+        { text: "using UDP instead of TCP", correct: false },
+      ] },
+
+    { prompt: "BBR takes a different approach by…",
+      options: [
+        { text: "modelling the path's bottleneck bandwidth and RTT instead of using loss as the signal", correct: true },
+        { text: "resetting cwnd to 1 on every ACK", correct: false },
+        { text: "disabling congestion control entirely", correct: false },
+        { text: "advertising cwnd to the receiver", correct: false },
+      ] },
+
+    { prompt: "'Bufferbloat' refers to…",
+      options: [
+        { text: "loss-based senders filling huge router buffers, adding latency before any drop occurs", correct: true },
+        { text: "the receive buffer being too small", correct: false },
+        { text: "too many sequence numbers", correct: false },
+        { text: "the handshake using too many packets", correct: false },
+      ] },
+  ]);
+</script>

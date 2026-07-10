@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Page-Replacement Algorithms</primer-title>
+
+    <primer-card>
+      <p>
+        Physical memory is finite; the virtual memory processes ask for is not. When every frame is full and a
+        process faults on a page that must be brought in, the operating system faces the defining decision of
+        virtual memory: <strong>which resident page do we evict</strong> to make room? Guess well and the victim
+        is a page nobody wanted again — the fault is nearly free. Guess badly and you evict a page that is needed
+        one instruction later, forcing it right back in. Over billions of references, that policy is worth
+        enormous performance.
+      </p>
+      <p>
+        This is a pure <strong>policy</strong> question — the
+        <primer-ref to="computer-science/advanced-operating-systems/memory/address-translation-in-depth">mechanism</primer-ref>
+        (fault, fetch, update the page table) is fixed; only the <em>choice of victim</em> varies. This lesson
+        walks the classic ladder of replacement algorithms, from the impossible-but-optimal, through the naive,
+        to the clever approximations real kernels actually ship — and the tiny scraps of hardware help (two status
+        bits) that make the good ones possible.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>OPT — the oracle you cannot build</h2>
+      <p>
+        Start with the impossible ideal. Bélády's <strong>OPT</strong> algorithm evicts the page that will not be
+        used for the <em>longest time in the future</em>. It is provably optimal — no algorithm can produce fewer
+        faults on a given reference string. There is just one problem: it requires knowing the future. OPT cannot
+        be implemented for real workloads; its value is as a <strong>yardstick</strong>. When we measure a real
+        algorithm we ask "how close to OPT did it get?", and the gap tells us how much a better predictor could
+        possibly buy.
+      </p>
+      <primer-theorem name="The replacement problem">
+        <ul>
+          <li><strong>OPT</strong> evicts the page used furthest in the future — provably minimises faults, but is
+            unrealisable (it needs the future);</li>
+          <li>real policies <em>approximate</em> OPT by using the <strong>past</strong> as a predictor of the
+            future — recency (LRU) and reference frequency;</li>
+          <li>the hardware helps with two per-PTE bits: an <strong>accessed</strong> (reference) bit set on use
+            and a <strong>dirty</strong> bit set on write — the OS samples and clears them to approximate LRU
+            cheaply.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>FIFO — simple, and quietly broken</h2>
+      <p>
+        The simplest realisable policy: evict the page that has been resident <strong>longest</strong>, regardless
+        of use — a queue. It needs no hardware help, just a list. But FIFO has no idea which pages are
+        <em>useful</em>; it will happily evict a hot, constantly-used page simply because it arrived early.
+        Worse, FIFO suffers <strong>Bélády's anomaly</strong>: giving it <em>more</em> memory can produce
+        <em>more</em> faults — a violation of the obvious intuition that more RAM should never hurt. The runnable
+        comparison below includes the famous anomaly-triggering reference string.
+      </p>
+      <primer-vignette title="Bélády's anomaly: how can MORE memory cause MORE faults?">
+        <p>
+          Run the reference string <primer-math>1,2,3,4,1,2,5,1,2,3,4,5</primer-math> through FIFO. With
+          <strong>three</strong> frames it takes <strong>9</strong> faults; with <strong>four</strong> frames it
+          takes <strong>10</strong>. Adding a frame made things worse. The reason is that FIFO's eviction order
+          isn't a subset relationship across memory sizes: the set of pages resident with 4 frames is not
+          guaranteed to contain the set resident with 3, so a larger cache can evict something a smaller one kept.
+          Algorithms that <em>are</em> immune — where the resident set only grows as memory grows — are called
+          <strong>stack algorithms</strong>; LRU and OPT are stack algorithms, FIFO is not. It is one of the great
+          "wait, <em>what?</em>" results of systems.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>LRU — right idea, wrong price</h2>
+      <p>
+        <strong>Least Recently Used</strong> evicts the page unused for the longest time in the <em>past</em>,
+        betting that recency predicts the future — and for real programs, thanks to
+        <primer-ref to="computer-science/computer-architecture/memory/the-tlb">locality</primer-ref>, it usually
+        does. LRU is a stack algorithm (no anomaly) and typically lands close to OPT. So why not just use it?
+        Because <strong>exact LRU is far too expensive</strong>. To know the true least-recently-used page you
+        would have to timestamp or reorder a list on <em>every single memory reference</em> — that is hardware the
+        MMU does not have and software far too slow to run per access. Exact LRU is a beautiful policy that no one
+        can afford at page granularity.
+      </p>
+      <p>
+        The way out is the two status bits the hardware <em>does</em> give us. The MMU sets a PTE's
+        <strong>accessed</strong> bit whenever the page is touched and its <strong>dirty</strong> bit whenever it
+        is written. The OS cannot see the exact order of accesses, but it can periodically <em>read and clear</em>
+        the accessed bit to learn "was this page used since I last looked?" That single bit of recent-use
+        information is enough to build a cheap LRU <em>approximation</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>CLOCK — the approximation everyone ships</h2>
+      <p>
+        <strong>CLOCK</strong> (second-chance) is the workhorse. Arrange the frames in a circle with a moving
+        hand. To find a victim, look at the page under the hand:
+      </p>
+      <ul>
+        <li>if its accessed bit is <strong>0</strong>, it hasn't been used since we last passed — <strong>evict
+          it</strong>;</li>
+        <li>if its accessed bit is <strong>1</strong>, give it a "second chance": <strong>clear the bit to 0</strong>
+          and advance the hand, moving on to the next frame.</li>
+      </ul>
+      <p>
+        A page that keeps getting used keeps getting its bit re-set before the hand returns, so it survives; a page
+        that falls out of use eventually meets the hand with a 0 bit and is evicted. CLOCK gets most of LRU's
+        benefit for almost none of its cost — one bit and a circular scan. Real kernels refine it: Linux keeps
+        <em>two</em> LRU-ish lists (active/inactive) and factors in the dirty bit (evicting a clean page is cheaper
+        — no write-back needed). Compare all four policies on the same reference string:
+      </p>
+      <primer-code run>
+        // Compare FIFO, LRU, CLOCK (second-chance) and OPT on one reference string.
+        // Count page faults for each. (The string is Belady's classic anomaly string.)
+        const refs = [1, 2, 3, 4, 1, 2, 5, 1, 2, 3, 4, 5];
+        const FRAMES = 3;
+
+        function fifo(rs: number[], k: number): number {
+          const q: number[] = []; let faults = 0;
+          for (const p of rs) {
+            if (!q.includes(p)) { faults++; q.push(p); if (q.length &gt; k) q.shift(); }
+          }
+          return faults;
+        }
+        function lru(rs: number[], k: number): number {
+          let mem: number[] = []; let faults = 0;   // front = least recently used, back = most recent
+          for (const p of rs) {
+            const hit = mem.includes(p);
+            mem = mem.filter((x) => x !== p);        // pull it out if present
+            if (!hit) faults++;
+            mem.push(p);                             // (re)insert as most recently used
+            if (mem.length &gt; k) mem.shift();         // evict least recently used
+          }
+          return faults;
+        }
+        function clock(rs: number[], k: number): number {
+          const frame: number[] = []; const use: number[] = []; let hand = 0; let faults = 0;
+          for (const p of rs) {
+            if (frame.includes(p)) { use[frame.indexOf(p)] = 1; continue; }
+            faults++;
+            if (frame.length &lt; k) { frame.push(p); use.push(1); continue; }
+            while (use[hand] === 1) { use[hand] = 0; hand = (hand + 1) % k; }
+            frame[hand] = p; use[hand] = 1; hand = (hand + 1) % k;
+          }
+          return faults;
+        }
+        function opt(rs: number[], k: number): number {
+          const mem: number[] = []; let faults = 0;
+          for (let i = 0; i &lt; rs.length; i++) {
+            const p = rs[i];
+            if (mem.includes(p)) continue;
+            faults++;
+            if (mem.length &lt; k) { mem.push(p); continue; }
+            // Evict the resident page used furthest in the future (or never).
+            let victim = 0, farthest = -1;
+            for (let j = 0; j &lt; mem.length; j++) {
+              let next = rs.indexOf(mem[j], i + 1);
+              if (next === -1) { victim = j; break; }
+              if (next &gt; farthest) { farthest = next; victim = j; }
+            }
+            mem[victim] = p;
+          }
+          return faults;
+        }
+
+        console.log(`string: ${refs.join(" ")}   frames = ${FRAMES}`);
+        console.log(`FIFO : ${fifo(refs, FRAMES)} faults`);
+        console.log(`LRU  : ${lru(refs, FRAMES)} faults`);
+        console.log(`CLOCK: ${clock(refs, FRAMES)} faults`);
+        console.log(`OPT  : ${opt(refs, FRAMES)} faults  (the unbeatable lower bound)`);
+        console.log(`FIFO with 4 frames: ${fifo(refs, 4)} faults  <- Belady's anomaly (worse than 3!)`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Beyond CLOCK: fixing LRU's blind spots</h2>
+      <p>
+        Plain LRU has a famous weakness: a single sequential scan of a huge file (a backup, a
+        <primer-math>\texttt{grep}</primer-math> over everything) touches millions of pages <em>once</em> and, in
+        strict recency order, evicts your entire hot working set to cache data you will never reread. Modern
+        replacement algorithms defend against exactly this by considering <strong>frequency</strong>, not just
+        recency:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Algorithm</th><th>Key idea</th><th>Guards against</th><th>Seen in</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>2Q</strong></td><td>a probationary queue for one-hit pages; promote only on a second hit</td><td>scan pollution</td><td>PostgreSQL-style buffer pools</td></tr>
+            <tr><td><strong>ARC</strong></td><td>self-tunes the balance of recency vs frequency using ghost lists</td><td>changing workloads</td><td>ZFS, IBM storage</td></tr>
+            <tr><td><strong>LIRS</strong></td><td>ranks by reuse distance (inter-reference recency)</td><td>weak-locality scans</td><td>research, some DB caches</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The common thread: a page touched <em>once</em> should not have the same standing as a page touched
+        <em>often</em>. ARC (Adaptive Replacement Cache) is the star — it keeps "ghost" entries recording pages it
+        <em>recently evicted</em>, and if it sees a ghost come back it shifts its own recency-versus-frequency
+        balance automatically. It is why a ZFS box stays fast across wildly different workloads without hand-tuning.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! The reference bit tells you IF a page was used, not WHEN or HOW OFTEN">
+      <p>
+        A frequent error is to treat the hardware accessed bit as if it were a timestamp or a use-counter. It is
+        neither — it is a single bit that means "touched at least once since I last cleared it." You cannot read
+        an access <em>order</em> out of it, and you cannot tell a page touched once from a page touched a million
+        times. That coarseness is exactly <em>why</em> CLOCK only <em>approximates</em> LRU rather than
+        implementing it, and why algorithms wanting frequency information (ARC, LIRS) have to build it up in
+        software over time by sampling and clearing the bit repeatedly. Never claim your policy "is LRU" when it is
+        really "second-chance driven by a one-bit sampled signal." The gap between them is the whole subject.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Which page? — the mechanism/policy split, one last time</h2>
+      <p>
+        Notice what stayed constant through all of this. The <em>mechanism</em> — trap on fault, allocate a frame,
+        write back a dirty victim, fetch the wanted page, patch the page table, restart the instruction — never
+        changed. Only the <em>policy</em> (pick the victim) moved, from OPT's oracle to FIFO's queue to CLOCK's
+        one-bit approximation to ARC's self-tuning. That is the OS design pattern in its purest form: build the
+        expensive machinery once, and let a cheap, swappable decision ride on top. The next lesson,
+        <primer-ref forward to="computer-science/advanced-operating-systems/memory/demand-paging-and-thrashing">demand
+        paging and thrashing</primer-ref>, asks what happens when <em>no</em> policy can win — when the working
+        sets simply do not fit.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: replacement-policy concepts + variable-driven numeric fault-count calculations. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "replaceQuiz@1": {
+          "intro": "OPT is the unbeatable oracle; real policies approximate it from the past. CLOCK approximates LRU with one hardware bit.",
+          "optQ": "OPT (Bélády's optimal algorithm) evicts the page…",
+          "optRight": "that will not be used for the longest time in the future",
+          "optWrong1": "that was loaded most recently",
+          "optWrong2": "with the smallest page number",
+          "optWrong3": "chosen at random",
+          "optWhyQ": "Why can't OPT be used in a real OS?",
+          "optWhyRight": "it requires knowing the future reference string",
+          "optWhyWrong1": "it is too slow to compute even offline",
+          "optWhyWrong2": "it needs special hardware",
+          "optWhyWrong3": "it produces too many faults",
+          "fifoQ": "The main weakness of FIFO replacement is that it…",
+          "fifoRight": "ignores usage — it can evict a hot, frequently-used page just because it arrived first",
+          "fifoWrong1": "requires timestamping every access",
+          "fifoWrong2": "can never be implemented",
+          "fifoWrong3": "always beats LRU",
+          "anomalyQ": "Bélády's anomaly is the surprising fact that…",
+          "anomalyRight": "with FIFO, adding more frames can INCREASE the number of faults",
+          "anomalyWrong1": "LRU always beats OPT",
+          "anomalyWrong2": "more memory always reduces faults",
+          "anomalyWrong3": "the reference bit is unreliable",
+          "stackQ": "A 'stack algorithm' (like LRU or OPT) is one that…",
+          "stackRight": "never suffers Bélády's anomaly — more memory never increases faults",
+          "stackWrong1": "uses the call stack for storage",
+          "stackWrong2": "always faults on every reference",
+          "stackWrong3": "cannot use a reference bit",
+          "lruCostQ": "Why is EXACT LRU impractical at page granularity?",
+          "lruCostRight": "it would require updating recency order on every single memory reference",
+          "lruCostWrong1": "it suffers Bélády's anomaly",
+          "lruCostWrong2": "it needs the future",
+          "lruCostWrong3": "it can only use FIFO order",
+          "clockQ": "In CLOCK (second-chance), a page whose accessed bit is 1 when the hand reaches it is…",
+          "clockRight": "given a second chance: its bit is cleared to 0 and the hand moves on",
+          "clockWrong1": "evicted immediately",
+          "clockWrong2": "written to disk and kept",
+          "clockWrong3": "duplicated",
+          "bitsQ": "The two per-PTE status bits the hardware maintains for replacement are…",
+          "bitsRight": "the accessed (reference) bit and the dirty (modified) bit",
+          "bitsWrong1": "the present bit and the global bit",
+          "bitsWrong2": "read and execute permission bits",
+          "bitsWrong3": "the PCID and the ASID",
+          "arcQ": "ARC (Adaptive Replacement Cache) improves on LRU by…",
+          "arcRight": "balancing recency and frequency automatically, using ghost lists of recently-evicted pages",
+          "arcWrong1": "evicting strictly in FIFO order",
+          "arcWrong2": "never evicting dirty pages",
+          "arcWrong3": "requiring the future reference string",
+          "faultNumQ": "A reference string of {len} references produces {miss} faults. How many were hits?",
+          "rateNumQ": "Out of {len} references, {hit} hit in memory. What is the fault (miss) count?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="replaceQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/memory/address-translation-in-depth"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("replaceQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("optQ"),
+      options: [
+        { text: () => sceneStrings("optRight"), correct: true },
+        { text: () => sceneStrings("optWrong1"), correct: false },
+        { text: () => sceneStrings("optWrong2"), correct: false },
+        { text: () => sceneStrings("optWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("optWhyQ"),
+      options: [
+        { text: () => sceneStrings("optWhyRight"), correct: true },
+        { text: () => sceneStrings("optWhyWrong1"), correct: false },
+        { text: () => sceneStrings("optWhyWrong2"), correct: false },
+        { text: () => sceneStrings("optWhyWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fifoQ"),
+      options: [
+        { text: () => sceneStrings("fifoRight"), correct: true },
+        { text: () => sceneStrings("fifoWrong1"), correct: false },
+        { text: () => sceneStrings("fifoWrong2"), correct: false },
+        { text: () => sceneStrings("fifoWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("anomalyQ"),
+      options: [
+        { text: () => sceneStrings("anomalyRight"), correct: true },
+        { text: () => sceneStrings("anomalyWrong1"), correct: false },
+        { text: () => sceneStrings("anomalyWrong2"), correct: false },
+        { text: () => sceneStrings("anomalyWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("stackQ"),
+      options: [
+        { text: () => sceneStrings("stackRight"), correct: true },
+        { text: () => sceneStrings("stackWrong1"), correct: false },
+        { text: () => sceneStrings("stackWrong2"), correct: false },
+        { text: () => sceneStrings("stackWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lruCostQ"),
+      options: [
+        { text: () => sceneStrings("lruCostRight"), correct: true },
+        { text: () => sceneStrings("lruCostWrong1"), correct: false },
+        { text: () => sceneStrings("lruCostWrong2"), correct: false },
+        { text: () => sceneStrings("lruCostWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("clockQ"),
+      options: [
+        { text: () => sceneStrings("clockRight"), correct: true },
+        { text: () => sceneStrings("clockWrong1"), correct: false },
+        { text: () => sceneStrings("clockWrong2"), correct: false },
+        { text: () => sceneStrings("clockWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bitsQ"),
+      options: [
+        { text: () => sceneStrings("bitsRight"), correct: true },
+        { text: () => sceneStrings("bitsWrong1"), correct: false },
+        { text: () => sceneStrings("bitsWrong2"), correct: false },
+        { text: () => sceneStrings("bitsWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("arcQ"),
+      options: [
+        { text: () => sceneStrings("arcRight"), correct: true },
+        { text: () => sceneStrings("arcWrong1"), correct: false },
+        { text: () => sceneStrings("arcWrong2"), correct: false },
+        { text: () => sceneStrings("arcWrong3"), correct: false },
+      ],
+    },
+    {
+      // Hits = len - faults.
+      prompt: (v) => sceneStrings("faultNumQ", v),
+      variables: "len=[20:40] miss=[5:15]",
+      constraints: "miss < len",
+      answer: (v) => v.len - v.miss,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Faults = len - hits.
+      prompt: (v) => sceneStrings("rateNumQ", v),
+      variables: "len=[20:40] hit=[5:18]",
+      constraints: "hit < len",
+      answer: (v) => v.len - v.hit,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

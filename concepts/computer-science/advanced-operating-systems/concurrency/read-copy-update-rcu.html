@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Read-Copy-Update (RCU)</primer-title>
+
+    <primer-card>
+      <p>
+        Almost every important kernel data structure is <strong>read far more often than it is written</strong>:
+        the list of network routes, the table of mounted filesystems, the set of loaded modules, the process
+        list. A route is looked up on every single packet; it changes when you plug in a cable. For workloads this
+        lopsided, even a
+        <primer-ref to="computer-science/advanced-operating-systems/concurrency/lock-free-and-wait-free">lock-free</primer-ref>
+        read that does one atomic operation is too expensive — you pay a coherence cost millions of times a second
+        to guard against a change that happens once an hour.
+      </p>
+      <p>
+        <strong>Read-Copy-Update (RCU)</strong> is the audacious answer: make readers pay <em>literally nothing</em>
+        — no locks, no atomics, no writes, not even a memory fence on strongly-ordered CPUs. Readers just read.
+        All the cost is shoved onto the rare writer, which does not modify data in place but instead
+        <em>copies</em> it, updates the copy, atomically <em>publishes</em> a new pointer, and then waits — through
+        a <strong>grace period</strong> — until every reader that could still be looking at the old version has
+        finished, before reclaiming it. RCU is one of the most important scalability techniques in the Linux
+        kernel, used in tens of thousands of places.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The three words in the name</h2>
+      <p>
+        The writer's job is spelled out by the acronym. Say you want to change one field of a node in a shared
+        list:
+      </p>
+      <ul>
+        <li><strong>Read</strong> the existing node;</li>
+        <li><strong>Copy</strong> it into a freshly allocated node and modify the copy (the original is left
+          untouched, so readers still traversing it see a consistent old version);</li>
+        <li><strong>Update</strong> the list by atomically swinging the predecessor's pointer from the old node to
+          the new one — a single pointer store. From this instant, new readers see the new node; readers already
+          past this point still see the old one.</li>
+      </ul>
+      <p>
+        The old node is now <em>unreachable to new readers</em> but may still be in use by readers that grabbed the
+        pointer a moment ago. You cannot free it yet. The whole subtlety of RCU is: <strong>when is it safe to
+        free the old copy?</strong>
+      </p>
+      <primer-theorem name="The RCU contract">
+        <ul>
+          <li><strong>Readers</strong> wrap access in <primer-math>\texttt{rcu\_read\_lock()}</primer-math> /
+            <primer-math>\texttt{rcu\_read\_unlock()}</primer-math> — which, in the classic kernel implementation,
+            compile to <em>nothing but disabling pre-emption</em>: no atomic, no write, essentially free;</li>
+          <li><strong>Writers</strong> copy-update-publish with a single atomic pointer store
+            (<primer-math>\texttt{rcu\_assign\_pointer}</primer-math>), then call
+            <primer-math>\texttt{synchronize\_rcu()}</primer-math> to wait out a grace period before freeing the
+            old version;</li>
+          <li>a <strong>grace period</strong> ends once <em>every</em> CPU has passed through a
+            <strong>quiescent state</strong> — a moment when it provably holds no RCU-protected reference (e.g. a
+            context switch), guaranteeing all pre-existing readers have finished.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Strings for the grace-period timeline figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "grace": {
+          "title": "The grace period: the writer waits until every pre-existing reader has finished before reclaiming",
+          "tl": "time →",
+          "publish": "writer publishes new version (pointer swing)",
+          "graceStart": "grace period begins",
+          "graceEnd": "grace period ends → safe to free old copy",
+          "r1": "Reader 1 (started before publish — may still see OLD)",
+          "r2": "Reader 2 (started before publish — may still see OLD)",
+          "r3": "Reader 3 (starts after — sees NEW; irrelevant)",
+          "qs": "quiescent state (context switch)",
+          "free": "free old"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The grace period, drawn</h2>
+      <p>
+        This picture is the heart of RCU. The writer publishes the new version at one instant. Any reader that
+        <em>started before</em> that instant might still hold a pointer to the old version, so the old copy must
+        survive until the last such reader is done. The writer waits until every CPU has hit a
+        <strong>quiescent state</strong> — a point where it cannot possibly hold an old reference — and only then
+        is the grace period over and the old copy safe to free. Readers that start <em>after</em> publication see
+        the new version and are irrelevant to <em>this</em> grace period.
+      </p>
+      <primer-geometry scene="grace"></primer-geometry>
+      <p>
+        Notice what the writer does <em>not</em> do: it never asks readers to raise a hand, never inspects a
+        reference count, never touches a per-reader variable. It simply waits for a guarantee that follows from the
+        scheduler's own behaviour — "once every CPU has context-switched at least once since publication, no old
+        reader can remain." That is why readers can be free: the bookkeeping lives entirely in the passage of time
+        and the definition of a quiescent state, not in any per-read cost.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Quiescent states: how the grace period is detected</h2>
+      <p>
+        A <strong>quiescent state</strong> for a CPU is any moment it is guaranteed to hold no RCU read-side
+        reference. In classic (non-preemptible) kernel RCU, read-side critical sections run with pre-emption
+        disabled — so a CPU that performs a <strong>voluntary context switch</strong> must not be inside one. Thus
+        "every CPU has context-switched" is a sound, cheap proxy for "every pre-existing reader has finished." The
+        grace period is the interval from publication until every CPU has reported a quiescent state.
+      </p>
+      <p>
+        This is delightfully lazy. RCU does not track individual readers at all; it tracks the far coarser event
+        "has this whole CPU passed a safe point?" That coarseness is exactly why reads cost nothing — the price of
+        freedom is that the writer's grace period can be <em>long</em> (milliseconds), so RCU batches many pending
+        frees and reclaims them together. A writer that cannot afford to block calls the asynchronous
+        <primer-math>\texttt{call\_rcu(callback)}</primer-math>, which registers a callback to run after the next
+        grace period and returns immediately.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Simulate publish, grace period, and reclaim</h2>
+      <p>
+        Let's model an RCU update over a set of CPUs. Readers come and go; a writer publishes a new version and
+        must wait until <em>all</em> readers that were active at publication time have released before it may
+        reclaim the old copy. The simulation prints the grace period unfolding and shows a reader that started
+        <em>after</em> publication correctly seeing the new value.
+      </p>
+      <primer-code run>
+        // A minimal RCU model. Readers hold a reference to the CURRENT published version.
+        // The writer publishes a new version, then waits out a grace period (all pre-existing readers gone).
+        class RcuProtected {
+          private version = 0;                     // the currently published version id
+          private data = "v0";
+          private activeReaders = new Set&lt;number&gt;();   // readerId -> version they are reading
+          private readerVersion = new Map&lt;number, number&gt;();
+          private nextReader = 1;
+
+          readLock(): number {                     // rcu_read_lock: essentially free
+            const id = this.nextReader++;
+            this.activeReaders.add(id);
+            this.readerVersion.set(id, this.version);
+            return id;
+          }
+          read(id: number): string { return `reader ${id} sees "${this.data}"`; }
+          readUnlock(id: number): void { this.activeReaders.delete(id); }
+
+          publish(newData: string): number {        // writer: copy-update-publish (one pointer swing)
+            this.version++;
+            const oldVersion = this.version - 1;
+            this.data = newData;                     // new readers now see newData
+            console.log(`writer published "${newData}" (v${this.version}); grace period begins`);
+            return oldVersion;
+          }
+          // synchronize_rcu: block until no active reader still holds the OLD version.
+          synchronize(oldVersion: number): void {
+            for (const [id, v] of this.readerVersion) {
+              if (this.activeReaders.has(id) &amp;&amp; v &lt;= oldVersion)
+                console.log(`   waiting: reader ${id} still reading v${v}`);
+            }
+            console.log(`grace period ends -> safe to free old copy (v${oldVersion})`);
+          }
+        }
+
+        const rcu = new RcuProtected();
+        const r1 = rcu.readLock();               // reader 1 starts on v0
+        console.log(rcu.read(r1));
+
+        const old = rcu.publish("v1");           // writer publishes v1 while reader 1 still active
+        const r2 = rcu.readLock();               // reader 2 starts AFTER publish -> sees v1
+        console.log(rcu.read(r2));
+
+        rcu.readUnlock(r1);                       // pre-existing reader finishes
+        rcu.synchronize(old);                     // now the grace period can complete
+        rcu.readUnlock(r2);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Seqlocks: RCU's write-cheap cousin</h2>
+      <p>
+        RCU makes <em>reads</em> free and writes expensive-but-deferred. A <strong>seqlock</strong> (sequence lock)
+        makes the opposite trade and suits a different read-mostly case — small values updated in place, like a
+        system clock (Linux uses one for <primer-math>\texttt{jiffies}</primer-math> and
+        <primer-math>\texttt{gettimeofday}</primer-math>). A shared <strong>sequence counter</strong> is odd while
+        a writer holds it, even otherwise. A reader:
+      </p>
+      <ol>
+        <li>reads the sequence number (retry if odd — a write is in progress);</li>
+        <li>reads the protected data optimistically;</li>
+        <li>re-reads the sequence number — if it changed, a writer interfered mid-read, so <em>throw the read away
+          and retry</em>.</li>
+      </ol>
+      <p>
+        Readers take no lock and never block writers, but — unlike RCU — a reader may have to <em>retry</em> if a
+        write lands mid-read, so the data being read must be safe to read while changing (no pointer chasing into
+        freed memory). Writers are cheap (bump the counter, write, bump again) but must be mutually excluded from
+        each other. Seqlock: cheap writes, retrying reads. RCU: free reads, deferred-reclamation writes. Both exist
+        because the read/write ratio, and whether readers can tolerate a retry, decide which wins.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th></th><th>Reader cost</th><th>Writer cost</th><th>Reader can be forced to…</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>rwlock</strong></td><td>atomic + cache bounce</td><td>atomic + exclusion</td><td>block on a writer</td></tr>
+            <tr><td><strong>seqlock</strong></td><td>2 counter reads (no write)</td><td>cheap (2 counter bumps)</td><td><strong>retry</strong> the read</td></tr>
+            <tr><td><strong>RCU</strong></td><td><strong>~nothing</strong></td><td>copy + grace-period wait</td><td>nothing — never blocks or retries</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-vignette title="If readers do nothing, how does RCU synchronize at all? The trick is the scheduler.">
+      <p>
+        The magic that unsettles everyone new to RCU: readers write <em>nothing</em>, so how can a writer ever know
+        when they are done? The answer is that RCU offloads its detection onto an event the kernel is <em>already</em>
+        performing anyway — the context switch. In classic RCU, read-side critical sections run with pre-emption
+        disabled, so the very act of a CPU voluntarily switching tasks <em>proves</em> it left any read-side
+        section. The writer therefore needs no communication with readers at all; it just waits for the scheduler
+        to do its ordinary rounds. RCU is, in a sense, synchronization for free by <em>reusing information the
+        system generates for another reason entirely</em>. That is why it scales to hundreds of cores where
+        reference counting and reader-writer locks collapse — the read path adds zero contended memory traffic.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! RCU does not make writes cheap, and it never gives readers the latest value instantly">
+      <p>
+        Two misconceptions sink RCU newcomers. First, "RCU is a faster lock" — no: it makes <em>reads</em> nearly
+        free while making <em>writes</em> heavier (copy, publish, and a grace-period wait that can take
+        milliseconds). It is a spectacular win only when reads vastly outnumber writes; for a write-heavy
+        structure it is a poor fit. Second, "readers always see the newest data" — no: a reader that started before
+        a writer published will keep seeing the <em>old</em> version for the rest of its critical section. RCU
+        guarantees each reader sees <em>a</em> consistent version, not necessarily the <em>latest</em>. If your
+        code needs every reader to observe writes the instant they happen, RCU is the wrong tool — you need a lock
+        or a seqlock-style retry. RCU trades a little staleness for enormous read scalability, on purpose.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: RCU reader/writer costs, grace period, quiescent states, seqlocks, when-to-use. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "rcuQuiz@1": {
+          "intro": "RCU: readers pay ~nothing; writers copy-update-publish then wait a grace period (all pre-existing readers gone, detected via quiescent states) before reclaiming. Seqlock = cheap writes, retrying reads.",
+          "readerQ": "In classic kernel RCU, the read-side cost is…",
+          "rdRight": "essentially nothing — no locks, no atomics, no writes on the read path",
+          "rdAtom": "one atomic compare-and-swap per read",
+          "rdLock": "a full reader-writer lock acquisition",
+          "rdBlock": "blocking until the writer finishes",
+          "writeQ": "An RCU writer updates data by…",
+          "wrRight": "copying the node, modifying the copy, then atomically publishing the new pointer",
+          "wrPlace": "modifying the shared node in place while readers watch",
+          "wrLock": "taking a global lock that blocks all readers",
+          "wrNone": "doing nothing special",
+          "graceQ": "A 'grace period' in RCU is the interval the writer waits for…",
+          "grRight": "every pre-existing reader to finish, so the old copy can be safely freed",
+          "grNew": "new readers to start using the new version",
+          "grLock": "a lock to become available",
+          "grCpu": "the CPU clock to tick once",
+          "quiesceQ": "A 'quiescent state' for a CPU is a moment when it…",
+          "quRight": "provably holds no RCU read-side reference (e.g. a voluntary context switch)",
+          "quBusy": "is running an RCU reader",
+          "quIdle": "has been powered off",
+          "quWrite": "is performing a write",
+          "whenQ": "RCU is the right tool when the workload is…",
+          "whRight": "read-mostly — reads vastly outnumber writes",
+          "whWrite": "write-heavy with rare reads",
+          "whEqual": "an even mix of reads and writes that must all block",
+          "whSingle": "single-threaded",
+          "latestQ": "Does an RCU reader always see the very latest published value?",
+          "laRight": "no — a reader that started before a publish keeps seeing the old version for its critical section",
+          "laYes": "yes, always instantly the newest value",
+          "laNever": "no, it never sees any updates ever",
+          "laBlock": "only if it blocks the writer first",
+          "freeQ": "Why can't an RCU writer free the old copy immediately after publishing?",
+          "frRight": "readers that grabbed the old pointer before the publish may still be using it",
+          "frLock": "the memory allocator is locked",
+          "frNew": "new readers still need the old copy",
+          "frNever": "it can — freeing immediately is always safe",
+          "callQ": "call_rcu(callback) differs from synchronize_rcu() in that it…",
+          "caRight": "registers a callback to run after the next grace period and returns immediately (non-blocking)",
+          "caBlock": "blocks the caller for two grace periods",
+          "caSync": "is identical to synchronize_rcu",
+          "caFree": "frees memory before the grace period",
+          "seqReadQ": "A seqlock reader that observes an ODD sequence number, or a changed number after its read, must…",
+          "seRight": "retry the read — a writer was in progress or interfered",
+          "seBlock": "block until woken by the writer",
+          "seOk": "accept the possibly-torn data anyway",
+          "seCrash": "abort the program",
+          "seqWriteQ": "Compared with RCU, a seqlock makes…",
+          "swRight": "writes cheap but can force readers to retry",
+          "swSame": "exactly the same trade-offs as RCU",
+          "swRead": "reads more expensive than writes",
+          "swBlock": "readers always block writers",
+          "trickQ": "How does an RCU writer detect that readers are done without readers writing anything?",
+          "tkRight": "it waits for every CPU to pass a quiescent state the scheduler produces anyway (e.g. context switch)",
+          "tkPoll": "it polls a per-reader reference count",
+          "tkAtom": "readers must do an atomic increment after all",
+          "tkNever": "it cannot — RCU is unsafe",
+          "linuxQ": "RCU is used pervasively in the Linux kernel mainly because it…",
+          "liRight": "gives read-mostly structures near-zero read-side overhead that scales to many cores",
+          "liWrite": "makes writes faster than any other scheme",
+          "liSimple": "is simpler to reason about than a plain lock",
+          "liOnly": "is the only synchronization Linux supports"
+        }
+      }
+    </script>
+
+    <primer-quiz name="rcuQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/concurrency/lock-free-and-wait-free"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Grace-period timeline: a horizontal time axis; a publish marker; reader lifespans as horizontal bars
+     (two pre-existing crossing the publish line, one starting after); grace-period band; free marker.
+     Static base content. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "grace",
+    ({ board, colors, sceneStrings }) => {
+      // Time axis along the bottom.
+      board.create("arrow", [[0.4, 0.6], [11.6, 0.6]], { strokeColor: colors.line, strokeWidth: 2, lastArrow: { type: 2, size: 5 }, highlight: false, fixed: true });
+      board.create("text", [11.2, 0.25, sceneStrings("tl")], { strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+
+      const xPublish = 4.2;   // publication instant
+      const xEnd = 8.6;       // grace period ends
+
+      // Vertical event lines.
+      const vline = (x, ci) => board.create("line", [[x, 0.6], [x, 6.4]], { strokeColor: colors.cat[ci], strokeWidth: 2, dash: 2, straightFirst: false, straightLast: false, highlight: false, fixed: true });
+      vline(xPublish, 1); vline(xEnd, 0);
+
+      // Grace-period shaded band between publish and end.
+      board.create("polygon", [[xPublish, 0.6], [xEnd, 0.6], [xEnd, 6.4], [xPublish, 6.4]], {
+        fillColor: colors.cat[2], fillOpacity: 0.12, strokeColor: colors.cat[2], strokeWidth: 0,
+        fixed: true, highlight: false, vertices: { visible: false }, borders: { visible: false },
+      });
+
+      // Event captions at the top.
+      board.create("text", [xPublish, 6.9, sceneStrings("publish")], { strokeColor: colors.cat[1], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "max-width:180px" });
+      board.create("text", [xEnd, 6.9, sceneStrings("graceEnd")], { strokeColor: colors.cat[0], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "max-width:200px" });
+      board.create("text", [(xPublish + xEnd) / 2, 6.1, sceneStrings("graceStart")], { strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+
+      // Reader lifespan bars. r1,r2 start before publish and end within grace; r3 starts after publish.
+      const readerBar = (y, x0, x1, key, ci) => {
+        board.create("segment", [[x0, y], [x1, y]], { strokeColor: colors.cat[ci], strokeWidth: 8, highlight: false, fixed: true, lastArrow: false });
+        board.create("point", [x0, y], { size: 2, strokeColor: colors.cat[ci], fillColor: colors.cat[ci], fixed: true, name: "", withLabel: false, highlight: false });
+        board.create("point", [x1, y], { size: 2, strokeColor: colors.cat[ci], fillColor: colors.cat[ci], fixed: true, name: "", withLabel: false, highlight: false });
+        board.create("text", [x0 - 0.15, y + 0.42, sceneStrings(key)], { strokeColor: colors.ink, fontSize: 9, anchorX: "left", anchorY: "middle", fixed: true, highlight: false, cssStyle: "max-width:240px" });
+      };
+      readerBar(5.0, 2.2, 7.4, "r1", 1);
+      readerBar(3.8, 3.0, 8.0, "r2", 1);
+      readerBar(2.6, 5.4, 10.6, "r3", 0);
+
+      // 'free old' marker just after grace end.
+      board.create("text", [xEnd + 1.0, 1.2, sceneStrings("free")], { strokeColor: colors.cat[0], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+    },
+    { boundingbox: [-0.4, 7.4, 12.2, -0.2], keepAspect: false, title: () => makeStrings("grace")("title") },
+  );
+
+  registerQuiz("rcuQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("readerQ"),
+      options: [
+        { text: () => sceneStrings("rdRight"), correct: true },
+        { text: () => sceneStrings("rdAtom"), correct: false },
+        { text: () => sceneStrings("rdLock"), correct: false },
+        { text: () => sceneStrings("rdBlock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("writeQ"),
+      options: [
+        { text: () => sceneStrings("wrRight"), correct: true },
+        { text: () => sceneStrings("wrPlace"), correct: false },
+        { text: () => sceneStrings("wrLock"), correct: false },
+        { text: () => sceneStrings("wrNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("graceQ"),
+      options: [
+        { text: () => sceneStrings("grRight"), correct: true },
+        { text: () => sceneStrings("grNew"), correct: false },
+        { text: () => sceneStrings("grLock"), correct: false },
+        { text: () => sceneStrings("grCpu"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("quiesceQ"),
+      options: [
+        { text: () => sceneStrings("quRight"), correct: true },
+        { text: () => sceneStrings("quBusy"), correct: false },
+        { text: () => sceneStrings("quIdle"), correct: false },
+        { text: () => sceneStrings("quWrite"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whenQ"),
+      options: [
+        { text: () => sceneStrings("whRight"), correct: true },
+        { text: () => sceneStrings("whWrite"), correct: false },
+        { text: () => sceneStrings("whEqual"), correct: false },
+        { text: () => sceneStrings("whSingle"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("latestQ"),
+      options: [
+        { text: () => sceneStrings("laRight"), correct: true },
+        { text: () => sceneStrings("laYes"), correct: false },
+        { text: () => sceneStrings("laNever"), correct: false },
+        { text: () => sceneStrings("laBlock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("freeQ"),
+      options: [
+        { text: () => sceneStrings("frRight"), correct: true },
+        { text: () => sceneStrings("frLock"), correct: false },
+        { text: () => sceneStrings("frNew"), correct: false },
+        { text: () => sceneStrings("frNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("callQ"),
+      options: [
+        { text: () => sceneStrings("caRight"), correct: true },
+        { text: () => sceneStrings("caBlock"), correct: false },
+        { text: () => sceneStrings("caSync"), correct: false },
+        { text: () => sceneStrings("caFree"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("seqReadQ"),
+      options: [
+        { text: () => sceneStrings("seRight"), correct: true },
+        { text: () => sceneStrings("seBlock"), correct: false },
+        { text: () => sceneStrings("seOk"), correct: false },
+        { text: () => sceneStrings("seCrash"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("seqWriteQ"),
+      options: [
+        { text: () => sceneStrings("swRight"), correct: true },
+        { text: () => sceneStrings("swSame"), correct: false },
+        { text: () => sceneStrings("swRead"), correct: false },
+        { text: () => sceneStrings("swBlock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("trickQ"),
+      options: [
+        { text: () => sceneStrings("tkRight"), correct: true },
+        { text: () => sceneStrings("tkPoll"), correct: false },
+        { text: () => sceneStrings("tkAtom"), correct: false },
+        { text: () => sceneStrings("tkNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("linuxQ"),
+      options: [
+        { text: () => sceneStrings("liRight"), correct: true },
+        { text: () => sceneStrings("liWrite"), correct: false },
+        { text: () => sceneStrings("liSimple"), correct: false },
+        { text: () => sceneStrings("liOnly"), correct: false },
+      ],
+    },
+  ]);
+</script>

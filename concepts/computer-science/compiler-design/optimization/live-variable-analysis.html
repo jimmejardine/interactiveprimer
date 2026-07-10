@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Live-Variable Analysis</primer-title>
+
+    <primer-card>
+      <p>
+        A variable is <strong>live</strong> at a program point if the value it currently holds might be
+        <em>used later</em> — that is, if some path forward from here reads the variable before overwriting it.
+        If no such path exists, the variable is <strong>dead</strong>, and whatever we just stored in it was a
+        waste. Liveness is the mirror image of
+        <primer-ref to="computer-science/compiler-design/optimization/reaching-definitions">reaching definitions</primer-ref>:
+        where reaching definitions look <em>back</em> to ask "where did this value come from?", liveness looks
+        <em>forward</em> to ask "will this value ever be needed?". It is the second canonical instance of the
+        <primer-ref to="computer-science/compiler-design/optimization/the-dataflow-analysis-framework">dataflow framework</primer-ref>,
+        and its answers drive two of the most important back-end tasks: dead-code elimination and register
+        allocation.
+      </p>
+      <p>
+        Because the question is about the <em>future</em>, information flows <strong>backward</strong> through
+        the flow graph, against the direction of the edges. And because "used on <em>some</em> path" is enough
+        to keep a variable alive, the meet is <strong>union</strong> — liveness is a "may" analysis.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>def and use, per block</h2>
+      <p>
+        Each block is summarised by two sets of <em>variables</em> (not definitions this time):
+      </p>
+      <ul>
+        <li>
+          <primer-math>\text{use}_B</primer-math> — variables that are <strong>read in
+          <primer-math>B</primer-math> before being written</strong> in <primer-math>B</primer-math>
+          (upward-exposed uses). A use like the <code>a</code> in <code>b = a + 1</code> counts; but the
+          <code>a</code> in <code>a = b*2; … if a&lt;9</code> does <em>not</em>, because that read sees the
+          block's own earlier write.
+        </li>
+        <li>
+          <primer-math>\text{def}_B</primer-math> — variables <strong>assigned in
+          <primer-math>B</primer-math></strong>. A definition breaks the forward flow of liveness: once
+          <primer-math>B</primer-math> writes <primer-math>x</primer-math>, whatever was live in
+          <primer-math>x</primer-math> beyond <primer-math>B</primer-math> no longer needs its <em>old</em>
+          value coming into <primer-math>B</primer-math>.
+        </li>
+      </ul>
+      <p>
+        The dataflow equations are the backward mirror of reaching definitions — IN/OUT and pred/succ swap
+        places:
+      </p>
+      <primer-math display>\text{IN}[B] \;=\; \text{use}_B \,\cup\, \big(\text{OUT}[B] - \text{def}_B\big), \qquad \text{OUT}[B] \;=\; \bigcup_{S \,\in\, \text{succ}(B)} \text{IN}[S].</primer-math>
+      <p>
+        The boundary condition sits at the <em>exit</em>: <primer-math>\text{OUT}[\text{EXIT}] = \varnothing</primer-math>
+        — nothing is live after the program ends (barring globals or return values, which are modelled as an
+        artificial use at EXIT). Every interior set starts at <primer-math>\varnothing</primer-math> and grows
+        to a fixed point.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A worked flow graph, read backward</h2>
+      <p>
+        Take a small loop over variables <primer-math>a, b, c</primer-math>. Blocks and their def/use sets:
+        <primer-math>B_1</primer-math> <code>a=0</code>, <primer-math>B_2</primer-math> <code>b=a+1</code>,
+        <primer-math>B_3</primer-math> <code>c=c+b</code>, <primer-math>B_4</primer-math> <code>a=b*2; if a&lt;9</code>,
+        <primer-math>B_5</primer-math> <code>return c</code>, with a back-edge <primer-math>B_4 \to B_2</primer-math>.
+        Reveal the live-OUT set that each block finally carries — reading from the exit upward:
+      </p>
+      <primer-geometry scene="liveCfg"></primer-geometry>
+      <p>
+        Follow the logic at <primer-math>B_4</primer-math>. Its successors are <primer-math>B_5</primer-math>
+        (which needs <primer-math>c</primer-math>) and, round the back-edge, <primer-math>B_2</primer-math>
+        (which needs <primer-math>a</primer-math> — the loop counter — and <primer-math>c</primer-math>). So the
+        value of <primer-math>a</primer-math> that <primer-math>B_4</primer-math> computes is live out of
+        <primer-math>B_4</primer-math> <em>only because of the back-edge</em>. On the first backward pass we do
+        not yet know that <primer-math>a</primer-math> is live at <primer-math>B_2</primer-math>'s entry, so
+        <primer-math>a</primer-math> is missing from <primer-math>\text{OUT}[B_4]</primer-math>; a second pass
+        adds it. That is the loop forcing iteration, exactly as before.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Iterating to a fixed point</h2>
+      <p>
+        Visiting blocks in reverse order <primer-math>B_5, B_4, B_3, B_2, B_1</primer-math>, here are the
+        live-OUT sets as they settle:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Block (use / def)</th><th>OUT after pass 1</th><th>OUT after pass 2</th><th>Final</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><primer-math>B_1</primer-math> — def <primer-math>\{a\}</primer-math></td><td><primer-math>\{a,c\}</primer-math></td><td><primer-math>\{a,c\}</primer-math></td><td><primer-math>\{a,c\}</primer-math></td></tr>
+            <tr><td><primer-math>B_2</primer-math> — use <primer-math>\{a\}</primer-math>, def <primer-math>\{b\}</primer-math></td><td><primer-math>\{b,c\}</primer-math></td><td><primer-math>\{b,c\}</primer-math></td><td><primer-math>\{b,c\}</primer-math></td></tr>
+            <tr><td><primer-math>B_3</primer-math> — use <primer-math>\{b,c\}</primer-math>, def <primer-math>\{c\}</primer-math></td><td><primer-math>\{b,c\}</primer-math></td><td><primer-math>\{b,c\}</primer-math></td><td><primer-math>\{b,c\}</primer-math></td></tr>
+            <tr><td><primer-math>B_4</primer-math> — use <primer-math>\{b\}</primer-math>, def <primer-math>\{a\}</primer-math></td><td><primer-math>\{c\}</primer-math></td><td><primer-math>\{a,c\}</primer-math></td><td><primer-math>\{a,c\}</primer-math></td></tr>
+            <tr><td><primer-math>B_5</primer-math> — use <primer-math>\{c\}</primer-math></td><td><primer-math>\varnothing</primer-math></td><td><primer-math>\varnothing</primer-math></td><td><primer-math>\varnothing</primer-math></td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Only <primer-math>\text{OUT}[B_4]</primer-math> changes between the passes — gaining
+        <primer-math>a</primer-math> once the back-edge reveals that <primer-math>a</primer-math> is live at
+        <primer-math>B_2</primer-math>'s entry. A third pass changes nothing, so we have converged.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A backward worklist solver</h2>
+      <p>
+        Liveness is another bit-vector problem, so variables become bits and the set algebra becomes bitwise
+        operations — but now the iteration runs <em>backward</em>: OUT is the union of successors' IN.
+      </p>
+      <primer-code run>
+        // Variables a, b, c map to bits 0, 1, 2.
+        const A = 1, B = 2, C = 4;
+        const fmt = (m: number): string =&gt; {
+          const out: string[] = [];
+          if (m &amp; A) out.push("a");
+          if (m &amp; B) out.push("b");
+          if (m &amp; C) out.push("c");
+          return "{" + out.join(",") + "}";
+        };
+
+        interface Block { succ: number[]; use: number; def: number; }
+
+        // B1 a=0; B2 b=a+1; B3 c=c+b; B4 a=b*2, if a<9 -> B2; B5 return c.
+        const blocks: Block[] = [
+          { succ: [1],    use: 0,     def: A }, // B1
+          { succ: [2],    use: A,     def: B }, // B2
+          { succ: [3],    use: B | C, def: C }, // B3
+          { succ: [1, 4], use: B,     def: A }, // B4  (back-edge to B2)
+          { succ: [],     use: C,     def: 0 }, // B5
+        ];
+
+        const IN = blocks.map(() =&gt; 0);
+        const OUT = blocks.map(() =&gt; 0);
+        const order = blocks.map((_, i) =&gt; i).reverse(); // backward: visit exits first
+
+        let passes = 0, changed = true;
+        while (changed) {
+          changed = false; passes++;
+          for (const i of order) {
+            let outB = 0;
+            for (const s of blocks[i].succ) outB |= IN[s];         // OUT = union of successors' IN
+            OUT[i] = outB;
+            const inB = blocks[i].use | (outB &amp; ~blocks[i].def);    // IN = use ∪ (OUT − def)
+            if (inB !== IN[i]) { IN[i] = inB; changed = true; }
+          }
+        }
+
+        console.log(`fixed point after ${passes} passes`);
+        blocks.forEach((_, i) =&gt; console.log(`B${i + 1}: IN=${fmt(IN[i])}  OUT=${fmt(OUT[i])}`));
+      </primer-code>
+      <p>
+        The output matches the table: <code>a</code> appears in <code>OUT[B4]</code> only after the loop is
+        taken into account, and <code>c</code> is live almost everywhere because it is read at the very end and
+        threaded through the loop. Flip <code>OUT = ∪ succ IN</code> back to <code>IN = ∪ pred OUT</code> and
+        you would be computing reaching definitions — the two analyses are the same engine run in opposite
+        directions.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What liveness is for</h2>
+      <ul>
+        <li>
+          <strong>Dead-code elimination.</strong> If a variable is assigned but <em>not live</em> immediately
+          after the assignment, the assignment is dead (assuming no side effects) and can be deleted. Repeating
+          this can cascade: deleting one dead store may make an earlier one dead too.
+        </li>
+        <li>
+          <strong>Register allocation.</strong> Two variables that are <em>live at the same time</em> cannot
+          share a register — they <strong>interfere</strong>. Liveness gives the interference graph, whose
+          colouring assigns variables to a limited set of registers. This is the single most important
+          consumer of liveness in a real compiler.
+        </li>
+        <li>
+          <strong>Building an accurate spill/reload picture</strong> and detecting some uses of uninitialised
+          values (a variable live at the procedure's entry was read before ever being written on some path).
+        </li>
+      </ul>
+    </primer-card>
+
+    <primer-vignette title="Why does register allocation reduce to graph colouring?">
+      <p>
+        Model each variable as a node. Draw an edge between two variables whenever they are <em>simultaneously
+        live</em> at some point — this is the <strong>interference graph</strong>, and liveness analysis is
+        exactly what tells you where two variables overlap. Now assign each variable a physical register such
+        that no two adjacent nodes get the same one: that is a graph <em>colouring</em> with
+        <primer-math>k</primer-math> colours, where <primer-math>k</primer-math> is the number of available
+        registers. If the graph is <primer-math>k</primer-math>-colourable, everything fits in registers; if
+        not, some variable must be <strong>spilled</strong> to memory. Chaitin's classic allocator does exactly
+        this, using the heuristic that any node with fewer than <primer-math>k</primer-math> neighbours can
+        always be coloured, so it is safe to remove and colour last. Without precise liveness the interference
+        graph would be far too dense, and you would spill variables that never actually conflicted.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Liveness is BACKWARD and 'may' — start at the exit, and 'some path' is enough">
+      <p>
+        Two traps sink students here. First, <strong>direction</strong>. Liveness flows backward: you begin at
+        EXIT with <primer-math>\text{OUT}[\text{EXIT}] = \varnothing</primer-math> and propagate <em>upstream</em>,
+        with <primer-math>\text{OUT}[B]</primer-math> built from <em>successors'</em> IN. Run it forward — or set
+        the boundary at ENTRY — and every result is wrong. Second, <strong>"may", not "must"</strong>. A
+        variable is live if it is used on <em>some</em> future path, so the meet is union, not intersection. If
+        <primer-math>x</primer-math> is read on the <code>then</code> branch of an <code>if</code> but not the
+        <code>else</code>, it is still live before the branch — it might be needed. Using intersection would
+        declare it dead on the merged path and let dead-code elimination delete a store the program actually
+        depends on. Liveness deliberately <em>over</em>-approximates: keeping a variable that turns out unused
+        merely wastes a register, whereas dropping a live one is a miscompile.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "liveQuiz@1": {
+          "intro": "Live-variable analysis: backward, union (may). IN = use ∪ (OUT − def), OUT = ∪ over successors. Numbers change each attempt.",
+          "defQ": "A variable is live at a point when…",
+          "lvSome": "some path forward from that point uses it before redefining it",
+          "lvAll": "every path forward uses it",
+          "lvNever": "it is never used again",
+          "lvHere": "it is defined at that exact point",
+          "dirQ": "Live-variable analysis is which kind of dataflow analysis?",
+          "drBU": "backward, union (a 'may' analysis)",
+          "drFU": "forward, union",
+          "drBI": "backward, intersection",
+          "drFI": "forward, intersection",
+          "useQ": "use_B (a block's used variables) contains variables that are…",
+          "usExposed": "read in B before being written in B (upward-exposed uses)",
+          "usAll": "written anywhere in B",
+          "usPred": "used by B's predecessors",
+          "usNone": "never read",
+          "defBQ": "def_B contains…",
+          "dfAssigned": "the variables assigned (written) in B",
+          "dfRead": "the variables only read in B",
+          "dfSucc": "the successors' live sets",
+          "dfConst": "the constant values",
+          "inQ": "The transfer function IN[B] equals…",
+          "inLive": "use_B ∪ (OUT[B] − def_B)",
+          "inRD": "gen_B ∪ (IN[B] − kill_B)",
+          "inInt": "use_B ∩ OUT[B]",
+          "inOut": "OUT[B] unchanged",
+          "outQ": "OUT[B] for liveness is computed as…",
+          "otUnion": "the union of IN[S] over all successors S of B",
+          "otPred": "the union of OUT[P] over predecessors",
+          "otDef": "just def_B",
+          "otEmpty": "always empty",
+          "boundQ": "The boundary condition for liveness is…",
+          "bdExit": "OUT[EXIT] = ∅ — nothing is live after the program ends",
+          "bdEntry": "IN[ENTRY] = the universal set",
+          "bdEntry2": "OUT[ENTRY] = ∅",
+          "bdFull": "OUT[EXIT] = all variables",
+          "dceQ": "Liveness supports dead-code elimination: an assignment x = … is dead when…",
+          "dcNotLive": "x is not live immediately after the assignment (and it has no side effects)",
+          "dcLive": "x is live after the assignment",
+          "dcLoop": "the assignment is inside a loop",
+          "dcConst": "the right-hand side is constant",
+          "regQ": "In register allocation, two variables interfere (cannot share a register) when…",
+          "rgOverlap": "they are simultaneously live at some point",
+          "rgName": "their names are similar",
+          "rgSame": "they hold the same value",
+          "rgAdj": "they are declared next to each other",
+          "colorQ": "Register allocation via interference graphs is an instance of which classic problem?",
+          "clColor": "graph colouring with k = number of registers",
+          "clSort": "sorting",
+          "clParse": "parsing",
+          "clShort": "shortest path",
+          "approxQ": "Liveness deliberately over-approximates because…",
+          "apSafe": "keeping a spuriously-live variable only wastes a register, but dropping a live one is a miscompile",
+          "apFast": "it makes the analysis faster",
+          "apReq": "the language standard demands it",
+          "apRandom": "the choice is arbitrary",
+          "liveCountQ": "At a point, {n} variables are live and a block there defines a variable that is NOT among them (a dead store target). After deleting that dead assignment, how many variables remain live at that point?",
+          "interfQ": "If {k} variables are all simultaneously live at one program point, how many interference edges do they contribute among themselves (each pair interferes once)?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="liveQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/optimization/the-dataflow-analysis-framework"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // CFG-drawing toolkit: labelled rectangular blocks + directed edges.
+  function cfgTools(board, colors) {
+    const box = (cx, cy, w, h, title, sub, col) => {
+      const x1 = cx - w / 2, x2 = cx + w / 2, y1 = cy - h / 2, y2 = cy + h / 2;
+      board.create("polygon", [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], {
+        fillColor: col, fillOpacity: 0.12, fixed: true, highlight: false,
+        vertices: { visible: false, fixed: true }, borders: { strokeColor: col, strokeWidth: 2, highlight: false, fixed: true },
+      });
+      board.create("text", [cx, cy + h * 0.22, title], {
+        anchorX: "middle", anchorY: "middle", fontSize: 15, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+      board.create("text", [cx, cy - h * 0.22, sub], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    };
+    const arrow = (ax, ay, bx, by, col) =>
+      board.create("arrow", [[ax, ay], [bx, by]], { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false });
+    const curveEdge = (ax, ay, bx, by, bow, col) => {
+      const mx = (ax + bx) / 2 + bow, my = (ay + by) / 2;
+      board.create("curve", [
+        (t) => (1 - t) * (1 - t) * ax + 2 * (1 - t) * t * mx + t * t * bx,
+        (t) => (1 - t) * (1 - t) * ay + 2 * (1 - t) * t * my + t * t * by,
+        0, 1,
+      ], { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false, lastArrow: { size: 7 } });
+    };
+    const outLabel = (x, y, text, col) =>
+      board.create("text", [x, y, text], {
+        anchorX: "left", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    return { box, arrow, curveEdge, outLabel };
+  }
+
+  registerGeometryScene("liveCfg", ({ board, step, colors }) => {
+    const T = cfgTools(board, colors);
+    const w = 3.0, h = 1.3;
+    const B1 = [0, 7], B2 = [0, 4.6], B3 = [0, 2.2], B4 = [0, -0.2], B5 = [0, -2.8];
+
+    // Base content: blocks + edges (always visible).
+    T.box(B1[0], B1[1], w, h, "B1  a=0", "def a", colors.cat[0]);
+    T.box(B2[0], B2[1], w, h, "B2  b=a+1", "use a · def b", colors.cat[1]);
+    T.box(B3[0], B3[1], w, h, "B3  c=c+b", "use b,c · def c", colors.cat[2]);
+    T.box(B4[0], B4[1], w, h, "B4  a=b*2; a<9?", "use b · def a", colors.cat[3]);
+    T.box(B5[0], B5[1], w, h, "B5  return c", "use c", colors.cat[4]);
+
+    T.arrow(0, B1[1] - h / 2, 0, B2[1] + h / 2, colors.line);
+    T.arrow(0, B2[1] - h / 2, 0, B3[1] + h / 2, colors.line);
+    T.arrow(0, B3[1] - h / 2, 0, B4[1] + h / 2, colors.line);
+    T.arrow(0, B4[1] - h / 2, 0, B5[1] + h / 2, colors.line);
+    T.curveEdge(-w / 2, B4[1], -w / 2, B2[1], -3.6, colors.cat[5] || colors.cat[3]); // back-edge B4 -> B2
+
+    board.create("text", [-w / 2 - 3.4, (B2[1] + B4[1]) / 2, "back-edge"], {
+      anchorX: "left", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+      strokeColor: colors.cat[5] || colors.cat[3], color: colors.cat[5] || colors.cat[3],
+    });
+
+    // Steps reveal each block's final live-OUT set, read backward from the exit.
+    step("Start at the exit: nothing is live after B5, so live-OUT(B5) = ∅.", () =>
+      T.outLabel(w / 2 + 0.3, B5[1], "OUT = ∅", colors.cat[4]));
+    step("B4's successors need c (B5) and, round the back-edge, a and c (B2): live-OUT(B4) = {a,c}.", () =>
+      T.outLabel(w / 2 + 0.3, B4[1], "OUT = {a,c}", colors.cat[3]));
+    step("B3 flows into B4, which uses b: live-OUT(B3) = {b,c}.", () =>
+      T.outLabel(w / 2 + 0.3, B3[1], "OUT = {b,c}", colors.cat[2]));
+    step("B2 flows into B3, which uses b and c: live-OUT(B2) = {b,c}.", () =>
+      T.outLabel(w / 2 + 0.3, B2[1], "OUT = {b,c}", colors.cat[1]));
+    step("B1 flows into B2, which uses a; c survives from deeper: live-OUT(B1) = {a,c}.", () =>
+      T.outLabel(w / 2 + 0.3, B1[1], "OUT = {a,c}", colors.cat[0]));
+  }, { boundingbox: [-7, 8, 7, -3.8], keepAspect: false, title: "Live variables computed backward over a 5-block loop" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("liveQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("defQ"),
+      options: [
+        { text: () => sceneStrings("lvSome"), correct: true },
+        { text: () => sceneStrings("lvAll"), correct: false },
+        { text: () => sceneStrings("lvNever"), correct: false },
+        { text: () => sceneStrings("lvHere"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dirQ"),
+      options: [
+        { text: () => sceneStrings("drBU"), correct: true },
+        { text: () => sceneStrings("drFU"), correct: false },
+        { text: () => sceneStrings("drBI"), correct: false },
+        { text: () => sceneStrings("drFI"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("useQ"),
+      options: [
+        { text: () => sceneStrings("usExposed"), correct: true },
+        { text: () => sceneStrings("usAll"), correct: false },
+        { text: () => sceneStrings("usPred"), correct: false },
+        { text: () => sceneStrings("usNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("defBQ"),
+      options: [
+        { text: () => sceneStrings("dfAssigned"), correct: true },
+        { text: () => sceneStrings("dfRead"), correct: false },
+        { text: () => sceneStrings("dfSucc"), correct: false },
+        { text: () => sceneStrings("dfConst"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("inQ"),
+      options: [
+        { text: () => sceneStrings("inLive"), correct: true },
+        { text: () => sceneStrings("inRD"), correct: false },
+        { text: () => sceneStrings("inInt"), correct: false },
+        { text: () => sceneStrings("inOut"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("outQ"),
+      options: [
+        { text: () => sceneStrings("otUnion"), correct: true },
+        { text: () => sceneStrings("otPred"), correct: false },
+        { text: () => sceneStrings("otDef"), correct: false },
+        { text: () => sceneStrings("otEmpty"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("boundQ"),
+      options: [
+        { text: () => sceneStrings("bdExit"), correct: true },
+        { text: () => sceneStrings("bdEntry"), correct: false },
+        { text: () => sceneStrings("bdEntry2"), correct: false },
+        { text: () => sceneStrings("bdFull"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dceQ"),
+      options: [
+        { text: () => sceneStrings("dcNotLive"), correct: true },
+        { text: () => sceneStrings("dcLive"), correct: false },
+        { text: () => sceneStrings("dcLoop"), correct: false },
+        { text: () => sceneStrings("dcConst"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("regQ"),
+      options: [
+        { text: () => sceneStrings("rgOverlap"), correct: true },
+        { text: () => sceneStrings("rgName"), correct: false },
+        { text: () => sceneStrings("rgSame"), correct: false },
+        { text: () => sceneStrings("rgAdj"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("colorQ"),
+      options: [
+        { text: () => sceneStrings("clColor"), correct: true },
+        { text: () => sceneStrings("clSort"), correct: false },
+        { text: () => sceneStrings("clParse"), correct: false },
+        { text: () => sceneStrings("clShort"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("approxQ"),
+      options: [
+        { text: () => sceneStrings("apSafe"), correct: true },
+        { text: () => sceneStrings("apFast"), correct: false },
+        { text: () => sceneStrings("apReq"), correct: false },
+        { text: () => sceneStrings("apRandom"), correct: false },
+      ],
+    },
+    {
+      // Deleting a dead store (target not live) leaves the live set unchanged.
+      prompt: (v) => sceneStrings("liveCountQ", v),
+      variables: "n=[2:8]",
+      answer: (v) => v.n,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // k mutually-live variables form a clique: k(k-1)/2 interference edges.
+      prompt: (v) => sceneStrings("interfQ", v),
+      variables: "k=[2:7]",
+      answer: (v) => (v.k * (v.k - 1)) / 2,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Scheduling Metrics and the Multi-Level Feedback Queue</primer-title>
+
+    <primer-card>
+      <p>
+        In your undergraduate
+        <primer-ref to="computer-science/operating-systems/cpu-scheduling">CPU scheduling</primer-ref>
+        course you met round-robin, FCFS, and the clairvoyant favourite <strong>Shortest-Job-First</strong> (SJF),
+        which minimises average turnaround — <em>if</em> you know each job's length in advance. That "if" is the
+        whole problem. A real scheduler standing at the head of the run queue has no idea whether the process it is
+        about to dispatch will compute for three microseconds or three hours. It cannot see the future, and yet it
+        must decide, thousands of times a second, who runs next.
+      </p>
+      <p>
+        This lesson is about scheduling <em>under uncertainty</em>. First we sharpen the two metrics that pull
+        against each other — <strong>turnaround time</strong> (good for batch throughput) and <strong>response
+        time</strong> (good for interactivity) — and add the softer goal of <strong>fairness</strong>. Then we
+        build the <strong>Multi-Level Feedback Queue</strong> (MLFQ): a scheduler that, without any oracle, watches
+        how each job <em>behaves</em> and uses that history to approximate SJF while keeping interactive jobs snappy.
+        Variants of MLFQ have shipped in every serious OS — from Corbató's 1962 CTSS (which won him a Turing Award)
+        through Solaris, FreeBSD, and the Windows NT scheduler.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The two clocks: turnaround versus response</h2>
+      <p>
+        Every metric is a difference of timestamps. Let a job <primer-math>i</primer-math> <em>arrive</em> at time
+        <primer-math>T^{\text{arr}}_i</primer-math>, first get the CPU at
+        <primer-math>T^{\text{first}}_i</primer-math>, and <em>complete</em> at
+        <primer-math>T^{\text{comp}}_i</primer-math>. Then
+      </p>
+      <primer-math display>T^{\text{turnaround}}_i \;=\; T^{\text{comp}}_i - T^{\text{arr}}_i,
+        \qquad T^{\text{response}}_i \;=\; T^{\text{first}}_i - T^{\text{arr}}_i.</primer-math>
+      <p>
+        Turnaround measures the <em>whole</em> lifetime — how long until the job is done. Response measures only the
+        <em>wait to be first heard</em> — how long until the cursor blinks, the keystroke echoes, the window
+        redraws. A batch compile cares about turnaround; a shell prompt cares about response. The tragedy is that
+        the same policy cannot be great at both. SJF and FCFS run a job to completion, giving superb turnaround but
+        catastrophic response for anything queued behind a long job (the <strong>convoy effect</strong>).
+        Round-robin, with a short quantum, gives lovely response but drags out turnaround by time-slicing everyone.
+      </p>
+      <p>
+        MLFQ's whole reason for existing is to be good at <em>both at once</em> — to give interactive jobs
+        round-robin-like response while letting CPU-bound jobs finish with near-SJF turnaround, all without knowing
+        any job's length ahead of time.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: why order matters</h2>
+      <p>
+        Three jobs arrive together at <primer-math>t=0</primer-math> with run lengths
+        <primer-math>A=10,\; B=4,\; C=2</primer-math>. Under <strong>FCFS in the order A, B, C</strong>:
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th>Job</th><th>Completes at</th><th>Turnaround</th><th>First runs at</th><th>Response</th></tr></thead>
+          <tbody>
+            <tr><td>A</td><td>10</td><td>10</td><td>0</td><td>0</td></tr>
+            <tr><td>B</td><td>14</td><td>14</td><td>10</td><td>10</td></tr>
+            <tr><td>C</td><td>16</td><td>16</td><td>14</td><td>14</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Average turnaround <primer-math>= (10+14+16)/3 = 13.3</primer-math>, average response
+        <primer-math>= (0+10+14)/3 = 8</primer-math>. Now run <strong>shortest first (C, B, A)</strong>: turnarounds
+        become <primer-math>2, 6, 16</primer-math>, averaging <primer-math>8</primer-math>, and response averages
+        <primer-math>(0+2+6)/3 = 2.7</primer-math>. Shortest-first crushes both averages — the short jobs stop
+        "hiding" behind the long one. MLFQ's trick is to <em>discover</em> which jobs are short by watching them,
+        not by being told.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the MLFQ priority-queue diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "mlfq": {
+          "title": "The Multi-Level Feedback Queue — high priority (short quantum) at the top, demotion downward",
+          "q0": "Q2  ·  highest priority  ·  quantum 10 ms",
+          "q1": "Q1  ·  medium priority  ·  quantum 20 ms",
+          "q2": "Q0  ·  lowest priority  ·  quantum 40 ms",
+          "newjob": "New job enters at the TOP",
+          "demote": "Uses full quantum → demote",
+          "boost": "Periodic boost lifts everyone back to the top (anti-starvation)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The mechanism: priority queues plus feedback</h2>
+      <p>
+        MLFQ keeps several run queues, each at a distinct <strong>priority</strong>. The dispatch rule is trivial:
+        run a job from the highest-priority non-empty queue; among jobs at the same priority, round-robin. The
+        cleverness is entirely in <em>how a job moves between queues</em> — the "feedback". The diagram shows the
+        three-level version: new work lands at the top with a short quantum, and jobs sink as they prove themselves
+        CPU-hungry.
+      </p>
+      <primer-geometry scene="mlfq"></primer-geometry>
+      <primer-theorem name="The MLFQ rules">
+        <ul>
+          <li><strong>Rule 1</strong> — if <primer-math>\text{priority}(A) > \text{priority}(B)</primer-math>, run
+            <primer-math>A</primer-math>. Higher queue always wins;</li>
+          <li><strong>Rule 2</strong> — if they are equal, round-robin them within the queue;</li>
+          <li><strong>Rule 3</strong> — a new job enters at the <em>highest</em> priority (assume it is short and
+            interactive until proven otherwise);</li>
+          <li><strong>Rule 4</strong> — once a job uses up its <em>time allotment</em> at a level (whether in one
+            slice or several), <em>demote</em> it one level. Jobs that yield early (for I/O) stay put;</li>
+          <li><strong>Rule 5</strong> — every <primer-math>S</primer-math> milliseconds, <em>boost</em> all jobs
+            back to the top queue, to prevent starvation and adapt to changed behaviour.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>How MLFQ <em>learns</em> to approximate SJF</h2>
+      <p>
+        Watch what the rules do to two kinds of job. A short, interactive job (a keystroke handler, a shell) does a
+        little work, then blocks on I/O <em>before</em> exhausting its quantum. By Rule 4 it never gets demoted, so
+        it lives in the top queue and is dispatched almost immediately whenever it wakes — excellent response. A
+        long, CPU-bound job (a compile, a video encode) keeps consuming full quanta, so Rule 4 marches it steadily
+        down to the bottom queue, where it runs in long, efficient slices out of the interactive jobs' way —
+        near-SJF turnaround.
+      </p>
+      <p>
+        No one told MLFQ which job was short. It <em>inferred</em> length from observed behaviour: "how much CPU has
+        this job been demanding lately?" is a running estimate of its remaining burst, and the queues sort jobs by
+        that estimate. This is the deep idea — using <strong>past behaviour to predict future behaviour</strong>,
+        which is exactly the assumption SJF needs but cannot obtain directly.
+      </p>
+      <primer-code run>
+        // A compact MLFQ simulator. Three queues (index 2 = top/short-quantum, 0 = bottom).
+        // Interactive jobs yield before their quantum (block for I/O); CPU-bound jobs run full quanta.
+        interface Job { name: string; work: number; interactive: boolean; prio: number; }
+        const quantum = [40, 20, 10]; // ms at priority levels 0,1,2  (top has the SHORT quantum)
+
+        const jobs: Job[] = [
+          { name: "compile", work: 120, interactive: false, prio: 2 },
+          { name: "shell",   work: 30,  interactive: true,  prio: 2 },
+        ];
+
+        let now = 0;
+        // Run until all work is done. Always pick the highest-priority job with work left.
+        while (jobs.some((j) =&gt; j.work &gt; 0)) {
+          const runnable = jobs.filter((j) =&gt; j.work &gt; 0).sort((a, b) =&gt; b.prio - a.prio);
+          const j = runnable[0];
+          const q = quantum[j.prio];
+          // Interactive jobs run a short burst then block; CPU-bound jobs use the whole quantum.
+          const burst = j.interactive ? Math.min(5, j.work) : Math.min(q, j.work);
+          now += burst;
+          j.work -= burst;
+          const usedFullQuantum = !j.interactive &amp;&amp; burst === q;
+          console.log(`t=${now}ms  ran "${j.name}" for ${burst}ms at Q${j.prio}` +
+            (usedFullQuantum ? "  -> demote" : ""));
+          if (usedFullQuantum &amp;&amp; j.prio &gt; 0) j.prio--; // Rule 4: demote on full-quantum use
+        }
+        console.log("all jobs finished at t=" + now + "ms");
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="Could a sneaky program game MLFQ into giving it all the CPU?">
+      <p>
+        Yes — and this is a classic exam trap. The naive Rule 4 says "demote only if you use a <em>full</em>
+        quantum <em>in one slice</em>." A malicious job can exploit that: run for 99% of its quantum, then issue a
+        pointless <primer-math>\texttt{read()}</primer-math> on something that returns instantly, yielding the CPU
+        <em>just</em> before the timer fires. It never gets demoted, so it stays in the top queue and monopolises
+        the machine while behaving, on paper, like an interactive job. The fix (used in real systems) is
+        <strong>better accounting</strong>: track the <em>total</em> CPU a job has consumed at a level across
+        <em>all</em> its slices, and demote once that <em>allotment</em> is spent — regardless of how it was
+        chopped up. Rule 4 above is already written this way ("time allotment", not "one slice"), precisely to close
+        this hole.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Priority boosting is not a courtesy — it is anti-starvation insurance">
+      <p>
+        Students often read Rule 5 (periodic boost) as a nice-to-have. It is load-bearing. Without it, a steady
+        stream of interactive jobs at the top can <em>starve</em> the CPU-bound jobs stuck at the bottom
+        <em>forever</em> — they never get to run, never finish, and the system livelocks its background work. The
+        boost also fixes a second problem: a job whose <em>behaviour changes</em> (a compute job that becomes
+        interactive) would otherwise be trapped at the wrong priority. Boosting periodically re-examines everyone.
+        The tuning knob <primer-math>S</primer-math> is delicate — too large and starvation bites; too small and
+        long jobs keep floating back up and never make progress at the bottom. As Ousterhout quipped, such constants
+        are best set by <em>voodoo</em>.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Where MLFQ lives today</h2>
+      <p>
+        MLFQ is not a museum piece. The <strong>Solaris</strong> time-sharing class ships a literal MLFQ with 60
+        priority levels and a tunable dispatch table (<primer-math>\texttt{ts\_dptbl}</primer-math>) mapping
+        priority to quantum and demotion rules. <strong>Windows</strong> and older <strong>FreeBSD</strong>
+        schedulers are feedback-priority designs in the same family, with interactivity boosts for threads that wake
+        from I/O. Even Linux's older O(1) scheduler used priority arrays with dynamic bonuses. When we meet
+        <primer-ref forward to="computer-science/advanced-operating-systems/scheduling/the-completely-fair-scheduler">the
+        Completely Fair Scheduler</primer-ref> and
+        <primer-ref forward to="computer-science/advanced-operating-systems/scheduling/proportional-share-lottery-and-stride">proportional-share
+        scheduling</primer-ref>, notice that they attack the same tension — response versus turnaround versus
+        fairness — but replace MLFQ's pile of hand-tuned rules with a single clean invariant.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: metrics definitions, MLFQ rules, and variable-driven turnaround/response calculations. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "mlfqQuiz@1": {
+          "intro": "Turnaround = completion − arrival; response = first-run − arrival. MLFQ approximates SJF by watching behaviour.",
+          "turnQ": "Turnaround time of a job is defined as…",
+          "turnRight": "completion time − arrival time",
+          "turnWrong1": "first-run time − arrival time",
+          "turnWrong2": "completion time − first-run time",
+          "turnWrong3": "the length of one time quantum",
+          "respQ": "Response time (the metric interactive users care about) is…",
+          "respRight": "first-run time − arrival time",
+          "respWrong1": "completion time − arrival time",
+          "respWrong2": "total CPU time consumed",
+          "respWrong3": "the number of context switches",
+          "sjfQ": "Why can a real OS not simply run Shortest-Job-First?",
+          "sjfRight": "it cannot know each job's run length in advance",
+          "sjfWrong1": "SJF is illegal on modern CPUs",
+          "sjfWrong2": "SJF gives terrible turnaround",
+          "sjfWrong3": "SJF requires more than one core",
+          "newQ": "In MLFQ, a brand-new job is placed…",
+          "newRight": "at the highest priority (assumed short until proven otherwise)",
+          "newWrong1": "at the lowest priority",
+          "newWrong2": "at a random priority",
+          "newWrong3": "in a separate real-time queue",
+          "demoteQ": "An MLFQ job is demoted one level when it…",
+          "demoteRight": "uses up its full time allotment at its current level",
+          "demoteWrong1": "blocks on I/O before its quantum ends",
+          "demoteWrong2": "is created",
+          "demoteWrong3": "acquires a lock",
+          "boostQ": "The periodic priority BOOST in MLFQ primarily prevents…",
+          "boostRight": "starvation of long CPU-bound jobs stuck at the bottom",
+          "boostWrong1": "cache misses",
+          "boostWrong2": "deadlock",
+          "boostWrong3": "page faults",
+          "gameQ": "A job that yields the CPU just before each quantum expires is trying to…",
+          "gameRight": "avoid demotion and stay in the top queue (game the scheduler)",
+          "gameWrong1": "reduce its own priority on purpose",
+          "gameWrong2": "trigger a boost",
+          "gameWrong3": "free memory",
+          "approxQ": "MLFQ approximates SJF by…",
+          "approxRight": "using recent CPU behaviour to estimate which jobs are short",
+          "approxWrong1": "asking the user for job lengths",
+          "approxWrong2": "reading the program's source code",
+          "approxWrong3": "always running the newest job",
+          "interactiveQ": "An interactive job that keeps blocking for I/O before its quantum ends will…",
+          "interactiveRight": "stay near the top queue and keep excellent response time",
+          "interactiveWrong1": "sink to the bottom queue immediately",
+          "interactiveWrong2": "be killed by the scheduler",
+          "interactiveWrong3": "lose all its priority on first I/O",
+          "fcfsTurnQ": "Three jobs arrive at t=0 with lengths {a}, {b}, {c} ms and run FCFS in that order. What is the AVERAGE turnaround time (ms, 2 d.p.)?",
+          "fcfsRespQ": "Three jobs arrive at t=0 with lengths {a}, {b}, {c} ms and run FCFS in that order. What is the AVERAGE response time (ms, 2 d.p.)?",
+          "singleTurnQ": "A single job arrives at t={arr} ms and completes at t={comp} ms. What is its turnaround time (ms)?",
+          "sjfTurnQ": "Three jobs of length {a}, {b}, {c} ms arrive at t=0 and are run SHORTEST-first. Average turnaround (ms, 2 d.p.)?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="mlfqQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/operating-systems/cpu-scheduling"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The MLFQ diagram: three stacked priority queues (top = highest priority, short quantum), a
+     "new job enters at top" arrow, downward demotion arrows, and an upward boost arrow. Block
+     diagram, keepAspect:false, all colours from themeColors(). Plus the randomised quiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "mlfq",
+    ({ board, colors, sceneStrings }) => {
+      const x0 = 0.5, x1 = 8.5, h = 1.0, gap = 0.5;
+      const rows = ["q0", "q1", "q2"]; // top to bottom (q0 highest priority)
+      let yTop = 5.0;
+      const centres = [];
+      rows.forEach((key, i) => {
+        const yBot = yTop - h;
+        board.create("polygon", [[x0, yBot], [x1, yBot], [x1, yTop], [x0, yTop]], {
+          fillColor: colors.cat[i % 3],
+          fillOpacity: 0.22,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false },
+          fixed: true, highlight: false,
+        });
+        board.create("text", [(x0 + x1) / 2, (yTop + yBot) / 2, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 13, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:600",
+        });
+        centres.push({ yTop, yBot, yMid: (yTop + yBot) / 2 });
+        yTop = yBot - gap;
+      });
+
+      // New job enters at the top queue from the left.
+      board.create("arrow", [[-1.4, centres[0].yMid], [x0 - 0.05, centres[0].yMid]], {
+        strokeColor: colors.cat[0], strokeWidth: 2, lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+      });
+      board.create("text", [-2.6, centres[0].yMid + 0.35, sceneStrings("newjob")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+      });
+
+      // Demotion arrows down the right side.
+      for (let i = 0; i < centres.length - 1; i++) {
+        board.create("arrow", [[x1 + 0.4, centres[i].yBot + 0.1], [x1 + 0.4, centres[i + 1].yTop - 0.1]], {
+          strokeColor: colors.cat[1], strokeWidth: 2, lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+        });
+      }
+      board.create("text", [x1 + 1.9, (centres[0].yBot + centres[2].yTop) / 2, sceneStrings("demote")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        cssStyle: "max-width:130px",
+      });
+
+      // Boost arrow up the left side (bottom back to top).
+      board.create("arrow", [[x0 - 0.4, centres[2].yMid], [x0 - 0.4, centres[0].yMid]], {
+        strokeColor: colors.cat[2], strokeWidth: 2, dash: 2, lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+      });
+      board.create("text", [x0 - 2.4, centres[1].yMid, sceneStrings("boost")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        cssStyle: "max-width:150px",
+      });
+    },
+    {
+      boundingbox: [-4.0, 5.6, 11.0, 1.2],
+      keepAspect: false,
+      title: () => makeStrings("mlfq")("title"),
+    },
+  );
+
+  registerQuiz("mlfqQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("turnQ"),
+      options: [
+        { text: () => sceneStrings("turnRight"), correct: true },
+        { text: () => sceneStrings("turnWrong1"), correct: false },
+        { text: () => sceneStrings("turnWrong2"), correct: false },
+        { text: () => sceneStrings("turnWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("respQ"),
+      options: [
+        { text: () => sceneStrings("respRight"), correct: true },
+        { text: () => sceneStrings("respWrong1"), correct: false },
+        { text: () => sceneStrings("respWrong2"), correct: false },
+        { text: () => sceneStrings("respWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sjfQ"),
+      options: [
+        { text: () => sceneStrings("sjfRight"), correct: true },
+        { text: () => sceneStrings("sjfWrong1"), correct: false },
+        { text: () => sceneStrings("sjfWrong2"), correct: false },
+        { text: () => sceneStrings("sjfWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("newQ"),
+      options: [
+        { text: () => sceneStrings("newRight"), correct: true },
+        { text: () => sceneStrings("newWrong1"), correct: false },
+        { text: () => sceneStrings("newWrong2"), correct: false },
+        { text: () => sceneStrings("newWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("demoteQ"),
+      options: [
+        { text: () => sceneStrings("demoteRight"), correct: true },
+        { text: () => sceneStrings("demoteWrong1"), correct: false },
+        { text: () => sceneStrings("demoteWrong2"), correct: false },
+        { text: () => sceneStrings("demoteWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("boostQ"),
+      options: [
+        { text: () => sceneStrings("boostRight"), correct: true },
+        { text: () => sceneStrings("boostWrong1"), correct: false },
+        { text: () => sceneStrings("boostWrong2"), correct: false },
+        { text: () => sceneStrings("boostWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gameQ"),
+      options: [
+        { text: () => sceneStrings("gameRight"), correct: true },
+        { text: () => sceneStrings("gameWrong1"), correct: false },
+        { text: () => sceneStrings("gameWrong2"), correct: false },
+        { text: () => sceneStrings("gameWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("approxQ"),
+      options: [
+        { text: () => sceneStrings("approxRight"), correct: true },
+        { text: () => sceneStrings("approxWrong1"), correct: false },
+        { text: () => sceneStrings("approxWrong2"), correct: false },
+        { text: () => sceneStrings("approxWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("interactiveQ"),
+      options: [
+        { text: () => sceneStrings("interactiveRight"), correct: true },
+        { text: () => sceneStrings("interactiveWrong1"), correct: false },
+        { text: () => sceneStrings("interactiveWrong2"), correct: false },
+        { text: () => sceneStrings("interactiveWrong3"), correct: false },
+      ],
+    },
+    {
+      // FCFS avg turnaround = ((a) + (a+b) + (a+b+c))/3 = (3a+2b+c)/3.
+      prompt: (v) => sceneStrings("fcfsTurnQ", v),
+      variables: "a=[6:12] b=[3:8] c=[1:5]",
+      answer: (v) => Math.round(((3 * v.a + 2 * v.b + v.c) / 3) * 100) / 100,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // FCFS avg response = (0 + a + (a+b))/3 = (2a+b)/3.
+      prompt: (v) => sceneStrings("fcfsRespQ", v),
+      variables: "a=[6:12] b=[3:8] c=[1:5]",
+      answer: (v) => Math.round(((2 * v.a + v.b) / 3) * 100) / 100,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Single job turnaround = comp - arr.
+      prompt: (v) => sceneStrings("singleTurnQ", v),
+      variables: "arr=[1:9] comp=[20:40]",
+      answer: (v) => v.comp - v.arr,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Shortest-first avg turnaround: sort lengths ascending, prefix sums averaged.
+      prompt: (v) => sceneStrings("sjfTurnQ", v),
+      variables: "a=[6:12] b=[3:8] c=[1:5]",
+      answer: (v) => {
+        const s = [v.a, v.b, v.c].sort((x, y) => x - y);
+        const t = s[0] + (s[0] + s[1]) + (s[0] + s[1] + s[2]);
+        return Math.round((t / 3) * 100) / 100;
+      },
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

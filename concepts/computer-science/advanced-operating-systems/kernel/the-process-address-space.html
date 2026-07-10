@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The Process Address Space</primer-title>
+
+    <primer-card>
+      <p>
+        Undergraduate you learned that a process has "some memory". The graduate view is sharper and more useful:
+        a process <em>is</em>, in essence, three things bolted together — a <strong>virtual address space</strong>
+        (a private map of the machine's memory), one or more <strong>threads</strong> of execution running inside
+        it, and a kernel <strong>bookkeeping object</strong> (Linux's
+        <primer-math>\texttt{task\_struct}</primer-math>) that ties them to open files, credentials, and
+        signals. Kill the address space and the process is gone; the identity of a process is largely the
+        identity of its address space.
+      </p>
+      <p>
+        You already understand
+        <primer-ref to="computer-science/operating-systems/virtual-memory-and-paging">paging</primer-ref> — how
+        the MMU translates virtual pages to physical frames. This lesson climbs one level of abstraction above
+        the page table to the <em>layout</em> the process sees: where code, data, heap, libraries, and stack
+        live; how the kernel represents that layout as a set of memory regions; and the two-step dance —
+        <primer-math>\texttt{fork}</primer-math> then <primer-math>\texttt{exec}</primer-math> — by which one
+        address space gives birth to another and then reincarnates as a new program.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the address-space memory-map figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "vaspace": {
+          "title": "A process's virtual address space — high addresses at the top, growing toward each other",
+          "hiAddr": "0xFFFF… (top of the 64-bit space)",
+          "loAddr": "0x0000 (null page — unmapped, catches NULL derefs)",
+          "kernel": "Kernel space  (mapped into every process, unreachable from user mode)",
+          "stack": "Stack  — locals, call frames, return addresses",
+          "stackGrow": "grows ↓ downward",
+          "mmapReg": "mmap region  — shared libraries, mmap'd files, big mallocs",
+          "gap": "(unmapped gap — a fault here is a segfault)",
+          "heap": "Heap  — malloc/new; managed by brk / mmap",
+          "heapGrow": "grows ↑ upward",
+          "bss": "BSS  — uninitialised globals (zero-filled, no disk space)",
+          "data": "Data  — initialised globals",
+          "text": "Text  — the program's machine code (read-only, executable)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The classic map</h2>
+      <p>
+        Here is the layout every Unix process wears. Addresses run high at the top to low at the bottom. Two
+        regions grow <em>toward</em> each other — the stack downward from the top of user space, the heap upward
+        — with a vast unmapped gap between them that on a 64-bit machine is measured in terabytes.
+      </p>
+      <primer-geometry scene="vaspace"></primer-geometry>
+      <p>
+        The crucial subtlety: this is all <strong>virtual</strong>. None of these addresses name real RAM; the
+        MMU maps only the pages actually touched to physical frames, on demand. The top half —
+        <strong>kernel space</strong> — is mapped identically into <em>every</em> process (so a syscall doesn't
+        need an address-space switch to reach kernel code), but the privilege bit makes it unreadable from user
+        mode: touch it and you take a fault. The bottom page is deliberately left unmapped so that dereferencing
+        <primer-math>\texttt{NULL}</primer-math> faults loudly instead of silently corrupting memory.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The segments, precisely</h2>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Region</th><th>Holds</th><th>Permissions</th><th>Backed by</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Text</strong></td><td>machine code</td><td>read + execute (not writable)</td><td>the executable file (demand-paged, shareable)</td></tr>
+            <tr><td><strong>Data</strong></td><td>initialised globals/statics</td><td>read + write</td><td>the executable file</td></tr>
+            <tr><td><strong>BSS</strong></td><td>uninitialised globals</td><td>read + write</td><td>nothing — zero-filled on first touch</td></tr>
+            <tr><td><strong>Heap</strong></td><td>malloc / new</td><td>read + write</td><td>anonymous memory (grows via brk/mmap)</td></tr>
+            <tr><td><strong>mmap region</strong></td><td>shared libs, mapped files, big allocations</td><td>varies per mapping</td><td>files or anonymous memory</td></tr>
+            <tr><td><strong>Stack</strong></td><td>call frames, locals, return addresses</td><td>read + write</td><td>anonymous memory (grows on fault)</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        BSS is the clever one: a program with a <primer-math>\texttt{100\,MB}</primer-math> zero-initialised
+        array adds nothing to its executable on disk — the loader just records "reserve this range, zero-filled",
+        and the pages materialise, already zeroed, only when first written.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>How the kernel actually stores the map: VMAs</h2>
+      <p>
+        "Text, data, heap, stack" is the <em>picture</em>; the kernel's <em>data structure</em> is a set of
+        <strong>virtual memory areas</strong> — Linux calls each a <primer-math>\texttt{vm\_area\_struct}</primer-math>
+        (VMA). Each VMA is a contiguous run of virtual pages sharing the same properties: a start and end address,
+        permissions (<primer-math>r</primer-math>/<primer-math>w</primer-math>/<primer-math>x</primer-math>), and a
+        backing object (a file + offset, or anonymous). The whole address space is just a sorted collection of
+        these regions hanging off the process's memory descriptor
+        (<primer-math>\texttt{mm\_struct}</primer-math>). Run <primer-math>\texttt{cat /proc/self/maps}</primer-math>
+        on Linux and you are reading the VMA list directly.
+      </p>
+      <primer-theorem name="The address space, formally">
+        <ul>
+          <li>a process's address space is a <strong>set of VMAs</strong> — contiguous virtual ranges, each with
+            permissions and a backing object (file or anonymous);</li>
+          <li>a <strong>page fault</strong> looks up the faulting address in the VMA set: found and permitted →
+            map a frame (demand paging / copy-on-write); not found → <primer-math>\texttt{SIGSEGV}</primer-math>;</li>
+          <li>the <primer-math>\texttt{task\_struct}</primer-math> (the PCB) points at the
+            <primer-math>\texttt{mm\_struct}</primer-math> that owns the VMAs, plus the file table, credentials,
+            and signal state — everything that <em>is</em> the process besides its threads.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Making a new process: fork, then exec</h2>
+      <p>
+        Unix creates processes with a famously peculiar two-step. <primer-math>\texttt{fork()}</primer-math>
+        <em>clones</em> the calling process — same code, same data, same open files — producing a child that is a
+        near-perfect copy, distinguished only by the return value: the child sees
+        <primer-math>0</primer-math>, the parent sees the child's PID. Copying an entire address space would be
+        ruinous, so the kernel uses <strong>copy-on-write (COW)</strong>: parent and child <em>share</em> every
+        physical page read-only, and a page is duplicated only when one of them writes to it. A fork of a
+        <primer-math>\texttt{4\,GB}</primer-math> process copies only page tables, not the gigabytes.
+      </p>
+      <p>
+        Then <primer-math>\texttt{exec()}</primer-math> does the opposite: it <em>discards</em> the current
+        address space entirely and loads a new program image in its place — new text, data, heap, stack — keeping
+        only the PID and open file descriptors. The idiom, then, is <strong>fork-exec-wait</strong>: the shell
+        forks a copy of itself, the child execs the command, and the parent waits for it to finish. Trace it.
+      </p>
+      <primer-code run>
+        // The fork-exec-wait pattern, as a state model. fork() "returns twice"; exec() replaces
+        // the child's image; wait() collects the exit status. COW means fork copies page tables, not pages.
+        type Proc = { pid: number; program: string; pages: number };
+
+        let nextPid = 1000;
+
+        function fork(parent: Proc): { parent: Proc; child: Proc } {
+          const child: Proc = { pid: ++nextPid, program: parent.program, pages: parent.pages };
+          console.log(`fork(): parent pid=${parent.pid} -> child pid=${child.pid}`);
+          console.log(`  COW: ${parent.pages} pages shared read-only (copied only on write)`);
+          console.log(`  in parent, fork() returns ${child.pid};  in child, fork() returns 0`);
+          return { parent, child };
+        }
+
+        function exec(p: Proc, program: string, pages: number): Proc {
+          console.log(`exec("${program}"): pid ${p.pid} discards its address space`);
+          console.log(`  old image "${p.program}" (${p.pages} pages) -> new image "${program}" (${pages} pages)`);
+          return { pid: p.pid, program, pages };            // same PID, brand-new address space
+        }
+
+        function wait(parent: Proc, child: Proc, status: number): void {
+          console.log(`wait(): parent pid=${parent.pid} reaps child pid=${child.pid}, exit status ${status}`);
+        }
+
+        // The shell runs "ls": fork a copy of the shell, exec ls in the child, wait for it.
+        const shell: Proc = { pid: 1000, program: "bash", pages: 5000 };
+        const { parent, child } = fork(shell);
+        const running = exec(child, "ls", 300);
+        console.log(`  child is now running "${running.program}"`);
+        wait(parent, running, 0);
+        console.log(`parent "${parent.program}" continues, unchanged`);
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="Why split creation into fork AND exec instead of one 'spawn' call?">
+      <p>
+        It looks wasteful — why clone a whole process just to immediately throw it away with
+        <primer-math>\texttt{exec}</primer-math>? The genius is the <em>gap</em> between them. Between
+        <primer-math>\texttt{fork}</primer-math> and <primer-math>\texttt{exec}</primer-math>, the child is a copy
+        of the parent running the parent's code, and can quietly rearrange its own world before the new program
+        starts: redirect <primer-math>\texttt{stdout}</primer-math> to a file, close descriptors it shouldn't
+        leak, set up a pipe, drop privileges, change directory. Every shell redirection
+        (<primer-math>\texttt{ls &gt; out.txt}</primer-math>) and every pipe
+        (<primer-math>\texttt{a | b}</primer-math>) is built in that window. A single monolithic
+        <primer-math>\texttt{spawn}</primer-math> call would need a parameter for every possible adjustment; fork
+        gives you the full power of ordinary code instead. That said, <primer-math>\texttt{fork}</primer-math> has
+        aged awkwardly — a 2019 paper by Baumann, Appavoo, Krieger and Roscoe, <em>"A fork() in the road,"</em>
+        argues it is a poor fit for multithreaded, huge-memory modern programs, which is why
+        <primer-math>\texttt{posix\_spawn}</primer-math> and <primer-math>\texttt{vfork}</primer-math> exist.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The address space is virtual and mostly empty — it is not gigabytes of RAM">
+      <p>
+        A tempting mistake is to think a process's <primer-math>2^{48}</primer-math>-byte address space (256 TB
+        on a typical x86-64 layout) means it <em>uses</em> that memory, or even that the pictured regions are
+        fully populated. They are not. The address space is a <strong>map of possibilities</strong>: only pages
+        the process actually touches get physical frames, allocated lazily on the first access (demand paging).
+        A freshly <primer-math>\texttt{malloc}</primer-math>'d gigabyte consumes essentially <em>zero</em>
+        physical RAM until you write to it. Likewise, after a <primer-math>\texttt{fork}</primer-math>, parent and
+        child appear to have two full copies of memory, but COW means there is still only <em>one</em> physical
+        copy until a write forces a split. Always separate the <em>virtual</em> layout (what addresses are
+        legal) from the <em>physical</em> reality (what frames are committed) — conflating them makes memory
+        accounting nonsensical.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: layout, VMAs, task_struct, fork/COW/exec/wait. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "vaspaceQuiz@1": {
+          "intro": "The virtual address-space layout, VMAs, the task_struct, and the fork-exec-wait pattern with copy-on-write.",
+          "growQ": "In the classic layout, which two regions grow TOWARD each other?",
+          "growRight": "the stack (downward) and the heap (upward)",
+          "growWrong1": "the text and data segments",
+          "growWrong2": "the BSS and the kernel",
+          "growWrong3": "two stacks",
+          "textQ": "The text segment holds machine code and is…",
+          "textRight": "read + execute, but not writable",
+          "textWrong1": "read + write + execute",
+          "textWrong2": "write-only",
+          "textWrong3": "unmapped",
+          "bssQ": "Why does a large zero-initialised global array add nothing to the executable file?",
+          "bssRight": "BSS is recorded as a zero-filled range; pages materialise, already zeroed, on first touch",
+          "bssWrong1": "the array is stored on the stack",
+          "bssWrong2": "the compiler deletes unused arrays",
+          "bssWrong3": "it is compressed on disk",
+          "nullQ": "Why is the lowest page of the address space left unmapped?",
+          "nullRight": "so dereferencing NULL faults loudly instead of silently corrupting memory",
+          "nullWrong1": "to save physical RAM",
+          "nullWrong2": "because address 0 does not exist",
+          "nullWrong3": "to store the kernel there",
+          "kernQ": "What is true of the kernel-space half of a process's address space?",
+          "kernRight": "it is mapped into every process but is unreachable from user mode",
+          "kernWrong1": "it is different physical memory for each process's private use",
+          "kernWrong2": "user code can freely read and write it",
+          "kernWrong3": "it stores the program's heap",
+          "vmaQ": "How does the kernel actually represent an address space?",
+          "vmaRight": "as a set of VMAs — contiguous ranges with permissions and a backing object",
+          "vmaWrong1": "as a single flat array of bytes",
+          "vmaWrong2": "as one entry per byte",
+          "vmaWrong3": "it does not track it at all",
+          "taskQ": "The Linux task_struct (the PCB) holds…",
+          "taskRight": "process state: pointer to the mm_struct/VMAs, open files, credentials, signals",
+          "taskWrong1": "only the program's source code",
+          "taskWrong2": "the CPU's transistors",
+          "taskWrong3": "nothing; Linux has no PCB",
+          "forkQ": "What does fork() return?",
+          "forkRight": "the child's PID in the parent, and 0 in the child",
+          "forkWrong1": "0 in both",
+          "forkWrong2": "the child's PID in both",
+          "forkWrong3": "nothing; it never returns",
+          "cowQ": "Copy-on-write means that after fork()…",
+          "cowRight": "parent and child share pages read-only; a page is copied only when one writes",
+          "cowWrong1": "the entire address space is duplicated immediately",
+          "cowWrong2": "no memory is ever shared",
+          "cowWrong3": "the child gets no memory at all",
+          "execQ": "What does exec() do to the calling process?",
+          "execRight": "replaces its entire address space with a new program image, keeping the PID and open files",
+          "execWrong1": "creates a brand-new child process",
+          "execWrong2": "copies the parent's memory",
+          "execWrong3": "terminates the process",
+          "gapQ": "Why does Unix split process creation into fork AND exec?",
+          "gapRight": "the gap lets the child set up redirections, pipes, and privileges before the new program runs",
+          "gapWrong1": "to make process creation slower on purpose",
+          "gapWrong2": "because the CPU requires two steps",
+          "gapWrong3": "there is no reason; it is a bug",
+          "virtQ": "A process malloc's 1 GB but never writes to it. How much physical RAM is committed?",
+          "virtRight": "essentially none — frames are allocated lazily on first touch",
+          "virtWrong1": "exactly 1 GB immediately",
+          "virtWrong2": "2 GB (double, for safety)",
+          "virtWrong3": "all of physical RAM",
+          "pageNumQ": "A process has ${p}$ pages and forks. With copy-on-write, how many physical PAGES are copied at the moment of fork (before any writes)?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="vaspaceQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/kernel/the-graduate-view-of-operating-systems",
+      "computer-science/operating-systems/virtual-memory-and-paging"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The virtual address-space memory map: stacked labelled regions from high address (top) to low
+     (bottom), with growth-direction arrows for the stack and heap. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "vaspace",
+    ({ board, colors, step, sceneStrings }) => {
+      const X0 = 0.2, X1 = 8.0;
+      // Region bars, top (high address) to bottom (low address): [key, height, paletteIndex, sublabelKey].
+      const regions = [
+        { key: "kernel", h: 1.1, ci: 1, sub: null },
+        { key: "stack",  h: 1.0, ci: 0, sub: "stackGrow" },
+        { key: "gap",    h: 0.7, ci: 2, sub: null },
+        { key: "mmapReg",h: 1.0, ci: 0, sub: null },
+        { key: "heap",   h: 1.0, ci: 0, sub: "heapGrow" },
+        { key: "bss",    h: 0.8, ci: 0, sub: null },
+        { key: "data",   h: 0.8, ci: 0, sub: null },
+        { key: "text",   h: 0.8, ci: 0, sub: null },
+      ];
+
+      const bar = (yTop, R) => {
+        const yBot = yTop - R.h;
+        board.create("polygon", [[X0, yBot], [X1, yBot], [X1, yTop], [X0, yTop]], {
+          fillColor: colors.cat[R.ci], fillOpacity: R.key === "gap" ? 0.08 : 0.22,
+          borders: { strokeColor: colors.line, strokeWidth: 1.4, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [(X0 + X1) / 2, yBot + R.h / 2 + (R.sub ? 0.16 : 0), sceneStrings(R.key)], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:600; max-width:430px",
+        });
+        if (R.sub)
+          board.create("text", [(X0 + X1) / 2, yBot + R.h / 2 - 0.24, sceneStrings(R.sub)], {
+            strokeColor: colors.ink, fontSize: 10.5, anchorX: "middle", anchorY: "middle",
+            fixed: true, highlight: false,
+          });
+        return yBot;
+      };
+
+      // Address labels at the extremes (base content).
+      board.create("text", [(X0 + X1) / 2, 7.85, sceneStrings("hiAddr")], {
+        strokeColor: colors.ink, fontSize: 10.5, anchorX: "middle", anchorY: "middle",
+        fixed: true, highlight: false,
+      });
+      board.create("text", [(X0 + X1) / 2, -0.45, sceneStrings("loAddr")], {
+        strokeColor: colors.ink, fontSize: 10.5, anchorX: "middle", anchorY: "middle",
+        fixed: true, highlight: false,
+      });
+
+      // Draw each region as its own step (opens fully revealed with a Play button).
+      let yTop = 7.5;
+      regions.forEach((R) => {
+        step(sceneStrings(R.key), () => { bar(yTop, R); });
+        yTop -= R.h;
+      });
+    },
+    {
+      boundingbox: [-0.5, 8.2, 8.7, -0.9],
+      keepAspect: false,
+      title: () => makeStrings("vaspace")("title"),
+    },
+  );
+
+  registerQuiz("vaspaceQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("growQ"), options: [
+      { text: () => sceneStrings("growRight"), correct: true },
+      { text: () => sceneStrings("growWrong1"), correct: false },
+      { text: () => sceneStrings("growWrong2"), correct: false },
+      { text: () => sceneStrings("growWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("textQ"), options: [
+      { text: () => sceneStrings("textRight"), correct: true },
+      { text: () => sceneStrings("textWrong1"), correct: false },
+      { text: () => sceneStrings("textWrong2"), correct: false },
+      { text: () => sceneStrings("textWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("bssQ"), options: [
+      { text: () => sceneStrings("bssRight"), correct: true },
+      { text: () => sceneStrings("bssWrong1"), correct: false },
+      { text: () => sceneStrings("bssWrong2"), correct: false },
+      { text: () => sceneStrings("bssWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("nullQ"), options: [
+      { text: () => sceneStrings("nullRight"), correct: true },
+      { text: () => sceneStrings("nullWrong1"), correct: false },
+      { text: () => sceneStrings("nullWrong2"), correct: false },
+      { text: () => sceneStrings("nullWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("kernQ"), options: [
+      { text: () => sceneStrings("kernRight"), correct: true },
+      { text: () => sceneStrings("kernWrong1"), correct: false },
+      { text: () => sceneStrings("kernWrong2"), correct: false },
+      { text: () => sceneStrings("kernWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("vmaQ"), options: [
+      { text: () => sceneStrings("vmaRight"), correct: true },
+      { text: () => sceneStrings("vmaWrong1"), correct: false },
+      { text: () => sceneStrings("vmaWrong2"), correct: false },
+      { text: () => sceneStrings("vmaWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("taskQ"), options: [
+      { text: () => sceneStrings("taskRight"), correct: true },
+      { text: () => sceneStrings("taskWrong1"), correct: false },
+      { text: () => sceneStrings("taskWrong2"), correct: false },
+      { text: () => sceneStrings("taskWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("forkQ"), options: [
+      { text: () => sceneStrings("forkRight"), correct: true },
+      { text: () => sceneStrings("forkWrong1"), correct: false },
+      { text: () => sceneStrings("forkWrong2"), correct: false },
+      { text: () => sceneStrings("forkWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cowQ"), options: [
+      { text: () => sceneStrings("cowRight"), correct: true },
+      { text: () => sceneStrings("cowWrong1"), correct: false },
+      { text: () => sceneStrings("cowWrong2"), correct: false },
+      { text: () => sceneStrings("cowWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("execQ"), options: [
+      { text: () => sceneStrings("execRight"), correct: true },
+      { text: () => sceneStrings("execWrong1"), correct: false },
+      { text: () => sceneStrings("execWrong2"), correct: false },
+      { text: () => sceneStrings("execWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("gapQ"), options: [
+      { text: () => sceneStrings("gapRight"), correct: true },
+      { text: () => sceneStrings("gapWrong1"), correct: false },
+      { text: () => sceneStrings("gapWrong2"), correct: false },
+      { text: () => sceneStrings("gapWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("virtQ"), options: [
+      { text: () => sceneStrings("virtRight"), correct: true },
+      { text: () => sceneStrings("virtWrong1"), correct: false },
+      { text: () => sceneStrings("virtWrong2"), correct: false },
+      { text: () => sceneStrings("virtWrong3"), correct: false },
+    ] },
+    {
+      // COW copies ZERO pages at fork time (only page tables); pages copy on later writes.
+      prompt: (v) => sceneStrings("pageNumQ", v),
+      variables: "p=[100:9000]",
+      answer: () => 0,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

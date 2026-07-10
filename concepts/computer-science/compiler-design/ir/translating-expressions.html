@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Translating Expressions and Assignments</primer-title>
+
+    <primer-card>
+      <p>
+        We have met <primer-ref to="computer-science/compiler-design/ir/three-address-code">three-address
+        code</primer-ref> as a target; now we ask the real question of a front end: <em>how does the compiler
+        actually produce it, mechanically, from a parse tree?</em> The answer is one of the most satisfying
+        ideas in compiling — a <strong>syntax-directed translation</strong> scheme that walks the expression
+        tree and, at each node, emits a single instruction while threading a small amount of information up the
+        tree. There is no cleverness, no search: the structure of the grammar <em>is</em> the algorithm.
+      </p>
+      <p>
+        The engine has two parts. A generator <primer-math>\textit{newtemp}()</primer-math> that hands out a
+        fresh temporary each time it is called (<primer-math>t_1, t_2, t_3, \dots</primer-math>), and a synthesized
+        attribute <primer-math>E.\textit{addr}</primer-math> attached to every expression node, holding
+        <em>the address where that sub-expression's value ends up living</em>. Leaves already know their address
+        (a variable's name, a constant's value); interior nodes compute one by emitting an instruction into a
+        fresh temporary and reporting that temporary upward. Assemble those two pieces and TAC generation writes
+        itself.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The translation scheme</h2>
+      <p>
+        Here is the classic SDT for expressions and assignments (following the Dragon Book). Each production
+        carries a semantic action in braces; <primer-math>\Vert</primer-math> denotes appending an instruction
+        to the output, and <primer-math>gen</primer-math> builds one three-address instruction:
+      </p>
+      <primer-code lang="text">
+        S -> id = E   { gen( id.addr  '='  E.addr ) }
+
+        E -> E1 + E2  { E.addr = newtemp();
+                        gen( E.addr '=' E1.addr '+' E2.addr ) }
+
+        E -> E1 * E2  { E.addr = newtemp();
+                        gen( E.addr '=' E1.addr '*' E2.addr ) }
+
+        E -> - E1     { E.addr = newtemp();
+                        gen( E.addr '=' 'minus' E1.addr ) }
+
+        E -> ( E1 )   { E.addr = E1.addr }        // parentheses carry the address up unchanged
+
+        E -> id       { E.addr = id.addr }        // a leaf already has an address
+
+        E -> num      { E.addr = num.value }
+      </primer-code>
+      <p>
+        Read the pattern: a <em>leaf</em> production copies an existing address up (no instruction emitted); an
+        <em>operator</em> production calls <primer-math>\textit{newtemp}()</primer-math>, emits exactly one
+        instruction, and reports the new temporary as its own address. Because the children's actions run before
+        the parent's (a post-order, bottom-up traversal), each child's <primer-math>addr</primer-math> is
+        already filled in by the time the parent needs it. One node, one temporary, one instruction.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A worked example, node by node</h2>
+      <p>
+        Take <primer-math>x = a + b \times c</primer-math>. Precedence makes the tree
+        <primer-math>a + (b \times c)</primer-math>. Reveal the traversal: each interior node lights up as it
+        emits its instruction and is labelled with the temporary it produces.
+      </p>
+      <primer-geometry scene="exprTree"></primer-geometry>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "exprTree": {
+            "title": "Emitting TAC for x = a + b*c",
+            "leaves": "The leaves a, b, c already have addresses — no code emitted.",
+            "mul": "Visit the '*' node: t1 = b * c.",
+            "add": "Visit the '+' node: its children are a and t1, so t2 = a + t1.",
+            "asg": "Finally the assignment copies t2 into x: x = t2."
+          }
+        }
+      </script>
+      <p>
+        The emitted three-address code, in the order the post-order walk produces it:
+      </p>
+      <primer-code lang="text">
+        t1 = b * c
+        t2 = a + t1
+        x  = t2
+      </primer-code>
+      <p>
+        Every interior node contributed exactly one line, and the temporaries chain the values together bottom
+        to top. This is the mechanical heart of a compiler's front end: give it any expression tree and it grinds
+        out correct TAC without a moment's thought.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Arrays: address arithmetic and type-driven widths</h2>
+      <p>
+        Expressions over scalars are the easy case. The moment an <em>array reference</em> like
+        <primer-math>a[i]</primer-math> appears, the translator must compute a memory <strong>address</strong>,
+        and that is where element widths enter. For a one-dimensional array <primer-math>a</primer-math> whose
+        elements each occupy <primer-math>w</primer-math> bytes, the element <primer-math>a[i]</primer-math> lives
+        at
+      </p>
+      <primer-math display>\textit{base}(a) \; + \; i \times w.</primer-math>
+      <p>
+        The width <primer-math>w</primer-math> is <em>type-driven</em>: an array of 4-byte <code>int</code>s uses
+        <primer-math>w = 4</primer-math>, of 8-byte <code>double</code>s uses <primer-math>w = 8</primer-math>.
+        The compiler reads it from the symbol table's type information. So <primer-math>x = a[i]</primer-math>
+        (with <code>int</code> elements) lowers to an <em>offset</em> computation followed by an indexed load:
+      </p>
+      <primer-code lang="text">
+        t1 = i * 4          // scale the index by the element width
+        t2 = a[t1]          // indexed read: fetch the element at offset t1
+        x  = t2
+      </primer-code>
+      <p>
+        Two dimensions compose the same idea by a
+        <primer-ref todo to="ir/row-major-addressing">row-major</primer-ref> formula: for
+        <primer-math>a[i][j]</primer-math> with <primer-math>n_2</primer-math> columns, the offset is
+        <primer-math>(i \times n_2 + j) \times w</primer-math>. The key insight is that array indexing is not a
+        primitive — it is <em>arithmetic on addresses</em>, generated by the same
+        <primer-math>\textit{newtemp}()</primer-math> machinery as everything else.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The emitter, in code</h2>
+      <p>
+        Below is the SDT scheme made real: a recursive emitter over an expression AST. Each node type maps to
+        one case; operators call <code>newtemp()</code>, push one instruction, and return the temporary as their
+        address. We translate <primer-math>x = a + b \times c</primer-math> and an array read
+        <primer-math>y = m[k]</primer-math>, then print the TAC.
+      </p>
+      <primer-code run>
+        type Expr =
+          | { kind: "num"; value: number }
+          | { kind: "var"; name: string }
+          | { kind: "bin"; op: string; l: Expr; r: Expr }
+          | { kind: "neg"; e: Expr }
+          | { kind: "index"; arr: string; idx: Expr; width: number }; // a[idx], element width in bytes
+
+        const code: string[] = [];
+        let counter = 0;
+        const newtemp = () =&gt; `t${++counter}`;
+        const emit = (line: string) =&gt; code.push(line);
+
+        // Returns the ADDRESS (a string) where this sub-expression's value lives.
+        function gen(e: Expr): string {
+          switch (e.kind) {
+            case "num": return String(e.value);
+            case "var": return e.name;
+            case "neg": {
+              const a = gen(e.e);
+              const t = newtemp();
+              emit(`${t} = minus ${a}`);
+              return t;
+            }
+            case "bin": {
+              const a = gen(e.l);          // children first (post-order)
+              const b = gen(e.r);
+              const t = newtemp();
+              emit(`${t} = ${a} ${e.op} ${b}`);
+              return t;
+            }
+            case "index": {
+              const i = gen(e.idx);
+              const off = newtemp();
+              emit(`${off} = ${i} * ${e.width}`); // scale by element width
+              const t = newtemp();
+              emit(`${t} = ${e.arr}[${off}]`);    // indexed read
+              return t;
+            }
+          }
+        }
+
+        function assign(lhs: string, e: Expr): void {
+          const a = gen(e);
+          emit(`${lhs} = ${a}`);
+        }
+
+        // x = a + b * c
+        assign("x", {
+          kind: "bin", op: "+",
+          l: { kind: "var", name: "a" },
+          r: { kind: "bin", op: "*", l: { kind: "var", name: "b" }, r: { kind: "var", name: "c" } },
+        });
+
+        emit("---");
+        counter = 0; // restart temp numbering for the second example
+
+        // y = m[k]   (int array, width 4)
+        assign("y", { kind: "index", arr: "m", idx: { kind: "var", name: "k" }, width: 4 });
+
+        code.forEach((line) =&gt; console.log(line));
+      </primer-code>
+      <p>
+        The first block prints <code>t1 = b * c</code>, <code>t2 = a + t1</code>, <code>x = t2</code>; the second
+        prints the scaled-offset pattern <code>t1 = k * 4</code>, <code>t2 = m[t1]</code>, <code>y = t2</code>.
+        The <em>same</em> recursive walk handles arithmetic and array addressing — that uniformity is the whole
+        pay-off of syntax-directed translation.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Could a smarter compiler reuse temporaries instead of minting so many?">
+      <p>
+        Yes — and it should, eventually, but not here. The naive scheme mints a brand-new temporary at every
+        operator, which for a deep expression produces a long parade of <code>t1 … tk</code>, most of which are
+        alive for only a single instruction. That is fine: at IR level temporaries are free and unbounded, and
+        keeping them distinct <em>helps</em> later analysis. A classic refinement is Sethi–Ullman numbering,
+        which computes the minimum number of registers an expression needs and reuses temporaries on a stack
+        discipline, so <code>a + b</code> and <code>c + d</code> can share a temporary once the first is dead. But
+        that is an <em>optimisation</em>; the correctness of translation never depends on it. Generate freely,
+        then let <primer-ref todo to="codegen/register-allocation">register allocation</primer-ref> tidy up.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Evaluation order and array offsets are where bugs hide">
+      <p>
+        Two subtle traps. First, <strong>evaluation order</strong>: the scheme evaluates a binary node's
+        <em>left</em> child before its <em>right</em>. For pure arithmetic that never matters, but if operands
+        have side effects (a function call, a <code>++</code>), the order the compiler picks becomes observable —
+        C famously leaves it unspecified, so <code>f() + g()</code> may run either first. Fix the order in your
+        scheme and document it. Second, <strong>array offsets</strong>: the index must be scaled by the element
+        <em>width</em>, not used raw. Writing <code>a[i]</code> as offset <code>i</code> instead of
+        <code>i * w</code> is a classic off-by-a-factor bug that reads the wrong element (and for
+        <code>double</code>s, lands halfway inside one). Always multiply the index by the type's width before the
+        indexed access.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: SDT/newtemp/addr/array-offset concepts + variable-driven offset & temp-count arithmetic. Bank of 13, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "exprQuiz@1": {
+          "intro": "Syntax-directed translation emits three-address code by walking the expression tree: newtemp() and the addr attribute do the work. Numbers change every attempt.",
+          "newtempQ": "What does newtemp() do?",
+          "ntFresh": "return a fresh, previously-unused temporary name each call",
+          "ntReg": "allocate a physical CPU register",
+          "ntSame": "return the same temporary every time",
+          "ntLabel": "create a new jump label",
+          "addrQ": "The synthesized attribute E.addr holds…",
+          "adWhere": "the address where the sub-expression E's value ends up",
+          "adOp": "the operator of E",
+          "adType": "the type of E only",
+          "adLine": "the source line number",
+          "leafQ": "For a leaf production E -> id, how many instructions are emitted?",
+          "lfZero": "zero — the address is just the variable's name",
+          "lfOne": "exactly one",
+          "lfTwo": "two",
+          "lfMany": "one per character",
+          "opQ": "For an operator production E -> E1 + E2, the action…",
+          "opEmit": "calls newtemp() and emits one instruction, reporting the temp as E.addr",
+          "opNone": "emits nothing",
+          "opTwo": "always emits two instructions",
+          "opJump": "emits a conditional jump",
+          "orderQ": "In what order does the scheme process an interior node's children?",
+          "orPost": "children first (post-order), then the node itself",
+          "orPre": "the node first, then its children",
+          "orRand": "in random order",
+          "orRight": "right child only",
+          "arrQ": "For a 1-D array a with element width w, the address of a[i] is…",
+          "arBase": "base(a) + i * w",
+          "arPlain": "base(a) + i",
+          "arDiv": "base(a) + i / w",
+          "arMul": "base(a) * i",
+          "widthQ": "Where does the compiler get the element width w for scaling an index?",
+          "wType": "from the element's type in the symbol table",
+          "wGuess": "it always assumes 1",
+          "wUser": "the programmer must type it in",
+          "wRandom": "from the clock",
+          "parenQ": "In E -> ( E1 ), what does the action do?",
+          "pCopy": "copies E1.addr up unchanged — parentheses emit no code",
+          "pTemp": "allocates a new temporary",
+          "pEmit": "emits a copy instruction",
+          "pJump": "emits a jump",
+          "watchQ": "A common array-addressing bug is to…",
+          "waRaw": "use the raw index i as the offset instead of i * w",
+          "waTwo": "scale by w twice",
+          "waNoBase": "forget the operator",
+          "waLabel": "emit a label",
+          "countQ": "An arithmetic expression tree (no arrays) has ${ops} operator nodes. Using one temporary per operator, how many temporaries does newtemp() mint?",
+          "offQ": "An int array has element width 4 bytes. What byte offset (from the base) is element a[${i}]? Give i*4.",
+          "off8Q": "A double array has element width 8 bytes. What byte offset is element a[${i}]? Give i*8.",
+          "instrQ": "Reading a[i] from an array lowers to a scale-offset plus an indexed load: how many TAC instructions is that (excluding any final copy)?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="exprQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/ir/three-address-code",
+      "computer-science/compiler-design/semantics/syntax-directed-translation"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Small tree-drawing toolkit adapted from the state-machine tools: nodes + straight edges.
+  function treeTools(board, colors) {
+    const node = (cx, cy, label, col, r = 0.5) => {
+      board.create("circle", [[cx, cy], r], {
+        strokeColor: col, strokeWidth: 2, fillColor: col, fillOpacity: 0.14,
+        fixed: true, highlight: false,
+      });
+      board.create("text", [cx, cy, label], {
+        anchorX: "middle", anchorY: "middle", fontSize: 16, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    const edge = (ax, ay, bx, by, col, r = 0.5) => {
+      const dx = bx - ax, dy = by - ay, d = Math.hypot(dx, dy), ux = dx / d, uy = dy / d;
+      board.create("segment", [[ax + ux * r, ay + uy * r], [bx - ux * r, by - uy * r]], {
+        strokeColor: col, strokeWidth: 2, fixed: true, highlight: false, straightFirst: false, straightLast: false,
+      });
+    };
+    const tag = (x, y, text, col) =>
+      board.create("text", [x, y, text], {
+        anchorX: "middle", anchorY: "middle", fontSize: 14, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    return { node, edge, tag };
+  }
+
+  // Expression tree for x = a + b*c  (tree: '=' over 'x' and '+'; '+' over 'a' and '*'; '*' over 'b' and 'c').
+  registerGeometryScene("exprTree", ({ board, step, colors, sceneStrings }) => {
+    const T = treeTools(board, colors);
+    // Coordinates
+    const asg = [0, 3.4], xN = [-2.6, 1.8], plus = [2.6, 1.8];
+    const aN = [0.6, 0.2], mul = [4.4, 0.2];
+    const bN = [3.2, -1.6], cN = [5.6, -1.6];
+
+    // Base edges (always visible).
+    T.edge(asg[0], asg[1], xN[0], xN[1], colors.line);
+    T.edge(asg[0], asg[1], plus[0], plus[1], colors.line);
+    T.edge(plus[0], plus[1], aN[0], aN[1], colors.line);
+    T.edge(plus[0], plus[1], mul[0], mul[1], colors.line);
+    T.edge(mul[0], mul[1], bN[0], bN[1], colors.line);
+    T.edge(mul[0], mul[1], cN[0], cN[1], colors.line);
+
+    step(sceneStrings("leaves"), () => {
+      T.node(xN[0], xN[1], "x", colors.cat[1]);
+      T.node(aN[0], aN[1], "a", colors.cat[1]);
+      T.node(bN[0], bN[1], "b", colors.cat[1]);
+      T.node(cN[0], cN[1], "c", colors.cat[1]);
+    });
+    step(sceneStrings("mul"), () => {
+      T.node(mul[0], mul[1], "*", colors.cat[0]);
+      T.tag(mul[0] + 1.35, mul[1] + 0.15, "t1 = b*c", colors.cat[0]);
+    });
+    step(sceneStrings("add"), () => {
+      T.node(plus[0], plus[1], "+", colors.cat[2]);
+      T.tag(plus[0] + 1.6, plus[1] + 0.15, "t2 = a+t1", colors.cat[2]);
+    });
+    step(sceneStrings("asg"), () => {
+      T.node(asg[0], asg[1], "=", colors.cat[3]);
+      T.tag(asg[0] - 1.7, asg[1] + 0.15, "x = t2", colors.cat[3]);
+    });
+  }, { boundingbox: [-4.5, 4.4, 7.6, -2.6], keepAspect: false, title: () => "Emitting TAC for x = a + b*c" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("exprQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("newtempQ"),
+      options: [
+        { text: () => sceneStrings("ntFresh"), correct: true },
+        { text: () => sceneStrings("ntReg"), correct: false },
+        { text: () => sceneStrings("ntSame"), correct: false },
+        { text: () => sceneStrings("ntLabel"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("addrQ"),
+      options: [
+        { text: () => sceneStrings("adWhere"), correct: true },
+        { text: () => sceneStrings("adOp"), correct: false },
+        { text: () => sceneStrings("adType"), correct: false },
+        { text: () => sceneStrings("adLine"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("leafQ"),
+      options: [
+        { text: () => sceneStrings("lfZero"), correct: true },
+        { text: () => sceneStrings("lfOne"), correct: false },
+        { text: () => sceneStrings("lfTwo"), correct: false },
+        { text: () => sceneStrings("lfMany"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("opQ"),
+      options: [
+        { text: () => sceneStrings("opEmit"), correct: true },
+        { text: () => sceneStrings("opNone"), correct: false },
+        { text: () => sceneStrings("opTwo"), correct: false },
+        { text: () => sceneStrings("opJump"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("orderQ"),
+      options: [
+        { text: () => sceneStrings("orPost"), correct: true },
+        { text: () => sceneStrings("orPre"), correct: false },
+        { text: () => sceneStrings("orRand"), correct: false },
+        { text: () => sceneStrings("orRight"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("arrQ"),
+      options: [
+        { text: () => sceneStrings("arBase"), correct: true },
+        { text: () => sceneStrings("arPlain"), correct: false },
+        { text: () => sceneStrings("arDiv"), correct: false },
+        { text: () => sceneStrings("arMul"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("widthQ"),
+      options: [
+        { text: () => sceneStrings("wType"), correct: true },
+        { text: () => sceneStrings("wGuess"), correct: false },
+        { text: () => sceneStrings("wUser"), correct: false },
+        { text: () => sceneStrings("wRandom"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("parenQ"),
+      options: [
+        { text: () => sceneStrings("pCopy"), correct: true },
+        { text: () => sceneStrings("pTemp"), correct: false },
+        { text: () => sceneStrings("pEmit"), correct: false },
+        { text: () => sceneStrings("pJump"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("watchQ"),
+      options: [
+        { text: () => sceneStrings("waRaw"), correct: true },
+        { text: () => sceneStrings("waTwo"), correct: false },
+        { text: () => sceneStrings("waNoBase"), correct: false },
+        { text: () => sceneStrings("waLabel"), correct: false },
+      ],
+    },
+    {
+      // one temp per operator.
+      prompt: (v) => sceneStrings("countQ", v),
+      variables: "ops=[2:8]",
+      answer: (v) => v.ops,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // offset = i*4.
+      prompt: (v) => sceneStrings("offQ", v),
+      variables: "i=[0:9]",
+      answer: (v) => v.i * 4,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // offset = i*8.
+      prompt: (v) => sceneStrings("off8Q", v),
+      variables: "i=[0:9]",
+      answer: (v) => v.i * 8,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // scale + indexed load = 2 instructions.
+      prompt: () => sceneStrings("instrQ"),
+      answer: 2,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

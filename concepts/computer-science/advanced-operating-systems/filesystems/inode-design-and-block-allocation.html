@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Inode Design and Block Allocation</primer-title>
+
+    <primer-card>
+      <p>
+        Behind every file sits an <strong>inode</strong> — a fixed-size record (128 or 256 bytes in ext4) holding
+        everything about the file <em>except its name</em>: its owner, permissions, timestamps, size, link count, and,
+        crucially, <em>where its data lives on disk</em>. The name is kept in the directory; the inode is the file. Now
+        the classic engineering puzzle: an inode is tiny and fixed-size, yet it must be able to locate the blocks of a
+        file that might be 3 bytes or 3 terabytes. You cannot store a terabyte's worth of block addresses in 256 bytes.
+        How do you point at an unbounded amount of data from a bounded record?
+      </p>
+      <p>
+        The answer, invented in early Unix and still shaping ext4 today, is the <strong>multi-level indirect block</strong>
+        tree — a beautiful piece of design that makes small files cheap and huge files possible with the same structure.
+        This lesson is about that tree, the modern <strong>extent</strong> alternative that replaced it, and the
+        allocation ideas (FFS locality, bitmaps) that decide <em>which</em> physical blocks a file gets.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The indirect-block idea</h2>
+      <p>
+        The inode holds a small array of block pointers — classically <strong>15</strong> of them. But they are not all
+        equal. The first twelve are <strong>direct</strong> pointers: each names one data block. The thirteenth is a
+        <strong>single indirect</strong> pointer — it names a block that itself is <em>full of pointers</em> to data. The
+        fourteenth is <strong>double indirect</strong> (a block of pointers to blocks of pointers to data), and the
+        fifteenth is <strong>triple indirect</strong>. Each level multiplies the reach by the number of pointers that fit
+        in one block.
+      </p>
+      <p>
+        This is the master stroke: a tiny file (say 8 KB, two blocks) uses only direct pointers, so reading it costs
+        <em>one</em> inode fetch and no extra hops. A giant file grows into the deeper levels only as it needs them, and
+        the deepest level is reached in at most three extra block reads. The structure is an <strong>imbalanced tree</strong>
+        that is shallow for the common (small) case and deep only where it must be — the same "make the common case fast"
+        instinct that runs through all of systems.
+      </p>
+      <primer-math display>N_{\text{ptr}} = \frac{B}{P}, \qquad \text{max size} = \big(12 + N_{\text{ptr}} + N_{\text{ptr}}^{2} + N_{\text{ptr}}^{3}\big)\,B</primer-math>
+      <p>
+        where <primer-math>B</primer-math> is the block size in bytes and <primer-math>P</primer-math> is the size of one
+        block pointer. With <primer-math>B = 4\text{ KB}</primer-math> and <primer-math>P = 4\text{ bytes}</primer-math>
+        you get <primer-math>N_{\text{ptr}} = 1024</primer-math> pointers per block, and the triple-indirect term alone is
+        <primer-math>1024^3 \approx 10^9</primer-math> blocks — about <strong>4 TB</strong>. That is how 15 pointers reach
+        a terabyte.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the indirect-block tree figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "inode": {
+          "title": "The inode's indirect-block tree — shallow for small files, deep only when needed",
+          "inodeBox": "inode  (metadata + 15 pointers)",
+          "direct": "12 direct → data blocks (1 hop)",
+          "single": "single indirect → 1 block of pointers → data (2 hops)",
+          "double": "double indirect → pointers → pointers → data (3 hops)",
+          "triple": "triple indirect → 3 levels of pointers → data (4 hops)",
+          "iblk": "indirect block (Nₚₜᵣ = B/P pointers)",
+          "data": "data",
+          "revealD": "Direct pointers: the 12 cheap ones for small files",
+          "revealS": "Single indirect adds Nₚₜᵣ more blocks",
+          "revealX": "Double and triple indirect reach the huge sizes"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>See the tree</h2>
+      <p>
+        Each row below is one class of pointer. Notice how the depth (number of hops to reach data) grows by one at each
+        level, while the <em>fan-out</em> multiplies — that geometric growth is what lets three indirect levels cover
+        terabytes.
+      </p>
+      <primer-geometry scene="inode"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Compute the ceiling yourself</h2>
+      <p>
+        The runnable model below plugs numbers into the formula and prints how much each level contributes. Change the
+        block or pointer size and watch the maximum file size swing by orders of magnitude — bigger blocks and smaller
+        pointers both fatten <primer-math>N_{\text{ptr}}</primer-math>, and the triple-indirect term (which goes as
+        <primer-math>N_{\text{ptr}}^3</primer-math>) dominates everything.
+      </p>
+      <primer-code run>
+        // Maximum file size from the classic 12-direct / single / double / triple indirect scheme.
+        function maxFileSize(blockBytes: number, ptrBytes: number) {
+          const ptrsPerBlock = blockBytes / ptrBytes;      // N_ptr = B / P
+          const direct = 12;
+          const single = ptrsPerBlock;
+          const dbl = ptrsPerBlock ** 2;
+          const triple = ptrsPerBlock ** 3;
+          const totalBlocks = direct + single + dbl + triple;
+          return { ptrsPerBlock, direct, single, dbl, triple, totalBlocks, bytes: totalBlocks * blockBytes };
+        }
+
+        const B = 4096;   // 4 KB block
+        const P = 4;       // 4-byte pointer
+        const r = maxFileSize(B, P);
+        console.log(`block = ${B} B, pointer = ${P} B  ->  ${r.ptrsPerBlock} pointers per indirect block`);
+        console.log(`direct blocks   : ${r.direct}`);
+        console.log(`single indirect : ${r.single.toLocaleString()} blocks`);
+        console.log(`double indirect : ${r.dbl.toLocaleString()} blocks`);
+        console.log(`triple indirect : ${r.triple.toLocaleString()} blocks  (dominates!)`);
+        console.log(`MAX FILE SIZE   : ${(r.bytes / 1024 ** 4).toFixed(2)} TiB`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Extents — the modern replacement</h2>
+      <p>
+        The indirect scheme has an ugly cost: a 1 GB contiguous file still needs a quarter of a million individual block
+        pointers, one per 4 KB block, even though the blocks are all in a row. Reading them means chasing indirect blocks
+        all over the disk. Modern file systems — <strong>ext4</strong>, <strong>XFS</strong>, <strong>btrfs</strong> —
+        replace pointer lists with <strong>extents</strong>: a single record saying "logical blocks 0…262143 live at
+        physical block <primer-math>P</primer-math>, contiguous." One extent can describe a 128 MB run in a dozen bytes.
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th>Scheme</th><th>Describes a big file with…</th><th>Best when…</th></tr></thead>
+          <tbody>
+            <tr><td>Block list (indirect)</td><td>one pointer per block</td><td>files are fragmented / sparse</td></tr>
+            <tr><td>Extents</td><td>a few (start, length) runs</td><td>files are large and contiguous</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Extents only pay off if the file system can actually <em>allocate</em> long contiguous runs — which is exactly
+        what good block allocation is about.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>FFS: locality is everything</h2>
+      <p>
+        The original Unix file system scattered inodes at one end of the disk and data everywhere else, so reading a file
+        meant a long seek from inode to data and back. Berkeley's <strong>Fast File System</strong> (McKusick, 1984)
+        fixed this with a single dominating idea: <strong>keep related things close</strong>. FFS divides the disk into
+        <strong>cylinder groups</strong>, each with its own inodes, bitmap, and data blocks, and it follows two rules:
+        put a file's inode <em>in the same group</em> as its directory, and put a file's data blocks <em>in the same
+        group</em> as its inode. Related data ends up physically near each other, so the disk head barely moves.
+      </p>
+      <p>
+        Free space is tracked with a <strong>bitmap</strong>: one bit per block, <primer-math>1</primer-math> = used,
+        <primer-math>0</primer-math> = free. Allocating a block is finding a clear bit; to keep files contiguous the
+        allocator looks for <em>runs</em> of clear bits near the previous block. FFS deliberately keeps a slice of the disk
+        (historically ~10%) free so the allocator always has room to find contiguous space — fill a disk to the brim and
+        fragmentation, and slowness, set in.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why does an empty 1 GB 'sparse' file take almost no disk at all?">
+      <p>
+        Because a null block pointer is legal. If a program seeks to offset 1 GB and writes one byte, the file system
+        allocates a data block for <em>that</em> byte and the handful of indirect blocks needed to reach it — but every
+        other block pointer in the tree stays <strong>zero</strong>, meaning "a hole." The file's <em>logical</em> size
+        is 1 GB, but only a few kilobytes are actually on disk; reading a hole returns zeros without any block existing.
+        This is how virtual-machine disk images, database files, and core dumps can claim enormous sizes while occupying
+        almost nothing — and why <primer-math>\texttt{du}</primer-math> (actual blocks) and
+        <primer-math>\texttt{ls -l}</primer-math> (logical size) famously disagree. Extents represent holes just as
+        naturally, simply by leaving a gap in the logical range.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The indirect block is itself a disk block, and it costs a read">
+      <p>
+        A tempting mistake is to imagine the indirect pointers as a free lookup — as if the inode magically knows all the
+        addresses. It does not. A <strong>single indirect block is an ordinary data block</strong> that must be
+        <em>fetched from disk</em> before you can read the pointers inside it, and a double-indirect access reads
+        <em>two</em> such blocks before touching any data. So the byte at offset 100 GB in a huge file costs an inode read
+        plus three indirect-block reads plus the data read — four seeks, not one. This is precisely why extents (which
+        describe millions of blocks in one record) and aggressive caching of indirect blocks matter so much for large
+        files, and why the depth of the tree, not just its total reach, is part of a file system's performance story.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Where this leads</h2>
+      <p>
+        You can now say precisely <em>which</em> disk blocks make up a file and how the inode reaches them. But writing a
+        file touches several of these structures at once — the inode, a bitmap bit, and a data block — and if the machine
+        crashes between those writes, the file system is left inconsistent. That is the
+        <primer-ref forward to="computer-science/advanced-operating-systems/filesystems/crash-consistency-and-fsck">crash-consistency
+        problem</primer-ref>, the subject of the next lesson.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: inode/indirect concepts + numeric block/pointer/size calculations. Bank of 13, draws 5.
+         Variable names avoid evaluator collisions (bs, psz, nd, fsz, ng). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "inodeQuiz@1": {
+          "intro": "N_ptr = B/P pointers per block; max size = (12 + N_ptr + N_ptr² + N_ptr³)·B. Extents replace long pointer lists; FFS keeps data near its inode; bitmaps track free blocks.",
+          "inodeQ": "An inode stores everything about a file EXCEPT…",
+          "inRight": "its name (that lives in the directory)",
+          "inWrong1": "its size and permissions",
+          "inWrong2": "its owner and timestamps",
+          "inWrong3": "the location of its data blocks",
+          "whyIndirectQ": "Why use direct + single/double/triple indirect pointers instead of one flat list?",
+          "wiRight": "small files stay cheap (direct only) while huge files are still reachable — a tree shallow in the common case",
+          "wiWrong1": "to encrypt the file",
+          "wiWrong2": "to make every file exactly the same size",
+          "wiWrong3": "because pointers cannot address disk blocks directly",
+          "hopsQ": "Reading a byte via the DOUBLE indirect pointer costs how many block reads beyond the inode (before the data block)?",
+          "hopRight": "two (a block of pointers, then another block of pointers)",
+          "hopWrong1": "zero — it is inside the inode",
+          "hopWrong2": "one",
+          "hopWrong3": "twelve",
+          "extentQ": "An extent is…",
+          "exRight": "a (start block, length) record describing a contiguous run of blocks in one entry",
+          "exWrong1": "a single 512-byte disk sector",
+          "exWrong2": "a backup copy of the inode",
+          "exWrong3": "an encrypted pointer",
+          "extentWhyQ": "Extents beat block lists mainly when files are…",
+          "ewRight": "large and contiguous — one record replaces thousands of pointers",
+          "ewWrong1": "tiny and numerous",
+          "ewWrong2": "highly fragmented",
+          "ewWrong3": "stored on tape",
+          "ffsQ": "The Fast File System's cylinder groups exist chiefly to…",
+          "ffsRight": "keep a file's inode and data physically close, cutting disk-head seeks",
+          "ffsWrong1": "encrypt each group separately",
+          "ffsWrong2": "let the disk spin faster",
+          "ffsWrong3": "store more copies of every file",
+          "bitmapQ": "A free-space bitmap represents each block as…",
+          "bmRight": "one bit: 1 = allocated, 0 = free",
+          "bmWrong1": "a full 64-bit pointer",
+          "bmWrong2": "a filename",
+          "bmWrong3": "a timestamp",
+          "sparseQ": "A sparse file's 'holes' are stored as…",
+          "spRight": "null (zero) block pointers — no data block is allocated for a hole",
+          "spWrong1": "blocks full of the byte 0xFF",
+          "spWrong2": "compressed zeros on disk",
+          "spWrong3": "a separate hidden file",
+          "reserveQ": "FFS keeps ~10% of the disk free so that…",
+          "reRight": "the allocator can still find contiguous runs and avoid fragmentation",
+          "reWrong1": "the OS has somewhere to store passwords",
+          "reWrong2": "the disk does not overheat",
+          "reWrong3": "users cannot see the free space",
+          "ptrsNumQ": "With a {bs} KB block and a {psz}-byte pointer, how many pointers fit in one indirect block?",
+          "directNumQ": "With a {bs} KB block, the 12 direct pointers alone address how many KB of data?",
+          "blocksNumQ": "A {fsz} MB file on a file system with {bs} KB blocks needs how many data blocks?",
+          "singleNumQ": "A single indirect block holds {np} pointers to {bs} KB blocks. How many KB of data does it address?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="inodeQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/filesystems/the-vfs-layer"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The indirect-block tree: an inode box on the left, four pointer rows (direct/single/double/triple)
+     each revealed in a step, fanning right into indirect blocks and data. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "inode",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, ci, label, fs = 11) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[ci % 6], fillOpacity: 0.22,
+          borders: { strokeColor: colors.line, strokeWidth: 1.4, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, label], {
+          strokeColor: colors.ink, fontSize: fs, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "max-width:150px",
+        });
+      };
+      const arrow = (x0, y0, x1, y1, ci) =>
+        board.create("arrow", [[x0, y0], [x1, y1]], {
+          strokeColor: colors.cat[ci % 6], strokeWidth: 2, lastArrow: { size: 5 }, fixed: true, highlight: false,
+        });
+
+      // Base content: the inode itself (tall box on the left), always visible.
+      box(0, 1, 2.4, 9, 1, sceneStrings("inodeBox"), 11);
+
+      // Row y-centres for the four pointer classes.
+      const rows = [
+        { y: 8, key: "direct", ci: 2, levels: 1 },
+        { y: 6, key: "single", ci: 3, levels: 2 },
+        { y: 4, key: "double", ci: 4, levels: 3 },
+        { y: 2, key: "triple", ci: 5, levels: 4 },
+      ];
+      rows.forEach((r) => {
+        step(sceneStrings(r.key), () => {
+          // A chain of `levels` boxes: the last is data, the intermediate ones are indirect blocks.
+          let x = 3.0;
+          let prevX = 2.4, prevY = r.y;
+          for (let L = 0; L < r.levels; L++) {
+            const isData = L === r.levels - 1;
+            arrow(prevX + (L === 0 ? 0 : 0.0), r.y, x, r.y, r.ci);
+            const label = isData ? sceneStrings("data") : sceneStrings("iblk");
+            box(x, r.y - 0.6, x + 1.7, r.y + 0.6, isData ? r.ci : 1, isData ? sceneStrings("data") : "ptr", isData ? 12 : 10);
+            prevX = x + 1.7; prevY = r.y;
+            x += 2.4;
+          }
+          // Row caption to the far right.
+          board.create("text", [x + 0.1, r.y, sceneStrings(r.key)], {
+            strokeColor: colors.ink, fontSize: 10, anchorX: "left", anchorY: "middle",
+            fixed: true, highlight: false, cssStyle: "max-width:140px; opacity:0.85",
+          });
+        });
+      });
+    },
+    {
+      boundingbox: [-0.6, 9.8, 14.4, 0.4],
+      keepAspect: false,
+      title: () => makeStrings("inode")("title"),
+    },
+  );
+
+  registerQuiz("inodeQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("inodeQ"), options: [
+      { text: () => sceneStrings("inRight"), correct: true },
+      { text: () => sceneStrings("inWrong1"), correct: false },
+      { text: () => sceneStrings("inWrong2"), correct: false },
+      { text: () => sceneStrings("inWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("whyIndirectQ"), options: [
+      { text: () => sceneStrings("wiRight"), correct: true },
+      { text: () => sceneStrings("wiWrong1"), correct: false },
+      { text: () => sceneStrings("wiWrong2"), correct: false },
+      { text: () => sceneStrings("wiWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("hopsQ"), options: [
+      { text: () => sceneStrings("hopRight"), correct: true },
+      { text: () => sceneStrings("hopWrong1"), correct: false },
+      { text: () => sceneStrings("hopWrong2"), correct: false },
+      { text: () => sceneStrings("hopWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("extentQ"), options: [
+      { text: () => sceneStrings("exRight"), correct: true },
+      { text: () => sceneStrings("exWrong1"), correct: false },
+      { text: () => sceneStrings("exWrong2"), correct: false },
+      { text: () => sceneStrings("exWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("extentWhyQ"), options: [
+      { text: () => sceneStrings("ewRight"), correct: true },
+      { text: () => sceneStrings("ewWrong1"), correct: false },
+      { text: () => sceneStrings("ewWrong2"), correct: false },
+      { text: () => sceneStrings("ewWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("ffsQ"), options: [
+      { text: () => sceneStrings("ffsRight"), correct: true },
+      { text: () => sceneStrings("ffsWrong1"), correct: false },
+      { text: () => sceneStrings("ffsWrong2"), correct: false },
+      { text: () => sceneStrings("ffsWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("bitmapQ"), options: [
+      { text: () => sceneStrings("bmRight"), correct: true },
+      { text: () => sceneStrings("bmWrong1"), correct: false },
+      { text: () => sceneStrings("bmWrong2"), correct: false },
+      { text: () => sceneStrings("bmWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("sparseQ"), options: [
+      { text: () => sceneStrings("spRight"), correct: true },
+      { text: () => sceneStrings("spWrong1"), correct: false },
+      { text: () => sceneStrings("spWrong2"), correct: false },
+      { text: () => sceneStrings("spWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("reserveQ"), options: [
+      { text: () => sceneStrings("reRight"), correct: true },
+      { text: () => sceneStrings("reWrong1"), correct: false },
+      { text: () => sceneStrings("reWrong2"), correct: false },
+      { text: () => sceneStrings("reWrong3"), correct: false },
+    ] },
+    {
+      // Pointers per block = B/P = bs*1024 / psz.
+      prompt: (v) => sceneStrings("ptrsNumQ", v),
+      variables: "bs=[1,2,4,8] psz=[4,8]",
+      answer: (v) => (v.bs * 1024) / v.psz,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // 12 direct blocks * block size in KB.
+      prompt: (v) => sceneStrings("directNumQ", v),
+      variables: "bs=[1,2,4,8]",
+      answer: (v) => 12 * v.bs,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Blocks for an fsz MB file with bs KB blocks = fsz*1024/bs (integer, bs divides 1024).
+      prompt: (v) => sceneStrings("blocksNumQ", v),
+      variables: "fsz=[1:16] bs=[1,2,4,8]",
+      answer: (v) => (v.fsz * 1024) / v.bs,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // A single indirect block addresses np * bs KB of data.
+      prompt: (v) => sceneStrings("singleNumQ", v),
+      variables: "np=[128,256,512,1024] bs=[1,2,4,8]",
+      answer: (v) => v.np * v.bs,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

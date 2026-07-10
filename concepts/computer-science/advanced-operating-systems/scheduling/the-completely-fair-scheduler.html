@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The Completely Fair Scheduler</primer-title>
+
+    <primer-card>
+      <p>
+        From 2007 until the EEVDF rewrite of 2023, the default Linux scheduler was the
+        <strong>Completely Fair Scheduler</strong> (CFS), written by Ingo Molnár in a famously terse few thousand
+        lines. It replaced the older O(1) scheduler's pile of heuristics — interactivity bonuses, sleeper credits,
+        magic constants — with a single, almost philosophical idea: <em>model an ideal, perfectly fair CPU that
+        runs every runnable task at once, each at a fraction of full speed, and then, on real hardware that can run
+        only one task at a time, always dispatch the task that has fallen furthest behind that ideal.</em>
+      </p>
+      <p>
+        "How far behind is each task?" is answered by one number per task: its <strong>virtual runtime</strong>, or
+        <primer-math>\texttt{vruntime}</primer-math>. If you did the previous lesson on
+        <primer-ref to="computer-science/advanced-operating-systems/scheduling/proportional-share-lottery-and-stride">lottery
+        and stride</primer-ref>, you already know the trick — CFS is <em>stride scheduling</em> with "pass" renamed
+        "vruntime", weights coming from Unix nice values, and the run queue stored in a
+        <primer-ref soft to="computer-science/data-structures/binary-search-trees">red-black tree</primer-ref> (a
+        self-balancing binary search tree) so the minimum is always at your fingertips.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Virtual runtime: fairness in one counter</h2>
+      <p>
+        Each task accumulates <primer-math>\texttt{vruntime}</primer-math> as it runs, but at a rate scaled by its
+        <strong>weight</strong>. Run a task for <primer-math>\Delta</primer-math> nanoseconds of real time and its
+        virtual runtime grows by
+      </p>
+      <primer-math display>\Delta \texttt{vruntime} \;=\; \Delta \cdot \frac{W_0}{w_i},
+        \qquad W_0 = 1024 = \text{the weight of a nice-0 task}.</primer-math>
+      <p>
+        A heavy task (high weight, low nice value) has its clock run <em>slow</em> — its
+        <primer-math>\texttt{vruntime}</primer-math> creeps up gently, so it keeps looking "behind" and gets picked
+        again and again. A light task's clock runs <em>fast</em>, its
+        <primer-math>\texttt{vruntime}</primer-math> races ahead, and it waits longer between turns. The scheduler's
+        entire policy is then one line: <strong>run the runnable task with the smallest
+        <primer-math>\texttt{vruntime}</primer-math></strong>. Fairness is not a special case bolted on; it is the
+        definition.
+      </p>
+      <p>
+        Weights come from the classic Unix <strong>nice</strong> value (<primer-math>-20</primer-math> to
+        <primer-math>+19</primer-math>, default <primer-math>0</primer-math>) through a fixed table in which each
+        step of nice changes CPU share by roughly <primer-math>1.25\times</primer-math>. Nice
+        <primer-math>0</primer-math> weighs <primer-math>1024</primer-math>; nice <primer-math>+5</primer-math>
+        weighs <primer-math>335</primer-math>; nice <primer-math>-5</primer-math> weighs
+        <primer-math>3121</primer-math>. Two tasks split the CPU in proportion to their weights.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the vruntime red-black tree diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "rbtree": {
+          "title": "The CFS run queue: a red-black tree keyed by vruntime — the leftmost node runs next",
+          "next": "least vruntime → runs next",
+          "key": "nodes labelled by vruntime (ms)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The run queue is a tree</h2>
+      <p>
+        To "pick the least <primer-math>\texttt{vruntime}</primer-math>" fast, CFS keeps the runnable tasks in a
+        <strong>red-black tree keyed by <primer-math>\texttt{vruntime}</primer-math></strong> — a self-balancing
+        binary search tree. The task to run next is always the <em>leftmost</em> node (smallest key), which CFS
+        caches, so dispatch is <primer-math>O(1)</primer-math> and inserting a woken task or re-inserting a
+        preempted one is <primer-math>O(\log n)</primer-math>. When a task has run, its
+        <primer-math>\texttt{vruntime}</primer-math> has grown, so it is removed and reinserted further right, and
+        the next-leftmost task takes its turn.
+      </p>
+      <primer-geometry scene="rbtree"></primer-geometry>
+      <p>
+        A newly woken task is not inserted at <primer-math>\texttt{vruntime} = 0</primer-math> — that would let it
+        hog the CPU to "catch up" for all the time it slept. Instead CFS places it near the tree's <em>minimum</em>
+        (with a small sleeper credit), so it gets a prompt but bounded turn. This is how CFS gives sleepers — that
+        is, interactive tasks — good response without a special interactivity heuristic.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Target latency and minimum granularity</h2>
+      <p>
+        How long is one "turn"? CFS aims to run <em>every</em> runnable task once within a window called the
+        <strong>target latency</strong> (<primer-math>\texttt{sched\_latency}</primer-math>, e.g.
+        <primer-math>6</primer-math> ms). It divides that window among tasks by weight, so task
+        <primer-math>i</primer-math>'s time slice is
+      </p>
+      <primer-math display>\text{slice}_i \;=\; \texttt{sched\_latency} \cdot \frac{w_i}{\sum_j w_j}.</primer-math>
+      <p>
+        With two equal tasks and a <primer-math>6</primer-math> ms latency, each runs
+        <primer-math>3</primer-math> ms per round. But if a hundred tasks are runnable, dividing
+        <primer-math>6</primer-math> ms a hundred ways gives <primer-math>60\,\mu\text{s}</primer-math> slices —
+        and the cost of context switching would swamp useful work. So CFS enforces a
+        <strong>minimum granularity</strong> (<primer-math>\texttt{sched\_min\_granularity}</primer-math>, e.g.
+        <primer-math>0.75</primer-math> ms): no slice drops below it, even if that means the target latency
+        stretches. This is the eternal scheduler tension — <em>fairness/responsiveness</em> (short slices) versus
+        <em>throughput</em> (long slices amortising switch cost).
+      </p>
+      <primer-theorem name="CFS in four rules">
+        <ul>
+          <li>each task carries a <primer-math>\texttt{vruntime}</primer-math> that grows by
+            <primer-math>\Delta \cdot W_0/w_i</primer-math> when it runs for real time
+            <primer-math>\Delta</primer-math>;</li>
+          <li>the scheduler always runs the runnable task with the <strong>least</strong>
+            <primer-math>\texttt{vruntime}</primer-math> — the leftmost node of a red-black tree keyed by it;</li>
+          <li>weights come from <strong>nice</strong> values (each step ≈ <primer-math>1.25\times</primer-math> the
+            CPU share); shares are proportional to weight;</li>
+          <li>slices divide a <strong>target latency</strong> by weight but never fall below a <strong>minimum
+            granularity</strong>, trading responsiveness against context-switch overhead.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Watch vruntime steer the CPU</h2>
+      <p>
+        The simulator runs two tasks — one at nice <primer-math>0</primer-math> (weight
+        <primer-math>1024</primer-math>) and one at nice <primer-math>5</primer-math> (weight
+        <primer-math>335</primer-math>) — under the exact CFS rule: repeatedly dispatch the least-vruntime task for a
+        1 ms tick and charge it <primer-math>W_0/w_i</primer-math>. Because the heavy task's clock runs slow, it
+        wins roughly three ticks for every one the light task gets — matching the weight ratio
+        <primer-math>1024/335 \approx 3.06</primer-math>.
+      </p>
+      <primer-code run>
+        // CFS core: always run the task with the least vruntime; charge vruntime by W0/weight.
+        const W0 = 1024;
+        interface Task { name: string; weight: number; vruntime: number; ticks: number; }
+        const tasks: Task[] = [
+          { name: "nice 0", weight: 1024, vruntime: 0, ticks: 0 }, // heavy: runs often
+          { name: "nice 5", weight: 335,  vruntime: 0, ticks: 0 }, // light: runs rarely
+        ];
+
+        const TICKS = 40; // each tick = 1 ms of real CPU time
+        for (let t = 0; t &lt; TICKS; t++) {
+          // Pick the least-vruntime task (the leftmost node of the RB tree).
+          let pick = tasks[0];
+          for (const task of tasks) if (task.vruntime &lt; pick.vruntime) pick = task;
+          pick.vruntime += 1 * (W0 / pick.weight); // charge 1 ms, scaled by weight
+          pick.ticks++;
+        }
+
+        for (const task of tasks) {
+          const share = ((task.ticks / TICKS) * 100).toFixed(0);
+          console.log(`${task.name}: ran ${task.ticks}/${TICKS} ticks (${share}%),  ` +
+            `final vruntime = ${task.vruntime.toFixed(1)}`);
+        }
+        console.log("weight ratio 1024/335 = " + (1024 / 335).toFixed(2) + "  -> CPU-share ratio should match");
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="If CFS was so good, why did Linux replace it with EEVDF in 2023?">
+      <p>
+        CFS is fair about <em>throughput</em> — over time everyone gets their weighted share — but it has no notion
+        of <em>latency requirements</em>. A task that wants "not much CPU, but please run me <em>soon</em> when I
+        wake" (audio, input handling) could only ask by lowering its nice value, which also (wrongly) grants it a
+        <em>bigger</em> share. <strong>EEVDF</strong> (Earliest Eligible Virtual Deadline First), which became the
+        default in Linux 6.6, separates the two: each task declares a <em>latency</em> requirement that sets a
+        virtual <em>deadline</em>, and the scheduler runs the eligible task with the earliest deadline while still
+        honouring weighted fairness for throughput. It is CFS's fairness plus a deadline dimension — and it retired
+        a lot of the interactivity hacks that had accreted around CFS over sixteen years.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Completely fair' does NOT mean everyone gets equal CPU">
+      <p>
+        The name misleads a lot of students. CFS is not egalitarian — a nice-<primer-math>-5</primer-math> task
+        legitimately gets about nine times the CPU of a nice-<primer-math>+5</primer-math> task
+        (<primer-math>3121/335</primer-math>). "Fair" here means <em>proportional to weight</em>: each task gets
+        exactly the share its weight entitles it to, no more and no less, with no task starved. The fairness is in
+        the <em>faithfulness to the weights</em>, not in equal division. Equal division is just the special case
+        where all weights are equal. Likewise, a lower <primer-math>\texttt{vruntime}</primer-math> is not a
+        "reward" — it simply means "this task has received less than its share so far," which is precisely why it
+        should run next.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The through-line</h2>
+      <p>
+        Trace the lineage: SJF wanted to know job lengths;
+        <primer-ref to="computer-science/advanced-operating-systems/scheduling/scheduling-metrics-and-mlfq">MLFQ</primer-ref>
+        estimated them by watching behaviour;
+        <primer-ref to="computer-science/advanced-operating-systems/scheduling/proportional-share-lottery-and-stride">stride</primer-ref>
+        gave exact shares with a per-task counter; and CFS made that counter the <em>only</em> state, stored it in a
+        balanced tree, and shipped it to billions of devices. Every one of these is answering the same question —
+        "who runs next, and for how long?" — with progressively less magic. The next question is what changes when
+        there is more than one CPU to schedule <em>onto</em>, which is exactly where
+        <primer-ref forward to="computer-science/advanced-operating-systems/scheduling/multiprocessor-scheduling">multiprocessor
+        scheduling</primer-ref> begins.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: CFS concepts + variable-driven vruntime / slice / share calculations. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "cfsQuiz@1": {
+          "intro": "CFS runs the least-vruntime task. Δvruntime = Δ·1024/weight; slice = latency·w/Σw.",
+          "pickQ": "At each scheduling decision, CFS runs the task with the…",
+          "pickRight": "smallest virtual runtime (vruntime)",
+          "pickWrong1": "largest virtual runtime",
+          "pickWrong2": "highest nice value",
+          "pickWrong3": "earliest arrival time",
+          "dsQ": "CFS stores its runnable tasks in a…",
+          "dsRight": "red-black tree keyed by vruntime",
+          "dsWrong1": "simple FIFO linked list",
+          "dsWrong2": "hash table keyed by PID",
+          "dsWrong3": "fixed array of 140 priority queues",
+          "leftQ": "In the CFS red-black tree, the task chosen to run next is the…",
+          "leftRight": "leftmost node (minimum vruntime)",
+          "leftWrong1": "rightmost node (maximum vruntime)",
+          "leftWrong2": "root node",
+          "leftWrong3": "a randomly chosen node",
+          "weightQ": "A task's weight in CFS comes from its…",
+          "weightRight": "nice value, via a fixed table (~1.25× per step)",
+          "weightWrong1": "process ID",
+          "weightWrong2": "memory footprint",
+          "weightWrong3": "number of open files",
+          "heavyQ": "A HEAVY task (low nice, high weight) accumulates vruntime…",
+          "heavyRight": "slowly, so it keeps looking 'behind' and runs often",
+          "heavyWrong1": "quickly, so it runs rarely",
+          "heavyWrong2": "at the same rate as any other task",
+          "heavyWrong3": "not at all",
+          "latQ": "The 'target latency' (sched_latency) in CFS is…",
+          "latRight": "the window in which every runnable task should run once",
+          "latWrong1": "the time to boot the kernel",
+          "latWrong2": "the disk seek time",
+          "latWrong3": "the maximum vruntime allowed",
+          "granQ": "Why does CFS enforce a minimum granularity on time slices?",
+          "granRight": "to stop context-switch overhead swamping work when many tasks are runnable",
+          "granWrong1": "to make the tree taller",
+          "granWrong2": "to give root tasks priority",
+          "granWrong3": "to save disk space",
+          "fairQ": "'Completely fair' in CFS means each task gets…",
+          "fairRight": "CPU proportional to its weight (equal only if weights are equal)",
+          "fairWrong1": "exactly equal CPU regardless of nice",
+          "fairWrong2": "the whole CPU in turn until it finishes",
+          "fairWrong3": "CPU only when idle",
+          "wakeQ": "When a sleeping task wakes, CFS inserts it near the tree minimum (not at vruntime 0) to…",
+          "wakeRight": "give it a prompt but bounded turn, not let it hog the CPU to 'catch up'",
+          "wakeWrong1": "punish it for sleeping",
+          "wakeWrong2": "delete it",
+          "wakeWrong3": "reset every other task's vruntime",
+          "eevdfQ": "EEVDF (CFS's 2023 successor) adds which capability?",
+          "eevdfRight": "per-task latency requirements via virtual deadlines, separate from share",
+          "eevdfWrong1": "support for a single CPU only",
+          "eevdfWrong2": "removal of fairness entirely",
+          "eevdfWrong3": "scheduling by process name",
+          "vrNumQ": "A task with weight {wa} runs for {delta} ms. By how much does its vruntime increase? Use Δvruntime = Δ·1024/weight. (2 d.p.)",
+          "sliceNumQ": "Two runnable tasks have weights {wa} and {wb}. With a target latency of {lat} ms, what time slice (ms) does the FIRST task get? (2 d.p.)",
+          "shareNumQ": "Two tasks have weights {wa} and {wb}. What percentage of the CPU does the FIRST get? (%, 2 d.p.)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="cfsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/scheduling/proportional-share-lottery-and-stride"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- vruntime red-black tree: seven nodes in a balanced BST keyed by vruntime, the leftmost (least
+     vruntime) highlighted as "runs next". Edges then circles then labels; all colours from
+     themeColors(). Plus the randomised quiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "rbtree",
+    ({ board, colors, sceneStrings }) => {
+      // Balanced BST of vruntime values. leftmost (value 4) is the next to run.
+      const nodes = {
+        root: { x: 4.0, y: 4.0, v: "12", hl: false },
+        l:    { x: 2.0, y: 2.4, v: "7",  hl: false },
+        r:    { x: 6.0, y: 2.4, v: "18", hl: false },
+        ll:   { x: 1.0, y: 0.8, v: "4",  hl: true  }, // least vruntime → runs next
+        lr:   { x: 3.0, y: 0.8, v: "9",  hl: false },
+        rl:   { x: 5.0, y: 0.8, v: "15", hl: false },
+        rr:   { x: 7.0, y: 0.8, v: "24", hl: false },
+      };
+      const edges = [["root", "l"], ["root", "r"], ["l", "ll"], ["l", "lr"], ["r", "rl"], ["r", "rr"]];
+
+      // Edges first so circles sit on top.
+      edges.forEach(([a, b]) => {
+        board.create("segment", [[nodes[a].x, nodes[a].y], [nodes[b].x, nodes[b].y]], {
+          strokeColor: colors.line, strokeWidth: 1.5, highlight: false, fixed: true,
+        });
+      });
+
+      Object.values(nodes).forEach((n) => {
+        board.create("circle", [[n.x, n.y], 0.42], {
+          strokeColor: colors.line, strokeWidth: 1.5,
+          fillColor: n.hl ? colors.cat[0] : colors.bg, fillOpacity: n.hl ? 0.5 : 1,
+          highlight: false, fixed: true,
+        });
+        board.create("text", [n.x, n.y, n.v], {
+          strokeColor: colors.ink, fontSize: 14, anchorX: "middle", anchorY: "middle",
+          highlight: false, fixed: true, cssStyle: "font-weight:600",
+        });
+      });
+
+      // Pointer to the leftmost node.
+      board.create("arrow", [[-1.2, 0.8], [nodes.ll.x - 0.5, 0.8]], {
+        strokeColor: colors.cat[0], strokeWidth: 2, lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+      });
+      board.create("text", [-1.2, 1.5, sceneStrings("next")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", highlight: false, fixed: true,
+        cssStyle: "max-width:130px",
+      });
+      board.create("text", [4.0, 4.9, sceneStrings("key")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", highlight: false, fixed: true,
+      });
+    },
+    {
+      boundingbox: [-2.6, 5.4, 8.4, 0.0],
+      keepAspect: false,
+      title: () => makeStrings("rbtree")("title"),
+    },
+  );
+
+  registerQuiz("cfsQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("pickQ"),
+      options: [
+        { text: () => sceneStrings("pickRight"), correct: true },
+        { text: () => sceneStrings("pickWrong1"), correct: false },
+        { text: () => sceneStrings("pickWrong2"), correct: false },
+        { text: () => sceneStrings("pickWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dsQ"),
+      options: [
+        { text: () => sceneStrings("dsRight"), correct: true },
+        { text: () => sceneStrings("dsWrong1"), correct: false },
+        { text: () => sceneStrings("dsWrong2"), correct: false },
+        { text: () => sceneStrings("dsWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("leftQ"),
+      options: [
+        { text: () => sceneStrings("leftRight"), correct: true },
+        { text: () => sceneStrings("leftWrong1"), correct: false },
+        { text: () => sceneStrings("leftWrong2"), correct: false },
+        { text: () => sceneStrings("leftWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("weightQ"),
+      options: [
+        { text: () => sceneStrings("weightRight"), correct: true },
+        { text: () => sceneStrings("weightWrong1"), correct: false },
+        { text: () => sceneStrings("weightWrong2"), correct: false },
+        { text: () => sceneStrings("weightWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("heavyQ"),
+      options: [
+        { text: () => sceneStrings("heavyRight"), correct: true },
+        { text: () => sceneStrings("heavyWrong1"), correct: false },
+        { text: () => sceneStrings("heavyWrong2"), correct: false },
+        { text: () => sceneStrings("heavyWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("latQ"),
+      options: [
+        { text: () => sceneStrings("latRight"), correct: true },
+        { text: () => sceneStrings("latWrong1"), correct: false },
+        { text: () => sceneStrings("latWrong2"), correct: false },
+        { text: () => sceneStrings("latWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("granQ"),
+      options: [
+        { text: () => sceneStrings("granRight"), correct: true },
+        { text: () => sceneStrings("granWrong1"), correct: false },
+        { text: () => sceneStrings("granWrong2"), correct: false },
+        { text: () => sceneStrings("granWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fairQ"),
+      options: [
+        { text: () => sceneStrings("fairRight"), correct: true },
+        { text: () => sceneStrings("fairWrong1"), correct: false },
+        { text: () => sceneStrings("fairWrong2"), correct: false },
+        { text: () => sceneStrings("fairWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("wakeQ"),
+      options: [
+        { text: () => sceneStrings("wakeRight"), correct: true },
+        { text: () => sceneStrings("wakeWrong1"), correct: false },
+        { text: () => sceneStrings("wakeWrong2"), correct: false },
+        { text: () => sceneStrings("wakeWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("eevdfQ"),
+      options: [
+        { text: () => sceneStrings("eevdfRight"), correct: true },
+        { text: () => sceneStrings("eevdfWrong1"), correct: false },
+        { text: () => sceneStrings("eevdfWrong2"), correct: false },
+        { text: () => sceneStrings("eevdfWrong3"), correct: false },
+      ],
+    },
+    {
+      // Δvruntime = Δ · 1024 / weight.
+      prompt: (v) => sceneStrings("vrNumQ", v),
+      variables: "wa=[200,335,512,1024,2048] delta=[2:12]",
+      answer: (v) => Math.round((v.delta * 1024 / v.wa) * 100) / 100,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // slice = latency · w1/(w1+w2).
+      prompt: (v) => sceneStrings("sliceNumQ", v),
+      variables: "wa=[256,512,1024,2048] wb=[256,512,1024,2048] lat=[6,12,24]",
+      answer: (v) => Math.round((v.lat * v.wa / (v.wa + v.wb)) * 100) / 100,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // share% = w1/(w1+w2).
+      prompt: (v) => sceneStrings("shareNumQ", v),
+      variables: "wa=[256,335,512,1024,2048,3121] wb=[256,335,512,1024,2048,3121]",
+      answer: (v) => Math.round((v.wa / (v.wa + v.wb)) * 100 * 100) / 100,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Storage Organization</primer-title>
+
+    <primer-card>
+      <p>
+        A compiler does not just translate expressions — it decides, for every name and every value in the
+        program, <em>where in memory it will live and for how long</em>. Before code generation can emit a
+        single load or store, the compiler needs a <strong>storage organization</strong>: a plan that carves
+        the running program's address space into regions, each with its own allocation discipline. Get this
+        plan right and recursion, dynamic data structures, and global constants all coexist happily. Get it
+        wrong and you get dangling pointers, leaks, or a stack that eats the heap alive.
+      </p>
+      <p>
+        The <primer-ref to="computer-science/compiler-design/semantics/symbol-tables-and-scope">symbol table</primer-ref>
+        told the compiler <em>which</em> names exist and what they mean. Storage organization answers the next
+        question: <strong>what memory does each of those names map to at run time?</strong> The answer is not
+        one-size-fits-all — a global constant, a loop counter, and a linked-list node each want a different
+        home.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The four regions of an address space</h2>
+      <p>
+        A classical run-time image divides memory into four regions, laid out from low addresses to high. The
+        two at the bottom have sizes fixed <em>before</em> the program runs; the two at the top grow and shrink
+        <em>while</em> it runs — and, cunningly, they grow <strong>toward each other</strong> so that whichever
+        one needs more room can borrow from the shared gap between them.
+      </p>
+      <primer-geometry scene="memLayout"></primer-geometry>
+      <p>
+        Reveal the column region by region. At the bottom sits the <strong>code</strong> (or <em>text</em>)
+        segment — the machine instructions themselves, fixed in size and usually read-only. Above it the
+        <strong>static</strong> (or <em>global</em>) area holds data whose size and address are both known at
+        compile time: global variables, string literals, static locals. Then comes the <strong>heap</strong>,
+        which grows <em>upward</em> as the program allocates dynamic objects, and — from the very top of the
+        address space downward — the <strong>stack</strong>, which grows <em>downward</em> as calls nest.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why the stack and heap grow toward each other</h2>
+      <p>
+        This is a genuinely elegant design decision, not an accident. The compiler cannot know in advance how a
+        program will divide its dynamic memory between the two: a deeply recursive numerical routine is
+        stack-hungry and heap-light, while a program building a huge graph is the reverse. If you gave each a
+        fixed budget you would waste memory in one and starve the other.
+      </p>
+      <p>
+        By putting the heap at the bottom of the dynamic area growing up, and the stack at the top growing
+        down, both draw from a single shared pool of free addresses in the middle. Either can expand as far as
+        it likes until they <em>meet</em> — and that meeting point, not an arbitrary partition, is the true
+        out-of-memory condition. One pool, allocated on demand from both ends: maximum flexibility from a
+        single contiguous span.
+      </p>
+      <primer-theorem name="Three allocation strategies">
+        <ul>
+          <li>
+            <strong>Static allocation</strong> — storage is laid out at compile time and lasts the entire run.
+            Address known before execution; no run-time cost, but no flexibility.
+          </li>
+          <li>
+            <strong>Stack allocation</strong> — storage is pushed on entry to a procedure and popped on exit,
+            in strict last-in-first-out order. Lifetime is tied to the call; allocation is a pointer bump.
+          </li>
+          <li>
+            <strong>Heap allocation</strong> — storage is requested and released explicitly (or reclaimed by a
+            collector) in <em>any</em> order. Lifetime is arbitrary; the price is a real allocator and possible
+            fragmentation.
+          </li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>What decides an object's storage class?</h2>
+      <p>
+        The compiler chooses a home for each object by asking two questions. First, <strong>is its size known
+        at compile time?</strong> A fixed-size record can be placed statically or on the stack; an array whose
+        length is a run-time value, or a structure that must outlive its creator, is forced onto the heap.
+        Second, <strong>what is its lifetime?</strong> — how long must the storage remain valid?
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Kind of object</th><th>Lifetime</th><th>Size known at compile time?</th><th>Lives in</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Global / static variable</td><td>Whole program run</td><td>Yes</td><td><strong>Static area</strong></td></tr>
+            <tr><td>String / numeric literal</td><td>Whole program run</td><td>Yes</td><td><strong>Static area</strong></td></tr>
+            <tr><td>Local variable, parameter</td><td>One activation of its procedure</td><td>Usually yes</td><td><strong>Stack</strong></td></tr>
+            <tr><td>Compiler temporary</td><td>Within one expression / call</td><td>Yes</td><td><strong>Stack</strong> (or register)</td></tr>
+            <tr><td><code>new</code> / <code>malloc</code> object</td><td>Arbitrary — until freed / unreachable</td><td>Often no</td><td><strong>Heap</strong></td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Notice the pattern: <strong>lifetime that nests with the call structure ⇒ stack</strong>;
+        <strong>lifetime independent of the call structure ⇒ heap</strong>; <strong>lifetime = the whole
+        program ⇒ static</strong>. A language like C makes the programmer pick (<code>static</code>, an
+        automatic local, or <code>malloc</code>); a language like Java hides the choice but the compiler still
+        makes exactly these decisions underneath.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A worked decision</h2>
+      <p>
+        Walk through where each name in this fragment ends up. The reasoning is exactly what a compiler's
+        storage planner does:
+      </p>
+      <primer-code>
+        let counter = 0;                 // module-level → STATIC (lives whole run)
+        const GREETING = "hello";        // literal      → STATIC (read-only)
+
+        function build(n: number) {      // n            → STACK  (one per call)
+          let sum = 0;                   // sum          → STACK  (dies at return)
+          const node = { value: n };     // {value:n}    → HEAP   (may escape via return)
+          return node;                   // the object outlives this frame → must be heap
+        }
+      </primer-code>
+      <p>
+        <code>counter</code> and <code>GREETING</code> exist for the program's entire life, so they go in the
+        static area. <code>n</code> and <code>sum</code> live exactly as long as one call to <code>build</code>,
+        so they ride the stack and vanish when the call returns. But the object <code>{ value: n }</code> is
+        <em>returned</em> — it must survive after <code>build</code>'s frame is gone — so it cannot live on the
+        stack; it is allocated on the heap. This "does it escape the frame?" test is precisely what real
+        escape-analysis passes compute.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Static vs stack: the same idea in a tiny simulator</h2>
+      <p>
+        The essential difference between static and stack storage is <em>reuse</em>. A static slot is written
+        once and keeps its address forever; a stack slot's address is handed out on entry and reclaimed on
+        exit, so a later call reuses the very same bytes. This short model shows the stack pointer bumping up on
+        each entry and back down on each exit, while a static counter simply persists.
+      </p>
+      <primer-code run>
+        let stackTop = 1000;             // stack grows DOWNWARD from a high address
+        let staticCounter = 0;           // one fixed slot, never reclaimed
+
+        function enter(name: string, bytes: number): number {
+          stackTop -= bytes;             // allocate = bump the pointer
+          console.log(`enter ${name}: frame at addr ${stackTop} (${bytes} bytes)`);
+          return stackTop;
+        }
+        function leave(name: string, bytes: number): void {
+          stackTop += bytes;             // free = un-bump; the bytes are now reusable
+          console.log(`leave ${name}: stackTop back to ${stackTop}`);
+        }
+
+        enter("f", 32);
+        staticCounter += 1;              // the static slot survives across calls
+        enter("g", 16);
+        leave("g", 16);
+        enter("h", 16);                  // reuses the SAME address g just freed
+        leave("h", 16);
+        leave("f", 32);
+        console.log(`staticCounter persisted = ${staticCounter}`);
+      </primer-code>
+      <p>
+        Watch <code>g</code> and <code>h</code> receive the identical address: stack storage is recycled the
+        instant a frame is popped, which is exactly why a local's value is meaningless after its procedure
+        returns.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Where do read-only string literals actually live — and can you write to one?">
+      <p>
+        String and numeric literals go in the static area, and in most systems that region is mapped
+        <strong>read-only</strong> by the loader. That is why, in C, taking <code>char *s = "hi";</code> and
+        then writing <code>s[0] = 'H';</code> is undefined behaviour that typically segfaults: the compiler put
+        <code>"hi"</code> in a read-only static page, and the store faults. It also lets the compiler
+        <em>share</em> identical literals — two occurrences of <code>"hello"</code> may point at the same
+        bytes. Statically-known, program-lifetime, immutable: the perfect tenant for the static segment.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Automatic (stack) lifetime is not dynamic (heap) lifetime">
+      <p>
+        The classic catastrophe is <strong>returning a pointer to a local</strong>. A local variable has
+        <em>automatic</em> lifetime: its storage is on the stack and is reclaimed the moment its procedure
+        returns. If you return the <em>address</em> of that local, you hand back a pointer into a frame that no
+        longer exists — a <em>dangling pointer</em>. The next call overwrites those bytes and your pointer now
+        reads garbage.
+      </p>
+      <primer-code>
+        function bad(): { value: number } {
+          const local = { value: 42 };   // in a language with stack objects, this is on the frame…
+          return &amp;local;                // …and this hands back an address that dies at return — BUG
+        }
+      </primer-code>
+      <p>
+        The fix is to match storage to lifetime: an object that must outlive its creating call needs
+        <em>dynamic</em> (heap) allocation, not <em>automatic</em> (stack) allocation. Languages with garbage
+        collection sidestep the trap by heap-allocating any object that escapes; C and C++ leave the choice —
+        and the danger — to you.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "storageQuiz@1": {
+          "intro": "A compiler places every object in one of the run-time memory regions — code, static, stack, or heap — by its lifetime and whether its size is known at compile time.",
+          "regionsQ": "The classical run-time image is divided into which four regions?",
+          "rgRight": "code (text), static/global, heap, and stack",
+          "rgReg": "L1, L2, L3 caches and main memory",
+          "rgCpu": "registers, ALU, control unit, and bus",
+          "rgFile": "code, comments, imports, and exports",
+          "growQ": "Why are the stack and heap arranged to grow toward each other?",
+          "grShare": "so both draw from one shared pool of free addresses, and either can expand until they meet",
+          "grFast": "so the CPU clock runs faster",
+          "grFixed": "so each gets a fixed, equal half of memory",
+          "grOrder": "so the heap is always searched before the stack",
+          "staticQ": "Which objects are placed in the static area?",
+          "stGlobal": "those whose size and lifetime span the whole program run (globals, literals)",
+          "stLocal": "loop counters and other short-lived locals",
+          "stHeap": "objects created by new / malloc",
+          "stTemp": "compiler temporaries within one expression",
+          "stackQ": "A local variable and a parameter are placed on the stack because…",
+          "skLife": "their lifetime is exactly one activation of the procedure — nested with the call structure",
+          "skSize": "their size is always unknown at compile time",
+          "skGlob": "they must survive the whole program run",
+          "skFast": "the stack is faster than registers",
+          "heapQ": "An object is forced onto the heap chiefly when…",
+          "hpEscape": "its lifetime is arbitrary — it may outlive the call that created it, or its size is a run-time value",
+          "hpSmall": "it is smaller than four bytes",
+          "hpConst": "it is a compile-time constant",
+          "hpNamed": "it has a name in the symbol table",
+          "classQ": "What two questions decide an object's storage class?",
+          "clBoth": "is its size known at compile time, and what is its lifetime?",
+          "clName": "is it uppercase, and does it have a comment?",
+          "clType": "is it an int, and is it signed?",
+          "clOrder": "when was it declared, and by whom?",
+          "danglQ": "Returning a pointer to a local variable is a bug because…",
+          "dgFrame": "the local's stack storage is reclaimed at return, leaving a dangling pointer",
+          "dgSlow": "it makes the function run slower",
+          "dgType": "pointers cannot be returned at all",
+          "dgHeap": "the heap is read-only",
+          "litQ": "String literals typically live in the static area and are…",
+          "liRO": "read-only, so writing through them faults, and identical literals may be shared",
+          "liRW": "freely writable copies, one per use",
+          "liStack": "pushed on the stack each time the function runs",
+          "liHeap": "malloc'd and must be freed by the programmer",
+          "reuseQ": "Two non-overlapping calls f() then g() often get the same stack address for their frames because…",
+          "reReuse": "stack storage is reclaimed on exit and reused by the next call (LIFO)",
+          "reBug": "of a compiler bug",
+          "reFixed": "every function has one fixed permanent address",
+          "reHeap": "the heap assigns them",
+          "kindQ": "Storage laid out at compile time that lasts the entire run is called…",
+          "kdStatic": "static allocation",
+          "kdStack": "stack allocation",
+          "kdHeap": "heap allocation",
+          "kdReg": "register allocation",
+          "gapQ": "When does a program truly run out of memory in this layout?",
+          "gpMeet": "when the growing stack and heap meet in the shared middle gap",
+          "gpStatic": "when the static area is full",
+          "gpCode": "when the code segment is full",
+          "gpFirst": "after exactly 1024 allocations",
+          "escapeQ": "A compiler decides an object must be heap-allocated when it detects the object…",
+          "esEsc": "escapes the frame — e.g. it is returned or stored somewhere outliving the call",
+          "esInt": "is an integer",
+          "esLoop": "is used inside a loop",
+          "esGlobal": "is declared before main"
+        }
+      }
+    </script>
+
+    <primer-quiz name="storageQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/semantics/symbol-tables-and-scope"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // The four-region run-time memory image, drawn as a stacked column.
+  registerGeometryScene("memLayout", ({ board, step, colors }) => {
+    const x0 = -1.4, x1 = 1.4;
+
+    const rect = (y0, y1, col, name, sub) => {
+      board.create(
+        "polygon",
+        [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+        {
+          fillColor: col, fillOpacity: 0.18, highlight: false, fixed: true,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5 },
+          vertices: { visible: false },
+        },
+      );
+      board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2 + (sub ? 0.28 : 0), name], {
+        anchorX: "middle", anchorY: "middle", fontSize: 15, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink, cssStyle: "font-weight:600",
+      });
+      if (sub) {
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2 - 0.32, sub], {
+          anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true, highlight: false,
+          strokeColor: colors.ink, color: colors.ink,
+        });
+      }
+    };
+    const growArrow = (fromY, toY, text, col) => {
+      board.create("arrow", [[x1 + 0.55, fromY], [x1 + 0.55, toY]], {
+        strokeColor: col, strokeWidth: 2, fixed: true, highlight: false,
+      });
+      board.create("text", [x1 + 1.75, (fromY + toY) / 2, text], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    };
+
+    // Address labels down the left edge.
+    board.create("text", [x0 - 1.6, 9.7, "high addr"], {
+      anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true, highlight: false,
+      strokeColor: colors.ink, color: colors.ink,
+    });
+    board.create("text", [x0 - 1.6, 0.3, "low addr"], {
+      anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true, highlight: false,
+      strokeColor: colors.ink, color: colors.ink,
+    });
+
+    step("Code (text): the machine instructions, fixed size, usually read-only — at the bottom.", () => {
+      rect(0, 1.8, colors.cat[0], "Code / Text", "instructions (read-only)");
+    });
+    step("Static / global area: data whose size and address are fixed at compile time.", () => {
+      rect(1.8, 3.6, colors.cat[1], "Static / Global", "globals, literals");
+    });
+    step("Heap: dynamic objects, allocated on demand — grows UPWARD.", () => {
+      rect(3.6, 5.4, colors.cat[2], "Heap", "new / malloc objects");
+      growArrow(5.4, 6.4, "grows up", colors.cat[2]);
+    });
+    step("Free gap: the shared pool both dynamic regions draw from.", () => {
+      board.create("text", [(x0 + x1) / 2, 6.6, "(free space)"], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    });
+    step("Stack: activation records, pushed as calls nest — grows DOWNWARD from the top.", () => {
+      rect(7.8, 9.6, colors.cat[3], "Stack", "activation records");
+      growArrow(7.8, 6.8, "grows down", colors.cat[3]);
+    });
+    step("Out of memory is when the two ends MEET in the shared gap — not a fixed partition.", () => {
+      board.create("segment", [[x0, 6.9], [x1, 6.9]], {
+        strokeColor: colors.cat[4], strokeWidth: 2, dash: 2, fixed: true, highlight: false,
+        straightFirst: false, straightLast: false,
+      });
+    });
+  }, { boundingbox: [-4.2, 10.4, 4.2, -0.6], keepAspect: false, title: "Run-time memory image — code, static, heap, stack" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("storageQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("regionsQ"),
+      options: [
+        { text: () => sceneStrings("rgRight"), correct: true },
+        { text: () => sceneStrings("rgReg"), correct: false },
+        { text: () => sceneStrings("rgCpu"), correct: false },
+        { text: () => sceneStrings("rgFile"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("growQ"),
+      options: [
+        { text: () => sceneStrings("grShare"), correct: true },
+        { text: () => sceneStrings("grFast"), correct: false },
+        { text: () => sceneStrings("grFixed"), correct: false },
+        { text: () => sceneStrings("grOrder"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("staticQ"),
+      options: [
+        { text: () => sceneStrings("stGlobal"), correct: true },
+        { text: () => sceneStrings("stLocal"), correct: false },
+        { text: () => sceneStrings("stHeap"), correct: false },
+        { text: () => sceneStrings("stTemp"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("stackQ"),
+      options: [
+        { text: () => sceneStrings("skLife"), correct: true },
+        { text: () => sceneStrings("skSize"), correct: false },
+        { text: () => sceneStrings("skGlob"), correct: false },
+        { text: () => sceneStrings("skFast"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("heapQ"),
+      options: [
+        { text: () => sceneStrings("hpEscape"), correct: true },
+        { text: () => sceneStrings("hpSmall"), correct: false },
+        { text: () => sceneStrings("hpConst"), correct: false },
+        { text: () => sceneStrings("hpNamed"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("classQ"),
+      options: [
+        { text: () => sceneStrings("clBoth"), correct: true },
+        { text: () => sceneStrings("clName"), correct: false },
+        { text: () => sceneStrings("clType"), correct: false },
+        { text: () => sceneStrings("clOrder"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("danglQ"),
+      options: [
+        { text: () => sceneStrings("dgFrame"), correct: true },
+        { text: () => sceneStrings("dgSlow"), correct: false },
+        { text: () => sceneStrings("dgType"), correct: false },
+        { text: () => sceneStrings("dgHeap"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("litQ"),
+      options: [
+        { text: () => sceneStrings("liRO"), correct: true },
+        { text: () => sceneStrings("liRW"), correct: false },
+        { text: () => sceneStrings("liStack"), correct: false },
+        { text: () => sceneStrings("liHeap"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("reuseQ"),
+      options: [
+        { text: () => sceneStrings("reReuse"), correct: true },
+        { text: () => sceneStrings("reBug"), correct: false },
+        { text: () => sceneStrings("reFixed"), correct: false },
+        { text: () => sceneStrings("reHeap"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("kindQ"),
+      options: [
+        { text: () => sceneStrings("kdStatic"), correct: true },
+        { text: () => sceneStrings("kdStack"), correct: false },
+        { text: () => sceneStrings("kdHeap"), correct: false },
+        { text: () => sceneStrings("kdReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gapQ"),
+      options: [
+        { text: () => sceneStrings("gpMeet"), correct: true },
+        { text: () => sceneStrings("gpStatic"), correct: false },
+        { text: () => sceneStrings("gpCode"), correct: false },
+        { text: () => sceneStrings("gpFirst"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("escapeQ"),
+      options: [
+        { text: () => sceneStrings("esEsc"), correct: true },
+        { text: () => sceneStrings("esInt"), correct: false },
+        { text: () => sceneStrings("esLoop"), correct: false },
+        { text: () => sceneStrings("esGlobal"), correct: false },
+      ],
+    },
+  ]);
+</script>

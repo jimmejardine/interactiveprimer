@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>RAID and Redundancy</primer-title>
+
+    <primer-card>
+      <p>
+        One disk gives you one disk's capacity, one disk's speed, and one disk's chance of ruining your week when
+        it dies. <strong>RAID</strong> — a Redundant Array of Independent Disks — is the idea that several cheap
+        drives, coordinated by the block layer or a controller, can be made to look like a single volume that is
+        <em>faster</em>, <em>bigger</em>, or <em>more reliable</em> than any one of them. The catch, and the whole
+        subject, is that you cannot maximise all three at once. RAID is a family of explicit trade-offs between
+        <strong>capacity</strong>, <strong>performance</strong>, and <strong>reliability</strong>.
+      </p>
+      <p>
+        The two primitive tricks are <strong>striping</strong> (spread data across disks so they work in parallel)
+        and <strong>redundancy</strong> (keep extra copies or parity so a failure loses nothing). Every RAID level
+        is a different recipe mixing these two — and the interesting engineering lives in the parity schemes,
+        the "small write" problem they create, and the terrifying arithmetic of rebuild time when a disk in a
+        large array finally fails.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the RAID striping/parity figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "raid": {
+          "title": "RAID-5: data striped across disks with one distributed parity block per stripe (P = A⊕B⊕C)",
+          "disk": "Disk",
+          "parity": "parity",
+          "stripe": "one stripe",
+          "note": "parity rotates across disks so no single disk is a write bottleneck"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The level zoo</h2>
+      <p>
+        Six levels cover almost everything you meet in practice. Read this table as "what am I buying, and what am
+        I paying?" for an array of <primer-math>N</primer-math> disks each of size <primer-math>C</primer-math>.
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th>Level</th><th>Technique</th><th>Usable capacity</th><th>Tolerates</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><strong>RAID 0</strong></td><td>striping only</td><td><primer-math>N\cdot C</primer-math></td><td><strong>0</strong> failures</td><td>fastest, zero safety — one death loses all</td></tr>
+            <tr><td><strong>RAID 1</strong></td><td>mirroring</td><td><primer-math>C</primer-math> (2 disks)</td><td>1 failure</td><td>simple, halves capacity</td></tr>
+            <tr><td><strong>RAID 4</strong></td><td>striping + dedicated parity disk</td><td><primer-math>(N-1)\cdot C</primer-math></td><td>1 failure</td><td>parity disk is a write bottleneck</td></tr>
+            <tr><td><strong>RAID 5</strong></td><td>striping + <em>distributed</em> parity</td><td><primer-math>(N-1)\cdot C</primer-math></td><td>1 failure</td><td>the workhorse; small-write penalty</td></tr>
+            <tr><td><strong>RAID 6</strong></td><td>striping + <em>two</em> parities</td><td><primer-math>(N-2)\cdot C</primer-math></td><td><strong>2</strong> failures</td><td>survives a failure during rebuild</td></tr>
+            <tr><td><strong>RAID 10</strong></td><td>mirror, then stripe</td><td><primer-math>N\cdot C/2</primer-math></td><td>≥1 (often more)</td><td>fast + safe, expensive</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The elegant trick behind RAID 4/5/6 is <strong>parity via XOR</strong>. For a stripe of data blocks
+        <primer-math>A, B, C</primer-math>, store <primer-math>P = A \oplus B \oplus C</primer-math>. XOR's magic
+        is that it is its own inverse: if disk <primer-math>B</primer-math> dies, you recover it as
+        <primer-math display>B = A \oplus C \oplus P.</primer-math>
+        You get one disk of protection for the price of one disk of capacity — vastly cheaper than mirroring
+        everything. RAID 6 adds a second, independent parity (Reed–Solomon style) so <em>any two</em> disks can
+        fail and still be reconstructed.
+      </p>
+      <primer-geometry scene="raid"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Reconstruct a lost disk with XOR</h2>
+      <p>
+        This is the whole reliability story in ten lines. We build a stripe, compute its parity, then "lose" a
+        disk and rebuild its exact bytes from the survivors plus parity. Change which disk fails — it always comes
+        back.
+      </p>
+      <primer-code run>
+        // RAID-5 parity and reconstruction via XOR. Each "block" is one byte here for clarity.
+        const A = 0b1011_0010;
+        const B = 0b0110_1101;
+        const C = 0b1100_0001;
+
+        const P = A ^ B ^ C;                 // parity block: P = A ⊕ B ⊕ C
+        const bin = (x: number) =&gt; x.toString(2).padStart(8, "0");
+
+        console.log(`A = ${bin(A)}`);
+        console.log(`B = ${bin(B)}`);
+        console.log(`C = ${bin(C)}`);
+        console.log(`P = ${bin(P)}   (parity = A ⊕ B ⊕ C)`);
+
+        // Disk holding B dies. Rebuild it from the survivors and parity.
+        const Brebuilt = A ^ C ^ P;          // A ⊕ C ⊕ P must equal B
+        console.log(`\nDisk B failed. Rebuild B = A ⊕ C ⊕ P = ${bin(Brebuilt)}`);
+        console.log(`recovered correctly? ${Brebuilt === B}`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The small-write problem — why RAID 5 hates tiny updates</h2>
+      <p>
+        Parity is cheap to <em>read</em> but expensive to <em>update</em>. Suppose you overwrite a single data
+        block <primer-math>A \to A'</primer-math> in a RAID-5 stripe. Parity must change too — but recomputing it
+        naively means reading every other block in the stripe. The clever shortcut still costs four I/Os, the
+        <strong>read-modify-write</strong>:
+      </p>
+      <ul>
+        <li><strong>read</strong> the old data block <primer-math>A</primer-math>;</li>
+        <li><strong>read</strong> the old parity <primer-math>P</primer-math>;</li>
+        <li>compute <primer-math>P' = P \oplus A \oplus A'</primer-math> (out with the old, in with the new);</li>
+        <li><strong>write</strong> the new data <primer-math>A'</primer-math> and <strong>write</strong> the new
+          parity <primer-math>P'</primer-math>.</li>
+      </ul>
+      <p>
+        So one logical small write becomes <strong>two reads + two writes</strong> — a 4× amplification, and the
+        parity disk (RAID 4) or parity blocks (RAID 5) become hot. This is why RAID 5 is superb for large
+        sequential writes (compute parity once for a whole stripe) and painful for small random writes — databases
+        with many tiny updates often choose RAID 10 instead.
+      </p>
+      <primer-vignette title="What is the 'write hole', and why does it corrupt silently?">
+        <p>
+          A stripe's data and its parity live on <em>different</em> disks, so they cannot be updated in one atomic
+          step. If power fails <em>between</em> writing the new data and writing the new parity, the stripe is now
+          <strong>inconsistent</strong> — parity no longer matches data — and nothing detects it until a disk
+          later fails and you reconstruct from that stale parity, silently returning <em>wrong</em> bytes. This is
+          the <strong>RAID write hole</strong>. Hardware controllers plug it with battery-backed cache (finish the
+          write after power returns); software systems like <primer-ref soft to="computer-science/advanced-operating-systems/filesystems/copy-on-write-file-systems">ZFS/btrfs</primer-ref>
+          plug it by making the stripe update copy-on-write and checksummed, so a torn stripe is detected and
+          never trusted. It is a lovely example of why "just add parity" is not the end of the reliability story.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-vignette title="Watch out! RAID is redundancy, NOT a backup">
+      <p>
+        The single most expensive misconception in all of storage: "we're on RAID 6, our data is safe." RAID
+        protects against <em>disk hardware failure</em> and nothing else. It faithfully, instantly replicates a
+        <code>rm -rf /</code>, a ransomware encryption, a buggy write, or a controller that scribbles garbage —
+        across every disk in the array. It does not protect against fire, theft, or the building flooding.
+        Mirroring a mistake gives you a very reliable copy of the mistake. RAID buys you <strong>availability</strong>
+        (keep serving through a dead disk) and sometimes <strong>performance</strong>; a real
+        <strong>backup</strong> is a separate, ideally offline and off-site, point-in-time copy. You need both,
+        and they solve different problems. Never let RAID lull you out of backups.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Rebuild time and the case for RAID 6</h2>
+      <p>
+        When a disk dies, the array runs <strong>degraded</strong> and must <strong>rebuild</strong> the lost disk
+        onto a spare by reading <em>every</em> surviving disk in full and recomputing the missing blocks. For a
+        modern 16 TB drive at a realistic ~150 MB/s rebuild rate, that is
+        <primer-math>16{,}000{,}000 / 150 \approx 106{,}000</primer-math> s ≈ <strong>30 hours</strong> — and
+        often far longer under live load. During that whole window a RAID 5 array has <em>zero</em> remaining
+        redundancy: a second disk failure means total data loss.
+      </p>
+      <p>
+        Worse, rebuild <em>stresses</em> the surviving disks — reading them cover to cover, at exactly the moment
+        they are the same age and model as the one that just died. As drives grew past a few terabytes, the
+        probability of a second failure (or an unrecoverable read error) during a multi-day rebuild stopped being
+        negligible. That is the whole argument for <strong>RAID 6</strong>: two parities mean the array survives a
+        <em>second</em> failure <em>during</em> the rebuild. For large arrays of large disks, RAID 6 is not
+        paranoia — it is the statistically responsible default.
+      </p>
+      <primer-theorem name="RAID — the essentials">
+        <ul>
+          <li><strong>striping</strong> adds speed but no safety; <strong>mirroring/parity</strong> adds safety at
+            a capacity cost;</li>
+          <li>usable capacity: RAID 0 = <primer-math>N C</primer-math>, RAID 1 = <primer-math>C</primer-math>,
+            RAID 5 = <primer-math>(N-1)C</primer-math>, RAID 6 = <primer-math>(N-2)C</primer-math>,
+            RAID 10 = <primer-math>N C/2</primer-math>;</li>
+          <li><strong>parity is XOR</strong>: <primer-math>P=A\oplus B\oplus C</primer-math>, recover any one block
+            by XOR-ing the rest with <primer-math>P</primer-math>;</li>
+          <li>RAID 5's <strong>small write</strong> = read-modify-write (2 reads + 2 writes); the <strong>write
+            hole</strong> can corrupt a torn stripe; <strong>RAID 6</strong> survives a second failure during a
+            long <strong>rebuild</strong>.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Quiz: RAID concepts + numeric capacity / fault-tolerance / rebuild calcs.
+         Variables avoid evaluator collisions (nd, cc, sz, rate, dead). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "raidQuiz@1": {
+          "intro": "RAID 0/1/4/5/6/10 — striping vs mirroring vs parity; XOR reconstruction; the RAID-5 small-write (read-modify-write) penalty and write hole; rebuild time and why RAID 6 exists.",
+          "stripeQ": "Striping (RAID 0) with no redundancy gives you…",
+          "stRight": "maximum capacity and speed but zero fault tolerance — one disk death loses everything",
+          "stWrong1": "double the reliability of one disk",
+          "stWrong2": "the ability to survive two failures",
+          "stWrong3": "half the usable capacity",
+          "mirrorQ": "A two-disk RAID 1 mirror provides usable capacity of…",
+          "miRight": "one disk's worth (C) — the other is an exact copy",
+          "miWrong1": "two disks' worth (2C)",
+          "miWrong2": "three disks' worth",
+          "miWrong3": "zero",
+          "parityQ": "RAID-5 parity is computed as…",
+          "paRight": "the XOR of the data blocks in the stripe (P = A ⊕ B ⊕ C)",
+          "paWrong1": "the sum of the data blocks modulo 256",
+          "paWrong2": "an exact copy of the first data block",
+          "paWrong3": "a checksum stored off-array",
+          "recoverQ": "If one disk in a RAID 5 stripe fails, its block is recovered by…",
+          "reRight": "XOR-ing all the surviving data blocks with the parity block",
+          "reWrong1": "restoring from a nightly backup automatically",
+          "reWrong2": "reading it from the parity disk directly, unchanged",
+          "reWrong3": "it cannot be recovered at all",
+          "raid4Q": "The weakness of RAID 4 versus RAID 5 is that RAID 4…",
+          "r4Right": "puts all parity on one dedicated disk, making it a write bottleneck",
+          "r4Wrong1": "cannot tolerate any disk failure",
+          "r4Wrong2": "uses twice the capacity",
+          "r4Wrong3": "has no parity at all",
+          "smallQ": "The RAID-5 'small write' penalty is that one small update requires…",
+          "smRight": "a read-modify-write: read old data + old parity, then write new data + new parity (4 I/Os)",
+          "smWrong1": "rewriting the entire array",
+          "smWrong2": "exactly one write, same as a single disk",
+          "smWrong3": "recomputing every stripe on the array",
+          "holeQ": "The RAID 'write hole' occurs when…",
+          "hoRight": "power fails between writing new data and new parity, leaving the stripe inconsistent",
+          "hoWrong1": "the disks physically wear a hole in the platter",
+          "hoWrong2": "an SSD runs out of P/E cycles",
+          "hoWrong3": "the parity disk fills up",
+          "raid6Q": "RAID 6 exists mainly to…",
+          "r6Right": "survive a SECOND disk failure, e.g. during the long rebuild after the first",
+          "r6Wrong1": "double the write speed of RAID 5",
+          "r6Wrong2": "remove the need for any parity",
+          "r6Wrong3": "increase usable capacity above RAID 5",
+          "backupQ": "Which statement about RAID is TRUE?",
+          "baRight": "RAID is not a backup — it replicates deletions and corruption across all disks",
+          "baWrong1": "RAID protects against accidental file deletion",
+          "baWrong2": "RAID makes off-site backups unnecessary",
+          "baWrong3": "RAID protects against fire and theft",
+          "raid10Q": "RAID 10 (mirror + stripe) is often chosen for databases because it…",
+          "r10Right": "combines fast reads/writes with redundancy, avoiding the parity small-write penalty",
+          "r10Wrong1": "gives the most usable capacity of any level",
+          "r10Wrong2": "needs only one disk",
+          "r10Wrong3": "has no fault tolerance",
+          "cap5NumQ": "A RAID 5 array has {nd} disks of {cc} TB each. What is the usable capacity in TB? (usable = (nd − 1) × cc)",
+          "cap6NumQ": "A RAID 6 array has {nd} disks of {cc} TB each. What is the usable capacity in TB? (usable = (nd − 2) × cc)",
+          "rebuildNumQ": "Rebuilding reads a {sz} TB disk at {rate} MB/s. Roughly how many HOURS does that take? (1 TB = 1,000,000 MB; answer to 1 dp)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="raidQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/storage/disks-and-io-scheduling"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- RAID-5 layout: a grid of disks (columns) x stripes (rows); each stripe has data cells and one parity
+     cell, with parity rotating down the diagonal. Static BASE content, visible on load. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "raid",
+    ({ board, colors, sceneStrings }) => {
+      const NDISK = 4, NSTRIPE = 4;
+      const CW = 1.7, CH = 1.1, x0 = 1.2, y0 = 5.0, gap = 0.12;
+
+      // Disk headers.
+      for (let d = 0; d < NDISK; d++) {
+        board.create("text", [x0 + d * (CW + gap) + CW / 2, y0 + 0.9, `${sceneStrings("disk")} ${d}`], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600",
+        });
+      }
+
+      for (let s = 0; s < NSTRIPE; s++) {
+        const parityDisk = (NDISK - 1 - s) % NDISK;   // rotate parity up the diagonal
+        const y = y0 - s * (CH + gap);
+        let dataLetter = 0;
+        for (let d = 0; d < NDISK; d++) {
+          const x = x0 + d * (CW + gap);
+          const isParity = d === parityDisk;
+          board.create("polygon", [[x, y - CH], [x + CW, y - CH], [x + CW, y], [x, y]], {
+            fillColor: isParity ? colors.cat[1] : colors.cat[0],
+            fillOpacity: isParity ? 0.34 : 0.2,
+            borders: { strokeColor: colors.line, strokeWidth: 1.2, highlight: false },
+            vertices: { visible: false }, fixed: true, highlight: false,
+          });
+          const lbl = isParity ? `P${s}` : `${String.fromCharCode(65 + dataLetter)}${s}`;
+          if (!isParity) dataLetter++;
+          board.create("text", [x + CW / 2, y - CH / 2, lbl], {
+            strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+          });
+        }
+        // Stripe bracket label on the left.
+        board.create("text", [x0 - 0.35, y - CH / 2, `${sceneStrings("stripe")} ${s}`], {
+          strokeColor: colors.ink, fontSize: 9, anchorX: "right", anchorY: "middle", fixed: true, highlight: false,
+          cssStyle: "opacity:0.8; max-width:80px",
+        });
+      }
+
+      board.create("text", [x0, y0 - NSTRIPE * (CH + gap) - 0.1, sceneStrings("note")], {
+        strokeColor: colors.ink, fontSize: 10, anchorX: "left", fixed: true, highlight: false,
+        cssStyle: "max-width:460px; opacity:0.9",
+      });
+    },
+    {
+      boundingbox: [-1.2, 6.4, 9.4, -1.4],
+      keepAspect: false,
+      title: () => makeStrings("raid")("title"),
+    },
+  );
+
+  registerQuiz("raidQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("stripeQ"), options: [
+      { text: () => sceneStrings("stRight"), correct: true },
+      { text: () => sceneStrings("stWrong1"), correct: false },
+      { text: () => sceneStrings("stWrong2"), correct: false },
+      { text: () => sceneStrings("stWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("mirrorQ"), options: [
+      { text: () => sceneStrings("miRight"), correct: true },
+      { text: () => sceneStrings("miWrong1"), correct: false },
+      { text: () => sceneStrings("miWrong2"), correct: false },
+      { text: () => sceneStrings("miWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("parityQ"), options: [
+      { text: () => sceneStrings("paRight"), correct: true },
+      { text: () => sceneStrings("paWrong1"), correct: false },
+      { text: () => sceneStrings("paWrong2"), correct: false },
+      { text: () => sceneStrings("paWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("recoverQ"), options: [
+      { text: () => sceneStrings("reRight"), correct: true },
+      { text: () => sceneStrings("reWrong1"), correct: false },
+      { text: () => sceneStrings("reWrong2"), correct: false },
+      { text: () => sceneStrings("reWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("raid4Q"), options: [
+      { text: () => sceneStrings("r4Right"), correct: true },
+      { text: () => sceneStrings("r4Wrong1"), correct: false },
+      { text: () => sceneStrings("r4Wrong2"), correct: false },
+      { text: () => sceneStrings("r4Wrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("smallQ"), options: [
+      { text: () => sceneStrings("smRight"), correct: true },
+      { text: () => sceneStrings("smWrong1"), correct: false },
+      { text: () => sceneStrings("smWrong2"), correct: false },
+      { text: () => sceneStrings("smWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("holeQ"), options: [
+      { text: () => sceneStrings("hoRight"), correct: true },
+      { text: () => sceneStrings("hoWrong1"), correct: false },
+      { text: () => sceneStrings("hoWrong2"), correct: false },
+      { text: () => sceneStrings("hoWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("raid6Q"), options: [
+      { text: () => sceneStrings("r6Right"), correct: true },
+      { text: () => sceneStrings("r6Wrong1"), correct: false },
+      { text: () => sceneStrings("r6Wrong2"), correct: false },
+      { text: () => sceneStrings("r6Wrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("backupQ"), options: [
+      { text: () => sceneStrings("baRight"), correct: true },
+      { text: () => sceneStrings("baWrong1"), correct: false },
+      { text: () => sceneStrings("baWrong2"), correct: false },
+      { text: () => sceneStrings("baWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("raid10Q"), options: [
+      { text: () => sceneStrings("r10Right"), correct: true },
+      { text: () => sceneStrings("r10Wrong1"), correct: false },
+      { text: () => sceneStrings("r10Wrong2"), correct: false },
+      { text: () => sceneStrings("r10Wrong3"), correct: false },
+    ] },
+    {
+      // RAID 5 usable = (nd - 1) * cc.
+      prompt: (v) => sceneStrings("cap5NumQ", v),
+      variables: "nd=[4,5,6,8] cc=[2,4,8]",
+      answer: (v) => (v.nd - 1) * v.cc,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // RAID 6 usable = (nd - 2) * cc.
+      prompt: (v) => sceneStrings("cap6NumQ", v),
+      variables: "nd=[5,6,8,10] cc=[2,4,8]",
+      answer: (v) => (v.nd - 2) * v.cc,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Hours = sz * 1e6 / rate / 3600.
+      prompt: (v) => sceneStrings("rebuildNumQ", v),
+      variables: "sz=[4,8,16] rate=[100,150,200]",
+      answer: (v) => Math.round((v.sz * 1000000 / v.rate / 3600) * 10) / 10,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

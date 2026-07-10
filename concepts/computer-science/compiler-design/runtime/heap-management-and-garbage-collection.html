@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Heap Management and Garbage Collection</primer-title>
+
+    <primer-card>
+      <p>
+        The <primer-ref to="computer-science/compiler-design/runtime/storage-organization">stack</primer-ref>
+        reclaims storage for free — pop the frame and it is gone. The <strong>heap</strong> enjoys no such
+        luck. Objects there are born and die in <em>any</em> order, at the program's whim, so someone must track
+        which bytes are in use and which are free, and — crucially — must decide <em>when</em> a heap object
+        will never be used again so its space can be recycled. That "someone" is the heap manager and its
+        garbage collector, and it is one of the most consequential runtime systems a language can have: it is
+        the difference between manual <code>free</code> (fast but perilous) and automatic memory (safe but with
+        its own costs).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Explicit allocation and the fragmentation problem</h2>
+      <p>
+        The simplest heap gives the programmer two operations: <code>allocate(size)</code> hands back a block
+        of free memory, and <code>free(block)</code> returns it. The manager keeps a <strong>free list</strong>
+        of available blocks and, on each request, must find one big enough (first-fit, best-fit, and so on).
+        The trouble is <strong>fragmentation</strong>. <em>External</em> fragmentation is free memory scattered
+        into many small blocks: you may have a megabyte free in total yet be unable to satisfy a request for a
+        contiguous kilobyte. <em>Internal</em> fragmentation is space wasted <em>inside</em> a block that was
+        rounded up to a convenient size. Both waste memory that the bookkeeping says is "free".
+      </p>
+      <p>
+        Worse, manual <code>free</code> is a minefield: free too early and you get a <em>dangling pointer</em>;
+        forget to free and you get a <em>memory leak</em>; free twice and you corrupt the allocator. Automatic
+        garbage collection exists to take this hazardous decision out of the programmer's hands.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What "garbage" actually means: reachability</h2>
+      <p>
+        A collector cannot know the programmer's intentions, so it uses a computable proxy for "will never be
+        used again": <strong>reachability</strong>. Start from the <strong>roots</strong> — the pointers the
+        program can access directly, namely the local variables and parameters in the active stack frames, plus
+        the global/static variables and machine registers. Any object reachable by following pointers from a
+        root is <em>live</em>. Everything else is <strong>garbage</strong>, provably unreachable, and safe to
+        reclaim.
+      </p>
+      <primer-theorem name="The reachability definition of garbage">
+        <ul>
+          <li>The <strong>roots</strong> are the directly accessible references: stack locals, globals, and registers.</li>
+          <li>An object is <strong>live</strong> iff it is reachable by a chain of pointers starting at some root.</li>
+          <li>An object is <strong>garbage</strong> iff it is <em>not</em> reachable — the program can never
+            name it again, so its storage may be reclaimed.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Reachability is a graph problem. Model the heap as a directed graph — objects are nodes, pointers are
+        edges — and garbage collection becomes "find every node reachable from the roots; free the rest." Reveal
+        a mark step by step:
+      </p>
+      <primer-geometry scene="reachGraph"></primer-geometry>
+      <p>
+        Notice the two islands on the right: an unreachable pair, and an unreachable <em>cycle</em>. Neither is
+        reachable from the root, so both are garbage — even though the objects in the cycle still point at each
+        other. That cycle is the exact case that defeats reference counting, as we will see.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Mark-and-sweep, in code</h2>
+      <p>
+        The oldest tracing collector is <strong>mark-and-sweep</strong>. Phase one (<em>mark</em>) does a graph
+        traversal from the roots, setting a "mark" bit on every reachable object. Phase two (<em>sweep</em>)
+        walks the entire heap and frees every object whose mark bit is <em>not</em> set (clearing the bits for
+        next time). This tiny implementation reports exactly which nodes it reclaims:
+      </p>
+      <primer-code run>
+        interface Obj { id: string; children: string[]; marked: boolean; }
+
+        // A heap: an object graph. root -&gt; A -&gt; B ; A -&gt; C ; D -&gt; E (island) ; F &lt;-&gt; G (cycle).
+        const heap: Record&lt;string, Obj&gt; = {
+          A: { id: "A", children: ["B", "C"], marked: false },
+          B: { id: "B", children: [],        marked: false },
+          C: { id: "C", children: [],        marked: false },
+          D: { id: "D", children: ["E"],     marked: false },
+          E: { id: "E", children: [],        marked: false },
+          F: { id: "F", children: ["G"],     marked: false },
+          G: { id: "G", children: ["F"],     marked: false },   // cycle F -&gt; G -&gt; F
+        };
+        const roots = ["A"];   // only A is reachable from the program
+
+        // MARK: depth-first traversal from the roots.
+        function mark(id: string): void {
+          const obj = heap[id];
+          if (!obj || obj.marked) return;    // stop at the unknown or the already-marked (handles cycles)
+          obj.marked = true;
+          for (const c of obj.children) mark(c);
+        }
+
+        // SWEEP: free every unmarked object; clear marks for next cycle.
+        function sweep(): string[] {
+          const freed: string[] = [];
+          for (const id of Object.keys(heap)) {
+            if (!heap[id].marked) { freed.push(id); delete heap[id]; }
+            else heap[id].marked = false;
+          }
+          return freed;
+        }
+
+        roots.forEach(mark);
+        const freed = sweep();
+        console.log(`freed (garbage): ${freed.sort().join(", ")}`);      // D, E, F, G
+        console.log(`survivors:       ${Object.keys(heap).sort().join(", ")}`); // A, B, C
+      </primer-code>
+      <p>
+        The cycle <code>F ↔ G</code> is collected without trouble: a tracing collector asks "reachable from a
+        root?", and the cycle is not, so both go. The <code>marked</code> check is also what stops the traversal
+        from looping forever on that cycle.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The family of collectors</h2>
+      <p>
+        Mark-and-sweep is one point in a rich design space. The main algorithms trade throughput, pause time,
+        memory overhead, and fragmentation against each other:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Algorithm</th><th>Pros</th><th>Cons</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Reference counting</strong></td>
+              <td>immediate reclamation; incremental; simple; no global pause</td>
+              <td><strong>cannot collect cycles</strong>; per-pointer-write overhead</td>
+            </tr>
+            <tr>
+              <td><strong>Mark-and-sweep</strong></td>
+              <td>collects cycles; no object movement</td>
+              <td>stop-the-world pause; sweep touches whole heap; leaves fragmentation</td>
+            </tr>
+            <tr>
+              <td><strong>Copying (Cheney's)</strong></td>
+              <td>compacts (no fragmentation); allocation is a pointer bump; cost ∝ live data only</td>
+              <td>needs two semispaces (½ heap wasted); moves objects (must update pointers)</td>
+            </tr>
+            <tr>
+              <td><strong>Generational</strong></td>
+              <td>fast, frequent minor collections; exploits that most objects die young</td>
+              <td>needs a write barrier to track old→young pointers; occasional full collection</td>
+            </tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        <strong>Reference counting</strong> keeps a count of incoming pointers in each object; when it hits
+        zero the object is freed at once. <strong>Cheney's copying</strong> collector divides the heap into two
+        semispaces and, on collection, copies every live object from "from-space" to "to-space" in a single
+        breadth-first pass — compacting them and leaving from-space entirely empty. <strong>Generational</strong>
+        collectors segregate objects by age and collect the young generation often and cheaply.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The weak generational hypothesis</h2>
+      <p>
+        Generational collection rests on an empirical observation so reliable it has a name:
+      </p>
+      <primer-theorem name="Weak generational hypothesis">
+        <ul>
+          <li><strong>Most objects die young</strong> — the overwhelming majority of allocations become garbage
+            very soon after they are created.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        If that is true, then concentrating collection effort on the youngest objects gives the biggest payoff
+        for the least work. A generational collector puts new objects in a small <em>nursery</em> and collects
+        it frequently (a cheap <em>minor</em> collection touching only young objects); the few survivors are
+        <em>promoted</em> to an older generation that is collected rarely (an expensive <em>major</em>
+        collection). Because minor collections scan only a small, mostly-dead region, they are fast and their
+        pauses are short — which is why generational GC underpins the JVM, .NET, and V8.
+      </p>
+      <p>
+        There is a catch that a <strong>write barrier</strong> handles: a minor collection scanning only the
+        nursery would miss a live young object that is referenced only from an <em>old</em> object. The write
+        barrier is a small piece of code on every pointer store that records such old→young references in a
+        <em>remembered set</em>, so they can be treated as extra roots for the nursery.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Stop-the-world vs incremental</h2>
+      <p>
+        A <strong>stop-the-world</strong> collector halts the application ("mutator") completely while it
+        collects, then resumes it. Simple and correct, but it introduces pauses — unacceptable for a game,
+        an animation, or a trading system. <strong>Incremental</strong> and <strong>concurrent</strong>
+        collectors interleave collection with the running program, doing a little work at a time (or on another
+        thread) to keep pauses short. The price is coordination: because the program keeps mutating the graph
+        <em>while</em> it is being traced, the collector needs barriers to avoid missing an object that the
+        mutator moves behind the collector's back — the celebrated tri-colour invariant. It is throughput
+        traded for latency.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If most objects die young, why not just collect the whole heap every time?">
+      <p>
+        Because the cost of a tracing collection is dominated by the <em>live</em> data it must copy or mark,
+        not the garbage it reclaims — garbage is free to ignore. A full collection must trace every live object
+        in the entire heap, including the long-lived ones that were live last time and will be live next time
+        too; you re-do that work for nothing. A minor collection touches only the nursery, where almost
+        everything is already dead, so it does a tiny amount of tracing to reclaim a lot of space. The
+        generational trick is not that young objects are special to collect — it is that <em>old objects are
+        expensive to keep re-scanning</em>, so you scan them as rarely as you can get away with.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Reference counting can't collect cycles; and conservative GC only guesses">
+      <p>
+        Two traps. First, <strong>reference counting cannot reclaim cycles</strong>. If object
+        <code>F</code> points to <code>G</code> and <code>G</code> points back to <code>F</code>, each keeps
+        the other's count at one even after the program has dropped all outside references — the count never
+        reaches zero, and the pair leaks forever. This is <em>the</em> reason pure reference counting is
+        usually paired with a backup tracing collector (or weak references) to catch cycles. A tracing
+        collector has no such problem: an unreachable cycle is simply unreachable.
+      </p>
+      <p>
+        Second, <strong>conservative vs precise</strong>. A <em>precise</em> collector knows exactly which
+        words are pointers (the compiler emits maps), so it can move objects and never errs. A
+        <em>conservative</em> collector (used when you cannot get that type information, e.g. collecting C)
+        must treat <em>any</em> word that <em>looks like</em> a pointer as one — so an integer that happens to
+        equal a heap address will pin a dead object alive, and no object can safely be moved, since you dare
+        not overwrite a value that might really be an integer. Conservative GC is a pragmatic guess; precise GC
+        is the real thing.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "gcQuiz@1": {
+          "intro": "Garbage is heap memory unreachable from the roots (stack, globals, registers). Tracing collectors reclaim it; reference counting cannot collect cycles.",
+          "garbageQ": "An object is garbage exactly when it is…",
+          "gbUnreach": "not reachable from any root by a chain of pointers",
+          "gbOld": "older than one second",
+          "gbBig": "larger than the free block",
+          "gbZero": "storing the value zero",
+          "rootsQ": "The roots of garbage collection are…",
+          "rtDirect": "the directly accessible references: stack locals, globals, and registers",
+          "rtHeap": "every object on the heap",
+          "rtCode": "the machine code instructions",
+          "rtFree": "the entries on the free list",
+          "markQ": "The mark phase of mark-and-sweep does what?",
+          "mkTrav": "a traversal from the roots, setting a mark bit on every reachable object",
+          "mkFree": "frees every object immediately",
+          "mkCopy": "copies objects to a new semispace",
+          "mkCount": "increments a reference count",
+          "sweepQ": "The sweep phase frees…",
+          "swUn": "every object whose mark bit is NOT set",
+          "swAll": "every object in the heap",
+          "swMarked": "only the marked objects",
+          "swRoots": "the roots",
+          "rcCycleQ": "Why can reference counting NOT collect a cycle F↔G with no outside references?",
+          "rcKeep": "each object keeps the other's count above zero, so neither ever reaches zero",
+          "rcFast": "reference counting is too fast to notice",
+          "rcCan": "it can — cycles are no problem for it",
+          "rcHeap": "cycles live on the stack",
+          "copyQ": "Cheney's copying collector works by…",
+          "cpMove": "copying live objects from one semispace to the other, compacting them",
+          "cpMark": "marking without moving anything",
+          "cpCount": "counting references",
+          "cpFree": "freeing by hand",
+          "copyConQ": "The main cost of a copying collector is…",
+          "ccHalf": "it needs two semispaces, so half the heap is reserved, and it must update moved pointers",
+          "ccCycle": "it cannot collect cycles",
+          "ccSlow": "marking is exponential",
+          "ccNone": "it has no cost",
+          "genHypQ": "The weak generational hypothesis states that…",
+          "ghYoung": "most objects die young — become garbage soon after allocation",
+          "ghOld": "most objects live forever",
+          "ghBig": "objects grow over time",
+          "ghEqual": "all objects die at the same rate",
+          "minorQ": "A minor (young-generation) collection is fast because…",
+          "mnSmall": "it scans only the small nursery, where almost everything is already dead",
+          "mnAll": "it scans the entire heap",
+          "mnNo": "it frees nothing",
+          "mnStack": "it only touches the stack",
+          "barrierQ": "A write barrier in a generational collector exists to…",
+          "wbRem": "record old→young pointers so a nursery collection doesn't miss objects kept alive from the old generation",
+          "wbFast": "make writes faster",
+          "wbFree": "free memory immediately",
+          "wbStack": "grow the stack",
+          "stwQ": "A stop-the-world collector differs from an incremental one in that it…",
+          "swHalt": "halts the application completely during collection, rather than interleaving the work",
+          "swNever": "never actually collects",
+          "swRef": "uses reference counts",
+          "swHeapless": "needs no heap",
+          "consQ": "A conservative garbage collector…",
+          "csGuess": "treats any word that looks like a pointer as one, so it can't move objects and may keep dead ones alive",
+          "csPrec": "knows exactly which words are pointers",
+          "csFast": "is always faster and exact",
+          "csNoHeap": "does not use the heap",
+          "fragQ": "External fragmentation is…",
+          "frScatter": "free memory split into many small blocks, so a large contiguous request can't be met",
+          "frInside": "wasted space inside one allocated block",
+          "frLeak": "forgetting to free memory",
+          "frDangle": "a pointer to freed memory"
+        }
+      }
+    </script>
+
+    <primer-quiz name="gcQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/runtime/storage-organization"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // An object graph: root -> A -> {B, C}; an unreachable island D->E; an unreachable cycle F<->G.
+  registerGeometryScene("reachGraph", ({ board, step, colors }) => {
+    const r = 0.5;
+    const nodes = {
+      root: [-5, 0], A: [-2.6, 1.4], B: [-0.2, 2.4], C: [-0.2, 0.4],
+      D: [2.6, 2.2], E: [4.6, 2.2],
+      F: [2.6, -1.6], G: [4.6, -1.6],
+    };
+    const drawn = {};
+    const nodeCircle = (key, col, label) => {
+      const [cx, cy] = nodes[key];
+      const c = board.create("circle", [[cx, cy], r], {
+        strokeColor: col, strokeWidth: 2, fillColor: col, fillOpacity: 0.14,
+        fixed: true, highlight: false,
+      });
+      board.create("text", [cx, cy, label], {
+        anchorX: "middle", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink, cssStyle: "font-weight:600",
+      });
+      drawn[key] = c;
+    };
+    const edge = (aKey, bKey, col) => {
+      const [ax, ay] = nodes[aKey], [bx, by] = nodes[bKey];
+      const dx = bx - ax, dy = by - ay, d = Math.hypot(dx, dy), ux = dx / d, uy = dy / d;
+      board.create("arrow", [[ax + ux * r, ay + uy * r], [bx - ux * r, by - uy * r]], {
+        strokeColor: col, strokeWidth: 2, fixed: true, highlight: false,
+      });
+    };
+    const mark = (key) => {
+      const [cx, cy] = nodes[key];
+      board.create("text", [cx + 0.02, cy - 0.02, "✓"], {
+        anchorX: "middle", anchorY: "middle", fontSize: 18, fixed: true, highlight: false,
+        strokeColor: colors.cat[3], color: colors.cat[3],
+      });
+    };
+
+    // Base content: the whole graph, drawn once, always visible.
+    nodeCircle("root", colors.cat[4], "root");
+    nodeCircle("A", colors.cat[0], "A");
+    nodeCircle("B", colors.cat[0], "B");
+    nodeCircle("C", colors.cat[0], "C");
+    nodeCircle("D", colors.cat[1], "D");
+    nodeCircle("E", colors.cat[1], "E");
+    nodeCircle("F", colors.cat[2], "F");
+    nodeCircle("G", colors.cat[2], "G");
+    edge("root", "A", colors.line);
+    edge("A", "B", colors.line);
+    edge("A", "C", colors.line);
+    edge("D", "E", colors.line);
+    edge("F", "G", colors.line);
+    edge("G", "F", colors.line);
+
+    step("Start at the root — the only directly accessible reference.", () => mark("root"));
+    step("Follow the pointer: A is reachable. Mark it.", () => mark("A"));
+    step("From A, reach B and C. Mark both — these are live.", () => { mark("B"); mark("C"); });
+    step("D→E is an island: no path from the root reaches it. It stays unmarked = garbage.", () => {
+      board.create("text", [3.6, 3.2, "unreachable"], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true, highlight: false,
+        strokeColor: colors.cat[1], color: colors.cat[1],
+      });
+    });
+    step("F↔G is a CYCLE with no root path: still unreachable, still garbage (tracing collects it).", () => {
+      board.create("text", [3.6, -2.6, "unreachable cycle"], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true, highlight: false,
+        strokeColor: colors.cat[2], color: colors.cat[2],
+      });
+    });
+    step("Sweep: everything unmarked (D, E, F, G) is reclaimed; root, A, B, C survive.", () => {
+      board.create("text", [-2.6, -2.6, "live: root, A, B, C   —   freed: D, E, F, G"], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    });
+  }, { boundingbox: [-6.2, 3.8, 6.0, -3.2], keepAspect: false, title: "Reachability: live objects vs garbage (islands and cycles)" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("gcQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("garbageQ"),
+      options: [
+        { text: () => sceneStrings("gbUnreach"), correct: true },
+        { text: () => sceneStrings("gbOld"), correct: false },
+        { text: () => sceneStrings("gbBig"), correct: false },
+        { text: () => sceneStrings("gbZero"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rootsQ"),
+      options: [
+        { text: () => sceneStrings("rtDirect"), correct: true },
+        { text: () => sceneStrings("rtHeap"), correct: false },
+        { text: () => sceneStrings("rtCode"), correct: false },
+        { text: () => sceneStrings("rtFree"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("markQ"),
+      options: [
+        { text: () => sceneStrings("mkTrav"), correct: true },
+        { text: () => sceneStrings("mkFree"), correct: false },
+        { text: () => sceneStrings("mkCopy"), correct: false },
+        { text: () => sceneStrings("mkCount"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sweepQ"),
+      options: [
+        { text: () => sceneStrings("swUn"), correct: true },
+        { text: () => sceneStrings("swAll"), correct: false },
+        { text: () => sceneStrings("swMarked"), correct: false },
+        { text: () => sceneStrings("swRoots"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rcCycleQ"),
+      options: [
+        { text: () => sceneStrings("rcKeep"), correct: true },
+        { text: () => sceneStrings("rcFast"), correct: false },
+        { text: () => sceneStrings("rcCan"), correct: false },
+        { text: () => sceneStrings("rcHeap"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("copyQ"),
+      options: [
+        { text: () => sceneStrings("cpMove"), correct: true },
+        { text: () => sceneStrings("cpMark"), correct: false },
+        { text: () => sceneStrings("cpCount"), correct: false },
+        { text: () => sceneStrings("cpFree"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("copyConQ"),
+      options: [
+        { text: () => sceneStrings("ccHalf"), correct: true },
+        { text: () => sceneStrings("ccCycle"), correct: false },
+        { text: () => sceneStrings("ccSlow"), correct: false },
+        { text: () => sceneStrings("ccNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("genHypQ"),
+      options: [
+        { text: () => sceneStrings("ghYoung"), correct: true },
+        { text: () => sceneStrings("ghOld"), correct: false },
+        { text: () => sceneStrings("ghBig"), correct: false },
+        { text: () => sceneStrings("ghEqual"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("minorQ"),
+      options: [
+        { text: () => sceneStrings("mnSmall"), correct: true },
+        { text: () => sceneStrings("mnAll"), correct: false },
+        { text: () => sceneStrings("mnNo"), correct: false },
+        { text: () => sceneStrings("mnStack"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("barrierQ"),
+      options: [
+        { text: () => sceneStrings("wbRem"), correct: true },
+        { text: () => sceneStrings("wbFast"), correct: false },
+        { text: () => sceneStrings("wbFree"), correct: false },
+        { text: () => sceneStrings("wbStack"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("stwQ"),
+      options: [
+        { text: () => sceneStrings("swHalt"), correct: true },
+        { text: () => sceneStrings("swNever"), correct: false },
+        { text: () => sceneStrings("swRef"), correct: false },
+        { text: () => sceneStrings("swHeapless"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("consQ"),
+      options: [
+        { text: () => sceneStrings("csGuess"), correct: true },
+        { text: () => sceneStrings("csPrec"), correct: false },
+        { text: () => sceneStrings("csFast"), correct: false },
+        { text: () => sceneStrings("csNoHeap"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fragQ"),
+      options: [
+        { text: () => sceneStrings("frScatter"), correct: true },
+        { text: () => sceneStrings("frInside"), correct: false },
+        { text: () => sceneStrings("frLeak"), correct: false },
+        { text: () => sceneStrings("frDangle"), correct: false },
+      ],
+    },
+  ]);
+</script>

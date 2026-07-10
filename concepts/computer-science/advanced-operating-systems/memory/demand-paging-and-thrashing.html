@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Demand Paging and Thrashing</primer-title>
+
+    <primer-card>
+      <p>
+        When you launch a <primer-math>2\,\text{GB}</primer-math> program it starts in milliseconds, long before
+        that much data could ever be read from disk. The trick is that the operating system loads
+        <strong>almost nothing</strong> up front. It builds the page tables so the whole address space is
+        <em>valid</em>, but marks the pages <strong>not present</strong>, and lets the very first access to each
+        page take a fault that pulls it in. This is <strong>demand paging</strong>: pay for a page only when, and
+        if, it is actually touched. Most of a program's pages are never touched at all, so you never pay for them.
+      </p>
+      <p>
+        Demand paging is what makes virtual memory feel free — until the day the pages a program actively needs no
+        longer fit in RAM. Then the system tips over an edge into <strong>thrashing</strong>, where it spends all
+        its time shuttling pages to and from disk and gets almost no real work done. This lesson is about both:
+        the elegant laziness that makes memory abundant, and the cliff it walks up to.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Major faults, minor faults, and the ones that aren't faults at all</h2>
+      <p>
+        "Page fault" sounds like an error; it is not. It is the ordinary mechanism by which the OS lazily
+        populates memory. The crucial distinction — the one that separates a fast program from a slow one — is
+        <strong>where the page comes from</strong>:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Kind</th><th>What happened</th><th>Cost</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Minor</strong> (soft) fault</td><td>page is already in RAM — just not mapped into this process (e.g. shared page, page cache hit, zero page)</td><td>microseconds — no I/O</td></tr>
+            <tr><td><strong>Major</strong> (hard) fault</td><td>page must be read from disk/swap</td><td>milliseconds — thousands× slower</td></tr>
+            <tr><td>Invalid access</td><td>address not in any valid mapping (a real bug)</td><td>SIGSEGV — the program dies</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        A minor fault is a bookkeeping blip; a major fault stalls the process for milliseconds while a disk (or,
+        today, an SSD or swap device) delivers the page. The ratio of major to minor faults is one of the first
+        things you look at when a system feels slow: many major faults means the working data does not fit in RAM.
+      </p>
+      <primer-theorem name="Demand paging and the working set">
+        <ul>
+          <li><strong>Demand paging</strong>: pages are marked valid-but-not-present and brought in on first
+            touch, so a process only occupies RAM proportional to what it actually uses;</li>
+          <li>a <strong>major</strong> fault fetches from disk (milliseconds); a <strong>minor</strong> fault only
+            re-maps a page already in RAM (microseconds);</li>
+          <li>the <strong>working set</strong> <primer-math>W(t,\Delta)</primer-math> is the set of distinct pages
+            referenced in the last <primer-math>\Delta</primer-math> accesses — the memory a process
+            <em>currently</em> needs; <strong>thrashing</strong> occurs when the working sets of the runnable
+            processes sum to more than physical memory.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The working-set model</h2>
+      <p>
+        How much memory does a process "need"? Not its whole address space, and not one page — it needs whatever
+        it is <em>actively using right now</em>. Denning's <strong>working-set model</strong> makes this precise:
+        the working set <primer-math>W(t,\Delta)</primer-math> is the set of distinct pages referenced in the last
+        <primer-math>\Delta</primer-math> memory accesses (the <em>window</em>). Because programs have
+        <strong>locality</strong>, this set is small and stable for a while, then shifts as the program moves to a
+        new phase. Keep each process's working set resident and its major faults nearly vanish; let it fall below,
+        and faults explode. Run the window over a reference string and watch the working set breathe:
+      </p>
+      <primer-code run>
+        // The working-set model: W(t, delta) = distinct pages referenced in the last `delta` accesses.
+        // A program with two locality phases; watch the working set stay small, then shift.
+        const refs = [1, 2, 1, 2, 3, 1, 2, 3, 7, 8, 9, 7, 8, 9, 8, 7];
+        const DELTA = 4; // window size
+
+        let peak = 0;
+        for (let t = 0; t &lt; refs.length; t++) {
+          const lo = Math.max(0, t - DELTA + 1);
+          const window = refs.slice(lo, t + 1);
+          const ws = [...new Set(window)].sort((a, b) => a - b);
+          peak = Math.max(peak, ws.length);
+          console.log(`t=${String(t).padStart(2)} ref ${refs[t]}  W = {${ws.join(",")}}  |W| = ${ws.length}`);
+        }
+        console.log(`peak working-set size = ${peak} pages -> give the process at least this many frames`);
+        console.log("Notice |W| jumps briefly when the program switches locality (1,2,3 -> 7,8,9), then settles.");
+      </primer-code>
+      <p>
+        This is the basis of a real allocation policy: the OS estimates each process's working-set size (by
+        sampling the accessed bits over a window) and tries to keep that many frames allocated to it. If it cannot
+        — if the working sets do not all fit — some process must be <em>suspended entirely</em> and swapped out,
+        because running it would only thrash everyone.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the throughput-vs-multiprogramming (thrashing) chart. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "thrash": {
+          "title": "Throughput vs degree of multiprogramming: it climbs, peaks, then collapses into thrashing",
+          "W": "Working-set size per process (pages)",
+          "leg": "useful CPU throughput"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The thrashing cliff</h2>
+      <p>
+        Here is the counter-intuitive shape every OS student must know. Add more processes (raise the
+        <strong>degree of multiprogramming</strong>) and at first throughput <em>rises</em> — more processes means
+        the CPU always has something to run while others wait on I/O. But each process needs its working set
+        resident. Past the point where the working sets stop fitting in RAM, adding one more process forces
+        eviction of pages that are still in use, so every process starts faulting, the disk queue saturates, and
+        throughput falls off a <strong>cliff</strong>. Drag the working-set slider: fatter working sets move the
+        cliff to the left, because fewer processes fill memory.
+      </p>
+      <primer-chart scene="thrash"></primer-chart>
+      <primer-chart-sliders name="thrash"></primer-chart-sliders>
+      <p>
+        The system is worst exactly when it is busiest: at the peak of thrashing the CPU is <em>idle</em> most of
+        the time, waiting on disk, even though the run queue is full. The fix is not "work harder" — it is to
+        <strong>reduce</strong> the degree of multiprogramming: suspend a process, free its frames, and let the
+        survivors keep their working sets. This is the <strong>page-fault-frequency (PFF)</strong> policy in one
+        sentence.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Page-fault frequency: a thermostat for memory</h2>
+      <p>
+        Working sets are expensive to track exactly, so real systems use a feedback signal that is trivial to
+        measure: each process's <strong>page-fault rate</strong>. PFF sets an upper and lower band:
+      </p>
+      <ul>
+        <li>if a process's fault rate climbs <strong>above</strong> the upper band, it does not have enough frames
+          — <strong>give it more</strong> (or, if none are free, suspend some other process);</li>
+        <li>if it drops <strong>below</strong> the lower band, it has more than it needs — <strong>take some
+          frames away</strong> for others.</li>
+      </ul>
+      <p>
+        It is a thermostat: fault rate is the temperature, frames are the heat, and the OS holds each process in a
+        comfortable band. When the whole machine is over-committed and even PFF cannot keep everyone in band, the
+        last resort is <strong>swapping</strong>: evict an entire process's pages to the swap device and mark it
+        non-runnable until memory frees up. Swapping a process out to rescue the rest is the OS admitting that no
+        replacement <em>policy</em> can help when the <em>demand</em> simply exceeds the RAM.
+      </p>
+      <primer-vignette title="Why does a thrashing machine sometimes need a hard reboot?">
+        <p>
+          Once thrashing sets in, everything slows down — <em>including the code that is supposed to fix it</em>.
+          The memory manager, the shell you are typing into, even the mouse cursor's handler must all be paged
+          back in to run, and they are stuck behind a saturated disk queue. So the machine that most needs to
+          suspend a process is the one least able to, because the tool for suspending it is itself paged out. This
+          "swap death" is why an over-committed server can become totally unresponsive rather than merely slow, and
+          why the kernel eventually invokes the blunt instrument of last resort — the
+          <strong>OOM killer</strong>, which simply picks a memory hog and terminates it to break the spiral.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why one major fault ruins your averages</h2>
+      <p>
+        Demand paging is only cheap because major faults are <em>rare</em>. To see how brutally a small fault rate
+        hurts, compute the <strong>effective access time</strong>. Let a RAM access take
+        <primer-math>t_m = 100\,\text{ns}</primer-math> and a page-fault service (disk) take
+        <primer-math>t_f = 8\,\text{ms} = 8{,}000{,}000\,\text{ns}</primer-math>. With fault probability
+        <primer-math>p</primer-math>,
+      </p>
+      <primer-math display>\text{EAT} \;=\; (1-p)\,t_m \;+\; p\,t_f.</primer-math>
+      <p>
+        Plug in a fault on just <em>one</em> access in a thousand (<primer-math>p = 0.001</primer-math>):
+        <primer-math>\text{EAT} \approx 0.999\times100 + 0.001\times8{,}000{,}000 \approx 8100\,\text{ns}</primer-math> —
+        the machine now runs <strong>81× slower</strong> than its fault-free speed, from a fault rate of one in a
+        thousand. That is the whole argument for keeping working sets resident: because a major fault is
+        <primer-math>\sim 10^5</primer-math> times a memory access, you can tolerate only a <em>vanishingly
+        small</em> fault rate before it dominates everything.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! A page fault is normal machinery, not a crash — and a minor fault touches no disk">
+      <p>
+        Two slips travel together. First, "fault" does not mean error: the overwhelming majority of page faults
+        are the intended way memory gets populated, and the process resumes as if nothing happened. The genuine
+        error — touching an address in no valid mapping — is a <em>segmentation fault</em>, a different beast.
+        Second, do not assume every fault hits the disk. A <strong>minor</strong> fault — mapping in a page that
+        is already in RAM (a shared library other processes loaded, a file already in the page cache, a
+        copy-on-write or demand-zero page) — costs microseconds and never queues an I/O. When you profile, the
+        number that predicts pain is the <strong>major</strong>-fault count, not the total. Conflating the two
+        will make you fear cheap faults and miss the expensive ones.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: demand-paging / working-set / thrashing concepts + EAT and working-set numeric calcs. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "thrashQuiz@1": {
+          "intro": "Demand paging loads pages on first touch; thrashing is when working sets exceed RAM. EAT = (1−p)·t_mem + p·t_fault.",
+          "demandQ": "Demand paging means the OS…",
+          "demandRight": "marks pages valid-but-not-present and brings each in on its first access",
+          "demandWrong1": "loads the entire program into RAM before it starts",
+          "demandWrong2": "never uses the disk",
+          "demandWrong3": "gives every process all of physical memory",
+          "majorQ": "A MAJOR (hard) page fault differs from a minor one because it…",
+          "majorRight": "must read the page from disk/swap, costing milliseconds",
+          "majorWrong1": "always crashes the program",
+          "majorWrong2": "is handled entirely in hardware",
+          "majorWrong3": "is faster than a minor fault",
+          "minorQ": "Which is an example of a MINOR (soft) fault?",
+          "minorRight": "mapping in a page already resident in RAM (page-cache hit or shared page)",
+          "minorWrong1": "reading a page from a spinning disk",
+          "minorWrong2": "an access to an unmapped address",
+          "minorWrong3": "a TLB shootdown",
+          "segQ": "An access to an address that is in NO valid mapping produces…",
+          "segRight": "a segmentation fault (SIGSEGV) — a genuine program error",
+          "segWrong1": "an ordinary minor fault",
+          "segWrong2": "a demand-zero page",
+          "segWrong3": "a TLB hit",
+          "wsQ": "The working set W(t, Δ) is…",
+          "wsRight": "the set of distinct pages referenced in the last Δ accesses",
+          "wsWrong1": "the entire virtual address space",
+          "wsWrong2": "the pages on disk",
+          "wsWrong3": "the number of processes running",
+          "thrashDefQ": "Thrashing occurs when…",
+          "thrashDefRight": "the combined working sets of runnable processes exceed physical memory, so everyone faults constantly",
+          "thrashDefWrong1": "the CPU clock is too slow",
+          "thrashDefWrong2": "there are too few processes",
+          "thrashDefWrong3": "the TLB is disabled",
+          "curveQ": "As the degree of multiprogramming rises past the thrashing point, throughput…",
+          "curveRight": "collapses — the CPU sits idle waiting on disk while every process faults",
+          "curveWrong1": "keeps rising linearly forever",
+          "curveWrong2": "stays exactly constant",
+          "curveWrong3": "doubles",
+          "pffQ": "The page-fault-frequency (PFF) policy works by…",
+          "pffRight": "giving a process more frames when its fault rate is too high, and taking frames when it is too low",
+          "pffWrong1": "always giving every process equal frames",
+          "pffWrong2": "disabling paging under load",
+          "pffWrong3": "raising the clock speed",
+          "fixQ": "The correct response to thrashing is to…",
+          "fixRight": "reduce the degree of multiprogramming (suspend/swap out a process) so the rest keep their working sets",
+          "fixWrong1": "start even more processes",
+          "fixWrong2": "shrink every process's frame allocation equally",
+          "fixWrong3": "increase the page size",
+          "eatNumQ": "RAM access is 100 ns, a fault costs {ft} ms, fault probability is p = {pm}/1000. What is the EAT in ns? (fault time in ns = ft·1e6)",
+          "wsSizeNumQ": "In a window, the pages referenced were {a}, {b}, {a}, {b}, {c}. What is the working-set size |W|?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="thrashQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/memory/page-replacement-algorithms"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Throughput-vs-multiprogramming (thrashing) curve: rises, peaks near capacity, collapses. A working-set
+     slider shifts the cliff. Colours only from themeColors() via the line thunk. Plus the randomised quiz. -->
+<script type="module">
+  import { registerCharts, registerChartSliders, registerQuiz, makeStrings } from "primer";
+
+  const th = makeStrings("thrash");
+  registerChartSliders("thrash", [
+    { name: "W", label: () => th("W"), min: 8, max: 40, step: 2, value: 12, anchors: [8, 12, 20, 40] },
+  ]);
+  registerCharts(
+    [{
+      name: "thrash",
+      // R = 120 physical frames. Capacity m0 = R/W processes fit; throughput climbs ~m then collapses past m0.
+      f: (m, s) => {
+        const m0 = 120 / s.W;
+        return m / (1 + (m / m0) ** 6);
+      },
+      line: (colors) => ({ strokeColor: colors.cat[0], strokeWidth: 4 }),
+      legend: [() => th("leg")],
+    }],
+    {
+      id: "thrash",
+      title: () => th("title"),
+      xmin: 0, xmax: 20, xticks: 4,
+      ymin: 0, ymax: 12, yticks: 2,
+      xaxisname: "degree of multiprogramming", yaxisname: "throughput",
+    },
+    "thrash",
+  );
+
+  registerQuiz("thrashQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("demandQ"),
+      options: [
+        { text: () => sceneStrings("demandRight"), correct: true },
+        { text: () => sceneStrings("demandWrong1"), correct: false },
+        { text: () => sceneStrings("demandWrong2"), correct: false },
+        { text: () => sceneStrings("demandWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("majorQ"),
+      options: [
+        { text: () => sceneStrings("majorRight"), correct: true },
+        { text: () => sceneStrings("majorWrong1"), correct: false },
+        { text: () => sceneStrings("majorWrong2"), correct: false },
+        { text: () => sceneStrings("majorWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("minorQ"),
+      options: [
+        { text: () => sceneStrings("minorRight"), correct: true },
+        { text: () => sceneStrings("minorWrong1"), correct: false },
+        { text: () => sceneStrings("minorWrong2"), correct: false },
+        { text: () => sceneStrings("minorWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("segQ"),
+      options: [
+        { text: () => sceneStrings("segRight"), correct: true },
+        { text: () => sceneStrings("segWrong1"), correct: false },
+        { text: () => sceneStrings("segWrong2"), correct: false },
+        { text: () => sceneStrings("segWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("wsQ"),
+      options: [
+        { text: () => sceneStrings("wsRight"), correct: true },
+        { text: () => sceneStrings("wsWrong1"), correct: false },
+        { text: () => sceneStrings("wsWrong2"), correct: false },
+        { text: () => sceneStrings("wsWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("thrashDefQ"),
+      options: [
+        { text: () => sceneStrings("thrashDefRight"), correct: true },
+        { text: () => sceneStrings("thrashDefWrong1"), correct: false },
+        { text: () => sceneStrings("thrashDefWrong2"), correct: false },
+        { text: () => sceneStrings("thrashDefWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("curveQ"),
+      options: [
+        { text: () => sceneStrings("curveRight"), correct: true },
+        { text: () => sceneStrings("curveWrong1"), correct: false },
+        { text: () => sceneStrings("curveWrong2"), correct: false },
+        { text: () => sceneStrings("curveWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pffQ"),
+      options: [
+        { text: () => sceneStrings("pffRight"), correct: true },
+        { text: () => sceneStrings("pffWrong1"), correct: false },
+        { text: () => sceneStrings("pffWrong2"), correct: false },
+        { text: () => sceneStrings("pffWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fixQ"),
+      options: [
+        { text: () => sceneStrings("fixRight"), correct: true },
+        { text: () => sceneStrings("fixWrong1"), correct: false },
+        { text: () => sceneStrings("fixWrong2"), correct: false },
+        { text: () => sceneStrings("fixWrong3"), correct: false },
+      ],
+    },
+    {
+      // EAT = (1-p)*100 + p*ft*1e6 ns, p = pm/1000. Round to nearest ns.
+      prompt: (v) => sceneStrings("eatNumQ", v),
+      variables: "ft=[2,4,8] pm=[1:5]",
+      answer: (v) => Math.round((1 - v.pm / 1000) * 100 + (v.pm / 1000) * v.ft * 1e6),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Distinct pages among a,b,a,b,c -> 3 distinct when a,b,c all differ.
+      prompt: (v) => sceneStrings("wsSizeNumQ", v),
+      variables: "a=[1:9] b=[1:9] c=[1:9]",
+      constraints: "a != b && b != c && a != c",
+      answer: () => 3,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

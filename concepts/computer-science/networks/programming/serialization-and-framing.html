@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Serialization and Framing</primer-title>
+
+    <primer-card>
+      <p>
+        Inside your program, a chat message is a tidy object: <code>{ user: "alice", text: "hi", ts: 42 }</code>
+        — three fields, sitting at some address in RAM, wired together by pointers your language manages for
+        you. But a socket cannot carry an <em>object</em>. A socket carries <strong>bytes</strong>: a flat,
+        one-dimensional river of numbers 0–255, with no fields, no pointers, and — this is the sting in the
+        tail — <strong>no marks showing where one message stops and the next begins</strong>. Getting your data
+        onto that river, and safely off it again at the far end, is two distinct jobs that beginners forever
+        confuse.
+      </p>
+      <ul>
+        <li>
+          <strong>Serialization</strong> (a.k.a. marshalling) — turning an in-memory object into a flat byte
+          sequence, and parsing it back. This is <em>what the bytes mean</em>.
+        </li>
+        <li>
+          <strong>Framing</strong> — marking where each message begins and ends on a boundary-less
+          <primer-ref soft to="computer-science/networks/programming/the-socket-api">TCP stream</primer-ref>,
+          so the receiver can chop the river back into the messages you sent. This is <em>where one message
+          ends</em>.
+        </li>
+      </ul>
+      <p>
+        You need both, and they are independent choices. This page builds each from the ground up, and its
+        centrepiece is a working <strong>deframer</strong> — the exact code every networked program secretly
+        contains — that reassembles messages no matter how cruelly the network chops the byte stream.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Serialization: text vs binary</h2>
+      <p>
+        To serialize is to answer "how do I write this object as bytes so the other side can rebuild it?" The
+        great divide is between <strong>text formats</strong> and <strong>binary formats</strong>.
+      </p>
+      <p>
+        <strong>Text formats — JSON, XML, YAML.</strong> The bytes are human-readable characters.
+        <code>{ "user": "alice", "text": "hi", "ts": 42 }</code> is literally those characters, UTF-8 encoded.
+        The huge win is that the format is <strong>self-describing</strong>: the field names travel <em>with</em>
+        the data, so anyone — a person, a new service, a debugger — can read it without a prior agreement. The
+        cost is size and speed: you ship the string <code>"user"</code> on every single message, and parsing
+        text into numbers is comparatively slow.
+      </p>
+      <p>
+        <strong>Binary formats — Protocol Buffers, Avro, Thrift, MessagePack.</strong> The bytes are a compact
+        machine encoding. Schema-based binary formats like <strong>Protocol Buffers</strong> take this furthest:
+        both sides share a <code>.proto</code> <em>schema</em> that says "field 1 is a string called
+        <code>user</code>, field 2 is a string called <code>text</code>, field 3 is an int called
+        <code>ts</code>." On the wire you then send only <em>field number + value</em> — never the names. That
+        is dramatically smaller and faster to parse, but the bytes are <strong>not self-describing</strong>:
+        without the schema they are meaningless, and both ends must agree on it in advance.
+      </p>
+
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Concern</th><th>JSON (text)</th><th>Protocol Buffers (schema binary)</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Size on the wire</td><td>Large — field names + text digits repeated</td><td>Small — field <em>numbers</em>, packed binary</td></tr>
+            <tr><td>Parse speed</td><td>Slower (text → values)</td><td>Faster (direct binary decode)</td></tr>
+            <tr><td>Self-describing?</td><td>Yes — readable without a schema</td><td>No — needs the shared <code>.proto</code></td></tr>
+            <tr><td>Human-debuggable?</td><td>Yes — eyeball it in a log</td><td>No — needs a decoder</td></tr>
+            <tr><td>Schema evolution</td><td>Ad hoc (ignore unknown keys)</td><td>Designed in — reserved field numbers, add without breaking old readers</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+
+      <p>
+        <strong>Schema evolution</strong> is the quiet reason big systems lean binary. Protobuf gives every
+        field a <em>number</em>, and old code simply skips field numbers it doesn't recognise. So you can add a
+        <code>field 4</code> next year and last year's servers keep working — forward and backward compatible
+        by design. Hand-rolled binary formats that hard-code byte offsets have no such grace: insert a field in
+        the middle and every old reader shatters.
+      </p>
+
+      <primer-vignette title="Endianness: which end of the number goes first?">
+        <p>
+          Serialize the 32-bit integer <code>1</code> and you must write four bytes — but in which order? A
+          <strong>big-endian</strong> machine writes the most-significant byte first
+          (<code>00 00 00 01</code>); a <strong>little-endian</strong> machine (x86, most ARM) writes the
+          least-significant first (<code>01 00 00 00</code>). If sender and receiver disagree, <code>1</code>
+          becomes <code>16777216</code>. The internet settled this by decree: multi-byte integers in protocol
+          headers go <strong>big-endian</strong>, and we call that convention <em>network byte order</em>. It
+          is why C programmers reflexively wrap integers in <code>htonl()</code> ("host to network long")
+          before sending. The demo below shows the two orderings turning the same number into different bytes.
+        </p>
+
+        <primer-code run>
+          // Encode a 32-bit unsigned int into 4 bytes, big-endian (network order).
+          function toBigEndian(n) {
+            return [ (n &gt;&gt;&gt; 24) &amp; 0xff, (n &gt;&gt;&gt; 16) &amp; 0xff, (n &gt;&gt;&gt; 8) &amp; 0xff, n &amp; 0xff ];
+          }
+          function toLittleEndian(n) { return toBigEndian(n).reverse(); }
+
+          const hex = (bytes) =&gt; bytes.map((b) =&gt; b.toString(16).padStart(2, "0")).join(" ");
+
+          for (const n of [1, 256, 0x01020304]) {
+            console.log(`n = ${n}`);
+            console.log(`  big-endian (network order): ${hex(toBigEndian(n))}`);
+            console.log(`  little-endian            : ${hex(toLittleEndian(n))}`);
+          }
+          console.log("\nIf the two ends disagree on order, the same 4 bytes decode to a different number.");
+        </primer-code>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Framing: where does each message end?</h2>
+      <p>
+        Suppose you have serialized three messages and written them to a TCP socket. The receiver gets a stream
+        of bytes with the boundaries erased — it must re-discover them. There are exactly two classic
+        strategies, and essentially every real protocol picks one.
+      </p>
+      <ul>
+        <li>
+          <strong>Length prefixing.</strong> Before each message, write its length. The frame is
+          <code>[length][payload]</code>. The reader reads the length header, then reads <em>exactly</em> that
+          many payload bytes. <em>Pro:</em> the payload can contain <em>any</em> bytes — length prefixing does
+          not care what's inside. <em>Con:</em> you must know the length up front, and you must decide how many
+          bytes the length field itself takes (2 bytes caps a message at 65 535; 4 bytes at ~4 GB).
+        </li>
+        <li>
+          <strong>Delimiters.</strong> Put a special marker between messages — a newline
+          (<code>\n</code>) for line-based text protocols (HTTP headers, SMTP, Redis's RESP), or
+          <code>\r\n\r\n</code> to end a header block. The reader scans for the delimiter. <em>Pro:</em> simple,
+          streamable, human-readable, no need to know the length in advance. <em>Con:</em> the delimiter
+          <strong>must not appear in the payload</strong> — or you must <em>escape</em> it, or forbid it. This
+          is why line-based protocols are awkward for arbitrary binary data.
+        </li>
+      </ul>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "frameLayout": {
+            "title": "A length-prefixed frame: a fixed-width header then exactly that many payload bytes",
+            "header": "LENGTH (4-byte header)",
+            "payload": "PAYLOAD — exactly LENGTH bytes",
+            "next": "next frame's LENGTH…",
+            "arrow": "read 4 bytes → learn N → read N bytes → repeat"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="frameLayout"
+        caption="A horizontal byte strip showing a 4-byte length header, followed by a payload block exactly that many bytes long, followed by the start of the next frame's length header. An arrow reads: read 4 bytes to learn N, then read N payload bytes, then repeat."
+      ></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The centrepiece: a deframer that survives arbitrary chunking</h2>
+      <p>
+        Here is the crux. TCP delivers bytes in whatever chunk sizes it likes — a <code>data</code> event might
+        hand you <em>half a length header</em>, or three messages glued together, or one byte at a time. A
+        correct deframer therefore cannot assume anything about chunk boundaries. It must <strong>buffer</strong>
+        incoming bytes and repeatedly ask: "do I now hold a <em>complete</em> frame? If so, emit it and keep
+        the leftover; if not, wait for more." The code below implements a length-prefixed framer and a stateful
+        deframer, then feeds it a stream sliced at the <em>worst possible</em> places — including mid-header.
+      </p>
+
+      <primer-code run>
+        const HEADER = 4; // 4-byte big-endian length prefix
+
+        // --- FRAMER: object/string -> [4-byte length][payload] bytes ---
+        function frame(payload) {
+          const body = Array.from(payload).map((c) =&gt; c.charCodeAt(0));
+          const n = body.length;
+          const header = [ (n &gt;&gt;&gt; 24) &amp; 0xff, (n &gt;&gt;&gt; 16) &amp; 0xff, (n &gt;&gt;&gt; 8) &amp; 0xff, n &amp; 0xff ];
+          return header.concat(body);
+        }
+
+        // --- DEFRAMER: a stateful buffer that emits whole messages as they complete ---
+        function makeDeframer(onMessage) {
+          let buf = [];                       // bytes seen so far, not yet consumed
+          return function feed(chunk) {       // called with each arbitrary arriving chunk
+            buf = buf.concat(chunk);
+            while (true) {
+              if (buf.length &lt; HEADER) return;                 // not even a full header yet — wait
+              const n = (buf[0] &lt;&lt; 24) | (buf[1] &lt;&lt; 16) | (buf[2] &lt;&lt; 8) | buf[3];
+              if (buf.length &lt; HEADER + n) return;             // header known, payload incomplete — wait
+              const payload = buf.slice(HEADER, HEADER + n)
+                                 .map((b) =&gt; String.fromCharCode(b)).join("");
+              onMessage(payload);                              // a WHOLE message is ready
+              buf = buf.slice(HEADER + n);                     // drop it; keep the remainder
+            }
+          };
+        }
+
+        // Frame three messages and concatenate into one wire stream.
+        const wire = [].concat(frame("LOGIN alice"), frame("MSG hi there"), frame("LOGOUT"));
+
+        // Now deliver that stream in DELIBERATELY cruel chunks: mid-header, glued, 1 byte.
+        const chunks = [ wire.slice(0, 2), wire.slice(2, 9), wire.slice(9, 10), wire.slice(10) ];
+        console.log(`${wire.length} bytes arriving as ${chunks.length} chunks of sizes ` +
+                    chunks.map((c) =&gt; c.length).join(", ") + ":\n");
+
+        const feed = makeDeframer((msg) =&gt; console.log(`  emitted whole message: "${msg}"`));
+        chunks.forEach((c, i) =&gt; {
+          console.log(`feed chunk ${i} (${c.length} bytes)...`);
+          feed(c);
+        });
+        console.log("\nEvery message recovered intact — even though chunk 0 held only HALF the first header.");
+      </primer-code>
+
+      <p>
+        Trace the state: chunk 0 is 2 bytes — not even a full 4-byte header — so <code>feed</code> buffers and
+        returns, emitting nothing. Only once enough bytes have accumulated does the <code>while</code> loop fire,
+        and it keeps firing as long as complete frames remain, leaving any partial tail in <code>buf</code> for
+        next time. <strong>That buffer-and-loop is the heart of every real network reader.</strong>
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Putting it together</h2>
+      <p>
+        Serialization and framing compose: you <em>serialize</em> the object to a payload (JSON, protobuf,
+        whatever), then <em>frame</em> the payload for the stream (length-prefix it, or delimit it). The
+        receiver reverses both: <em>deframe</em> to recover the payload bytes, then <em>deserialize</em> to
+        rebuild the object. Many real protocols even do both at once — HTTP frames its headers with
+        <code>\r\n</code> delimiters and its body with a <code>Content-Length</code> length prefix, all in one
+        message, which is exactly the machinery you'll assemble on the
+        <primer-ref soft to="computer-science/networks/programming/building-an-http-server">HTTP-server</primer-ref>
+        page.
+      </p>
+
+      <primer-vignette title="Watch out! — one read is NOT one message, and delimiters can bite">
+        <p>
+          <strong>Revisited, because it is the bug.</strong> A <code>data</code> event (one <code>read()</code>)
+          has <em>no relationship</em> to a message. It may hold a fraction of a message, exactly one, or
+          several — including a <em>partial header</em>, as the demo's 2-byte first chunk showed. Any reader that
+          does <code>parse(chunk)</code> directly, without buffering across reads, is broken; it merely
+          <em>appears</em> to work on localhost where writes often arrive one-to-one. Always buffer and
+          re-check "do I have a complete frame yet?"
+        </p>
+        <p>
+          <strong>The delimiter trap.</strong> If you frame with a delimiter — say <code>\n</code> — and your
+          payload can itself contain that byte, a naïve reader will split one message into two at the embedded
+          delimiter. You must either <strong>escape</strong> the delimiter in the payload (and un-escape on
+          read), forbid it entirely, or switch to length prefixing, which is delimiter-agnostic and the safe
+          default for arbitrary binary data. "It can't contain a newline" is a promise your payload will one day
+          break.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "framingQuiz@1": { "instructions": "Check your grasp of serialization vs framing: text vs binary formats, endianness, length-prefix vs delimiter, and the buffer-and-loop deframer." } }
+    </script>
+    <primer-quiz name="framingQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/programming/the-socket-api"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // A horizontal byte strip: [4-byte LENGTH header][PAYLOAD of exactly that many bytes]
+  // then the next frame's header — the length-prefix framing layout.
+  registerGeometryScene("frameLayout", ({ board, step, colors, sceneStrings }) => {
+    const y0 = 0, y1 = 1.2;
+
+    const rect = (x0, x1, col, fill) =>
+      board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+        vertices: { visible: false }, fixed: true, highlight: false,
+        borders: { strokeColor: col, strokeWidth: 2, highlight: false },
+        fillColor: fill, fillOpacity: 0.12,
+      });
+
+    const label = (x, y, s, col, size = 13) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: size, fixed: true,
+        highlight: false, strokeColor: col, color: col, cssStyle: "font-weight:600",
+      });
+
+    // header block
+    step(sceneStrings("header"), () => {
+      rect(0, 2, colors.cat[0], colors.cat[0]);
+      label(1, 0.6, sceneStrings("header"), colors.cat[0]);
+    });
+    // payload block
+    step(sceneStrings("payload"), () => {
+      rect(2, 8, colors.cat[1], colors.cat[1]);
+      label(5, 0.6, sceneStrings("payload"), colors.cat[1]);
+    });
+    // next frame begins
+    step(sceneStrings("next"), () => {
+      rect(8, 10, colors.line, colors.line);
+      label(9, 0.6, sceneStrings("next"), colors.ink, 11);
+    });
+    // the read rule
+    step(sceneStrings("arrow"), () => {
+      board.create("arrow", [[0, -0.7], [10, -0.7]], { strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false });
+      label(5, -1.2, sceneStrings("arrow"), colors.ink, 12);
+    });
+  }, {
+    boundingbox: [-1, 2.2, 11, -2],
+    keepAspect: false,
+    title: () => makeStrings("frameLayout")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("framingQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "What is the difference between serialization and framing?",
+      options: [
+        { text: "Serialization is turning an object into/out of bytes; framing marks where each message begins and ends on the stream", correct: true },
+        { text: "They are two words for the same operation", correct: false },
+        { text: "Serialization compresses data; framing encrypts it", correct: false },
+        { text: "Framing is only needed for binary formats", correct: false },
+      ] },
+
+    { prompt: "A key advantage of a TEXT format like JSON over schema-based binary is that it is…",
+      options: [
+        { text: "self-describing — field names travel with the data, so it is readable without a prior schema", correct: true },
+        { text: "always smaller on the wire", correct: false },
+        { text: "always faster to parse", correct: false },
+        { text: "immune to schema-evolution problems by omitting field identity", correct: false },
+      ] },
+
+    { prompt: "Why is a Protocol Buffers message smaller than the equivalent JSON?",
+      options: [
+        { text: "It sends compact field NUMBERS and packed binary values, not repeated field-name strings", correct: true },
+        { text: "It automatically gzip-compresses every message", correct: false },
+        { text: "It drops any field whose value is a string", correct: false },
+        { text: "It sends field names but abbreviates them to one letter", correct: false },
+      ] },
+
+    { prompt: "A downside of a schema-based binary format like Protobuf is that…",
+      options: [
+        { text: "the bytes are not self-describing — both ends must share the schema to interpret them", correct: true },
+        { text: "it cannot represent integers", correct: false },
+        { text: "it can only be used over UDP", correct: false },
+        { text: "it makes schema evolution impossible", correct: false },
+      ] },
+
+    { prompt: "'Network byte order' refers to…",
+      options: [
+        { text: "big-endian — the most-significant byte of a multi-byte integer is sent first", correct: true },
+        { text: "little-endian — the least-significant byte is sent first", correct: false },
+        { text: "the order in which packets are routed", correct: false },
+        { text: "sorting messages alphabetically before sending", correct: false },
+      ] },
+
+    { prompt: "Two machines exchange a 32-bit integer but disagree on endianness. What happens?",
+      options: [
+        { text: "The same four bytes are interpreted as a different number (e.g. 1 becomes 16777216)", correct: true },
+        { text: "The transfer fails with a checksum error", correct: false },
+        { text: "TCP transparently fixes the byte order", correct: false },
+        { text: "Nothing — endianness only affects text", correct: false },
+      ] },
+
+    { prompt: "In length-prefix framing, the frame is laid out as…",
+      options: [
+        { text: "[length header][payload] — read the length, then read exactly that many payload bytes", correct: true },
+        { text: "[payload][length header] — read the payload, then check the trailing length", correct: false },
+        { text: "[delimiter][payload][delimiter]", correct: false },
+        { text: "just the payload, with the length inferred from the connection close", correct: false },
+      ] },
+
+    { prompt: "A key advantage of length-prefix framing over delimiter framing is that…",
+      options: [
+        { text: "the payload may contain ANY bytes — the framer never inspects its contents", correct: true },
+        { text: "it never needs to know the message length in advance", correct: false },
+        { text: "it is always human-readable in a log", correct: false },
+        { text: "it works only for text and never for binary", correct: false },
+      ] },
+
+    { prompt: "You frame messages with a '\\n' delimiter, but a payload can itself contain '\\n'. What must you do?",
+      options: [
+        { text: "Escape (or forbid) the delimiter in the payload — otherwise one message is wrongly split in two", correct: true },
+        { text: "Nothing — the receiver ignores delimiters inside payloads automatically", correct: false },
+        { text: "Switch the whole connection to UDP", correct: false },
+        { text: "Send the payload twice for redundancy", correct: false },
+      ] },
+
+    { prompt: "A correct deframer must, above all, handle the fact that…",
+      options: [
+        { text: "one read() may carry a partial message (even a partial header), one message, or several glued together", correct: true },
+        { text: "every read() carries exactly one complete message", correct: false },
+        { text: "reads always arrive in message-sized chunks on a real network", correct: false },
+        { text: "the OS guarantees frame boundaries align with reads", correct: false },
+      ] },
+
+    { prompt: "In the deframer, what happens when a chunk arrives holding only 2 of the 4 header bytes?",
+      options: [
+        { text: "It is buffered and the function returns, emitting nothing until more bytes complete the header", correct: true },
+        { text: "It throws an error and drops the connection", correct: false },
+        { text: "It guesses the length from the 2 bytes and proceeds", correct: false },
+        { text: "It emits an empty message and moves on", correct: false },
+      ] },
+
+    { prompt: "After the deframer emits a complete frame, what does it do with any leftover bytes?",
+      options: [
+        { text: "Keeps them in the buffer as the start of the next frame and re-checks whether that frame is complete", correct: true },
+        { text: "Discards them, since a frame boundary was reached", correct: false },
+        { text: "Sends them back to the sender as an acknowledgement", correct: false },
+        { text: "Merges them into the frame it just emitted", correct: false },
+      ] },
+
+    { prompt: "Why do large systems often prefer schema-based binary formats for evolving APIs?",
+      options: [
+        { text: "Numbered fields let old readers skip unknown fields, so you can add fields without breaking them (forward/backward compatible)", correct: true },
+        { text: "Binary formats never change once written", correct: false },
+        { text: "Text formats cannot add new fields at all", correct: false },
+        { text: "Binary formats include the reader's version automatically", correct: false },
+      ] },
+
+    { prompt: "HTTP frames a single message using…",
+      options: [
+        { text: "delimiters (\\r\\n) for the header block AND a Content-Length prefix for the body — both strategies at once", correct: true },
+        { text: "only a single length prefix for the entire message", correct: false },
+        { text: "no framing at all; it relies on closing the connection", correct: false },
+        { text: "UDP datagram boundaries", correct: false },
+      ] },
+  ]);
+</script>

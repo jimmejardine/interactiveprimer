@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The Graduate View of Operating Systems</primer-title>
+
+    <primer-card>
+      <p>
+        You already know what an
+        <primer-ref to="computer-science/operating-systems/operating-systems">operating system</primer-ref>
+        does — it runs your programs, shares out memory, and talks to the disk. This master's course goes
+        underneath that summary and asks the hard questions: <em>how</em> does one machine safely run a hundred
+        untrusting programs at once? How does the kernel stay in control of a CPU that is, most of the time,
+        running someone else's code? What does it <em>cost</em>, in cycles, to cross from a program into the
+        kernel and back? Modern operating systems — Linux, Windows, the seL4 microkernel — are among the most
+        carefully engineered artefacts humans build, and this course is about the ideas and trade-offs inside
+        them.
+      </p>
+      <p>
+        The whole subject organises around <strong>three illusions</strong> the OS sells to every process, and
+        one recurring design principle. The illusions are <strong>virtualization</strong> (each program thinks
+        it has the CPU and all of memory to itself), <strong>concurrency</strong> (many things appear to happen
+        at once, correctly), and <strong>persistence</strong> (data outlives any single program and survives a
+        crash). Hold those three words; every module of this course is a deep dive into one of them.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Mechanism versus policy — the master key</h2>
+      <p>
+        The single most useful lens in OS design is the separation of <strong>mechanism</strong> from
+        <strong>policy</strong>. A <em>mechanism</em> is the low-level machinery that answers "<em>how</em> is
+        something done?" — how do we switch from one process to another, how do we protect one program's memory
+        from another. A <em>policy</em> answers "<em>which</em>, or <em>when</em>?" — <em>which</em> process runs
+        next, <em>which</em> page gets evicted when memory is full. Good kernels build a fast, general mechanism
+        once, then let a swappable policy sit on top.
+      </p>
+      <p>
+        The payoff is that you can change the decision-making — a new scheduler, a new page-replacement rule —
+        without rewriting the delicate machinery underneath. Watch for this split in every module: context
+        switching (mechanism) vs the scheduler (policy); address translation (mechanism) vs which page to evict
+        (policy).
+      </p>
+      <primer-theorem name="What an operating system is">
+        <ul>
+          <li>an OS <strong>virtualizes</strong> the machine — it gives each process the illusion of a private
+            CPU and a private address space on shared hardware;</li>
+          <li>it provides <strong>concurrency</strong> — running and coordinating many activities at once,
+            correctly, despite interleaving;</li>
+          <li>it provides <strong>persistence</strong> — storing data durably so it survives crashes and
+            outlives any one program;</li>
+          <li>it is built by separating <strong>mechanism</strong> (how — the fast, fixed machinery) from
+            <strong>policy</strong> (which/when — the swappable decision).</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Strings for the privilege-boundary figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "boundary": {
+          "title": "The kernel/user boundary — the OS runs privileged, your programs do not",
+          "user": "User mode (unprivileged): your processes — a browser, a shell, a compiler — run here.",
+          "trap": "The system-call interface: the ONLY doorway from user mode into the kernel, crossed by a trap.",
+          "kernel": "Kernel mode (privileged, ring 0): scheduler, virtual memory, file systems, device drivers.",
+          "hw": "Hardware: the CPU, the MMU that enforces memory protection, and the devices."
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The protected boundary</h2>
+      <p>
+        The reason all this is possible is a hardware feature: the CPU runs in one of (at least) two
+        <strong>privilege modes</strong>. In <strong>user mode</strong> some instructions are simply forbidden —
+        a program cannot issue I/O directly, reprogram the memory-management unit, or disable interrupts. In
+        <strong>kernel mode</strong> everything is allowed. Your programs live on top; the kernel lives in the
+        middle, privileged; and the only way up is through a narrow, controlled doorway — the
+        <strong>system call</strong>. Step through the layers.
+      </p>
+      <primer-geometry scene="boundary"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Limited direct execution — how the kernel stays in charge</h2>
+      <p>
+        Here is the central tension. For <strong>speed</strong>, a user program must run <em>directly</em> on
+        the CPU — if the OS interpreted every instruction, everything would crawl. But if the program runs
+        directly, how does the OS ever get the CPU <em>back</em>, or stop the program doing something forbidden?
+        The answer, the beating heart of every OS, is <strong>limited direct execution</strong>:
+      </p>
+      <ul>
+        <li>the program runs directly and at full speed in user mode — <em>most</em> of the time;</li>
+        <li>a <strong>trap</strong> (a deliberate system call, or a fault) yanks control into the kernel through
+          a fixed <strong>trap table</strong> the OS installed at boot;</li>
+        <li>a <strong>timer interrupt</strong>, set to fire every few milliseconds, guarantees the kernel
+          regains the CPU even from a program that never cooperates — this is how pre-emptive multitasking is
+          possible at all.</li>
+      </ul>
+      <p>
+        So the kernel is not a babysitter watching every step; it is more like a signalman who has wired the
+        tracks so that certain events <em>must</em> route back through the station. Between those events, the
+        program runs unwatched and fast. The simulation below models a timer firing every few ticks and the
+        scheduler stepping in.
+      </p>
+      <primer-code run>
+        // Limited direct execution: processes run directly, but a timer interrupt (every QUANTUM ticks)
+        // returns control to the kernel, which round-robins to the next process. No process can hog the CPU.
+        const procs = ["browser", "compiler", "shell"];
+        const QUANTUM = 3;          // timer fires every 3 ticks
+        const TICKS = 12;
+
+        let current = 0;            // index of the running process
+        let ranFor = 0;             // ticks used in this quantum
+        for (let t = 1; t &lt;= TICKS; t++) {
+          console.log(`tick ${t}: running "${procs[current]}" in USER mode`);
+          ranFor++;
+          if (ranFor === QUANTUM) {
+            // Timer interrupt -> trap into the kernel -> scheduler picks the next process.
+            const next = (current + 1) % procs.length;
+            console.log(`   ⏰ timer interrupt -> KERNEL: context switch ${procs[current]} -> ${procs[next]}`);
+            current = next;
+            ranFor = 0;
+          }
+        }
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="How expensive is it to 'just' call the kernel?">
+      <p>
+        A system call looks in C like an ordinary function call — <primer-math>\texttt{read()}</primer-math>,
+        <primer-math>\texttt{write()}</primer-math> — but it is far from ordinary. Crossing into the kernel
+        means switching privilege mode, saving registers, possibly flushing pipeline and predictor state, and
+        jumping through the trap table; the return does it all again. A plain function call is a handful of
+        cycles; a round trip into the kernel is typically <strong>hundreds</strong>. That gap is why high-perfor­mance
+        systems fight to make <em>fewer</em> crossings — batching many operations per call
+        (<primer-math>\texttt{io\_uring}</primer-math>), caching results in user space, or even running kernel
+        logic without a trap at all. "Avoid the syscall" is a recurring theme you will meet again and again in
+        this course.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The kernel is not a separate computer — it is code on the same CPU">
+      <p>
+        A common mental slip is to imagine the kernel as some other machine, always watching, that your programs
+        talk to over a wire. It is not. The kernel is <em>code that runs on the very same CPU cores as your
+        programs</em> — the difference is purely the privilege bit the hardware is in when those instructions
+        execute. When you make a system call, your core stops running your code and starts running the kernel's
+        code, in kernel mode, then switches back. There is no separate "OS processor." This matters because it
+        means kernel time is <em>stolen</em> from your program's time, on your core — every trap, every
+        interrupt, every context switch is overhead paid out of the same cycle budget, which is exactly why the
+        cost of crossing the boundary is such a big deal.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Where this course goes</h2>
+      <p>
+        With the boundary and limited direct execution in hand, the rest of the course descends into each
+        illusion in depth: the <primer-ref forward to="computer-science/advanced-operating-systems/kernel/the-system-call-interface">system-call
+        interface</primer-ref> and
+        <primer-ref forward to="computer-science/advanced-operating-systems/kernel/kernel-architectures">kernel
+        architectures</primer-ref> first, then advanced scheduling and virtual memory (virtualization),
+        kernel-grade synchronization (concurrency), journaling and log-structured file systems (persistence),
+        and finally virtualization proper, containers, OS security, and where the field is heading.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: concept MCQs on the three roles, mechanism/policy, privilege, limited direct execution. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "gradOsQuiz@1": {
+          "intro": "Three illusions — virtualization, concurrency, persistence — plus mechanism vs policy and limited direct execution.",
+          "threeQ": "The three core illusions an operating system provides are…",
+          "tRight": "virtualization, concurrency, and persistence",
+          "tWrong1": "compilation, linking, and loading",
+          "tWrong2": "encryption, compression, and networking",
+          "tWrong3": "addition, subtraction, and multiplication",
+          "virtQ": "\"Virtualization\" in the OS sense means…",
+          "vRight": "each process gets the illusion of a private CPU and private memory on shared hardware",
+          "vWrong1": "running inside a hypervisor virtual machine only",
+          "vWrong2": "converting a program into virtual reality",
+          "vWrong3": "compressing memory to save space",
+          "mechQ": "A scheduling MECHANISM (vs policy) is best described as…",
+          "mRight": "the machinery that performs a context switch (the 'how')",
+          "mWrong1": "the rule deciding which process runs next (the 'which')",
+          "mWrong2": "the user's preference for a fast computer",
+          "mWrong3": "the clock frequency of the CPU",
+          "polQ": "Deciding WHICH page to evict when memory is full is an example of a…",
+          "pRight": "policy",
+          "pWrong1": "mechanism",
+          "pWrong2": "device driver",
+          "pWrong3": "system call",
+          "modeQ": "Which is TRUE about CPU privilege modes?",
+          "modeRight": "user mode forbids some instructions; kernel mode allows everything",
+          "modeWrong1": "user mode is faster and more privileged than kernel mode",
+          "modeWrong2": "there is only ever one privilege mode",
+          "modeWrong3": "the kernel runs in user mode for safety",
+          "trapQ": "The controlled doorway a user program uses to enter the kernel is a…",
+          "trapRight": "trap / system call (through the trap table)",
+          "trapWrong1": "direct jump to any kernel address it likes",
+          "trapWrong2": "network packet",
+          "trapWrong3": "compiler directive",
+          "ldeQ": "Under 'limited direct execution', how does the OS regain the CPU from a program that never makes a system call?",
+          "ldeRight": "a periodic timer interrupt forces control back into the kernel",
+          "ldeWrong1": "it politely asks the program to stop",
+          "ldeWrong2": "it cannot — the program runs forever",
+          "ldeWrong3": "it reboots the machine",
+          "whyQ": "Why does a user program run DIRECTLY on the CPU rather than being interpreted by the OS?",
+          "whyRight": "for speed — interpreting every instruction would be far too slow",
+          "whyWrong1": "because the OS has no way to interpret code",
+          "whyWrong2": "to use more memory",
+          "whyWrong3": "it does not — the OS interprets everything",
+          "costQ": "Compared with an ordinary function call, a system call is…",
+          "costRight": "much more expensive (typically hundreds of cycles) — a mode switch and register save/restore",
+          "costWrong1": "exactly the same cost",
+          "costWrong2": "always cheaper",
+          "costWrong3": "free",
+          "kernelQ": "Where does kernel code physically run?",
+          "kRight": "on the same CPU cores as user programs, but in privileged (kernel) mode",
+          "kWrong1": "on a dedicated separate 'OS processor'",
+          "kWrong2": "on the GPU",
+          "kWrong3": "in the cloud",
+          "persistQ": "\"Persistence\" as an OS illusion refers to…",
+          "persistRight": "storing data durably so it survives crashes and outlives any single program",
+          "persistWrong1": "keeping the CPU busy at all times",
+          "persistWrong2": "a stubborn user who won't quit",
+          "persistWrong3": "never turning the computer off"
+        }
+      }
+    </script>
+
+    <primer-quiz name="gradOsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/operating-systems/operating-systems",
+      "computer-science/operating-systems/processes-and-the-process-model"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The kernel/user privilege-boundary figure: four stacked layers (user processes, the syscall trap
+     boundary, the kernel, the hardware), the trap boundary highlighted. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "boundary",
+    ({ board, colors, step, sceneStrings }) => {
+      const W = 9;
+      // Top (high y) to bottom. `hl` marks the highlighted trap boundary.
+      const layers = [
+        { key: "user", hl: false, h: 1.4, sub: "browser   ·   shell   ·   compiler" },
+        { key: "trap", hl: true, h: 0.8, sub: "" },
+        { key: "kernel", hl: false, h: 1.4, sub: "scheduler · virtual memory · file systems · drivers" },
+        { key: "hw", hl: false, h: 1.0, sub: "CPU · MMU · devices" },
+      ];
+      let yTop = 4.6;
+      const bar = (L) => {
+        const yBot = yTop - L.h;
+        board.create(
+          "polygon",
+          [[0, yBot], [W, yBot], [W, yTop], [0, yTop]],
+          {
+            fillColor: L.hl ? colors.cat[1] : colors.cat[0],
+            fillOpacity: L.hl ? 0.32 : 0.2,
+            borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+            vertices: { visible: false },
+            fixed: true, highlight: false,
+          },
+        );
+        board.create("text", [W / 2, yTop - L.h / 2 + (L.sub ? 0.18 : 0), sceneStrings(L.key)], {
+          strokeColor: colors.ink, fontSize: 13, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+          cssStyle: "font-weight:600; max-width:340px",
+        });
+        if (L.sub)
+          board.create("text", [W / 2, yTop - L.h / 2 - 0.24, L.sub], {
+            strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+          });
+        yTop = yBot;
+      };
+      layers.forEach((L) => step(sceneStrings(L.key), () => bar(L)));
+    },
+    {
+      boundingbox: [-0.6, 5.0, 10.6, -0.4],
+      keepAspect: false,
+      title: () => makeStrings("boundary")("title"),
+    },
+  );
+
+  registerQuiz("gradOsQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("threeQ"),
+      options: [
+        { text: () => sceneStrings("tRight"), correct: true },
+        { text: () => sceneStrings("tWrong1"), correct: false },
+        { text: () => sceneStrings("tWrong2"), correct: false },
+        { text: () => sceneStrings("tWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("virtQ"),
+      options: [
+        { text: () => sceneStrings("vRight"), correct: true },
+        { text: () => sceneStrings("vWrong1"), correct: false },
+        { text: () => sceneStrings("vWrong2"), correct: false },
+        { text: () => sceneStrings("vWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("mechQ"),
+      options: [
+        { text: () => sceneStrings("mRight"), correct: true },
+        { text: () => sceneStrings("mWrong1"), correct: false },
+        { text: () => sceneStrings("mWrong2"), correct: false },
+        { text: () => sceneStrings("mWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("polQ"),
+      options: [
+        { text: () => sceneStrings("pRight"), correct: true },
+        { text: () => sceneStrings("pWrong1"), correct: false },
+        { text: () => sceneStrings("pWrong2"), correct: false },
+        { text: () => sceneStrings("pWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("modeQ"),
+      options: [
+        { text: () => sceneStrings("modeRight"), correct: true },
+        { text: () => sceneStrings("modeWrong1"), correct: false },
+        { text: () => sceneStrings("modeWrong2"), correct: false },
+        { text: () => sceneStrings("modeWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("trapQ"),
+      options: [
+        { text: () => sceneStrings("trapRight"), correct: true },
+        { text: () => sceneStrings("trapWrong1"), correct: false },
+        { text: () => sceneStrings("trapWrong2"), correct: false },
+        { text: () => sceneStrings("trapWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ldeQ"),
+      options: [
+        { text: () => sceneStrings("ldeRight"), correct: true },
+        { text: () => sceneStrings("ldeWrong1"), correct: false },
+        { text: () => sceneStrings("ldeWrong2"), correct: false },
+        { text: () => sceneStrings("ldeWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("whyRight"), correct: true },
+        { text: () => sceneStrings("whyWrong1"), correct: false },
+        { text: () => sceneStrings("whyWrong2"), correct: false },
+        { text: () => sceneStrings("whyWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("costQ"),
+      options: [
+        { text: () => sceneStrings("costRight"), correct: true },
+        { text: () => sceneStrings("costWrong1"), correct: false },
+        { text: () => sceneStrings("costWrong2"), correct: false },
+        { text: () => sceneStrings("costWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("kernelQ"),
+      options: [
+        { text: () => sceneStrings("kRight"), correct: true },
+        { text: () => sceneStrings("kWrong1"), correct: false },
+        { text: () => sceneStrings("kWrong2"), correct: false },
+        { text: () => sceneStrings("kWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("persistQ"),
+      options: [
+        { text: () => sceneStrings("persistRight"), correct: true },
+        { text: () => sceneStrings("persistWrong1"), correct: false },
+        { text: () => sceneStrings("persistWrong2"), correct: false },
+        { text: () => sceneStrings("persistWrong3"), correct: false },
+      ],
+    },
+  ]);
+</script>

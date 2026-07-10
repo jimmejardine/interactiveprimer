@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Local Optimization and the DAG</primer-title>
+
+    <primer-card>
+      <p>
+        Inside a single basic block there is no branching, no merging — just a straight run of three-address
+        instructions executed top to bottom. That simplicity is an opportunity. If we can capture what the
+        block <em>computes</em>, stripped of the order in which it happened to be written, we can spot every
+        redundant recomputation, every value that is never used, and every copy that could be short-circuited
+        — all at once, with one data structure. That data structure is the
+        <strong>directed acyclic graph</strong> of the basic block: the DAG.
+      </p>
+      <p>
+        The <primer-ref to="computer-science/compiler-design/optimization/the-principal-sources-of-optimization">catalogue of optimizations</primer-ref>
+        gave us common-subexpression elimination, copy propagation and dead-code elimination as separate ideas.
+        The DAG unifies them: build it once, and all three fall out of simply <em>reading it back</em>. This is
+        local optimization at its most elegant — and it is the intellectual seed of global
+        <em>value numbering</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What the DAG is</h2>
+      <p>
+        A DAG for a basic block has one node per <em>distinct computed value</em>:
+      </p>
+      <ul>
+        <li>
+          <strong>Leaves</strong> are the initial values of variables live on entry — written
+          <primer-math>b_0, c_0, d_0</primer-math> — and constants.
+        </li>
+        <li>
+          <strong>Interior nodes</strong> are labelled with an operator and have edges down to their operand
+          nodes. A node such as <primer-math>+</primer-math> with children <primer-math>b_0</primer-math> and
+          <primer-math>c_0</primer-math> represents the value <primer-math>b_0 + c_0</primer-math>.
+        </li>
+        <li>
+          Each node carries an <strong>attached list of variables</strong> — every program variable whose
+          current value is that node. When two statements compute the same value, they attach to the
+          <em>same</em> node, and there they are: common subexpressions, detected structurally.
+        </li>
+      </ul>
+      <p>
+        The construction is essentially <strong>value numbering</strong>: before creating a node for
+        <primer-math>x \; \text{op} \; y</primer-math>, check whether a node with that same operator and those
+        same two operand-nodes already exists. If it does, reuse it; if not, make a new one. The signature
+        <primer-math>\langle \text{op}, \text{left}, \text{right}\rangle</primer-math> is the value's "number",
+        and equal numbers mean equal values.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Building the DAG for a block</h2>
+      <p>
+        Watch the DAG grow for the Dragon Book's classic four-statement block. Each interior node appears as we
+        process its statement; the payoff comes at the last line, where a value we already have is
+        <em>reused</em> rather than recomputed:
+      </p>
+      <primer-code lang="text">
+        a = b + c
+        b = a - d
+        c = b + c
+        d = a - d
+      </primer-code>
+      <primer-geometry scene="blockDag"></primer-geometry>
+      <p>
+        The revelation is the fourth statement, <code>d = a - d</code>. Its value is
+        <primer-math>a - d_0</primer-math> — but that is exactly the value the second statement,
+        <code>b = a - d</code>, already computed. Its node already exists, so we do not build a new one: we
+        just attach the label <primer-math>d</primer-math> to it. The shared node (highlighted) now carries
+        <strong>both</strong> <primer-math>b</primer-math> and <primer-math>d</primer-math>. That single shared
+        node <em>is</em> the common-subexpression elimination — no separate pass required.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Reading the optimizations off the DAG</h2>
+      <p>
+        Once built, the DAG hands you three optimizations for free when you regenerate code from it:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Optimization</th><th>How the DAG delivers it</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Common-subexpression elimination</strong></td>
+              <td>Two computations of the same value map to one node; you emit the operation once.</td>
+            </tr>
+            <tr>
+              <td><strong>Dead-code elimination</strong></td>
+              <td>A node whose attached variables are all dead on exit (and that no live node depends on) need not be evaluated at all — don't emit it.</td>
+            </tr>
+            <tr>
+              <td><strong>Copy propagation</strong></td>
+              <td>A copy <code>x = y</code> attaches <code>x</code> to <code>y</code>'s node instead of making a new one, so later uses read <code>y</code> directly.</td>
+            </tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        To regenerate optimised code, walk the interior nodes in an order that respects the edges (children
+        before parents — a topological order), emitting one instruction per live node and, for a node with
+        several attached live variables, one assignment to bind each of them. The block that comes out never
+        computes the same value twice.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The DAG in code</h2>
+      <p>
+        Here is the value-numbering builder. Each interior node is keyed by its signature
+        <code>op,leftId,rightId</code>; if the key is already in the table, we reuse the existing node — that
+        reuse <em>is</em> the detected common subexpression. Watch the log flag the fourth statement.
+      </p>
+      <primer-code run>
+        type Stmt = { dst: string; a: string; op: "+" | "-"; b: string };
+
+        interface Node { id: number; label: string; kind: "leaf" | "op"; op?: string; l?: number; r?: number; vars: string[]; }
+
+        function buildDAG(block: Stmt[]) {
+          const nodes: Node[] = [];
+          const env = new Map&lt;string, number&gt;();      // variable -> current node id
+          const sig = new Map&lt;string, number&gt;();      // "op,l,r" -> node id  (value numbering)
+
+          // Look up a variable's node, creating a leaf (its entry value x0) on first mention.
+          const leafOf = (name: string): number =&gt; {
+            if (env.has(name)) return env.get(name)!;
+            const id = nodes.length;
+            nodes.push({ id, label: name + "0", kind: "leaf", vars: [] });
+            env.set(name, id);
+            return id;
+          };
+
+          for (const s of block) {
+            const l = leafOf(s.a);
+            const r = leafOf(s.b);
+            const key = `${s.op},${l},${r}`;
+            let id = sig.get(key);
+            if (id === undefined) {
+              id = nodes.length;
+              nodes.push({ id, label: s.op, kind: "op", op: s.op, l, r, vars: [] });
+              sig.set(key, id);
+            } else {
+              console.log(`  reuse! "${s.dst} = ${s.a} ${s.op} ${s.b}" is a common subexpression of node ${id}`);
+            }
+            // Detach dst from any old node, attach to this one (copy/label bookkeeping).
+            for (const n of nodes) n.vars = n.vars.filter((v) =&gt; v !== s.dst);
+            nodes[id].vars.push(s.dst);
+            env.set(s.dst, id);
+          }
+          return nodes;
+        }
+
+        const block: Stmt[] = [
+          { dst: "a", a: "b", op: "+", b: "c" },
+          { dst: "b", a: "a", op: "-", b: "d" },
+          { dst: "c", a: "b", op: "+", b: "c" },
+          { dst: "d", a: "a", op: "-", b: "d" },
+        ];
+
+        console.log("building DAG:");
+        const nodes = buildDAG(block);
+        console.log("\nnodes:");
+        for (const n of nodes) {
+          const body = n.kind === "leaf" ? n.label : `${n.op}(#${n.l}, #${n.r})`;
+          console.log(`  #${n.id}  ${body}   attached: {${n.vars.join(", ")}}`);
+        }
+      </primer-code>
+      <p>
+        The output shows node <code>#4</code> — the value <primer-math>a - d_0</primer-math> — ending up with
+        <em>both</em> <code>b</code> and <code>d</code> attached, and the fourth statement flagged as a reuse.
+        Four multiplications' worth of source has become three distinct interior nodes.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why does value numbering catch a[i]=x; y=a[i] but not a[i]=x; a[j]=z; y=a[i]?">
+      <p>
+        Because array and pointer stores can <em>invalidate</em> nodes. When you build the DAG and reach an
+        assignment through a memory reference — <code>a[i] = x</code> — you cannot assume any node built from
+        an array load like <code>a[k]</code> is still valid, because <code>i</code> and <code>k</code> might be
+        equal. The safe rule is that a store to <code>a</code> <strong>kills</strong> every node that loaded
+        from <code>a</code>: they must be recomputed if used again. In the first snippet no intervening store
+        can alias, so <code>y = a[i]</code> reuses the just-stored value; in the second, <code>a[j] = z</code>
+        might alias <code>a[i]</code>, so the load node is killed and <code>y = a[i]</code> is recomputed. This
+        conservative killing is exactly what keeps the DAG correct in the presence of aliasing.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The DAG is a local device — one block, no farther">
+      <p>
+        A DAG summarises the values computed within <em>one</em> basic block. It knows nothing about what
+        happens across a branch or a loop back-edge, and it treats every variable live on entry as an opaque
+        leaf. So you must never carry a DAG's conclusions across a block boundary: a value that is a "common
+        subexpression" within a block may be recomputed legitimately in a successor block where an operand has
+        changed. Two further traps: a <strong>store through a pointer or array</strong> kills the loaded-value
+        nodes it might alias (see above), and any <strong>function call</strong> that could have side effects
+        must be treated as killing whatever it might modify. Global redundancy elimination across blocks needs
+        the heavier machinery of <em>available-expressions</em> dataflow analysis, not a single DAG.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "dagQuiz@1": {
+          "intro": "The DAG of a basic block: one node per distinct value, shared nodes = common subexpressions. Numbers change each attempt.",
+          "whatQ": "In a basic-block DAG, an interior node represents…",
+          "wtVal": "a distinct computed value (an operator applied to operand nodes)",
+          "wtStmt": "one source statement, always distinct",
+          "wtVar": "one variable name",
+          "wtBlock": "an entire basic block",
+          "leafQ": "What do the leaves of the DAG represent?",
+          "lfInit": "initial values of variables live on entry, and constants",
+          "lfRes": "the final results only",
+          "lfDead": "the dead variables",
+          "lfOps": "the operators used",
+          "cseQ": "How does the DAG detect a common subexpression?",
+          "cseSame": "two computations of the same value map to the same node",
+          "cseName": "two statements share a variable name",
+          "cseAdj": "two statements are adjacent",
+          "cseConst": "an operand is constant",
+          "vnQ": "The node-reuse test in DAG construction is a form of…",
+          "vnValue": "value numbering — keying a node by ⟨op, left, right⟩",
+          "vnType": "type checking",
+          "vnParse": "parsing",
+          "vnReg": "register allocation",
+          "attachQ": "The list of variables attached to a node tells you…",
+          "atWhich": "which program variables currently hold that value",
+          "atOrder": "the order the block was written",
+          "atCount": "how many times the node was visited",
+          "atType": "the data type of the value",
+          "dceQ": "Reading the DAG, dead-code elimination corresponds to…",
+          "dcSkip": "not emitting a node whose attached variables are all dead on exit and that no live node needs",
+          "dcAll": "emitting every node twice",
+          "dcLeaf": "deleting all leaves",
+          "dcConst": "folding constants only",
+          "killQ": "A store through a pointer or array, or a side-effecting call, forces the DAG to…",
+          "klKill": "kill (invalidate) the nodes it might alias or modify",
+          "klNothing": "do nothing — memory never affects the DAG",
+          "klRestart": "discard the entire program",
+          "klMerge": "merge all nodes into one",
+          "scopeQ": "The DAG optimizations described here are valid…",
+          "scLocal": "only within the single basic block the DAG was built for",
+          "scWhole": "across the whole program automatically",
+          "scLoop": "only inside loops",
+          "scInter": "across procedure calls",
+          "regenQ": "To regenerate optimised code from the DAG you emit nodes in…",
+          "rgTopo": "a topological order — children (operands) before parents",
+          "rgRev": "reverse source order always",
+          "rgRand": "any random order",
+          "rgAlpha": "alphabetical order of variables",
+          "countQ": "A block computes the value (b0 + c0) exactly {k} times in a row with no operand changed between them. How many interior nodes does the DAG create for those computations?",
+          "reuseQ": "A block has {s} statements, of which {r} recompute a value already present in the DAG. How many DISTINCT interior nodes does the DAG end up with?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="dagQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/optimization/the-principal-sources-of-optimization"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // DAG-drawing toolkit: operator/leaf nodes as circles, directed edges down to operands.
+  function dagTools(board, colors) {
+    const r = 0.55;
+    const node = (x, y, text, col, labels = "") => {
+      board.create("circle", [[x, y], r], {
+        strokeColor: col, strokeWidth: 2, fillColor: col, fillOpacity: 0.14,
+        fixed: true, highlight: false,
+      });
+      board.create("text", [x, y, text], {
+        anchorX: "middle", anchorY: "middle", fontSize: 17, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+      if (labels) {
+        board.create("text", [x + r + 0.15, y, labels], {
+          anchorX: "left", anchorY: "middle", fontSize: 14, fixed: true, highlight: false,
+          strokeColor: col, color: col,
+        });
+      }
+    };
+    const edge = (ax, ay, bx, by, col) => {
+      const dx = bx - ax, dy = by - ay, d = Math.hypot(dx, dy), ux = dx / d, uy = dy / d;
+      board.create("arrow", [[ax + ux * r, ay + uy * r], [bx - ux * r, by - uy * r]], {
+        strokeColor: col, strokeWidth: 2, fixed: true, highlight: false,
+      });
+    };
+    return { node, edge };
+  }
+
+  // DAG for  a=b+c; b=a-d; c=b+c; d=a-d.  Node n2 (a-d) is shared by b and d.
+  registerGeometryScene("blockDag", ({ board, step, colors }) => {
+    const T = dagTools(board, colors);
+    // positions
+    const b0 = [-4, 0], c0 = [0, 0], d0 = [4, 0];
+    const n1 = [-2, 2.3];      // + : a
+    const n2 = [1.2, 4.2];     // - : b, d  (shared)
+    const n3 = [-0.6, 6.2];    // + : c
+
+    step("Leaves: the entry values b₀, c₀, d₀.", () => {
+      T.node(b0[0], b0[1], "b₀", colors.line);
+      T.node(c0[0], c0[1], "c₀", colors.line);
+      T.node(d0[0], d0[1], "d₀", colors.line);
+    });
+    step("Statement 1: a = b + c builds a '+' node over b₀ and c₀, attached label a.", () => {
+      T.node(n1[0], n1[1], "+", colors.cat[0], "a");
+      T.edge(n1[0], n1[1], b0[0], b0[1], colors.cat[0]);
+      T.edge(n1[0], n1[1], c0[0], c0[1], colors.cat[0]);
+    });
+    step("Statement 2: b = a − d builds a '−' node over node(a) and d₀, attached label b.", () => {
+      T.node(n2[0], n2[1], "−", colors.cat[2], "b");
+      T.edge(n2[0], n2[1], n1[0], n1[1], colors.cat[2]);
+      T.edge(n2[0], n2[1], d0[0], d0[1], colors.cat[2]);
+    });
+    step("Statement 3: c = b + c builds a '+' node over node(b) and c₀, attached label c.", () => {
+      T.node(n3[0], n3[1], "+", colors.cat[1], "c");
+      T.edge(n3[0], n3[1], n2[0], n2[1], colors.cat[1]);
+      T.edge(n3[0], n3[1], c0[0], c0[1], colors.cat[1]);
+    });
+    step("Statement 4: d = a − d is the SAME value a − d₀ — reuse node #2, just attach label d. Common subexpression found!", () => {
+      // redraw the shared node emphasised with both labels
+      T.node(n2[0], n2[1], "−", colors.cat[3], "b, d");
+    });
+  }, { boundingbox: [-6, 7.4, 6, -1.2], keepAspect: false, title: "DAG of a=b+c; b=a−d; c=b+c; d=a−d — node a−d is shared" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("dagQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("whatQ"),
+      options: [
+        { text: () => sceneStrings("wtVal"), correct: true },
+        { text: () => sceneStrings("wtStmt"), correct: false },
+        { text: () => sceneStrings("wtVar"), correct: false },
+        { text: () => sceneStrings("wtBlock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("leafQ"),
+      options: [
+        { text: () => sceneStrings("lfInit"), correct: true },
+        { text: () => sceneStrings("lfRes"), correct: false },
+        { text: () => sceneStrings("lfDead"), correct: false },
+        { text: () => sceneStrings("lfOps"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cseQ"),
+      options: [
+        { text: () => sceneStrings("cseSame"), correct: true },
+        { text: () => sceneStrings("cseName"), correct: false },
+        { text: () => sceneStrings("cseAdj"), correct: false },
+        { text: () => sceneStrings("cseConst"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("vnQ"),
+      options: [
+        { text: () => sceneStrings("vnValue"), correct: true },
+        { text: () => sceneStrings("vnType"), correct: false },
+        { text: () => sceneStrings("vnParse"), correct: false },
+        { text: () => sceneStrings("vnReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("attachQ"),
+      options: [
+        { text: () => sceneStrings("atWhich"), correct: true },
+        { text: () => sceneStrings("atOrder"), correct: false },
+        { text: () => sceneStrings("atCount"), correct: false },
+        { text: () => sceneStrings("atType"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dceQ"),
+      options: [
+        { text: () => sceneStrings("dcSkip"), correct: true },
+        { text: () => sceneStrings("dcAll"), correct: false },
+        { text: () => sceneStrings("dcLeaf"), correct: false },
+        { text: () => sceneStrings("dcConst"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("killQ"),
+      options: [
+        { text: () => sceneStrings("klKill"), correct: true },
+        { text: () => sceneStrings("klNothing"), correct: false },
+        { text: () => sceneStrings("klRestart"), correct: false },
+        { text: () => sceneStrings("klMerge"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("scopeQ"),
+      options: [
+        { text: () => sceneStrings("scLocal"), correct: true },
+        { text: () => sceneStrings("scWhole"), correct: false },
+        { text: () => sceneStrings("scLoop"), correct: false },
+        { text: () => sceneStrings("scInter"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("regenQ"),
+      options: [
+        { text: () => sceneStrings("rgTopo"), correct: true },
+        { text: () => sceneStrings("rgRev"), correct: false },
+        { text: () => sceneStrings("rgRand"), correct: false },
+        { text: () => sceneStrings("rgAlpha"), correct: false },
+      ],
+    },
+    {
+      // k identical recomputations collapse to ONE interior node.
+      prompt: (v) => sceneStrings("countQ", v),
+      variables: "k=[2:8]",
+      answer: () => 1,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // s statements, r of them reuse -> s - r distinct interior nodes.
+      prompt: (v) => sceneStrings("reuseQ", v),
+      variables: "s=[4:9] r=[1:3]",
+      constraints: "r < s",
+      answer: (v) => v.s - v.r,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

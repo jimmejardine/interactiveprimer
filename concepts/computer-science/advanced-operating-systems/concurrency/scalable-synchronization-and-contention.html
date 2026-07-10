@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Scalable Synchronization and Contention</primer-title>
+
+    <primer-card>
+      <p>
+        You have a program that runs beautifully on 4 cores. You move it to a 64-core server expecting a
+        <primer-math>16\times</primer-math> boost — and it runs <em>slower</em> than on 4. Not a little slower;
+        measurably, humiliatingly slower. The culprit is almost always a single hot lock. This lesson is about the
+        physics of that collapse: why one lock does not merely fail to help but actively <em>destroys</em>
+        throughput as cores pile on, and the toolkit — per-CPU data, sharding, RCU, cache-line padding — that
+        kernel engineers use to claw scalability back.
+      </p>
+      <p>
+        The intuition from
+        <primer-ref to="computer-science/computer-architecture/foundations/amdahls-law">Amdahl's law</primer-ref>
+        already warns you that a serial fraction caps speedup. But Amdahl is <em>optimistic</em>: it assumes the
+        serial part costs the same no matter how many cores wait. Real locks are worse, because contention adds a
+        cost that <em>grows</em> with the number of contenders — the
+        <primer-ref to="computer-science/computer-architecture/multicore/cache-coherence-and-snooping">coherence
+        traffic</primer-ref> of shuttling the lock's cache line between them. Past a point, adding a core
+        subtracts throughput.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two costs, not one</h2>
+      <p>
+        A single global lock imposes <em>two</em> distinct penalties as you add cores, and it is vital to keep them
+        apart:
+      </p>
+      <ul>
+        <li><strong>Serialization</strong> — only one core can be inside the critical section at a time, so that
+          work cannot go in parallel. This is the Amdahl term. It flattens throughput to a ceiling but does not, by
+          itself, make things go backwards.</li>
+        <li><strong>Coherence / crosstalk</strong> — every core that <em>tries</em> the lock must pull its cache
+          line to its own cache in Modified state, invalidating everyone else. This traffic grows roughly as the
+          square of the number of contenders, and it is <em>pure overhead</em> stolen from useful work. This is the
+          term that turns the curve <em>downward</em>.</li>
+      </ul>
+      <p>
+        The <strong>Universal Scalability Law</strong> (USL) captures both. If <primer-math>N</primer-math> cores
+        would ideally give throughput <primer-math>N</primer-math>, the real throughput is
+      </p>
+      <primer-math display>C(N) \;=\; \frac{N}{1 \;+\; \alpha\,(N-1) \;+\; \beta\,N\,(N-1)}.</primer-math>
+      <p>
+        Here <primer-math>\alpha</primer-math> is the <strong>contention</strong> (serialization) coefficient and
+        <primer-math>\beta</primer-math> is the <strong>coherence</strong> (crosstalk) coefficient. With
+        <primer-math>\beta = 0</primer-math> you recover an Amdahl-like ceiling. But any
+        <primer-math>\beta &gt; 0</primer-math> gives the curve a <em>peak</em>: it rises, tops out, and then
+        <em>declines</em> — the retrograde scalability that defines a contended lock.
+      </p>
+      <primer-theorem name="Why one lock kills scalability">
+        <ul>
+          <li><strong>Serialization</strong>: the critical section runs one-at-a-time — an Amdahl ceiling of
+            <primer-math>1/\alpha</primer-math>;</li>
+          <li><strong>Coherence</strong>: contenders bounce the lock's cache line, adding
+            <primer-math>O(N^2)</primer-math> traffic — the <primer-math>\beta</primer-math> term;</li>
+          <li>together they give a throughput <em>peak</em> at
+            <primer-math>N^\star = \sqrt{(1-\alpha)/\beta}</primer-math>, beyond which more cores mean
+            <em>less</em> throughput.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Strings for the USL throughput-vs-cores chart. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "usl": {
+          "title": "Throughput vs cores: with coherence crosstalk (β), the curve peaks then collapses",
+          "alpha": "Contention α (serialization)",
+          "beta": "Coherence β (crosstalk)",
+          "legReal": "actual throughput C(N)",
+          "legIdeal": "ideal linear N"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Watch the curve turn over</h2>
+      <p>
+        Below is the USL. The dashed line is the fantasy — linear scaling, throughput equal to core count. The
+        solid curve is reality. Drag <primer-math>\alpha</primer-math> (contention) and watch the ceiling drop;
+        then nudge <primer-math>\beta</primer-math> (coherence crosstalk) up off zero and watch the curve stop
+        being a ceiling and become a <em>hill</em> — throughput peaks and then falls off a cliff as cores are
+        added. That downturn is the single global lock destroying your machine. The peak sits at
+        <primer-math>N^\star = \sqrt{(1-\alpha)/\beta}</primer-math>; adding cores past it is worse than useless.
+      </p>
+      <primer-chart scene="usl"></primer-chart>
+      <primer-chart-sliders name="usl"></primer-chart-sliders>
+    </primer-card>
+
+    <primer-card>
+      <h2>The toolkit: how kernels claw scalability back</h2>
+      <p>
+        Every scalable-synchronization technique is, at heart, a way to make cores stop touching the <em>same</em>
+        cache line. If they don't share the line, there is no coherence traffic, and <primer-math>\beta</primer-math>
+        collapses toward zero. The kernel toolkit:
+      </p>
+      <ul>
+        <li><strong>Per-CPU data</strong> — give each core its own private copy of the counter/statistic/free-list,
+          so the common path touches only local memory (no sharing at all). Aggregate lazily when someone actually
+          needs the global total. This is why kernel statistics counters are per-CPU.</li>
+        <li><strong>Sharding / lock striping</strong> — replace one lock over a big table with
+          <primer-math>k</primer-math> locks, each over a slice, hashing keys to shards. Contention drops by a
+          factor of <primer-math>k</primer-math> because independent operations touch independent locks (Java's
+          old <primer-math>\texttt{ConcurrentHashMap}</primer-math> did exactly this).</li>
+        <li><strong>RCU</strong> — for read-mostly data, remove the read-side lock entirely (see
+          <primer-ref to="computer-science/advanced-operating-systems/concurrency/read-copy-update-rcu">RCU</primer-ref>);
+          readers touch no shared writable line at all.</li>
+        <li><strong>Cache-line padding</strong> — eliminate <em>false</em> sharing (below) by padding hot fields to
+          their own cache line.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>False sharing: contention you never asked for</h2>
+      <p>
+        The cruellest scalability bug is <strong>false sharing</strong>. Two cores update two <em>completely
+        independent</em> variables — no logical contention whatsoever — but the two variables happen to sit in the
+        <em>same 64-byte cache line</em>. Coherence works at cache-line granularity, so each write invalidates the
+        <em>whole line</em> in the other core's cache, and the line ping-pongs exactly as if the cores were
+        fighting over one lock. Your carefully lock-free per-core counters silently serialize because the compiler
+        packed them adjacently. The demo shows the cost.
+      </p>
+      <primer-code run>
+        // False sharing: two "independent" per-core counters that land in the SAME cache line
+        // ping-pong that line between cores. Padding them to separate lines removes the traffic.
+        const LINE = 64;   // bytes per cache line
+
+        // Model: coherence transfers = number of writes that hit a line another core owns.
+        function coherenceTransfers(layoutBytesApart: number, writesPerCore: number, cores: number): number {
+          const sameLine = layoutBytesApart &lt; LINE;   // do the two counters share a line?
+          // If they share a line, every write by any core steals the line from the previous writer.
+          return sameLine ? writesPerCore * cores : 0;
+        }
+
+        const writes = 1_000_000, cores = 2;
+        const packed  = coherenceTransfers(8,  writes, cores);   // counters 8 bytes apart -> SAME line
+        const padded  = coherenceTransfers(64, writes, cores);   // counters padded to separate lines
+
+        console.log(`packed  (8B apart, shared line):  ${packed.toLocaleString()} coherence transfers`);
+        console.log(`padded (64B apart, own lines):    ${padded.toLocaleString()} coherence transfers`);
+        console.log(`speedup from padding: ${packed === 0 ? "n/a" : "avoids " + packed.toLocaleString() + " bounces"}`);
+
+        // The scalability-commutativity rule of thumb: operations that COMMUTE can, in principle,
+        // be made to scale (no communication forced). Non-commuting ops force shared state.
+        function commutes(opA: string, opB: string): boolean {
+          // increment/increment commute (order-independent); read-after-write does not.
+          const commutingPairs = new Set(["inc|inc", "read|read"]);
+          const key = [opA, opB].sort().join("|");
+          return commutingPairs.has(key);
+        }
+        console.log(`inc & inc commute?  ${commutes("inc", "inc")}  -> can scale`);
+        console.log(`write & read commute? ${commutes("write", "read")} -> forces sharing`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Reader-writer locks are not a free lunch</h2>
+      <p>
+        A tempting "fix" for a read-heavy lock is a <strong>reader-writer lock</strong>: many readers concurrently,
+        writers exclusive. But it disappoints on many cores for a subtle reason: <em>readers still write</em>. To
+        register as a reader, each must atomically bump a shared reader count — and that shared counter's cache
+        line ping-pongs between all the readers exactly like a plain lock. So a rwlock under heavy read load can
+        scale <em>no better</em> than a mutex, because the "read lock" itself is a contended write. This is
+        precisely the gap RCU fills: RCU readers write <em>nothing</em>, so there is no shared line to bounce. The
+        lesson: a lock that requires any shared writable state on the hot path cannot escape the coherence tax —
+        the only true fix is to stop sharing the line.
+      </p>
+      <p>
+        This crystallises into a design principle, the <strong>scalability commutativity rule</strong>: <em>whenever
+        two operations commute — their results don't depend on the order they run — it is possible to implement
+        them so they scale (require no communication).</em> If operations are forced to share mutable state, look
+        for a reformulation where they commute; if they genuinely don't commute, no amount of clever locking will
+        make them scale, and you must change the interface, not the lock.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why can a benchmark get FASTER when you pin it to fewer cores?">
+      <p>
+        Operators of big in-memory databases learn a counterintuitive trick: sometimes you cap the thread pool
+        <em>below</em> the core count and throughput <em>rises</em>. The USL explains it exactly. If a workload's
+        coherence coefficient <primer-math>\beta</primer-math> is high, its throughput curve peaks at some
+        <primer-math>N^\star</primer-math> and declines after. Running on <em>more</em> cores than
+        <primer-math>N^\star</primer-math> puts you on the downslope, where extra threads add more crosstalk than
+        work. Pinning to <primer-math>N^\star</primer-math> cores lands you at the summit. This is why "throw more
+        hardware at it" can backfire, and why serious tuning starts by <em>measuring</em>
+        <primer-math>\alpha</primer-math> and <primer-math>\beta</primer-math> from a scalability curve rather than
+        assuming linear speedup. The bottleneck is not the CPUs; it is the conversation between them.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A lock-free or fine-grained design can still suffer coherence collapse">
+      <p>
+        Splitting one lock into a hundred, or going lock-free, attacks the <em>serialization</em> term
+        <primer-math>\alpha</primer-math> — but it does nothing for <primer-math>\beta</primer-math> if the cores
+        still hammer a shared cache line. A lock-free counter that every core increments with a CAS still bounces
+        one line and still collapses under the same <primer-math>O(N^2)</primer-math> crosstalk. Fine-grained
+        locking on a tree whose root pointer every operation reads-then-writes still serializes on the root's line.
+        The mental model to keep is not "locks bad, lock-free good" — it is "<em>shared writable cache lines
+        bad</em>." Ask of any hot path: how many distinct cache lines do <primer-math>N</primer-math> cores write?
+        If the answer doesn't grow with <primer-math>N</primer-math> (per-CPU data, RCU, sharding), you scale; if
+        it's a small constant that all cores touch, you don't — whatever the locking discipline.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: serialization vs coherence, USL, per-CPU/sharding/RCU, false sharing, rwlock pitfall, commutativity. Bank of 13, draws 5, incl. numeric USL. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "contentionQuiz@1": {
+          "intro": "One global lock imposes serialization (α, an Amdahl ceiling) AND coherence crosstalk (β, O(N²) traffic) that makes throughput PEAK then fall. Fixes: per-CPU data, sharding, RCU, cache-line padding. Shared writable lines are the enemy.",
+          "twoQ": "The two distinct penalties a single global lock imposes as cores are added are…",
+          "twRight": "serialization (one-at-a-time) and coherence crosstalk (cache-line bouncing)",
+          "twOnly": "only serialization — nothing else",
+          "twRam": "memory bandwidth and disk latency",
+          "twNone": "there is no penalty from a single lock",
+          "retroQ": "Which term is responsible for throughput actually DECREASING as cores are added?",
+          "reRight": "the coherence/crosstalk term (β, growing like N²)",
+          "reSer": "the serialization term (α), which only flattens the curve",
+          "reRam": "the amount of RAM",
+          "reClock": "the CPU clock speed",
+          "uslQ": "In the Universal Scalability Law, setting β = 0 gives you…",
+          "usRight": "an Amdahl-like ceiling (rises and flattens, never declines)",
+          "usLin": "perfect linear scaling forever",
+          "usZero": "zero throughput",
+          "usPeak": "an immediate peak at N = 1",
+          "percpuQ": "Per-CPU data improves scalability by…",
+          "pcRight": "giving each core private state so the hot path touches no shared cache line",
+          "pcLock": "adding one big lock around all cores",
+          "pcSlow": "making every access go to main memory",
+          "pcNone": "doing nothing to reduce sharing",
+          "shardQ": "Lock striping (sharding) reduces contention by…",
+          "shRight": "splitting one lock into k locks over k slices, so independent ops hit independent locks",
+          "shOne": "using a single lock more efficiently",
+          "shNo": "removing all locks unconditionally",
+          "shRam": "adding more memory",
+          "falseQ": "False sharing occurs when…",
+          "faRight": "two independent variables share one cache line, so writes to either bounce the whole line",
+          "faLock": "two threads intentionally share one lock",
+          "faSame": "two threads write the same variable",
+          "faDisk": "two files share one disk block",
+          "padQ": "The fix for false sharing is to…",
+          "paRight": "pad the hot fields so each sits on its own cache line",
+          "paLock": "add a lock around both variables",
+          "paMerge": "pack the variables closer together",
+          "paNone": "increase the clock speed",
+          "rwlockQ": "A reader-writer lock can scale no better than a mutex under heavy read load because…",
+          "rwRight": "each reader must atomically write a shared reader count, bouncing that line",
+          "rwNo": "readers are forbidden to run concurrently",
+          "rwWrite": "writers run concurrently and corrupt data",
+          "rwNone": "rwlocks always scale perfectly",
+          "commuteQ": "The scalability commutativity rule says that operations which commute…",
+          "coRight": "can be implemented to scale (they need not communicate)",
+          "coNever": "can never be made to scale",
+          "coLock": "must always share one global lock",
+          "coSame": "are identical to non-commuting operations",
+          "lockfreeQ": "Going lock-free does NOT fix scalability when…",
+          "lfRight": "all cores still write one shared cache line (the coherence β term remains)",
+          "lfAlways": "never — lock-free always scales perfectly",
+          "lfSer": "it only ever helps the β term",
+          "lfNone": "the data is read-only",
+          "modelQ": "The right question to ask of any hot path for scalability is…",
+          "moRight": "how many distinct cache lines do N cores WRITE, and does that grow with N?",
+          "moLock": "is it a lock or lock-free?",
+          "moRam": "how much RAM does it use?",
+          "moClock": "what is the clock speed?",
+          "numQ": "USL with α = 0.0{ap} and β = 0.00{bp}: at N = {n} cores, the relative throughput C(N) is? (2 d.p.)",
+          "peakQ": "USL with α = 0.0{ap} and β = 0.00{bp}: the throughput PEAK is at N* = √((1−α)/β), rounded to the nearest integer cores. N* = ?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="contentionQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/concurrency/kernel-locks-and-mcs",
+      "computer-science/computer-architecture/multicore/cache-coherence-and-snooping"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- USL throughput-vs-cores chart (actual C(N) solid; ideal linear dashed) driven by α, β sliders,
+     plus the randomised quiz incl. numeric USL. Colours only from themeColors() via the line thunk. -->
+<script type="module">
+  import { registerCharts, registerChartSliders, registerQuiz, makeStrings } from "primer";
+
+  const us = makeStrings("usl");
+  registerChartSliders("usl", [
+    { name: "a", label: () => us("alpha"), min: 0, max: 0.1, step: 0.005, value: 0.03, anchors: [0, 0.03, 0.06, 0.1] },
+    { name: "b", label: () => us("beta"), min: 0, max: 0.01, step: 0.0005, value: 0.002, anchors: [0, 0.002, 0.005, 0.01] },
+  ]);
+  registerCharts(
+    [{
+      name: "usl",
+      f: [
+        (n, s) => n / (1 + s.a * (n - 1) + s.b * n * (n - 1)),
+        (n) => n,
+      ],
+      line: (colors, i) =>
+        i === 0
+          ? { strokeColor: colors.cat[0], strokeWidth: 4 }
+          : { strokeColor: colors.line, strokeWidth: 2, dash: 2 },
+      legend: [() => us("legReal"), () => us("legIdeal")],
+    }],
+    {
+      id: "usl",
+      title: () => us("title"),
+      xmin: 1, xmax: 64, xticks: 8,
+      ymin: 0, ymax: 32, yticks: 4,
+      xaxisname: "cores N", yaxisname: "throughput",
+    },
+    "usl",
+  );
+
+  registerQuiz("contentionQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("twoQ"),
+      options: [
+        { text: () => sceneStrings("twRight"), correct: true },
+        { text: () => sceneStrings("twOnly"), correct: false },
+        { text: () => sceneStrings("twRam"), correct: false },
+        { text: () => sceneStrings("twNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("retroQ"),
+      options: [
+        { text: () => sceneStrings("reRight"), correct: true },
+        { text: () => sceneStrings("reSer"), correct: false },
+        { text: () => sceneStrings("reRam"), correct: false },
+        { text: () => sceneStrings("reClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("uslQ"),
+      options: [
+        { text: () => sceneStrings("usRight"), correct: true },
+        { text: () => sceneStrings("usLin"), correct: false },
+        { text: () => sceneStrings("usZero"), correct: false },
+        { text: () => sceneStrings("usPeak"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("percpuQ"),
+      options: [
+        { text: () => sceneStrings("pcRight"), correct: true },
+        { text: () => sceneStrings("pcLock"), correct: false },
+        { text: () => sceneStrings("pcSlow"), correct: false },
+        { text: () => sceneStrings("pcNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("shardQ"),
+      options: [
+        { text: () => sceneStrings("shRight"), correct: true },
+        { text: () => sceneStrings("shOne"), correct: false },
+        { text: () => sceneStrings("shNo"), correct: false },
+        { text: () => sceneStrings("shRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("falseQ"),
+      options: [
+        { text: () => sceneStrings("faRight"), correct: true },
+        { text: () => sceneStrings("faLock"), correct: false },
+        { text: () => sceneStrings("faSame"), correct: false },
+        { text: () => sceneStrings("faDisk"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("padQ"),
+      options: [
+        { text: () => sceneStrings("paRight"), correct: true },
+        { text: () => sceneStrings("paLock"), correct: false },
+        { text: () => sceneStrings("paMerge"), correct: false },
+        { text: () => sceneStrings("paNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rwlockQ"),
+      options: [
+        { text: () => sceneStrings("rwRight"), correct: true },
+        { text: () => sceneStrings("rwNo"), correct: false },
+        { text: () => sceneStrings("rwWrite"), correct: false },
+        { text: () => sceneStrings("rwNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("commuteQ"),
+      options: [
+        { text: () => sceneStrings("coRight"), correct: true },
+        { text: () => sceneStrings("coNever"), correct: false },
+        { text: () => sceneStrings("coLock"), correct: false },
+        { text: () => sceneStrings("coSame"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lockfreeQ"),
+      options: [
+        { text: () => sceneStrings("lfRight"), correct: true },
+        { text: () => sceneStrings("lfAlways"), correct: false },
+        { text: () => sceneStrings("lfSer"), correct: false },
+        { text: () => sceneStrings("lfNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("modelQ"),
+      options: [
+        { text: () => sceneStrings("moRight"), correct: true },
+        { text: () => sceneStrings("moLock"), correct: false },
+        { text: () => sceneStrings("moRam"), correct: false },
+        { text: () => sceneStrings("moClock"), correct: false },
+      ],
+    },
+    {
+      // USL throughput: alpha = ap/100, beta = bp/1000.
+      prompt: (v) => sceneStrings("numQ", v),
+      variables: "ap=[2:8] bp=[1:5] n=[8,16,32]",
+      answer: (v) => {
+        const a = v.ap / 100, b = v.bp / 1000, n = v.n;
+        return Math.round((n / (1 + a * (n - 1) + b * n * (n - 1))) * 100) / 100;
+      },
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Peak location N* = sqrt((1-alpha)/beta), rounded to nearest integer.
+      prompt: (v) => sceneStrings("peakQ", v),
+      variables: "ap=[2:8] bp=[1:5]",
+      answer: (v) => {
+        const a = v.ap / 100, b = v.bp / 1000;
+        return Math.round(Math.sqrt((1 - a) / b));
+      },
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

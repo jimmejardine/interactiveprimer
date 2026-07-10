@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Microkernels and Message Passing</primer-title>
+
+    <primer-card>
+      <p>
+        The <primer-ref to="computer-science/advanced-operating-systems/kernel/kernel-architectures">previous
+        lesson</primer-ref> left us with a provocation: a microkernel puts almost nothing in the privileged
+        kernel. So if the file system, the network stack, and every driver are ordinary user processes, how does
+        <em>anything</em> get done? A program can't call a function in another address space. The answer is the
+        one primitive a microkernel really cares about: <strong>message passing</strong> — inter-process
+        communication (IPC). In a microkernel, IPC isn't a feature; it is the bloodstream. Every service request,
+        every reply, every page fault delegated to a user pager travels as a message through the kernel.
+      </p>
+      <p>
+        This makes IPC performance <em>the</em> number that decides whether a microkernel is a beautiful idea or
+        a usable system. The story of microkernels is largely the story of that one number going from
+        embarrassing (Mach, early 1990s) to spectacular (the L4 family), and of a security model — capabilities —
+        that grew up alongside it. That is this lesson.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The three things a microkernel keeps</h2>
+      <p>
+        Jochen Liedtke's <strong>minimality principle</strong> is the microkernel's constitution: <em>a concept
+        is tolerated inside the kernel only if moving it outside would prevent the system from working at all.</em>
+        Apply that razor and what survives is a startlingly short list:
+      </p>
+      <primer-theorem name="The microkernel's irreducible core">
+        <ul>
+          <li><strong>Address spaces</strong> — the mechanism that isolates one server from another (built on the
+            <primer-ref to="computer-science/operating-systems/virtual-memory-and-paging">MMU</primer-ref>).
+            Can't be outside: it <em>is</em> the isolation.</li>
+          <li><strong>Threads and scheduling</strong> — someone must dispense the CPU; that requires privilege.</li>
+          <li><strong>IPC</strong> — the only way isolated address spaces can cooperate. Without it, isolated
+            servers are just isolated.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Everything else — file systems, drivers, paging <em>policy</em>, the network stack, even much of memory
+        management — is exiled to user space. The kernel becomes a tiny, auditable arbiter (seL4 is about
+        <primer-math>10{,}000</primer-math> lines of C) whose main job is to move messages between servers
+        quickly and safely.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the IPC round-trip figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "ipc": {
+          "title": "A synchronous IPC round trip — client Call() blocks, the kernel switches to the server, the reply switches back",
+          "clientLab": "CLIENT (user process)",
+          "serverLab": "SERVER (user process, e.g. file system)",
+          "kernLab": "MICROKERNEL",
+          "s1": "Client executes Call(server) — a trap into the kernel",
+          "s2": "Kernel transfers the message and switches address space to the server",
+          "s3": "Server runs the request (e.g. reads a block)",
+          "s4": "Server executes Reply() — a trap back into the kernel",
+          "s5": "Kernel switches back and delivers the reply to the client",
+          "call": "Call(fs, msg)\\nblocks, waiting",
+          "in": "transfer msg\\nswitch to server",
+          "work": "handle request\\n(read block)",
+          "reply": "Reply(result)",
+          "out": "switch back\\ndeliver reply",
+          "resume": "client resumes\\nwith result"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>One round trip, close up</h2>
+      <p>
+        Microkernel IPC is classically <strong>synchronous</strong> and <em>rendezvous</em>-based: the client
+        calls, blocks, and is unblocked only when the server replies — like a function call that happens to span
+        two address spaces. There is no buffering in the kernel; sender and receiver meet, the message is copied
+        (or, for small messages, passed in registers), and control hands over. Watch the five stages.
+      </p>
+      <primer-geometry scene="ipc"></primer-geometry>
+      <p>
+        Count the crossings: the client's <primer-math>\texttt{Call}</primer-math> is one kernel entry, the
+        server's <primer-math>\texttt{Reply}</primer-math> is another, and each involves an address-space switch.
+        That is why a naïve file read in a microkernel costs several times what it does in Linux — and why making
+        this exact path fast was the L4 project's obsession.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The "microkernels are slow" era — and its end</h2>
+      <p>
+        The reputation was earned honestly. <strong>Mach</strong> (CMU, 1980s) became the famous
+        microkernel — it underlies NeXTSTEP and, to this day, the XNU core of macOS and iOS. But Mach's IPC was
+        heavy: large, general messages, port lookups, and poor cache behaviour meant a round trip cost on the
+        order of <primer-math>100</primer-math> microseconds — thousands of cycles. Systems built by layering a
+        Unix server on Mach (like early OSF/1) paid that tax constantly and felt sluggish. The lesson the field
+        drew — "microkernels are inherently slow" — was <em>wrong</em>, but understandable.
+      </p>
+      <p>
+        Then Jochen Liedtke built <strong>L4</strong> and demolished the premise. By ruthless design — messages
+        small enough to pass in registers, no kernel buffering, a hand-tuned IPC path, careful cache and TLB
+        behaviour — L4 cut IPC to a few hundred cycles, roughly <primer-math>10</primer-math>–<primer-math>20\times</primer-math>
+        faster than Mach. Suddenly a microkernel could be practical. Its descendants — Fiasco, OKL4 (shipped on
+        billions of phone basebands), and finally <strong>seL4</strong> — carried the torch, seL4 adding a
+        machine-checked proof that the kernel's C code matches its specification.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Kernel</th><th>Era</th><th>One-way IPC (order of magnitude)</th><th>Claim to fame</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Mach</strong></td><td>late 1980s</td><td><primer-math>\sim 100</primer-math> µs (thousands of cycles)</td><td>the microkernel; lives on in XNU / macOS</td></tr>
+            <tr><td><strong>L4 (original)</strong></td><td>1993–95</td><td><primer-math>\sim 150</primer-math>–<primer-math>500</primer-math> cycles</td><td>killed the "microkernels are slow" myth</td></tr>
+            <tr><td><strong>seL4</strong></td><td>2009–</td><td><primer-math>\sim 300</primer-math> cycles (fastpath)</td><td>first formally verified OS kernel</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-card>
+      <h2>Modelling the fast path</h2>
+      <p>
+        Why is a synchronous round trip <em>two</em> crossings, and how does batching or an async design change
+        the arithmetic? The simulation walks a request from client to server and back, tallying the kernel
+        entries, then compares a Mach-scale cost with an L4-scale cost for a workload of many requests.
+      </p>
+      <primer-code run>
+        // A synchronous IPC round trip and what it costs at Mach vs L4 speeds.
+        type Stage = { who: string; act: string; kernelEntry: boolean };
+
+        const roundTrip: Stage[] = [
+          { who: "client", act: "Call(fs, msg)", kernelEntry: true  },  // trap in
+          { who: "kernel", act: "transfer msg, switch to server", kernelEntry: false },
+          { who: "server", act: "handle request", kernelEntry: false },
+          { who: "server", act: "Reply(result)", kernelEntry: true  },  // trap in
+          { who: "kernel", act: "switch back, deliver reply", kernelEntry: false },
+        ];
+
+        let crossings = 0;
+        for (const s of roundTrip) {
+          crossings += s.kernelEntry ? 1 : 0;
+          console.log(`${s.who.padEnd(6)} | ${s.act}${s.kernelEntry ? "   [kernel entry]" : ""}`);
+        }
+        console.log(`\ncrossings per round trip = ${crossings}`);
+
+        const N = 100_000;                       // requests in a busy second
+        const machCyclesPerCrossing = 3000;      // Mach-scale, heavy IPC
+        const l4CyclesPerCrossing   = 300;       // L4-scale, register-fast IPC
+        const mach = N * crossings * machCyclesPerCrossing;
+        const l4   = N * crossings * l4CyclesPerCrossing;
+        console.log(`Mach: ${(mach / 1e9).toFixed(1)}e9 cycles for ${N} requests`);
+        console.log(`L4:   ${(l4 / 1e9).toFixed(1)}e9 cycles  (${(mach / l4).toFixed(0)}x cheaper)`);
+        console.log("=> same architecture; the ONLY difference is IPC speed -> viability");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Capabilities — who is allowed to send to whom</h2>
+      <p>
+        If any process could send a message to any server, isolation would be meaningless — a malicious app could
+        message the disk driver directly and scribble on the raw device. So modern microkernels (seL4, Fuchsia's
+        Zircon) gate IPC with <strong>capabilities</strong>: an unforgeable, kernel-protected token that both
+        <em>names</em> a resource (a specific endpoint, a page, a thread) <em>and</em> conveys the right to use
+        it. To talk to the file server you must <em>hold a capability</em> to its endpoint; no capability, no
+        conversation.
+      </p>
+      <ul>
+        <li>Capabilities live in kernel-protected slots — a process holds handles, never raw pointers, so it
+          cannot forge or guess one.</li>
+        <li>They are the natural fit for message passing: a <primer-math>\texttt{Call}</primer-math> is
+          "invoke <em>this capability</em> with this message." Access control and addressing become the same act.</li>
+        <li>Rights can be <strong>delegated and attenuated</strong> — a server can hand a client a read-only
+          capability to a page — which makes least-privilege composition natural. This contrasts with the
+          ambient-authority ACL model in monolithic Unix, where a process acts with all its user's rights at once.</li>
+      </ul>
+    </primer-card>
+
+    <primer-vignette title="How do you PROVE a kernel has no bugs? The seL4 story">
+      <p>
+        In 2009 a team at NICTA in Australia did something audacious: they wrote a formal, machine-checked proof,
+        in the Isabelle/HOL theorem prover, that seL4's <primer-math>\sim 10{,}000</primer-math> lines of C
+        <em>refine</em> an abstract specification — meaning the implementation can never deviate from the spec,
+        so there are no buffer overflows, null dereferences, or unexpected behaviours, <em>ever</em>, for any
+        input. Later work extended the guarantee down to the compiled binary and up to security properties
+        (integrity and confidentiality). The proof cost roughly <primer-math>20</primer-math> person-years and
+        ran to hundreds of thousands of lines of proof script — economically insane for a 30-million-line
+        monolith, but feasible precisely <em>because</em> the microkernel is tiny. It is the sharpest possible
+        demonstration of the minimality principle's payoff: shrink the trusted core enough and you can prove it
+        correct.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Microkernels are slow' is a myth about Mach, not about microkernels">
+      <p>
+        The single most common misconception in this area is treating microkernel slowness as a law of nature. It
+        is not. Mach was slow because of <em>specific implementation choices</em> — large general messages, port
+        indirection, cache-unfriendly layout — not because putting servers in user space is inherently doomed.
+        Liedtke's L4 ran the exact same architecture <primer-math>10</primer-math>–<primer-math>20\times</primer-math>
+        faster by treating IPC as a first-class engineering problem. So when you read "microkernels are slow",
+        mentally rewrite it as "Mach's IPC was slow." The modern reality is that L4-family IPC costs a few hundred
+        cycles — comparable to a single monolithic syscall — and the residual overhead comes from the
+        <em>number</em> of round trips a task needs, not from any per-trip catastrophe. Design to reduce round
+        trips, not to fear IPC.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: the minimal core, synchronous IPC, Mach/L4/seL4 history, capabilities. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "ipcQuiz@1": {
+          "intro": "The microkernel's irreducible core, synchronous message passing, the Mach->L4->seL4 story, and capabilities.",
+          "coreQ": "Which three things make up a microkernel's irreducible in-kernel core?",
+          "coreRight": "address spaces, threads/scheduling, and IPC",
+          "coreWrong1": "file systems, drivers, and the network stack",
+          "coreWrong2": "the shell, the compiler, and the linker",
+          "coreWrong3": "caches, the TLB, and branch predictors",
+          "minQ": "Liedtke's minimality principle says a concept belongs in the kernel only if…",
+          "minRight": "moving it outside would prevent the system from working at all",
+          "minWrong1": "it is written in C",
+          "minWrong2": "it makes the kernel bigger",
+          "minWrong3": "the user asks for it",
+          "howQ": "In a microkernel, how does an application get a file read serviced?",
+          "howRight": "it sends an IPC message to a user-space file-system server",
+          "howWrong1": "it calls an in-kernel function directly",
+          "howWrong2": "it reads the disk hardware itself",
+          "howWrong3": "it reboots into the file system",
+          "syncQ": "Classic microkernel IPC is 'synchronous', meaning…",
+          "syncRight": "the caller blocks until the receiver replies — a rendezvous, like a cross-address-space call",
+          "syncWrong1": "messages are encrypted",
+          "syncWrong2": "the kernel buffers unlimited messages and returns immediately",
+          "syncWrong3": "it only works on synchronous DRAM",
+          "crossQ": "How many kernel entries does one synchronous Call/Reply round trip involve?",
+          "crossRight": "two — one for Call, one for Reply",
+          "crossWrong1": "zero — it stays in user mode",
+          "crossWrong2": "one — only the Call",
+          "crossWrong3": "hundreds, one per byte",
+          "machQ": "Why did Mach earn microkernels a reputation for being slow?",
+          "machRight": "its IPC was heavy (large messages, port indirection, poor cache behaviour)",
+          "machWrong1": "it had no scheduler",
+          "machWrong2": "it ran only on slow hardware by law",
+          "machWrong3": "it was monolithic",
+          "l4Q": "What was L4's key contribution?",
+          "l4Right": "IPC engineered to a few hundred cycles, disproving that microkernels must be slow",
+          "l4Wrong1": "it moved everything back into the kernel",
+          "l4Wrong2": "it was the first monolithic kernel",
+          "l4Wrong3": "it removed IPC entirely",
+          "xnuQ": "Where does Mach's design still ship today?",
+          "xnuRight": "in XNU, the core of macOS and iOS",
+          "xnuWrong1": "in the Linux kernel",
+          "xnuWrong2": "in Windows 95",
+          "xnuWrong3": "nowhere; it was never used",
+          "capQ": "A capability in a microkernel is…",
+          "capRight": "an unforgeable token that names a resource and grants the right to use it",
+          "capWrong1": "a password typed by the user",
+          "capWrong2": "the maximum memory a process may use",
+          "capWrong3": "a raw pointer into the kernel",
+          "capWhyQ": "Why do capabilities fit message passing so naturally?",
+          "capWhyRight": "invoking a capability IS sending a message — addressing and access control become one act",
+          "capWhyWrong1": "they make messages larger",
+          "capWhyWrong2": "they disable IPC for safety",
+          "capWhyWrong3": "they replace the scheduler",
+          "selQ": "What did the seL4 proof establish?",
+          "selRight": "its C implementation refines its specification — no crashes or undefined behaviour for any input",
+          "selWrong1": "that it is the fastest kernel ever",
+          "selWrong2": "that microkernels cannot be verified",
+          "selWrong3": "that it needs no IPC",
+          "tripNumQ": "A task needs ${r}$ synchronous IPC round trips. At 2 kernel entries each, how many kernel entries total?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="ipcQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/kernel/kernel-architectures"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The IPC round trip: client (left) and server (right) user boxes, a kernel band in the centre,
+     five stepped stages with arrows crossing into and out of the kernel. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "ipc",
+    ({ board, colors, step, sceneStrings }) => {
+      const bw = 2.7, bh = 0.95;
+      const CX = 2.0, KX = 6.0, SX = 10.0;   // client / kernel / server column centres
+      const box = (cx, cy, key, ci) => {
+        const x0 = cx - bw / 2, x1 = cx + bw / 2, y0 = cy - bh / 2, y1 = cy + bh / 2;
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[ci], fillOpacity: 0.2,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [cx, cy, sceneStrings(key).replace(/\\n/g, "\n")], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "text-align:center; white-space:pre-line;",
+        });
+      };
+      const arrow = (p1, p2, ci, dashed) =>
+        board.create("arrow", [p1, p2], {
+          strokeColor: colors.cat[ci], strokeWidth: 2.5, dash: dashed ? 2 : 0,
+          lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+        });
+      const caption = (x, y, text) =>
+        board.create("text", [x, y, text], {
+          strokeColor: colors.ink, fontSize: 11.5, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:700",
+        });
+
+      // The kernel band (base content) and the three column labels.
+      board.create("polygon", [[KX - 1.7, -0.2], [KX + 1.7, -0.2], [KX + 1.7, 8.4], [KX - 1.7, 8.4]], {
+        fillColor: colors.cat[1], fillOpacity: 0.08,
+        borders: { strokeColor: colors.line, strokeWidth: 1, dash: 2, highlight: false },
+        vertices: { visible: false }, fixed: true, highlight: false,
+      });
+      caption(CX, 8.8, sceneStrings("clientLab"));
+      caption(KX, 8.8, sceneStrings("kernLab"));
+      caption(SX, 8.8, sceneStrings("serverLab"));
+
+      step(sceneStrings("s1"), () => box(CX, 7.4, "call", 0));
+      step(sceneStrings("s2"), () => {
+        arrow([CX + bw / 2, 7.4], [KX - 1.7, 6.4], 1, false);
+        box(KX, 6.0, "in", 1);
+        arrow([KX + 1.7, 6.0], [SX - bw / 2, 5.4], 1, false);
+      });
+      step(sceneStrings("s3"), () => box(SX, 5.0, "work", 0));
+      step(sceneStrings("s4"), () => {
+        box(SX, 3.4, "reply", 0);
+        arrow([SX - bw / 2, 3.4], [KX + 1.7, 2.6], 2, true);
+      });
+      step(sceneStrings("s5"), () => {
+        box(KX, 2.2, "out", 1);
+        arrow([KX - 1.7, 2.2], [CX + bw / 2, 1.2], 2, true);
+        box(CX, 0.8, "resume", 0);
+      });
+    },
+    {
+      boundingbox: [0.0, 9.3, 12.0, -0.6],
+      keepAspect: false,
+      title: () => makeStrings("ipc")("title"),
+    },
+  );
+
+  registerQuiz("ipcQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("coreQ"), options: [
+      { text: () => sceneStrings("coreRight"), correct: true },
+      { text: () => sceneStrings("coreWrong1"), correct: false },
+      { text: () => sceneStrings("coreWrong2"), correct: false },
+      { text: () => sceneStrings("coreWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("minQ"), options: [
+      { text: () => sceneStrings("minRight"), correct: true },
+      { text: () => sceneStrings("minWrong1"), correct: false },
+      { text: () => sceneStrings("minWrong2"), correct: false },
+      { text: () => sceneStrings("minWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("howQ"), options: [
+      { text: () => sceneStrings("howRight"), correct: true },
+      { text: () => sceneStrings("howWrong1"), correct: false },
+      { text: () => sceneStrings("howWrong2"), correct: false },
+      { text: () => sceneStrings("howWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("syncQ"), options: [
+      { text: () => sceneStrings("syncRight"), correct: true },
+      { text: () => sceneStrings("syncWrong1"), correct: false },
+      { text: () => sceneStrings("syncWrong2"), correct: false },
+      { text: () => sceneStrings("syncWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("crossQ"), options: [
+      { text: () => sceneStrings("crossRight"), correct: true },
+      { text: () => sceneStrings("crossWrong1"), correct: false },
+      { text: () => sceneStrings("crossWrong2"), correct: false },
+      { text: () => sceneStrings("crossWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("machQ"), options: [
+      { text: () => sceneStrings("machRight"), correct: true },
+      { text: () => sceneStrings("machWrong1"), correct: false },
+      { text: () => sceneStrings("machWrong2"), correct: false },
+      { text: () => sceneStrings("machWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("l4Q"), options: [
+      { text: () => sceneStrings("l4Right"), correct: true },
+      { text: () => sceneStrings("l4Wrong1"), correct: false },
+      { text: () => sceneStrings("l4Wrong2"), correct: false },
+      { text: () => sceneStrings("l4Wrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("xnuQ"), options: [
+      { text: () => sceneStrings("xnuRight"), correct: true },
+      { text: () => sceneStrings("xnuWrong1"), correct: false },
+      { text: () => sceneStrings("xnuWrong2"), correct: false },
+      { text: () => sceneStrings("xnuWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("capQ"), options: [
+      { text: () => sceneStrings("capRight"), correct: true },
+      { text: () => sceneStrings("capWrong1"), correct: false },
+      { text: () => sceneStrings("capWrong2"), correct: false },
+      { text: () => sceneStrings("capWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("capWhyQ"), options: [
+      { text: () => sceneStrings("capWhyRight"), correct: true },
+      { text: () => sceneStrings("capWhyWrong1"), correct: false },
+      { text: () => sceneStrings("capWhyWrong2"), correct: false },
+      { text: () => sceneStrings("capWhyWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("selQ"), options: [
+      { text: () => sceneStrings("selRight"), correct: true },
+      { text: () => sceneStrings("selWrong1"), correct: false },
+      { text: () => sceneStrings("selWrong2"), correct: false },
+      { text: () => sceneStrings("selWrong3"), correct: false },
+    ] },
+    {
+      // total kernel entries = 2 per round trip.
+      prompt: (v) => sceneStrings("tripNumQ", v),
+      variables: "r=[2:20]",
+      answer: (v) => 2 * v.r,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

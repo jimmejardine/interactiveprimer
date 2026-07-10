@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Cookies, Sessions and Web State</primer-title>
+
+    <primer-card>
+      <p>
+        You log into a website, click to the next page, and it still knows you're logged in. That feels
+        utterly ordinary — and it is quietly impossible. Because
+        <primer-ref soft to="computer-science/networks/application/http">HTTP is stateless</primer-ref>, the
+        server forgets you the instant it finishes each response. Your second click arrives looking exactly
+        like a stranger's. So how does <em>any</em> site remember your login, your shopping cart, your
+        language preference?
+      </p>
+      <p>
+        The answer is a small, clever hack layered <em>on top</em> of stateless HTTP: the server hands your
+        browser a little token, and the browser dutifully sends it back on every future request. That token is
+        a <strong>cookie</strong>, and the whole apparatus of logins, carts and "remember me" is built from it.
+        This page is about how state is bolted onto a stateless protocol — cookies, server-side
+        <strong>sessions</strong>, stateless <strong>tokens</strong>, and the tradeoffs and security traps that
+        come with each.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The cookie mechanism: two headers</h2>
+      <p>
+        A cookie is just a small named string, and the entire mechanism is two HTTP headers. On a response, the
+        server says "store this":
+      </p>
+      <primer-code lang="text">
+        HTTP/1.1 200 OK
+        Set-Cookie: session=abc123; HttpOnly; Secure; SameSite=Lax; Max-Age=3600
+      </primer-code>
+      <p>
+        The browser saves it, and from then on <em>automatically</em> attaches it to every request back to that
+        site:
+      </p>
+      <primer-code lang="text">
+        GET /account HTTP/1.1
+        Host: example.com
+        Cookie: session=abc123
+      </primer-code>
+      <p>
+        That's the whole loop. The server tucks an identifier into the client, the client carries it back, and
+        statelessness is defeated — <em>the state travels in the request</em>, exactly as HTTP's design
+        demands. Everything else is attributes controlling <em>when</em> and <em>how safely</em> the browser
+        replays that cookie.
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th>Attribute</th><th>Controls</th></tr></thead>
+          <tbody>
+            <tr><td><code>Domain</code> / <code>Path</code></td><td>which URLs the cookie is sent to</td></tr>
+            <tr><td><code>Expires</code> / <code>Max-Age</code></td><td>how long it lives (absent = session cookie, dies when the browser closes)</td></tr>
+            <tr><td><code>Secure</code></td><td>only sent over HTTPS, never plain HTTP</td></tr>
+            <tr><td><code>HttpOnly</code></td><td>hidden from JavaScript (<code>document.cookie</code> can't read it)</td></tr>
+            <tr><td><code>SameSite</code></td><td>whether it rides along on cross-site requests (<code>Strict</code>/<code>Lax</code>/<code>None</code>)</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+
+      <primer-vignette title="Session cookie vs persistent cookie — what's the difference?">
+        <p>
+          It comes down to one attribute. A cookie with <em>no</em> <code>Expires</code>/<code>Max-Age</code>
+          is a <strong>session cookie</strong>: the browser keeps it only in memory and throws it away when you
+          close the browser — perfect for a login that should end when you leave. Add an <code>Expires</code>
+          date or a <code>Max-Age</code> and it becomes a <strong>persistent cookie</strong>, written to disk
+          and surviving restarts until that time — that's the "keep me logged in for 30 days" checkbox.
+          Confusingly, a <em>session cookie</em> (browser-lifetime) and a <em>session identifier</em> (the
+          topic of the next card) are different things that happen to share a word.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>What goes in the cookie? Two philosophies</h2>
+      <p>
+        You now have a channel for carrying a bit of state on every request. The big design question is
+        <em>what</em> to put in it. There are two dominant answers, and the choice shapes your whole backend.
+      </p>
+
+      <h3>1. Server-side sessions (an opaque id)</h3>
+      <p>
+        The classic approach: the cookie holds only a meaningless random <strong>session id</strong> —
+        <code>session=abc123</code> — and the <em>real</em> data lives on the server, in a session store keyed
+        by that id.
+      </p>
+      <primer-code lang="text">
+        cookie:  session=abc123
+        server store:  { "abc123": { userId: 42, cart: [7, 19], role: "admin" } }
+      </primer-code>
+      <p>
+        The cookie is just a claim ticket; the server looks up the real state each request. This is easy to
+        reason about and easy to revoke — delete the store entry and the session is dead instantly. The cost:
+        the server must <em>keep</em> that store, and every request pays a lookup.
+      </p>
+
+      <h3>2. Stateless tokens (the data itself, signed)</h3>
+      <p>
+        The modern alternative: put the <em>actual data</em> in the cookie (or an <code>Authorization</code>
+        header) — <code>userId=42; role=admin</code> — and <strong>cryptographically sign</strong> it so the
+        server can detect tampering. A <strong>JWT</strong> (JSON Web Token) is the common form: some JSON plus
+        a signature the server can verify with its secret key.
+      </p>
+      <primer-code lang="text">
+        token:  {"userId":42,"role":"admin"}  .  &lt;signature&gt;
+      </primer-code>
+      <p>
+        Now the server holds <em>no</em> session store at all — it just checks the signature and trusts the
+        contents. That's wonderfully scalable, but the flip side is real: because there's nothing stored to
+        delete, a signed token is <strong>hard to revoke</strong> before it expires. Log someone out and their
+        token still verifies until it times out (which is why token systems keep expiry short and add
+        refresh/blocklist machinery). The tradeoff in one line: <strong>sessions are easy to revoke but need a
+        store; tokens need no store but are hard to revoke.</strong>
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why a signature is enough</h2>
+      <p>
+        The idea that you can hand the client its own <code>role=admin</code> and still be safe sounds reckless
+        until you see the signature at work. The server signs <code>data</code> with a secret only it knows; any
+        change to the data breaks the signature. The demo uses a toy signing function (a real one is HMAC-SHA256),
+        but the logic — <em>verify before you trust</em> — is exactly right.
+      </p>
+
+      <primer-code run>
+        // A TOY signature (a real server uses HMAC-SHA256 with a secret key).
+        // Don't use this for anything real — it just illustrates sign/verify.
+        const SECRET = 9973;
+        function sign(data) {
+          let h = 0;
+          const s = data + SECRET;
+          for (let i = 0; i &lt; s.length; i++) h = (h * 31 + s.charCodeAt(i)) &amp; 0xffffff;
+          return h.toString(16);
+        }
+        function makeToken(data) { return data + "." + sign(data); }
+        function verify(token) {
+          const dot = token.lastIndexOf(".");
+          const data = token.slice(0, dot);
+          const sig = token.slice(dot + 1);
+          return sign(data) === sig ? data : null;   // null = tampered / invalid
+        }
+
+        // Server issues a token to a normal user:
+        const token = makeToken('{"userId":42,"role":"user"}');
+        console.log("issued token :", token);
+        console.log("verify       :", verify(token));   // returns the data -> trusted
+
+        // An attacker edits the payload to grant themselves admin, keeping the old signature:
+        const forged = token.replace('"role":"user"', '"role":"admin"');
+        console.log("\nforged token :", forged);
+        console.log("verify       :", verify(forged));   // null -> REJECTED, signature no longer matches
+
+        // The attacker can't re-sign, because they don't know SECRET:
+        console.log("\nThe payload is readable, but not FORGEABLE without the secret.");
+      </primer-code>
+
+      <p>
+        The key insight: a signed token is <em>readable</em> but not <em>forgeable</em>. Anyone can decode the
+        JSON (so never put secrets in it!), but nobody can change it and produce a matching signature without
+        the server's key. That's what makes it safe to let the client carry its own identity.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Scaling sessions across many servers</h2>
+      <p>
+        Statelessness let you run a fleet of identical servers — but the moment you store sessions <em>in a
+        server's memory</em>, you've reintroduced state, and a problem. Request 1 creates a session on server
+        A; request 2 gets load-balanced to server B, which has never heard of it, and the user is mysteriously
+        logged out. Two cures:
+      </p>
+      <ul>
+        <li>
+          <strong>Sticky sessions.</strong> Configure the
+          <primer-ref soft to="computer-science/networks/distributed-apps/load-balancing">load balancer</primer-ref>
+          to pin each client to the same server for the life of their session. Simple, but fragile: if that
+          server dies, so do all its sessions, and load can't spread evenly.
+        </li>
+        <li>
+          <strong>Shared session store.</strong> Keep sessions in an external store (like Redis) that <em>all</em>
+          servers read. Now any server can serve any request — statelessness restored at the app tier, at the
+          cost of running and scaling the store.
+        </li>
+      </ul>
+      <p>
+        Stateless <em>tokens</em> sidestep the whole issue: with nothing stored server-side, any server can
+        verify any request with just the shared secret. That property — trivial horizontal scaling — is a big
+        reason tokens became popular for APIs and microservices.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Security: the cookie is a key to your account</h2>
+      <p>
+        A session cookie is a <em>bearer credential</em>: whoever holds it <em>is</em> you, as far as the server
+        can tell. That makes cookies a prime target, and two attacks dominate.
+      </p>
+      <ul>
+        <li>
+          <strong>Session hijacking / XSS.</strong> If an attacker can read your cookie — by sniffing plain
+          HTTP, or by injecting JavaScript into the page (cross-site scripting) — they can paste it into their
+          own browser and become you. Defences: <code>Secure</code> (never send it over plain HTTP) and
+          <code>HttpOnly</code> (so injected JavaScript <em>can't read it via</em> <code>document.cookie</code>).
+        </li>
+        <li>
+          <strong>CSRF (cross-site request forgery).</strong> Because the browser attaches your cookie
+          <em>automatically</em> to every request to a site, a malicious page can quietly make your browser fire
+          a request to your bank — with your cookie riding along — to move money without your knowledge.
+          Defences: the <code>SameSite</code> attribute (don't send the cookie on cross-site requests) and
+          per-form anti-CSRF tokens.
+        </li>
+      </ul>
+
+      <primer-vignette title="Watch out! — cookies aren't 'spyware', and never put a secret in a readable cookie">
+        <p>
+          Two misconceptions worth clearing up. First, a cookie is <strong>not spyware</strong> — it's just a
+          bit of text your browser stores and sends back to the <em>same</em> site. What earned cookies their
+          creepy reputation is a narrow, abused case: <em>third-party</em> tracking cookies set by ad networks
+          embedded across many sites, letting one tracker recognise you everywhere. The mechanism is neutral;
+          the same cookie that tracks you is also the one that keeps you logged in.
+        </p>
+        <p>
+          Second, and the one that bites engineers: <strong>never store a secret in a cookie a script can
+          read.</strong> If your auth cookie lacks <code>HttpOnly</code>, a single cross-site-scripting flaw
+          anywhere on the page lets <code>document.cookie</code> exfiltrate the session token, and the attacker
+          walks in as the user. Mark session cookies <code>HttpOnly</code> and <code>Secure</code>, keep
+          genuine secrets out of the browser entirely (put them behind an opaque session id), and remember that
+          a signed token's payload is <em>readable by anyone</em> — signing prevents tampering, not reading.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "cookieQuiz@1": { "instructions": "Check your understanding of web state: cookies and their attributes, server-side sessions vs stateless tokens, scaling, and the security traps." } }
+    </script>
+    <primer-quiz name="cookieQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/application/http"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("cookieQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "Why are cookies needed at all?",
+      options: [
+        { text: "HTTP is stateless, so the server needs the client to carry an identifier on each request", correct: true },
+        { text: "TCP connections can only send text, not binary", correct: false },
+        { text: "browsers cannot render pages without them", correct: false },
+        { text: "DNS requires a cookie to resolve names", correct: false },
+      ] },
+
+    { prompt: "Which header does a server use to give the browser a cookie?",
+      options: [
+        { text: "Set-Cookie (in the response)", correct: true },
+        { text: "Cookie (in the response)", correct: false },
+        { text: "Content-Type", correct: false },
+        { text: "Host", correct: false },
+      ] },
+
+    { prompt: "After receiving a cookie, the browser sends it back using…",
+      options: [
+        { text: "the Cookie header, automatically, on requests to that site", correct: true },
+        { text: "the Set-Cookie header on each request", correct: false },
+        { text: "a fresh DNS lookup", correct: false },
+        { text: "only when the user clicks a special button", correct: false },
+      ] },
+
+    { prompt: "The HttpOnly attribute does what?",
+      options: [
+        { text: "hides the cookie from JavaScript (document.cookie cannot read it)", correct: true },
+        { text: "sends the cookie only over HTTPS", correct: false },
+        { text: "makes the cookie expire when the browser closes", correct: false },
+        { text: "blocks the cookie on cross-site requests", correct: false },
+      ] },
+
+    { prompt: "The Secure attribute does what?",
+      options: [
+        { text: "the cookie is only ever sent over HTTPS, never plain HTTP", correct: true },
+        { text: "the cookie is encrypted so the server can't read it", correct: false },
+        { text: "the cookie can't be read by JavaScript", correct: false },
+        { text: "the cookie never expires", correct: false },
+      ] },
+
+    { prompt: "A cookie with NO Expires or Max-Age is…",
+      options: [
+        { text: "a session cookie — kept in memory and discarded when the browser closes", correct: true },
+        { text: "a persistent cookie stored on disk for a year", correct: false },
+        { text: "invalid and rejected by the browser", correct: false },
+        { text: "sent only once and never again", correct: false },
+      ] },
+
+    { prompt: "In the server-side session approach, what does the cookie actually contain?",
+      options: [
+        { text: "an opaque random session id; the real data lives in a server-side store", correct: true },
+        { text: "the user's full profile in plain text", correct: false },
+        { text: "the server's secret key", correct: false },
+        { text: "nothing — sessions don't use cookies", correct: false },
+      ] },
+
+    { prompt: "With a stateless signed token (JWT), the server…",
+      options: [
+        { text: "keeps no session store; it verifies the token's signature and trusts the contents", correct: true },
+        { text: "stores every token in memory keyed by id", correct: false },
+        { text: "must look the token up in a database on each request", correct: false },
+        { text: "cannot detect if the token was modified", correct: false },
+      ] },
+
+    { prompt: "What is the main tradeoff of stateless tokens vs server-side sessions?",
+      options: [
+        { text: "tokens need no store but are hard to revoke before they expire", correct: true },
+        { text: "tokens are impossible to scale across servers", correct: false },
+        { text: "sessions can never be revoked", correct: false },
+        { text: "tokens cannot carry any user data", correct: false },
+      ] },
+
+    { prompt: "Why is it safe to hand the client a signed token containing role=admin?",
+      options: [
+        { text: "changing the payload breaks the signature, which the client can't recompute without the secret", correct: true },
+        { text: "the token is encrypted so the client can't read it", correct: false },
+        { text: "the client promises not to edit it", correct: false },
+        { text: "the browser refuses to send modified cookies", correct: false },
+      ] },
+
+    { prompt: "Why must you never put a secret inside a JWT payload?",
+      options: [
+        { text: "the payload is readable by anyone — signing prevents tampering, not reading", correct: true },
+        { text: "the payload is discarded by the browser", correct: false },
+        { text: "secrets make the signature invalid", correct: false },
+        { text: "the payload can only hold numbers", correct: false },
+      ] },
+
+    { prompt: "With in-memory sessions behind a load balancer, why might a user get logged out?",
+      options: [
+        { text: "a later request is routed to a different server that doesn't have their session", correct: true },
+        { text: "the cookie expires after one request", correct: false },
+        { text: "HTTPS strips the cookie", correct: false },
+        { text: "the DNS record changed", correct: false },
+      ] },
+
+    { prompt: "Which approach lets ANY server serve ANY request while still using server-side sessions?",
+      options: [
+        { text: "a shared session store (e.g. Redis) that all servers read", correct: true },
+        { text: "storing the session in each server's local memory", correct: false },
+        { text: "disabling cookies entirely", correct: false },
+        { text: "giving every server a different secret", correct: false },
+      ] },
+
+    { prompt: "Session hijacking is best mitigated by…",
+      options: [
+        { text: "Secure (HTTPS-only) and HttpOnly (hidden from JavaScript) on the session cookie", correct: true },
+        { text: "making the cookie persistent", correct: false },
+        { text: "putting the password in the cookie", correct: false },
+        { text: "removing the Host header", correct: false },
+      ] },
+
+    { prompt: "CSRF is possible because…",
+      options: [
+        { text: "the browser attaches your cookie automatically to every request to a site, even from another page", correct: true },
+        { text: "cookies are stored on disk", correct: false },
+        { text: "HTTP has no status codes", correct: false },
+        { text: "the server signs the token", correct: false },
+      ] },
+
+    { prompt: "Which cookie attribute chiefly defends against CSRF?",
+      options: [
+        { text: "SameSite", correct: true },
+        { text: "HttpOnly", correct: false },
+        { text: "Secure", correct: false },
+        { text: "Max-Age", correct: false },
+      ] },
+
+    { prompt: "Are cookies 'spyware'?",
+      options: [
+        { text: "No — a cookie is neutral text returned to the same site; tracking is a specific abuse via third-party cookies", correct: true },
+        { text: "Yes — every cookie secretly records your screen", correct: false },
+        { text: "Yes — cookies run programs on your machine", correct: false },
+        { text: "No — because browsers block all cookies by default", correct: false },
+      ] },
+  ]);
+</script>

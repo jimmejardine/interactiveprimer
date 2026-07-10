@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The Kernel Attack Surface and Hardening</primer-title>
+
+    <primer-card>
+      <p>
+        Every defence in this lesson exists because of one uncomfortable fact: the
+        <primer-ref to="computer-science/advanced-operating-systems/kernel/the-system-call-interface">system-call
+        interface</primer-ref> is a doorway that faces a hostile world. On the other side of it is the most
+        privileged code on the machine, and pushing on the door is every process you run — including the ones a
+        stranger's website just started inside your browser. The kernel exposes roughly
+        <primer-math>350</primer-math> to <primer-math>450</primer-math> syscalls on Linux, plus
+        <primer-math>\texttt{ioctl}</primer-math>s numbering in the thousands, plus every parser that touches a
+        packet, a filesystem image, or a USB descriptor. That entire reachable frontier is the
+        <strong>attack surface</strong>, and an attacker needs just one exploitable bug anywhere on it.
+      </p>
+      <p>
+        This is the story of an <strong>arms race</strong>. For each class of bug, defenders invented a
+        mitigation; for each mitigation, attackers found a bypass, which provoked the next mitigation. Nobody has
+        "won" — modern exploits chain several bypasses together — but each round raised the cost of an attack from
+        an afternoon's work to a research project. Understanding the sequence is understanding how a hardened
+        system is actually built, layer on grudging layer.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The classic bug: a buffer overflow becomes control</h2>
+      <p>
+        The archetypal memory-safety bug is the <strong>stack buffer overflow</strong>. A function allocates a
+        fixed-size array on its stack frame and then copies attacker-controlled data into it without checking the
+        length (<primer-math>\texttt{strcpy}</primer-math>, <primer-math>\texttt{gets}</primer-math>, a hand-rolled
+        loop). The copy runs past the end of the buffer and keeps writing — and on a downward-growing x86 stack,
+        "past the end" means <em>over the saved return address</em> that sits just above the locals.
+      </p>
+      <p>
+        When the function executes <primer-math>\texttt{ret}</primer-math>, the CPU pops that (now
+        attacker-chosen) address into the instruction pointer and jumps there. The attacker has achieved
+        <strong>control-flow hijack</strong>: they decide what the CPU does next. In the 1990s they simply pointed
+        it at their own shellcode, sitting in the same overflowed buffer. Aleph One's 1996 <em>"Smashing the Stack
+        for Fun and Profit"</em> turned this into a recipe a teenager could follow, and it defined the next thirty
+        years of both attack and defence.
+      </p>
+      <p>
+        Its close cousin, the <strong>use-after-free (UAF)</strong>, is today's dominant bug class in kernels and
+        browsers alike. A chunk of memory is <primer-math>\texttt{free}</primer-math>d, the allocator hands the
+        same address back for a different object, and a stale pointer to the <em>old</em> object is then used —
+        letting an attacker read or write a controlled object through it. UAFs are so prevalent that they are the
+        main reason the industry is migrating security-critical code to memory-safe languages like Rust.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the stack-smash + canary figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "stack": {
+          "title": "A stack frame under attack — the canary sits between the buffer and the return address",
+          "hi": "higher addresses",
+          "lo": "lower addresses",
+          "grow": "overflow writes UPWARD, toward the return address",
+          "ret": "saved return address  ← the attacker's target",
+          "fp": "saved frame pointer (rbp)",
+          "canary": "STACK CANARY (random per-process)",
+          "buf": "char buf[64]  ← the copy starts here",
+          "s1": "The normal frame: buffer below, canary, saved rbp, return address on top",
+          "s2": "An overflow floods upward, smashing the canary on its way to the return address",
+          "s3": "On return the epilogue re-checks the canary; a changed value aborts (__stack_chk_fail)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Defence 1 — the stack canary</h2>
+      <p>
+        The first cheap defence: place a secret random value — a <strong>canary</strong>, after the coal-mine
+        bird — between the local buffers and the saved return address when the function is entered. A contiguous
+        overflow that reaches the return address <em>must</em> pass through the canary and corrupt it. The
+        function's epilogue re-reads the canary before <primer-math>\texttt{ret}</primer-math>; if it changed, the
+        program calls <primer-math>\texttt{\_\_stack\_chk\_fail}</primer-math> and dies instead of returning into
+        the attacker's hands. Watch the smash happen.
+      </p>
+      <primer-geometry scene="stack"></primer-geometry>
+      <p>
+        GCC/Clang emit this automatically under <primer-math>\texttt{-fstack-protector-strong}</primer-math>. The
+        canary is chosen once per process at start-up (from the kernel's random pool) and stored where the
+        attacker cannot easily read it, so they cannot forge it. The <strong>bypass</strong>, of course, arrived
+        fast: an <em>information leak</em> that discloses the canary lets the attacker write it back verbatim; and
+        canaries do nothing against overflows that skip over them (indexed writes) or against use-after-free. So
+        canaries raise the bar — they do not close the door.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Defence 2 — W^X (NX / DEP): make data non-executable</h2>
+      <p>
+        The 1990s exploit ran shellcode <em>inside the stack buffer</em>. So why is the stack executable at all?
+        It need not be. <strong>W^X</strong> ("write XOR execute", also called <strong>NX</strong> / DEP) is the
+        page-table policy that no page is ever both writable and executable at once: code pages are read-execute,
+        data pages (stack, heap) are read-write-<em>no-execute</em>. The MMU's NX bit enforces it in hardware.
+        Injected shellcode on the stack now faults the instant the CPU tries to execute it.
+      </p>
+      <p>
+        The <strong>bypass</strong> was ingenious and is now the standard technique:
+        <strong>return-oriented programming (ROP)</strong>. If you cannot inject <em>new</em> code, reuse the
+        code already present. The attacker's overflow writes not one return address but a whole <em>chain</em> of
+        them, each pointing at a short "gadget" — a handful of existing instructions ending in
+        <primer-math>\texttt{ret}</primer-math> — already sitting in libc or the kernel. Stitched together,
+        gadgets form a Turing-complete program built entirely from the victim's own bytes. W^X made code
+        injection impossible and code <em>reuse</em> the new normal.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Defence 3 — ASLR / KASLR: hide the targets</h2>
+      <p>
+        ROP needs to know the <em>addresses</em> of its gadgets. <strong>Address-space layout randomisation
+        (ASLR)</strong> attacks that assumption: at every execution the loader places the stack, heap, libraries,
+        and (with PIE) the executable itself at random offsets. The attacker's pre-computed gadget addresses now
+        point at garbage. <strong>KASLR</strong> is the same idea for the kernel — the kernel image and its
+        modules load at a randomised base, so a userspace attacker who finds a kernel bug still does not know
+        <em>where</em> the kernel is.
+      </p>
+      <p>
+        Randomisation's strength is measured in <strong>bits of entropy</strong>: if the base can land in one of
+        <primer-math>2^{b}</primer-math> aligned slots, the attacker faces <primer-math>b</primer-math> bits and,
+        blind, must expect on the order of <primer-math>2^{\,b-1}</primer-math> guesses. On 64-bit Linux userland
+        ASLR typically gives <primer-math>b \approx 28</primer-math>–<primer-math>30</primer-math> bits for
+        libraries; KASLR historically gave a stingier <primer-math>\approx 9</primer-math> bits (randomising the
+        kernel base over a 1&nbsp;GB window in 2&nbsp;MB steps — <primer-math>2^{30}/2^{21} = 2^{9}</primer-math>).
+      </p>
+      <primer-math display>\text{entropy (bits)} \;=\; \log_2\!\frac{\text{randomisation window}}{\text{alignment granularity}}, \qquad \text{expected blind guesses} \approx 2^{\,b-1}.</primer-math>
+      <p>
+        The <strong>bypass</strong>: entropy only helps if the layout stays <em>secret</em>. Any
+        <em>information-leak</em> bug that discloses a single real pointer defeats the whole scheme — subtract the
+        known offset and the entire map is recovered. Low-entropy KASLR was also brute-forceable, and 32-bit ASLR
+        (only <primer-math>\approx 8</primer-math> bits) was famously broken in minutes. Hence the modern refrain:
+        ASLR is only as strong as your defence against info leaks — which is exactly why the side-channel
+        <primer-ref forward to="computer-science/advanced-operating-systems/security/speculative-execution-and-the-os">speculative-execution
+        attacks</primer-ref> were so devastating: they leak the very addresses ASLR tried to hide.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Defence 4 — SMEP / SMAP: wall off user memory from the kernel</h2>
+      <p>
+        A whole family of kernel exploits used a shortcut: trick the kernel, while running in ring 0, into
+        <em>jumping to</em> or <em>reading from</em> a page the attacker controls in <em>user</em> space (a
+        "ret2usr" attack). The user page is trivially populated with a fake structure or shellcode, and the kernel
+        — same address space, full privilege — happily uses it. Two CPU features slam this shut:
+      </p>
+      <ul>
+        <li><strong>SMEP</strong> (Supervisor Mode Execution Prevention): the kernel may not <em>execute</em>
+          instructions from any user-mode page. A kernel control-flow hijack that redirects to userland shellcode
+          now faults.</li>
+        <li><strong>SMAP</strong> (Supervisor Mode Access Prevention): the kernel may not even <em>read or write</em>
+          user pages except in tightly-bracketed windows (Linux's <primer-math>\texttt{copy\_from\_user}</primer-math>
+          toggles the <primer-math>\texttt{AC}</primer-math> flag via <primer-math>\texttt{stac}/\texttt{clac}</primer-math>).
+          This kills attacks that plant a fake structure in user memory for the kernel to dereference.</li>
+      </ul>
+      <p>
+        Together SMEP+SMAP force kernel exploits to keep <em>everything</em> — code and data — inside kernel
+        memory, which is far harder to control and, thanks to KASLR, harder to locate. The arms race responded:
+        exploits pivoted to pure kernel-space ROP/JOP and to data-only attacks that never redirect control at all.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Defence 5 — CFI and the current frontier</h2>
+      <p>
+        ROP and its jump-oriented cousin (JOP) both violate the program's intended <em>control-flow graph</em>:
+        they return to the middle of functions and call through pointers the compiler never sanctioned.
+        <strong>Control-Flow Integrity (CFI)</strong> enforces the graph directly. <em>Forward-edge</em> CFI
+        checks that every indirect call lands on a valid function entry of the right type; <em>backward-edge</em>
+        protection (Intel <strong>CET</strong>'s hardware <em>shadow stack</em>, or ARM's <strong>PAC</strong>
+        pointer authentication) guarantees a <primer-math>\texttt{ret}</primer-math> can only go back to a real,
+        recorded call site — which structurally defeats ROP. The kernel builds with Clang's
+        <primer-math>\texttt{kCFI}</primer-math> today.
+      </p>
+      <p>
+        Rounding out the toolbox: <strong>stack-clash</strong> protection (a probe on every large stack growth so
+        an allocation cannot silently leap the guard page into the heap, after the 2017 Stack Clash disclosures);
+        heap hardening (safe-unlinking, randomised allocators, quarantines against UAF); and
+        <primer-math>\texttt{-D\_FORTIFY\_SOURCE}</primer-math>, which swaps unbounded libc calls for
+        length-checked variants at compile time. None is a silver bullet. The point of <strong>defence in
+        depth</strong> is arithmetic: if each layer independently has a <primer-math>10\%</primer-math> chance of
+        being bypassable, chaining through four of them is a <primer-math>0.1^4 = 0.0001</primer-math> proposition.
+      </p>
+      <primer-theorem name="The hardening arms race — each shield, and the spear it provoked">
+        <ul>
+          <li><strong>Stack canary</strong> stops contiguous return-address smashes → bypassed by
+            <em>info-leak</em> of the canary;</li>
+          <li><strong>W^X / NX</strong> stops injected shellcode → bypassed by <em>return-oriented programming</em>
+            (reuse existing code);</li>
+          <li><strong>ASLR / KASLR</strong> hides gadget addresses → bypassed by <em>info-leak</em> of any real
+            pointer;</li>
+          <li><strong>SMEP / SMAP</strong> walls the kernel off from user pages → pushes exploits to pure
+            kernel-space ROP and <em>data-only</em> attacks;</li>
+          <li><strong>CFI / shadow stack / PAC</strong> enforces the control-flow graph → pushes attackers toward
+            data-only and speculative side-channel attacks.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The mitigations, in code</h2>
+      <p>
+        Two of these are pure arithmetic you can feel. First a canary check: a "clean" write leaves the canary
+        intact and the function returns safely; an overflowing write clobbers it and the epilogue aborts. Second,
+        ASLR entropy: how many guesses does randomisation buy? Run it and change the numbers.
+      </p>
+      <primer-code run>
+        // (1) Stack canary: the epilogue aborts if the secret between buffer and return address changed.
+        const CANARY = 0xC0DE5AFE;                 // random per-process secret, chosen at start-up
+        function callWithCanary(bytesWritten: number, bufSize: number): void {
+          let canary = CANARY;
+          if (bytesWritten &gt; bufSize) {
+            canary = 0x41414141;                   // overflow floods past buf and clobbers the canary
+          }
+          if (canary !== CANARY) {
+            console.log(`  wrote ${bytesWritten} into buf[${bufSize}] -> __stack_chk_fail: ABORT (attack stopped)`);
+          } else {
+            console.log(`  wrote ${bytesWritten} into buf[${bufSize}] -> canary intact, return OK`);
+          }
+        }
+        callWithCanary(40, 64);                     // safe
+        callWithCanary(96, 64);                     // smashes the canary
+
+        // (2) ASLR entropy: base lands in one of window/alignment slots. Blind attacker expects 2^(b-1) tries.
+        function aslrEntropy(windowBytes: number, alignBytes: number): void {
+          const slots = windowBytes / alignBytes;
+          const bits = Math.log2(slots);
+          const expected = Math.pow(2, bits - 1);
+          console.log(`  window=${windowBytes} align=${alignBytes} -> ${slots} slots = ${bits} bits;` +
+                      ` expected blind guesses ~ ${expected.toLocaleString()}`);
+        }
+        aslrEntropy(1 &lt;&lt; 30, 1 &lt;&lt; 21);              // classic KASLR: 1 GB window, 2 MB alignment -> 9 bits
+        aslrEntropy(Math.pow(2, 40), 1 &lt;&lt; 12);      // userland lib: ~1 TB window, 4 KB pages -> 28 bits
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="Why is a use-after-free worth more to an attacker than a plain overflow?">
+      <p>
+        A stack overflow is loud and increasingly well-defended — canaries, shadow stacks and CFI all cluster
+        around the return address. A use-after-free is quieter and far more <em>flexible</em>. The trick is
+        <strong>heap grooming</strong>: the attacker frees an object, then allocates a <em>different</em> object
+        of the same size class so the allocator reuses the exact freed slot, and now a dangling pointer of the old
+        type overlays a fresh object of the new type. By choosing the types carefully — say, overlaying a
+        structure that contains a length field or a function pointer — a mere "used a stale pointer" bug becomes a
+        precise read/write primitive, and from there, full control. This is why modern kernel and browser exploits
+        are overwhelmingly UAF-driven, why allocators now add type-segregated heaps and delayed reuse
+        (quarantines), and why Google and Microsoft both report that ~70% of their severe CVEs are memory-safety
+        bugs — the number that finally tipped the industry toward Rust.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! ASLR is not encryption — one leaked pointer unmasks the whole map">
+      <p>
+        It is tempting to treat ASLR (or KASLR) as if it <em>hides</em> the kernel the way a password hides an
+        account — as though the attacker must somehow "crack" it. It does no such thing. ASLR merely adds a single
+        secret <em>offset</em> to an otherwise fixed layout. Every symbol keeps its usual distance from the base;
+        only the base is random. So the moment <em>any</em> bug discloses one true runtime address — a leaked
+        stack pointer, an uninitialised-memory read, a speculative side channel — the attacker subtracts the known
+        static offset and recovers the base, and with it the address of <em>everything</em>. That is why real
+        exploit chains are almost always "info-leak <em>then</em> control-flow hijack", and why defending against
+        information disclosure matters as much as defending against the corruption itself. Entropy buys you
+        nothing once the secret has leaked even once.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: bugs, each defence + its bypass, SMEP/SMAP, CFI, plus numeric ASLR-entropy questions. Bank of 14, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "hardenQuiz@1": {
+          "intro": "The syscall attack surface, buffer overflow / UAF, and the canary → W^X → ASLR → SMEP/SMAP → CFI arms race.",
+          "surfaceQ": "The kernel's 'attack surface' is best described as…",
+          "surfaceRight": "everything an unprivileged process can reach — syscalls, ioctls, and every parser exposed to input",
+          "surfaceWrong1": "the physical outside of the CPU chip",
+          "surfaceWrong2": "only the login password prompt",
+          "surfaceWrong3": "the graphics card only",
+          "smashQ": "A stack buffer overflow hijacks control by…",
+          "smashRight": "writing past the buffer over the saved return address, so ret jumps to the attacker's choice",
+          "smashWrong1": "changing the CPU clock speed",
+          "smashWrong2": "encrypting the stack",
+          "smashWrong3": "deleting the program from disk",
+          "uafQ": "A use-after-free becomes exploitable when…",
+          "uafRight": "the freed slot is reallocated to a new object and a stale pointer manipulates it",
+          "uafWrong1": "the program runs out of disk space",
+          "uafWrong2": "two threads have the same name",
+          "uafWrong3": "a file is opened twice",
+          "canaryQ": "A stack canary stops an overflow by…",
+          "canaryRight": "placing a secret value before the return address and checking it is unchanged before ret",
+          "canaryWrong1": "encrypting the return address",
+          "canaryWrong2": "making the stack grow upward",
+          "canaryWrong3": "disabling the ret instruction",
+          "canaryBypassQ": "The standard way to defeat a stack canary is…",
+          "canaryBypassRight": "an information leak that discloses the canary so it can be rewritten verbatim",
+          "canaryBypassWrong1": "running the program twice",
+          "canaryBypassWrong2": "using a faster CPU",
+          "canaryBypassWrong3": "compiling with optimisations off",
+          "wxQ": "The W^X (NX/DEP) policy enforces that…",
+          "wxRight": "no page is writable and executable at once — data pages cannot be executed",
+          "wxWrong1": "every page is both writable and executable",
+          "wxWrong2": "code is stored encrypted",
+          "wxWrong3": "the stack is on a separate disk",
+          "ropQ": "Return-oriented programming (ROP) bypasses W^X by…",
+          "ropRight": "chaining short existing code 'gadgets' ending in ret, instead of injecting new code",
+          "ropWrong1": "turning off the NX bit from user mode",
+          "ropWrong2": "writing shellcode to a code page directly",
+          "ropWrong3": "rebooting into an older kernel",
+          "aslrQ": "ASLR raises the cost of ROP because…",
+          "aslrRight": "gadget addresses change every run, so pre-computed addresses point at garbage",
+          "aslrWrong1": "it encrypts all gadgets",
+          "aslrWrong2": "it removes libc from memory",
+          "aslrWrong3": "it disables the ret instruction",
+          "aslrBypassQ": "ASLR is defeated by…",
+          "aslrBypassRight": "an info-leak of any one real pointer, from which the base and all offsets are recovered",
+          "aslrBypassWrong1": "waiting for the addresses to stop changing",
+          "aslrBypassWrong2": "adding more RAM",
+          "aslrBypassWrong3": "nothing — ASLR is unbreakable",
+          "smepQ": "SMEP prevents which attack?",
+          "smepRight": "the kernel executing instructions from an attacker-controlled user page (ret2usr)",
+          "smepWrong1": "the user reading kernel memory directly",
+          "smepWrong2": "buffer overflows in user programs",
+          "smepWrong3": "disk corruption",
+          "smapQ": "SMAP additionally prevents the kernel from…",
+          "smapRight": "reading or writing user pages except in bracketed copy_from_user/copy_to_user windows",
+          "smapWrong1": "scheduling user processes",
+          "smapWrong2": "using more than one core",
+          "smapWrong3": "loading kernel modules",
+          "cfiQ": "Backward-edge protection (shadow stack / PAC) defeats ROP by…",
+          "cfiRight": "ensuring a ret can only return to a genuine, recorded call site",
+          "cfiWrong1": "encrypting every function",
+          "cfiWrong2": "removing all ret instructions from the binary",
+          "cfiWrong3": "randomising the stack canary faster",
+          "didQ": "Why does the industry layer many imperfect mitigations ('defence in depth')?",
+          "didRight": "an attacker must bypass ALL layers at once, so their independent failure odds multiply",
+          "didWrong1": "one perfect layer is impossible to write",
+          "didWrong2": "to slow the computer down on purpose",
+          "didWrong3": "because CPUs require exactly five defences",
+          "bitsNumQ": "KASLR randomises the base over a ${w}$-bit window in ${a}$-bit ($2^{a}$-byte) aligned steps. How many bits of entropy is that?",
+          "guessNumQ": "ASLR gives $b = ${b}$ bits of entropy. A blind attacker expects about how many guesses? (Answer $2^{b-1}$.)",
+          "slotsNumQ": "With $b = ${b}$ bits of ASLR entropy, how many equally-likely base positions are there? (Answer $2^{b}$.)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="hardenQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/kernel/the-system-call-interface"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The stack-smash + canary figure: a vertical stack (buffer at bottom, canary, saved rbp, return
+     address on top); step 2 shows the overflow flooding up through the canary. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "stack",
+    ({ board, colors, step, sceneStrings }) => {
+      const W = 8, x0 = 0.4;
+      // Slots from bottom (low addr) to top (high addr): buffer, canary, saved rbp, return address.
+      const slots = [
+        { key: "buf", ci: 0 },
+        { key: "canary", ci: 1 },
+        { key: "fp", ci: 0 },
+        { key: "ret", ci: 2 },
+      ];
+      const sh = 1.0;             // slot height
+      const yBot = (i) => 0.6 + i * sh;
+
+      // Draw each slot as a labelled bar — base content (visible on load).
+      slots.forEach((s, i) => {
+        const y = yBot(i);
+        board.create("polygon", [[x0, y], [x0 + W, y], [x0 + W, y + sh], [x0, y + sh]], {
+          fillColor: colors.cat[s.ci], fillOpacity: s.key === "canary" ? 0.35 : 0.18,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [x0 + W / 2, y + sh / 2, sceneStrings(s.key)], {
+          strokeColor: colors.ink, fontSize: 12.5, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: s.key === "canary" ? "font-weight:700" : "",
+        });
+      });
+
+      // High/low address labels (base content).
+      board.create("text", [x0 + W / 2, yBot(slots.length) + 0.35, sceneStrings("hi")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+      });
+      board.create("text", [x0 + W / 2, 0.25, sceneStrings("lo")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+      });
+
+      step(sceneStrings("s1"), () => {});
+
+      // Step 2: the overflow — a fat arrow flooding upward from the buffer through the canary to the ret slot.
+      step(sceneStrings("s2"), () => {
+        board.create("arrow", [[x0 + W + 0.7, yBot(0) + sh / 2], [x0 + W + 0.7, yBot(3) + sh / 2]], {
+          strokeColor: colors.cat[2], strokeWidth: 3, lastArrow: { type: 2, size: 7 },
+          highlight: false, fixed: true,
+        });
+        board.create("text", [x0 + W + 1.0, yBot(1) + sh / 2, sceneStrings("grow")], {
+          strokeColor: colors.cat[2], fontSize: 11, anchorX: "left", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "max-width:150px",
+        });
+      });
+
+      // Step 3: the check — mark the canary slot as the tripwire.
+      step(sceneStrings("s3"), () => {
+        board.create("polygon", [[x0, yBot(1)], [x0 + W, yBot(1)], [x0 + W, yBot(1) + sh], [x0, yBot(1) + sh]], {
+          fillColor: colors.cat[1], fillOpacity: 0.0,
+          borders: { strokeColor: colors.cat[2], strokeWidth: 3, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+      });
+    },
+    {
+      boundingbox: [-0.3, 5.4, 11.6, -0.1],
+      keepAspect: false,
+      title: () => makeStrings("stack")("title"),
+    },
+  );
+
+  registerQuiz("hardenQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("surfaceQ"), options: [
+      { text: () => sceneStrings("surfaceRight"), correct: true },
+      { text: () => sceneStrings("surfaceWrong1"), correct: false },
+      { text: () => sceneStrings("surfaceWrong2"), correct: false },
+      { text: () => sceneStrings("surfaceWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("smashQ"), options: [
+      { text: () => sceneStrings("smashRight"), correct: true },
+      { text: () => sceneStrings("smashWrong1"), correct: false },
+      { text: () => sceneStrings("smashWrong2"), correct: false },
+      { text: () => sceneStrings("smashWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("uafQ"), options: [
+      { text: () => sceneStrings("uafRight"), correct: true },
+      { text: () => sceneStrings("uafWrong1"), correct: false },
+      { text: () => sceneStrings("uafWrong2"), correct: false },
+      { text: () => sceneStrings("uafWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("canaryQ"), options: [
+      { text: () => sceneStrings("canaryRight"), correct: true },
+      { text: () => sceneStrings("canaryWrong1"), correct: false },
+      { text: () => sceneStrings("canaryWrong2"), correct: false },
+      { text: () => sceneStrings("canaryWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("canaryBypassQ"), options: [
+      { text: () => sceneStrings("canaryBypassRight"), correct: true },
+      { text: () => sceneStrings("canaryBypassWrong1"), correct: false },
+      { text: () => sceneStrings("canaryBypassWrong2"), correct: false },
+      { text: () => sceneStrings("canaryBypassWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("wxQ"), options: [
+      { text: () => sceneStrings("wxRight"), correct: true },
+      { text: () => sceneStrings("wxWrong1"), correct: false },
+      { text: () => sceneStrings("wxWrong2"), correct: false },
+      { text: () => sceneStrings("wxWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("ropQ"), options: [
+      { text: () => sceneStrings("ropRight"), correct: true },
+      { text: () => sceneStrings("ropWrong1"), correct: false },
+      { text: () => sceneStrings("ropWrong2"), correct: false },
+      { text: () => sceneStrings("ropWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("aslrQ"), options: [
+      { text: () => sceneStrings("aslrRight"), correct: true },
+      { text: () => sceneStrings("aslrWrong1"), correct: false },
+      { text: () => sceneStrings("aslrWrong2"), correct: false },
+      { text: () => sceneStrings("aslrWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("aslrBypassQ"), options: [
+      { text: () => sceneStrings("aslrBypassRight"), correct: true },
+      { text: () => sceneStrings("aslrBypassWrong1"), correct: false },
+      { text: () => sceneStrings("aslrBypassWrong2"), correct: false },
+      { text: () => sceneStrings("aslrBypassWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("smepQ"), options: [
+      { text: () => sceneStrings("smepRight"), correct: true },
+      { text: () => sceneStrings("smepWrong1"), correct: false },
+      { text: () => sceneStrings("smepWrong2"), correct: false },
+      { text: () => sceneStrings("smepWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("smapQ"), options: [
+      { text: () => sceneStrings("smapRight"), correct: true },
+      { text: () => sceneStrings("smapWrong1"), correct: false },
+      { text: () => sceneStrings("smapWrong2"), correct: false },
+      { text: () => sceneStrings("smapWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cfiQ"), options: [
+      { text: () => sceneStrings("cfiRight"), correct: true },
+      { text: () => sceneStrings("cfiWrong1"), correct: false },
+      { text: () => sceneStrings("cfiWrong2"), correct: false },
+      { text: () => sceneStrings("cfiWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("didQ"), options: [
+      { text: () => sceneStrings("didRight"), correct: true },
+      { text: () => sceneStrings("didWrong1"), correct: false },
+      { text: () => sceneStrings("didWrong2"), correct: false },
+      { text: () => sceneStrings("didWrong3"), correct: false },
+    ] },
+    {
+      // Entropy bits = window_bits - align_bits.
+      prompt: (v) => sceneStrings("bitsNumQ", v),
+      variables: "w=[28:40] a=[12:21]",
+      constraints: "w > a",
+      answer: (v) => v.w - v.a,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Expected blind guesses = 2^(b-1).
+      prompt: (v) => sceneStrings("guessNumQ", v),
+      variables: "b=[8:20]",
+      answer: (v) => Math.pow(2, v.b - 1),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Number of positions = 2^b.
+      prompt: (v) => sceneStrings("slotsNumQ", v),
+      variables: "b=[8:20]",
+      answer: (v) => Math.pow(2, v.b),
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

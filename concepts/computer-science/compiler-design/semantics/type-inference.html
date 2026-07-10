@@ -1,0 +1,515 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Type Inference (Hindley–Milner)</primer-title>
+
+    <primer-card>
+      <p>
+        <primer-ref to="computer-science/compiler-design/semantics/type-checking">Type checking</primer-ref> assumed
+        the programmer wrote the types down. But in ML, Haskell, OCaml, Rust and modern TypeScript you can write
+        <code>let twice = f =&gt; x =&gt; f(f(x))</code> with no annotation at all, and the compiler will calmly report
+        its type as <primer-math>(\alpha \to \alpha) \to \alpha \to \alpha</primer-math>. That feat is
+        <strong>type inference</strong>: <em>reconstructing</em> the most general type of every expression from its
+        <em>use</em>, with nothing declared. The <strong>Hindley–Milner</strong> (HM) system is the crown jewel
+        here — it infers a <em>principal</em> (most general) type for every well-typed program, and does so
+        completely automatically. It is one of the most beautiful results in all of programming languages.
+      </p>
+      <p>
+        The engine has three moving parts. Invent a fresh <strong>type variable</strong> for every unknown; walk
+        the AST <strong>generating constraints</strong> (equations between type expressions) that the code forces
+        to hold; then <strong>solve</strong> those equations by <strong>unification</strong>. The solution is a
+        substitution mapping type variables to types — and applying it to the program's top-level variable yields
+        its inferred type.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Type variables and constraints</h2>
+      <p>
+        Start ignorant. Give the unknown type of every leaf and every subexpression its own fresh variable
+        <primer-math>\alpha, \beta, \gamma, \dots</primer-math>. Then each construct <em>constrains</em> those
+        variables. Consider inferring the type of <code>f</code> in <primer-math>f(x) = x + 1</primer-math>. Let
+        <primer-math>x : \alpha</primer-math>. The subexpression <primer-math>x + 1</primer-math> forces, by the
+        <code>+</code> rule, <primer-math>\alpha = \texttt{int}</primer-math> and gives the body type
+        <primer-math>\texttt{int}</primer-math>. So <primer-math>f : \alpha \to \texttt{int}</primer-math> together
+        with <primer-math>\alpha = \texttt{int}</primer-math> — i.e.
+        <primer-math>f : \texttt{int} \to \texttt{int}</primer-math>. Each rule from type checking becomes, in
+        reverse, a <em>generator of equations</em>:
+      </p>
+      <primer-math display>\text{application } f(e):\quad \tau_f \;=\; \tau_e \to \beta \quad(\beta \text{ fresh}),\qquad \text{result type} = \beta.</primer-math>
+      <p>
+        Inference is thus two clean phases: a downward/upward walk that emits a <em>set of equations</em>, and a
+        solver that makes them all true simultaneously. All the cleverness lives in the solver.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Unification: making two type terms equal</h2>
+      <p>
+        Type expressions are just trees (terms): a constructor with children. <strong>Unification</strong> —
+        Robinson's algorithm, 1965 — takes two such terms and finds the <em>most general substitution</em> that
+        makes them identical, or fails if none exists. The rules are exactly what you would guess: a variable
+        unifies with anything (bind it); two identical constructors unify by unifying their children pairwise; two
+        different constructors clash.
+      </p>
+      <primer-geometry scene="unify"></primer-geometry>
+      <p>
+        Unifying <primer-math>\alpha \to \beta</primer-math> with <primer-math>\texttt{int} \to \texttt{bool}</primer-math>
+        descends the two arrow-trees in lock-step: the argument sides give
+        <primer-math>\alpha = \texttt{int}</primer-math>, the result sides give
+        <primer-math>\beta = \texttt{bool}</primer-math>, and the substitution
+        <primer-math>\{\alpha \mapsto \texttt{int},\ \beta \mapsto \texttt{bool}\}</primer-math> falls out. That
+        substitution, applied everywhere, is the inferred type. This is the heart of Milner's <strong>Algorithm
+        W</strong>: infer a type for each subterm, and unify at every point the language demands two types agree.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The occurs check</h2>
+      <p>
+        One rule keeps unification honest. When you are about to bind a type variable
+        <primer-math>\alpha</primer-math> to a term <primer-math>\tau</primer-math>, you must first check that
+        <primer-math>\alpha</primer-math> does <em>not itself occur inside</em> <primer-math>\tau</primer-math>. This
+        is the <strong>occurs check</strong>. Try to unify <primer-math>\alpha</primer-math> with
+        <primer-math>\alpha \to \alpha</primer-math>: binding <primer-math>\alpha \mapsto \alpha \to \alpha</primer-math>
+        would demand a type equal to its own function type, an <em>infinite</em> type
+        <primer-math>((\dots \to \dots) \to \dots)</primer-math> with no finite tree. The occurs check spots
+        <primer-math>\alpha</primer-math> inside <primer-math>\alpha \to \alpha</primer-math> and <em>fails</em> the
+        unification — correctly reporting that no (finite) type exists. This is exactly the check that flags the
+        classic self-application <code>f =&gt; f(f)</code> as untypable in HM.
+      </p>
+      <primer-code run>
+        // Type terms: a variable, or a constructor (e.g. "int", "->", "list") with args.
+        type Ty =
+          | { kind: "var"; name: string }
+          | { kind: "con"; name: string; args: Ty[] };
+
+        const tv = (name: string): Ty =&gt; ({ kind: "var", name });
+        const con = (name: string, args: Ty[] = []): Ty =&gt; ({ kind: "con", name, args });
+
+        type Subst = Record&lt;string, Ty&gt;;
+
+        // Apply a substitution to a type (follow variable bindings, recursively).
+        function apply(s: Subst, t: Ty): Ty {
+          if (t.kind === "var") return s[t.name] ? apply(s, s[t.name]) : t;
+          return { kind: "con", name: t.name, args: t.args.map((a) =&gt; apply(s, a)) };
+        }
+
+        // Does variable `name` occur inside t?  (after applying current substitution)
+        function occurs(name: string, t: Ty, s: Subst): boolean {
+          const r = apply(s, t);
+          if (r.kind === "var") return r.name === name;
+          return r.args.some((a) =&gt; occurs(name, a, s));
+        }
+
+        // Robinson unification. Returns an extended substitution or throws.
+        function unify(a: Ty, b: Ty, s: Subst): Subst {
+          a = apply(s, a); b = apply(s, b);
+          if (a.kind === "var") {
+            if (b.kind === "var" &amp;&amp; b.name === a.name) return s;
+            if (occurs(a.name, b, s)) throw new Error(`occurs check: ${a.name} in ${show(b)} — infinite type`);
+            return { ...s, [a.name]: b };                       // bind the variable
+          }
+          if (b.kind === "var") return unify(b, a, s);
+          if (a.name !== b.name || a.args.length !== b.args.length)
+            throw new Error(`cannot unify ${show(a)} with ${show(b)}`);
+          for (let i = 0; i &lt; a.args.length; i++) s = unify(a.args[i], b.args[i], s);  // children pairwise
+          return s;
+        }
+
+        function show(t: Ty): string {
+          if (t.kind === "var") return t.name;
+          if (t.name === "->") return `(${show(t.args[0])} -> ${show(t.args[1])})`;
+          return t.args.length ? `${t.name}(${t.args.map(show).join(",")})` : t.name;
+        }
+
+        // 1) Unify  α -> β   with   int -> bool.
+        const arrow = (x: Ty, y: Ty) =&gt; con("->", [x, y]);
+        let s = unify(arrow(tv("a"), tv("b")), arrow(con("int"), con("bool")), {});
+        console.log("a =", show(apply(s, tv("a"))), "  b =", show(apply(s, tv("b"))));
+
+        // 2) The occurs check:  α  with  α -> α   must FAIL.
+        try { unify(tv("a"), arrow(tv("a"), tv("a")), {}); }
+        catch (e) { console.log("caught:", (e as Error).message); }
+      </primer-code>
+      <p>
+        The first unification prints <code>a = int, b = bool</code>; the second is caught by the occurs check. Those
+        twenty-odd lines are, essentially, the whole solver at the core of every ML-family type checker.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Let-polymorphism and generalization</h2>
+      <p>
+        Inference so far gives each variable <em>one</em> type. But the identity function
+        <code>id = x =&gt; x</code> should be usable at <em>many</em> types in the same program:
+        <code>id(3)</code> and <code>id(true)</code> both. HM achieves this with <strong>let-polymorphism</strong>.
+        When a <code>let</code>-bound value is inferred, any type variables left <em>unconstrained</em> by the
+        environment are <strong>generalized</strong> — universally quantified into a <em>type scheme</em>
+        <primer-math>\forall \alpha.\ \alpha \to \alpha</primer-math>. Each <em>use</em> then
+        <strong>instantiates</strong> the scheme with fresh variables, so <code>id(3)</code> and
+        <code>id(true)</code> get independent copies and neither pins the other.
+      </p>
+      <p>
+        The subtlety — and the reason it is <em>let</em>-polymorphism, not <em>lambda</em>-polymorphism — is that a
+        function's <em>own parameter</em> is <strong>not</strong> generalized while you are still inferring the
+        function body. Inside <code>x =&gt; …</code>, the parameter <code>x</code> has a single monomorphic type; it
+        would be unsound to let it shape-shift mid-inference. Generalization happens only at a
+        <code>let</code> boundary, once the value's type is fully known and its free variables are provably
+        independent of the surrounding context. This one rule is what makes HM both sound and wonderfully
+        expressive.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Where do you actually meet Hindley–Milner?">
+      <p>
+        Everywhere the compiler "just knows" the types. <strong>ML and OCaml</strong> are HM's birthplace — full
+        inference, annotations optional. <strong>Haskell</strong> extends HM with type classes (the
+        <code>Num a =&gt;</code> you see in signatures is the constraint HM couldn't express alone).
+        <strong>Rust</strong> uses HM-style inference locally — inside a function body you rarely write types,
+        though Rust deliberately requires them at function <em>boundaries</em> for readability and better errors.
+        <strong>TypeScript</strong> and <strong>Swift</strong> lean on unification-based inference for local
+        variables and generics. The 1978 algorithm still runs, in spirit, in the editor autocompleting your code
+        right now — a rare case of a piece of deep theory that became invisible infrastructure.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The occurs check and the monomorphism of λ-parameters">
+      <p>
+        The first thing beginners "optimise away" is the occurs check — it seems like a fussy edge case. It is not:
+        without it, unifying <primer-math>\alpha</primer-math> with <primer-math>\alpha \to \alpha</primer-math>
+        succeeds, builds a cyclic type term, and the inferencer either loops forever printing an infinite type or
+        silently accepts nonsense like <code>f =&gt; f(f)</code>. The rule <em>«never bind
+        <primer-math>\alpha</primer-math> to a term containing <primer-math>\alpha</primer-math>»</em> is what keeps
+        every inferred type a finite tree. If your homemade inferencer hangs, suspect a missing occurs check first.
+      </p>
+      <p>
+        The second trap is over-generalizing. It is tempting to think "every type variable can be
+        <primer-math>\forall</primer-math>-quantified." No: a variable may be generalized only if it is
+        <em>not free in the environment</em> — a <strong>lambda parameter</strong> is monomorphic within its body,
+        and only a <code>let</code>-bound definition generalizes. Generalize a parameter too eagerly and you
+        "prove" unsound programs type-correct; this is exactly why HM restricts polymorphism to <code>let</code>,
+        and why <code>let f = fun x -&gt; …</code> and <code>fun x -&gt; let f = …</code> can infer different types.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: type variables, constraints, unification, occurs check, let-polymorphism. Bank of 13, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "hmQuiz@1": {
+          "intro": "Hindley–Milner infers a principal type by generating constraints and solving them with unification. Numbers change every attempt.",
+          "goalQ": "The goal of Hindley–Milner type inference is to…",
+          "goPrin": "reconstruct the most general (principal) type of every expression, with no annotations",
+          "goParse": "parse programs faster",
+          "goRun": "run the program to observe its type",
+          "goAnnot": "force the programmer to annotate every variable",
+          "varsQ": "The first step of inference is to…",
+          "vaFresh": "assign a fresh type variable to every unknown type",
+          "vaInt": "assume everything is int",
+          "vaErr": "reject the program",
+          "vaGuess": "randomly guess concrete types",
+          "constrQ": "Constraints in HM are…",
+          "coEq": "equations between type expressions forced by how the code is used",
+          "coVals": "the runtime values of variables",
+          "coTok": "the token stream",
+          "coRegs": "CPU register assignments",
+          "unifyQ": "Unification takes two type terms and finds…",
+          "unMgu": "the most general substitution making them identical (or fails)",
+          "unBig": "the larger of the two",
+          "unSum": "their union as a set",
+          "unRand": "a random common type",
+          "unRulesQ": "Two DIFFERENT type constructors (e.g. int vs (τ→τ)) unify…",
+          "urFail": "they do not unify — it is a type error",
+          "urOk": "always, by picking the first",
+          "urVar": "by turning both into variables",
+          "urInt": "always to int",
+          "unVarQ": "A type VARIABLE unifies with a term by…",
+          "uvBind": "binding the variable to that term (subject to the occurs check)",
+          "uvFail": "always failing",
+          "uvDrop": "discarding the term",
+          "uvInt": "converting it to int",
+          "occursQ": "The occurs check, before binding α to τ, verifies that…",
+          "ocNot": "α does NOT occur inside τ (else the type would be infinite)",
+          "ocDoes": "α DOES occur inside τ",
+          "ocInt": "τ is int",
+          "ocEmpty": "τ is empty",
+          "occursWhyQ": "Unifying α with α → α must FAIL because…",
+          "owInf": "it would require an infinite type with no finite tree",
+          "owSlow": "it is merely slow",
+          "owInt": "α is secretly int",
+          "owFine": "it should actually succeed",
+          "algoQ": "Milner's algorithm that threads inference-plus-unification over the AST is called…",
+          "alW": "Algorithm W",
+          "alDijkstra": "Dijkstra's algorithm",
+          "alLR": "the LR algorithm",
+          "alNewton": "Newton's method",
+          "letQ": "Let-polymorphism GENERALIZES a let-bound value's free type variables into…",
+          "leScheme": "a type scheme ∀α. … so each use instantiates fresh copies",
+          "leInt": "the type int",
+          "leOne": "one fixed monomorphic type shared by all uses",
+          "leErr": "an error",
+          "instQ": "Each USE of a polymorphic ∀α.τ scheme is handled by…",
+          "inFresh": "instantiating it with fresh type variables",
+          "inSame": "reusing the very same α every time",
+          "inInt": "replacing α with int",
+          "inErr": "rejecting the second use",
+          "lambdaQ": "A LAMBDA (function) parameter, while its body is being inferred, is…",
+          "laMono": "monomorphic — it is NOT generalized",
+          "laPoly": "fully polymorphic immediately",
+          "laInt": "always int",
+          "laErr": "illegal",
+          "principalQ": "A 'principal type' means…",
+          "prMost": "the most general type; every other valid type is an instance of it",
+          "prSmall": "the smallest concrete type",
+          "prFirst": "the first type tried",
+          "prRun": "the type observed at run time",
+          "twiceQ": "HM infers  f => x => f(f(x))  to have the type…",
+          "twArr": "(α → α) → α → α",
+          "twInt": "int → int",
+          "twBool": "bool → bool",
+          "twErr": "a type error",
+          "childNumQ": "Unifying two terms built from the SAME constructor, each with ${k} arguments, spawns how many recursive child unifications?",
+          "instNumQ": "The scheme ∀α.(α → α) has one quantified variable. Used at ${k} call sites, instantiation creates how many fresh type variables in total?",
+          "clashNumQ": "You generate ${k} constraints; ${b} of them are between two different, incompatible constructors. How many of the constraints cause a unification failure?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="hmQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/compiler-design/semantics/type-checking"]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  function treeTools(board, colors) {
+    const node = (x, y, text, col) => {
+      board.create("circle", [[x, y], 0.52], {
+        strokeColor: col, strokeWidth: 2, fillColor: col, fillOpacity: 0.14,
+        fixed: true, highlight: false,
+      });
+      board.create("text", [x, y, text], {
+        anchorX: "middle", anchorY: "middle", fontSize: 14, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+      return [x, y];
+    };
+    const link = (a, b, col) => {
+      const dx = b[0] - a[0], dy = b[1] - a[1], d = Math.hypot(dx, dy);
+      const ux = dx / d, uy = dy / d, r = 0.52;
+      board.create("segment", [[a[0] + ux * r, a[1] + uy * r], [b[0] - ux * r, b[1] - uy * r]], {
+        strokeColor: col, strokeWidth: 1.5, fixed: true, highlight: false,
+      });
+    };
+    const match = (a, b, col) => {
+      board.create("segment", [a, b], {
+        strokeColor: col, strokeWidth: 2.2, fixed: true, highlight: false, dash: 2,
+      });
+    };
+    const tag = (x, y, text, col) =>
+      board.create("text", [x, y, text], {
+        anchorX: "middle", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    return { node, link, match, tag };
+  }
+
+  // Unify (α → β) with (int → bool): two arrow-trees matched in lock-step.
+  registerGeometryScene("unify", ({ board, step, colors }) => {
+    const t = treeTools(board, colors);
+    const g = colors.line, mt = colors.cat[3];
+    const leftCol = colors.cat[0], rightCol = colors.cat[2];
+
+    // Left tree:  ->(α, β)
+    const lRoot = t.node(-4, 3, "→", leftCol);
+    const la = t.node(-5.6, 0.8, "α", leftCol);
+    const lb = t.node(-2.4, 0.8, "β", leftCol);
+    t.link(lRoot, la, g); t.link(lRoot, lb, g);
+    // Right tree: ->(int, bool)
+    const rRoot = t.node(4, 3, "→", rightCol);
+    const ri = t.node(2.4, 0.8, "int", rightCol);
+    const rb = t.node(5.6, 0.8, "bool", rightCol);
+    t.link(rRoot, ri, g); t.link(rRoot, rb, g);
+
+    step("Both roots are the '→' constructor — they match, so unify the children pairwise.", () => {
+      t.match([-3.48, 3], [3.48, 3], mt);
+      t.tag(0, 3.5, "→  =  →", mt);
+    });
+    step("Argument sides: α unifies with int  ⇒  bind α ↦ int.", () => {
+      t.match([-5.08, 0.8], [1.88, 0.8], mt);
+      t.tag(-1.6, 0.2, "α ↦ int", mt);
+    });
+    step("Result sides: β unifies with bool  ⇒  bind β ↦ bool.", () => {
+      t.match([-1.88, 0.55], [5.08, 0.55], mt);
+      t.tag(1.7, -0.5, "β ↦ bool", mt);
+    });
+    step("Substitution { α ↦ int, β ↦ bool } makes the two type terms identical.", () => {
+      t.tag(0, -1.7, "{ α ↦ int, β ↦ bool }", mt);
+    });
+  }, {
+    boundingbox: [-7, 4.2, 7, -2.4], keepAspect: false,
+    title: "Unifying  α → β  with  int → bool",
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("hmQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("goalQ"),
+      options: [
+        { text: () => sceneStrings("goPrin"), correct: true },
+        { text: () => sceneStrings("goParse"), correct: false },
+        { text: () => sceneStrings("goRun"), correct: false },
+        { text: () => sceneStrings("goAnnot"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("varsQ"),
+      options: [
+        { text: () => sceneStrings("vaFresh"), correct: true },
+        { text: () => sceneStrings("vaInt"), correct: false },
+        { text: () => sceneStrings("vaErr"), correct: false },
+        { text: () => sceneStrings("vaGuess"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("constrQ"),
+      options: [
+        { text: () => sceneStrings("coEq"), correct: true },
+        { text: () => sceneStrings("coVals"), correct: false },
+        { text: () => sceneStrings("coTok"), correct: false },
+        { text: () => sceneStrings("coRegs"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("unifyQ"),
+      options: [
+        { text: () => sceneStrings("unMgu"), correct: true },
+        { text: () => sceneStrings("unBig"), correct: false },
+        { text: () => sceneStrings("unSum"), correct: false },
+        { text: () => sceneStrings("unRand"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("unRulesQ"),
+      options: [
+        { text: () => sceneStrings("urFail"), correct: true },
+        { text: () => sceneStrings("urOk"), correct: false },
+        { text: () => sceneStrings("urVar"), correct: false },
+        { text: () => sceneStrings("urInt"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("unVarQ"),
+      options: [
+        { text: () => sceneStrings("uvBind"), correct: true },
+        { text: () => sceneStrings("uvFail"), correct: false },
+        { text: () => sceneStrings("uvDrop"), correct: false },
+        { text: () => sceneStrings("uvInt"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("occursQ"),
+      options: [
+        { text: () => sceneStrings("ocNot"), correct: true },
+        { text: () => sceneStrings("ocDoes"), correct: false },
+        { text: () => sceneStrings("ocInt"), correct: false },
+        { text: () => sceneStrings("ocEmpty"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("occursWhyQ"),
+      options: [
+        { text: () => sceneStrings("owInf"), correct: true },
+        { text: () => sceneStrings("owSlow"), correct: false },
+        { text: () => sceneStrings("owInt"), correct: false },
+        { text: () => sceneStrings("owFine"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("algoQ"),
+      options: [
+        { text: () => sceneStrings("alW"), correct: true },
+        { text: () => sceneStrings("alDijkstra"), correct: false },
+        { text: () => sceneStrings("alLR"), correct: false },
+        { text: () => sceneStrings("alNewton"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("letQ"),
+      options: [
+        { text: () => sceneStrings("leScheme"), correct: true },
+        { text: () => sceneStrings("leInt"), correct: false },
+        { text: () => sceneStrings("leOne"), correct: false },
+        { text: () => sceneStrings("leErr"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("instQ"),
+      options: [
+        { text: () => sceneStrings("inFresh"), correct: true },
+        { text: () => sceneStrings("inSame"), correct: false },
+        { text: () => sceneStrings("inInt"), correct: false },
+        { text: () => sceneStrings("inErr"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lambdaQ"),
+      options: [
+        { text: () => sceneStrings("laMono"), correct: true },
+        { text: () => sceneStrings("laPoly"), correct: false },
+        { text: () => sceneStrings("laInt"), correct: false },
+        { text: () => sceneStrings("laErr"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("principalQ"),
+      options: [
+        { text: () => sceneStrings("prMost"), correct: true },
+        { text: () => sceneStrings("prSmall"), correct: false },
+        { text: () => sceneStrings("prFirst"), correct: false },
+        { text: () => sceneStrings("prRun"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("twiceQ"),
+      options: [
+        { text: () => sceneStrings("twArr"), correct: true },
+        { text: () => sceneStrings("twInt"), correct: false },
+        { text: () => sceneStrings("twBool"), correct: false },
+        { text: () => sceneStrings("twErr"), correct: false },
+      ],
+    },
+    {
+      // k-arg constructor => k child unifications
+      prompt: (v) => sceneStrings("childNumQ", v),
+      variables: "k=[1:6]",
+      answer: (v) => v.k,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // k uses, one quantified var each => k fresh vars
+      prompt: (v) => sceneStrings("instNumQ", v),
+      variables: "k=[2:8]",
+      answer: (v) => v.k,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // b incompatible constraints => b failures
+      prompt: (v) => sceneStrings("clashNumQ", v),
+      variables: "k=[4:9] b=[1:3]",
+      answer: (v) => v.b,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

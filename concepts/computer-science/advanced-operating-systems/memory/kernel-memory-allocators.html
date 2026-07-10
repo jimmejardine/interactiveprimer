@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Kernel Memory Allocators</primer-title>
+
+    <primer-card>
+      <p>
+        The kernel cannot call <primer-math>\texttt{malloc}</primer-math> — it <em>is</em> the thing that
+        <primer-math>\texttt{malloc}</primer-math> is built on. When a device driver needs a buffer, when the
+        scheduler needs a new task structure, when the network stack needs a socket, some code inside the kernel
+        must hand out memory from the raw supply of physical
+        <primer-ref to="computer-science/advanced-operating-systems/memory/address-translation-in-depth">page
+        frames</primer-ref> — quickly, without fragmenting itself to death, and without ever blocking in a context
+        where blocking would deadlock the machine. This lesson is about how kernels solve that, at two very
+        different scales, and how the same ideas resurface in the fast user-space allocators your own programs
+        rely on.
+      </p>
+      <p>
+        The problem splits cleanly by <strong>granularity</strong>. Sometimes the kernel wants whole pages, or
+        runs of contiguous pages — that is the <strong>buddy allocator</strong>'s job. Far more often it wants a
+        tiny, fixed-shape object — a <primer-math>256</primer-math>-byte <primer-math>\texttt{struct}</primer-math>
+        — thousands of times a second; carving those out of whole pages would waste enormous space, so a second
+        layer, the <strong>slab allocator</strong>, sits on top. Two allocators, two fragmentation problems, one
+        stack.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the buddy-split figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "buddy": {
+          "title": "The buddy allocator: split a power-of-two block in halves until it fits the request",
+          "whole": "One free block: 16 pages (order 4)",
+          "split1": "Split into two buddies of 8 pages (order 3)",
+          "split2": "Split the left 8 into two buddies of 4 pages (order 2)",
+          "alloc": "Allocate one 4-page block for a request of 3 pages (1 page wasted = internal fragmentation)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The buddy allocator: power-of-two blocks</h2>
+      <p>
+        The buddy system manages physical memory in blocks whose sizes are <strong>powers of two</strong> pages:
+        <primer-math>1, 2, 4, 8, \dots, 2^{\text{order}}</primer-math> pages. A free list is kept for each order.
+        To satisfy a request you round up to the next power of two, then:
+      </p>
+      <ul>
+        <li>if a free block of exactly that order exists, hand it out;</li>
+        <li>otherwise take a larger free block and <strong>split</strong> it in half repeatedly — each half is the
+          other's <strong>buddy</strong> — until you reach the right size, parking the unused halves on their free
+          lists.</li>
+      </ul>
+      <p>
+        When a block is freed, the allocator checks whether its buddy is <em>also</em> free; if so it
+        <strong>coalesces</strong> them back into the block of the next order up, and repeats. Because a block and
+        its buddy differ by exactly one bit (buddy of block <primer-math>b</primer-math> at order
+        <primer-math>o</primer-math> is <primer-math>b \oplus 2^{o}</primer-math>), finding the buddy and merging
+        is a single XOR — fast, and it keeps large contiguous regions available. Watch a request for 3 pages split
+        a 16-page block down:
+      </p>
+      <primer-geometry scene="buddy"></primer-geometry>
+      <p>
+        That last step exposes the buddy system's built-in tax. A request for 3 pages had to be served by a
+        4-page block — one whole page is handed over but unused. This is <strong>internal fragmentation</strong>:
+        waste <em>inside</em> an allocated block, caused by rounding up to a power of two. In the worst case (a
+        request one page over a power of two) the buddy allocator wastes almost <primer-math>50\%</primer-math>.
+      </p>
+      <primer-code run>
+        // A buddy allocator over 2^4 = 16 pages. Requests round up to a power of two;
+        // larger free blocks split into buddies; frees coalesce buddies back together.
+        const MAX_ORDER = 4;                                   // total memory = 16 pages
+        const free: number[][] = Array.from({ length: MAX_ORDER + 1 }, () => []);
+        free[MAX_ORDER].push(0);                               // one free block @0 covering all 16 pages
+
+        const orderFor = (pages: number): number => {
+          let o = 0; while (2 ** o &lt; pages) o++; return o;   // smallest order that fits `pages`
+        };
+
+        function alloc(pages: number): number {
+          const need = orderFor(pages);
+          let o = need;
+          while (o &lt;= MAX_ORDER &amp;&amp; free[o].length === 0) o++; // find the smallest available block >= need
+          if (o &gt; MAX_ORDER) { console.log(`alloc(${pages}) FAILED (out of memory)`); return -1; }
+          let base = free[o].shift() as number;
+          while (o &gt; need) {                                  // split down to the needed order
+            o--;
+            const buddy = base + 2 ** o;
+            free[o].push(buddy);
+            console.log(`  split -> buddies @${base} and @${buddy} (order ${o})`);
+          }
+          const got = 2 ** need;
+          console.log(`alloc(${pages}) -> block @${base}, ${got} pages, internal frag = ${got - pages} page(s)`);
+          return base;
+        }
+
+        function release(base: number, pages: number): void {
+          let o = orderFor(pages);
+          while (o &lt; MAX_ORDER) {                             // try to coalesce with the buddy, repeatedly
+            const buddy = base ^ (2 ** o);
+            const i = free[o].indexOf(buddy);
+            if (i === -1) break;                              // buddy not free -> stop
+            free[o].splice(i, 1);
+            base = Math.min(base, buddy);
+            console.log(`  coalesce @${base} + @${buddy} -> order ${o + 1}`);
+            o++;
+          }
+          free[o].push(base);
+          console.log(`free(@${base}, ${pages}) done`);
+        }
+
+        const a = alloc(3);   // rounds up to a 4-page block: 1 page wasted
+        const b = alloc(2);
+        release(a, 3);
+        release(b, 2);        // frees ripple up, coalescing back toward the whole 16-page block
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The slab allocator: object caches</h2>
+      <p>
+        The buddy system deals in pages, but the kernel mostly wants <em>objects</em> far smaller than a page —
+        a <primer-math>\texttt{task\_struct}</primer-math>, an inode, a directory entry, allocated and freed
+        constantly. Cutting a fresh page from the buddy allocator for each tiny object would waste most of the
+        page and thrash the buddy lists. The <strong>slab allocator</strong> (Bonwick, 1994) fixes this: it asks
+        the buddy allocator for a <strong>slab</strong> (one or a few contiguous pages) and carves it into an
+        array of same-sized <strong>objects</strong>, kept in a per-type <strong>cache</strong>. Allocating an
+        object is then just popping one off a free list — no splitting, no page walk.
+      </p>
+      <p>
+        Slabs earn their keep three ways. They pack many objects per page, so per-object overhead is tiny. They
+        keep <strong>cache-warm</strong> objects: a freed object is not scrubbed but kept partly initialised, so
+        the next allocation of that type reuses a structure whose fields (and CPU-cache lines) are already hot —
+        a real speed win for churny types. And each object type gets its own cache, so a burst of one type does
+        not fragment the memory used by another. The cost is a form of <strong>internal fragmentation</strong>: an
+        object cache sized for <primer-math>320</primer-math>-byte objects rounds a
+        <primer-math>300</primer-math>-byte request up, wasting the slack in every slot.
+      </p>
+      <primer-theorem name="The kernel's two-level allocator">
+        <ul>
+          <li>the <strong>buddy allocator</strong> hands out contiguous runs of pages as power-of-two blocks,
+            splitting on demand and <strong>coalescing</strong> buddies (an XOR apart) on free — its waste is
+            <strong>internal</strong> fragmentation from rounding up, and it fights <strong>external</strong>
+            fragmentation by coalescing;</li>
+          <li>the <strong>slab/slub allocator</strong> sits on top, carving buddy-supplied pages into caches of
+            fixed-size objects for fast, low-overhead, cache-warm allocation of small kernel structures;</li>
+          <li>user-space allocators (jemalloc, tcmalloc) apply the same playbook: <strong>size classes</strong>
+            plus <strong>per-thread caches</strong> to make <primer-math>\texttt{malloc}</primer-math> fast and
+            scalable.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Internal vs external fragmentation — the two enemies</h2>
+      <p>
+        Every allocator is judged by how much memory it <em>wastes</em>, and there are exactly two ways to waste
+        it. Keep them straight, because the fixes are opposite:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Type</th><th>Where the waste is</th><th>Cause</th><th>Fought by</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Internal</strong></td><td>inside an allocated block (unused slack)</td><td>rounding a request up to a fixed size</td><td>finer size classes</td></tr>
+            <tr><td><strong>External</strong></td><td>between allocated blocks (free but unusable gaps)</td><td>free memory scattered in pieces too small to use</td><td>coalescing / compaction</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The buddy allocator trades them off deliberately: rounding to powers of two <em>causes</em> internal
+        fragmentation, but the resulting regularity makes coalescing trivial, which crushes <em>external</em>
+        fragmentation. Slabs almost eliminate external fragmentation for small objects (a slab is fully used or
+        fully returned) at the price of a little internal slack per slot. There is no free lunch — you choose
+        which fragmentation to pay.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Up in user space: jemalloc and tcmalloc</h2>
+      <p>
+        Your program's <primer-math>\texttt{malloc}</primer-math> faces the same pressures — plus one the kernel
+        allocators mostly dodge: dozens of threads calling it at once. A single global lock around the heap would
+        serialise them all. The modern answer, in <strong>tcmalloc</strong> (Google) and
+        <strong>jemalloc</strong> (FreeBSD, Facebook), is two ideas you have now met:
+      </p>
+      <ul>
+        <li><strong>Size classes</strong>: round every request up to one of a fixed menu of sizes (8, 16, 32, 48,
+          64, …), and keep a free list per class — the slab idea, in user space. Bounds internal fragmentation and
+          makes allocation a list pop.</li>
+        <li><strong>Per-thread caches</strong>: each thread keeps a small private cache of free objects per size
+          class, so the common case — allocate and free on the same thread — touches <em>no shared lock at
+          all</em>. Only when a thread's cache runs dry or overflows does it talk to the central heap.</li>
+      </ul>
+      <p>
+        That is why swapping in tcmalloc or jemalloc can dramatically speed up a heavily-threaded server: the
+        allocator stops being a contention bottleneck. The lesson is universal — from the buddy allocator in the
+        kernel to <primer-math>\texttt{malloc}</primer-math> in your process, fast allocation means
+        <em>size classes to bound waste</em> and <em>per-CPU / per-thread caches to bound contention</em>.
+      </p>
+      <primer-vignette title="Why is slab 'cache colouring' a trick about CPU caches, not memory colours?">
+        <p>
+          If every slab lays its objects out starting at the same offset within a page, then object number 0 of
+          <em>every</em> slab maps to the same
+          <primer-ref to="computer-science/computer-architecture/memory/cache-fundamentals">CPU-cache set</primer-ref>.
+          Hammer many such objects and they all collide in that one set, evicting each other while the rest of the
+          cache sits idle — a self-inflicted hot spot. <strong>Slab colouring</strong> nudges each new slab's
+          starting offset by a different small amount ("colour"), so equivalent objects across slabs land in
+          <em>different</em> cache sets and spread the load. It costs a few wasted bytes per slab and buys measurably
+          fewer conflict misses. It is a lovely example of an allocator reaching down two layers — past virtual
+          memory, into the cache's set-index bits — to tune performance.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-vignette title="Watch out! Internal and external fragmentation are opposites — don't blame the wrong one">
+      <p>
+        The classic mix-up: seeing a buddy allocator "waste" memory on a 3-page request and calling it external
+        fragmentation. It is <strong>internal</strong> — the waste is the unused fourth page <em>inside</em> the
+        block you were given. External fragmentation is the opposite failure: you have, say, 6 pages free in
+        total, but scattered as three separate 2-page gaps, so a request for a contiguous 4-page block
+        <em>fails</em> even though enough memory exists. The tell is <em>where the free space is</em>: unusable
+        slack <em>inside</em> a block you hold is internal; usable-in-total but too-scattered-to-use free space
+        <em>between</em> blocks is external. They demand opposite cures — finer sizing shrinks internal
+        fragmentation but tends to worsen external, and coalescing/compaction cures external at the cost of some
+        internal. Diagnose which one is biting before you "fix" it.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: allocator concepts + variable-driven internal-fragmentation / power-of-two rounding calcs. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "allocQuiz@1": {
+          "intro": "Buddy allocator: power-of-two page blocks, split and coalesce. Slab: fixed-size object caches. Both trade the two fragmentations.",
+          "buddyQ": "The buddy allocator manages memory in blocks of…",
+          "buddyRight": "power-of-two numbers of pages, split into buddies and coalesced on free",
+          "buddyWrong1": "arbitrary byte sizes with no rounding",
+          "buddyWrong2": "exactly one page, always",
+          "buddyWrong3": "fixed 1 MiB chunks",
+          "coalesceQ": "When a buddy block is freed, the allocator…",
+          "coalesceRight": "checks whether its buddy is also free and, if so, merges them into the next-larger block",
+          "coalesceWrong1": "always returns it straight to disk",
+          "coalesceWrong2": "splits it further",
+          "coalesceWrong3": "zeroes every other block",
+          "buddyXorQ": "The buddy of a block at base b, order o, is found by…",
+          "buddyXorRight": "XOR: b ⊕ 2^o — the two differ by exactly one bit",
+          "buddyXorWrong1": "adding the page size",
+          "buddyXorWrong2": "multiplying b by 2",
+          "buddyXorWrong3": "a full search of memory",
+          "slabQ": "The slab allocator exists to…",
+          "slabRight": "carve buddy-supplied pages into caches of fixed-size objects for fast small-object allocation",
+          "slabWrong1": "replace the buddy allocator for whole pages",
+          "slabWrong2": "store objects on disk",
+          "slabWrong3": "encrypt kernel structures",
+          "warmQ": "A 'cache-warm' object from a slab means…",
+          "warmRight": "a freed object is reused partly-initialised, so its fields and cache lines are already hot",
+          "warmWrong1": "the object is stored in the CPU cache permanently",
+          "warmWrong2": "it has been encrypted",
+          "warmWrong3": "it is always zeroed first",
+          "internalQ": "Internal fragmentation is…",
+          "internalRight": "wasted space INSIDE an allocated block, from rounding the request up",
+          "internalWrong1": "free memory scattered between blocks",
+          "internalWrong2": "memory lost to a crash",
+          "internalWrong3": "pages swapped to disk",
+          "externalQ": "External fragmentation is…",
+          "externalRight": "free memory split into gaps too small/scattered to satisfy a contiguous request",
+          "externalWrong1": "unused slack inside an allocated block",
+          "externalWrong2": "the TLB running out of entries",
+          "externalWrong3": "objects that are too warm",
+          "tcmallocQ": "tcmalloc / jemalloc scale to many threads chiefly by…",
+          "tcmallocRight": "giving each thread a private per-thread cache of size-classed objects, avoiding a shared lock",
+          "tcmallocWrong1": "using one global lock for correctness",
+          "tcmallocWrong2": "allocating only whole pages",
+          "tcmallocWrong3": "disabling multithreading",
+          "colourQ": "Slab cache colouring reduces…",
+          "colourRight": "CPU-cache conflict misses, by offsetting each slab so equivalent objects hit different cache sets",
+          "colourWrong1": "the number of colours on screen",
+          "colourWrong2": "internal fragmentation to zero",
+          "colourWrong3": "the page-table depth",
+          "fragNumQ": "A buddy allocator serves a request of {req} pages. It rounds up to the next power of two. How many pages are WASTED (internal fragmentation)?",
+          "roundNumQ": "A request of {req} pages is served by a buddy block. How many pages is that block (the next power of two ≥ req)?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="allocQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/memory/address-translation-in-depth"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The buddy-split diagram: a 16-page block split in halves down to a 4-page block for a 3-page request.
+     Stepped (opens revealed). Colours only from themeColors(). Plus the randomised quiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "buddy",
+    ({ board, colors, step, sceneStrings }) => {
+      const SCALE = 0.5;        // 16 units of pages -> 8 board units
+      const H = 0.7;
+      // Draw a block spanning [p0, p0+len) pages at a given y-level.
+      const block = (p0, len, y, cat, op, label) => {
+        const x0 = p0 * SCALE, x1 = (p0 + len) * SCALE;
+        board.create("polygon", [[x0, y], [x1, y], [x1, y + H], [x0, y + H]], {
+          fillColor: cat, fillOpacity: op,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [(x0 + x1) / 2, y + H / 2, label], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:600",
+        });
+      };
+
+      // Base: the whole 16-page block at the top level.
+      block(0, 16, 3.4, colors.cat[0], 0.2, "16");
+
+      // Step 1: split into two 8-page buddies.
+      step(sceneStrings("split1"), () => {
+        block(0, 8, 2.3, colors.cat[0], 0.2, "8");
+        block(8, 8, 2.3, colors.cat[0], 0.2, "8");
+      });
+      // Step 2: split the left 8 into two 4-page buddies.
+      step(sceneStrings("split2"), () => {
+        block(0, 4, 1.2, colors.cat[0], 0.2, "4");
+        block(4, 4, 1.2, colors.cat[0], 0.2, "4");
+      });
+      // Step 3: allocate the left 4-page block for a 3-page request (highlight; 1 page wasted).
+      step(sceneStrings("alloc"), () => {
+        block(0, 3, 0.1, colors.cat[1], 0.35, "3 used");
+        block(3, 1, 0.1, colors.cat[2], 0.35, "waste");
+      });
+    },
+    {
+      boundingbox: [-0.6, 4.5, 8.8, -0.5],
+      keepAspect: false,
+      title: () => makeStrings("buddy")("title"),
+    },
+  );
+
+  // Next power of two >= n (n in 1..64 for the quiz ranges).
+  const nextPow2 = (n) => { let p = 1; while (p < n) p *= 2; return p; };
+
+  registerQuiz("allocQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("buddyQ"),
+      options: [
+        { text: () => sceneStrings("buddyRight"), correct: true },
+        { text: () => sceneStrings("buddyWrong1"), correct: false },
+        { text: () => sceneStrings("buddyWrong2"), correct: false },
+        { text: () => sceneStrings("buddyWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("coalesceQ"),
+      options: [
+        { text: () => sceneStrings("coalesceRight"), correct: true },
+        { text: () => sceneStrings("coalesceWrong1"), correct: false },
+        { text: () => sceneStrings("coalesceWrong2"), correct: false },
+        { text: () => sceneStrings("coalesceWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("buddyXorQ"),
+      options: [
+        { text: () => sceneStrings("buddyXorRight"), correct: true },
+        { text: () => sceneStrings("buddyXorWrong1"), correct: false },
+        { text: () => sceneStrings("buddyXorWrong2"), correct: false },
+        { text: () => sceneStrings("buddyXorWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("slabQ"),
+      options: [
+        { text: () => sceneStrings("slabRight"), correct: true },
+        { text: () => sceneStrings("slabWrong1"), correct: false },
+        { text: () => sceneStrings("slabWrong2"), correct: false },
+        { text: () => sceneStrings("slabWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("warmQ"),
+      options: [
+        { text: () => sceneStrings("warmRight"), correct: true },
+        { text: () => sceneStrings("warmWrong1"), correct: false },
+        { text: () => sceneStrings("warmWrong2"), correct: false },
+        { text: () => sceneStrings("warmWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("internalQ"),
+      options: [
+        { text: () => sceneStrings("internalRight"), correct: true },
+        { text: () => sceneStrings("internalWrong1"), correct: false },
+        { text: () => sceneStrings("internalWrong2"), correct: false },
+        { text: () => sceneStrings("internalWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("externalQ"),
+      options: [
+        { text: () => sceneStrings("externalRight"), correct: true },
+        { text: () => sceneStrings("externalWrong1"), correct: false },
+        { text: () => sceneStrings("externalWrong2"), correct: false },
+        { text: () => sceneStrings("externalWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tcmallocQ"),
+      options: [
+        { text: () => sceneStrings("tcmallocRight"), correct: true },
+        { text: () => sceneStrings("tcmallocWrong1"), correct: false },
+        { text: () => sceneStrings("tcmallocWrong2"), correct: false },
+        { text: () => sceneStrings("tcmallocWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("colourQ"),
+      options: [
+        { text: () => sceneStrings("colourRight"), correct: true },
+        { text: () => sceneStrings("colourWrong1"), correct: false },
+        { text: () => sceneStrings("colourWrong2"), correct: false },
+        { text: () => sceneStrings("colourWrong3"), correct: false },
+      ],
+    },
+    {
+      // Wasted = nextPow2(req) - req.
+      prompt: (v) => sceneStrings("fragNumQ", v),
+      variables: "req=[3:30]",
+      answer: (v) => nextPow2(v.req) - v.req,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Block size = nextPow2(req).
+      prompt: (v) => sceneStrings("roundNumQ", v),
+      variables: "req=[3:30]",
+      answer: (v) => nextPow2(v.req),
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

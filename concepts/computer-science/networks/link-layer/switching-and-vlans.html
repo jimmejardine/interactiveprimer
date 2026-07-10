@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Switches and VLANs</primer-title>
+
+    <primer-card>
+      <p>
+        Plug six computers into one old <strong>hub</strong> and you have rebuilt the dinner-party microphone:
+        a hub is an electrical repeater that shouts every incoming bit out of <em>every other</em> port, so all
+        six machines share one noisy channel and must run
+        <primer-ref soft to="computer-science/networks/link-layer/multiple-access-and-ethernet">CSMA/CD</primer-ref>
+        to take turns. Plug the same six into a <strong>switch</strong> and something quietly magical happens:
+        each machine gets the wire to itself, collisions vanish, and any two pairs can talk <em>at the same
+        time</em> at full speed. The switch looks identical from the outside — same ports, same cables — but
+        inside it is a completely different kind of animal. This page is about that animal: how it learns, why
+        it abolishes collisions, and how <strong>VLANs</strong> let one physical box pretend to be many
+        separate LANs.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Hub, switch, router: three boxes, three layers</h2>
+      <p>
+        The three devices are easy to confuse because they all have ports and pass traffic around. The
+        difference is <em>how much they understand</em> about what flows through them.
+      </p>
+      <ul>
+        <li>
+          <strong>Hub (layer 1)</strong> — understands <em>nothing</em>. It repeats raw bits out every port. One
+          shared medium, one <strong>collision domain</strong>, half-duplex, CSMA/CD required. Obsolete.
+        </li>
+        <li>
+          <strong>Switch (layer 2)</strong> — understands <strong>frames and MAC addresses</strong>. It reads
+          each frame's destination MAC and forwards it out <em>only</em> the one port that reaches it. Every
+          port is its own collision domain, so the whole switch is collision-free and
+          <strong>full-duplex</strong>.
+        </li>
+        <li>
+          <strong>Router (layer 3)</strong> — understands <strong>IP addresses</strong>. It forwards
+          <primer-ref soft to="computer-science/networks/packet-switching">packets</primer-ref> between
+          <em>different</em> networks, choosing routes across the internet, and separates
+          <strong>broadcast domains</strong>. Slower per packet, but it is what lets networks scale beyond one
+          LAN.
+        </li>
+      </ul>
+      <p>
+        A useful one-liner: a <strong>switch moves frames within a LAN by MAC address; a router moves packets
+        between LANs by IP address.</strong> A switch never looks at IP; a router does not care about your MAC
+        beyond the next hop.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "collisionDomains": {
+            "title": "Hub: one shared collision domain — Switch: one per port",
+            "hubLabel": "HUB (layer 1)",
+            "swLabel": "SWITCH (layer 2)",
+            "hubDomain": "One collision domain — all hosts share the medium (CSMA/CD)",
+            "swDomain": "Each link is its own collision domain — full-duplex, no collisions"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="collisionDomains"
+        caption="Left: a hub with four hosts, all enclosed in a single shaded region labelled 'one collision domain'. Right: a switch with four hosts, each host-to-switch link enclosed in its own small shaded region, labelled 'each link is its own collision domain, full-duplex'."
+      ></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The self-learning switch table</h2>
+      <p>
+        A switch is not configured with a map of who is plugged in where — it <strong>teaches itself</strong>,
+        by watching traffic, using a <strong>switch (or MAC/CAM) table</strong> mapping
+        <em>MAC&nbsp;address → port</em>. The algorithm is three small rules, applied to every arriving frame:
+      </p>
+      <ul>
+        <li>
+          <strong>Learn</strong> — record the frame's <em>source</em> MAC against the port it arrived on. Now
+          the switch knows how to reach that station.
+        </li>
+        <li>
+          <strong>Forward or flood</strong> — look up the <em>destination</em> MAC. If it is in the table,
+          send the frame out <em>only</em> that port (a "forward"). If it is <em>unknown</em> (or a broadcast),
+          <strong>flood</strong> it out every port except the one it came in on — the switch does not yet know
+          where the target lives, so it asks everywhere.
+        </li>
+        <li>
+          <strong>Age</strong> — every table entry carries a timer; if a MAC goes silent for the timeout
+          (typically ~5 minutes) its entry is deleted, so the table tracks machines that move or unplug.
+        </li>
+      </ul>
+      <p>
+        Because normal replies flow back, the table fills within a frame or two of a conversation starting, and
+        flooding quickly gives way to precise forwarding. The simulation below fills a table live as frames
+        arrive.
+      </p>
+
+      <primer-code run>
+        // A self-learning layer-2 switch. It watches (srcMac, dstMac, inPort)
+        // for each frame and prints whether it FORWARDS to a known port or FLOODS.
+        type Frame = { src: string; dst: string; inPort: number };
+
+        function runSwitch(frames: Frame[], numPorts: number): void {
+          const table = new Map&lt;string, number&gt;(); // MAC -> port
+
+          for (const f of frames) {
+            // 1) LEARN the source
+            const learned = table.get(f.src) !== f.inPort;
+            table.set(f.src, f.inPort);
+
+            // 2) FORWARD if we know the destination, else FLOOD
+            const outPort = table.get(f.dst);
+            let action: string;
+            if (outPort === undefined) {
+              const flood = [];
+              for (let p = 1; p &lt;= numPorts; p++) if (p !== f.inPort) flood.push(p);
+              action = "FLOOD to ports " + flood.join(",") + " (dst unknown)";
+            } else if (outPort === f.inPort) {
+              action = "DROP (dst is on the same port)";
+            } else {
+              action = "FORWARD to port " + outPort;
+            }
+
+            const note = learned ? "  [learned " + f.src + "@" + f.inPort + "]" : "";
+            console.log(`${f.src}->${f.dst} in p${f.inPort}: ${action}${note}`);
+          }
+
+          console.log("\nFinal switch table:");
+          for (const [mac, port] of table) console.log(`  ${mac} -> port ${port}`);
+        }
+
+        // A, B, C, D on ports 1..4 exchange a few frames.
+        runSwitch([
+          { src: "A", dst: "B", inPort: 1 }, // B unknown -> flood
+          { src: "B", dst: "A", inPort: 2 }, // now A known -> forward
+          { src: "C", dst: "A", inPort: 3 }, // A known -> forward
+          { src: "A", dst: "C", inPort: 1 }, // C now known -> forward
+          { src: "D", dst: "B", inPort: 4 }, // B known -> forward
+        ], 4);
+      </primer-code>
+
+      <p>
+        Watch the first frame flood (nobody knows where B is), then every later frame forward precisely as the
+        table fills. This tiny algorithm — learn the source, forward-or-flood the destination, age the entries
+        — is the entire brain of an unmanaged switch.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why switched Ethernet is full-duplex and collision-free</h2>
+      <p>
+        On a hub, host and hub share one wire, so a host must not transmit while receiving — <em>half
+        duplex</em>, with CSMA/CD refereeing the shared medium. A switch changes the physics: a modern link is
+        a <strong>point-to-point</strong> connection with separate transmit and receive pairs between exactly
+        <em>two</em> devices — the host and the switch port. With only two endpoints and dedicated wires each
+        way, both can transmit <strong>simultaneously</strong> (<em>full duplex</em>) and there is
+        <strong>no one to collide with</strong>. The switch buffers frames arriving on busy ports and serves
+        them when the outgoing port is free.
+      </p>
+      <p>
+        So on fully-switched, full-duplex Ethernet, <strong>CSMA/CD is switched off entirely</strong> — there
+        are no collisions to detect. The collision-management machinery that defined classic Ethernet becomes
+        vestigial; the switch's buffering and per-port isolation do the job instead. This is why a switched LAN
+        can run every link at line rate at once, where a hubbed LAN's total throughput was capped at one shared
+        channel.
+      </p>
+
+      <primer-vignette title="Watch out! — a switch is NOT a router, and it does NOT tame broadcasts">
+        <p>
+          Two confusions to nail down. First, a <strong>switch is not a router</strong>: a switch forwards by
+          MAC within a single LAN and never inspects IP; a router forwards by IP <em>between</em> LANs. Calling
+          the box in your cupboard a "router" is often half-wrong — most home "routers" are a router, a switch,
+          and a Wi-Fi access point fused into one case.
+        </p>
+        <p>
+          Second — and this trips up many — a plain switch <strong>does not reduce broadcast traffic</strong>. A
+          switch confines <em>collisions</em> (one collision domain per port), but a broadcast frame (destination
+          <code>FF:FF:FF:FF:FF:FF</code>, or an unknown-destination flood, or every ARP query) is sent out
+          <em>every</em> port. The whole switch — and every switch chained to it — is one big
+          <strong>broadcast domain</strong>. Broadcast storms still cross switches freely. To split a broadcast
+          domain you need either a <strong>router</strong> or a <strong>VLAN</strong> — which is exactly what
+          the next section is for.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>VLANs: many logical LANs in one box</h2>
+      <p>
+        A big organisation wants Engineering, Finance and Guests kept apart — separate broadcast domains, so a
+        guest laptop can never even see Finance's broadcast traffic. The old way was three <em>physical</em>
+        switches. The modern way is one switch sliced into three <strong>virtual LANs (VLANs)</strong>. You
+        assign each port a VLAN number; the switch then behaves as if it were three independent switches that
+        happen to share a chassis. A frame from a port in VLAN&nbsp;10 is only ever flooded or forwarded to
+        <em>other VLAN&nbsp;10 ports</em> — VLAN 20 never hears it. Each VLAN is its own broadcast domain.
+      </p>
+      <p>
+        To carry many VLANs over a <em>single</em> cable between switches (or up to a router), you use a
+        <strong>trunk link</strong>, and each frame on it is tagged with its VLAN. The
+        <strong>IEEE 802.1Q</strong> standard defines this tag: a 4-byte field inserted into the Ethernet
+        header carrying a 12-bit <strong>VLAN ID</strong> (so up to 4094 usable VLANs). Access ports (to end
+        hosts) carry untagged frames for one VLAN; trunk ports carry tagged frames for many. Crossing
+        <em>between</em> VLANs still requires a router (or a layer-3 switch) — because different VLANs are
+        different IP subnets, and moving between subnets is, by definition, routing.
+      </p>
+
+      <primer-theorem name="Switch vs VLAN vs router — what each separates">
+        <ul>
+          <li>
+            A <strong>switch port</strong> separates <em>collision domains</em> (one per port) but not
+            broadcast domains.
+          </li>
+          <li>
+            A <strong>VLAN</strong> separates <em>broadcast domains</em> logically, on one physical switch,
+            via 802.1Q tags — no extra hardware.
+          </li>
+          <li>
+            A <strong>router</strong> separates <em>broadcast domains</em> too, and is the only way to move
+            traffic <em>between</em> VLANs / IP subnets.
+          </li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Spanning Tree: surviving loops</h2>
+      <p>
+        For resilience, network designers wire <em>redundant</em> links between switches — if one cable fails,
+        another path remains. But a physical <strong>loop</strong> is catastrophic for a layer-2 network. Recall
+        that switches flood unknown-destination and broadcast frames out every port. In a loop, a single
+        broadcast is flooded around the ring, arrives back, is flooded again, and multiplies forever — a
+        <strong>broadcast storm</strong> that melts the network in seconds. Ethernet frames have no
+        <primer-ref todo to="computer-science/networks/network-layer/time-to-live">time-to-live</primer-ref>
+        field to stop them, unlike IP packets.
+      </p>
+      <p>
+        The <strong>Spanning Tree Protocol (STP</strong>, IEEE 802.1D) solves this automatically. The switches
+        elect a <em>root</em>, measure distances, and cooperatively <strong>disable just enough redundant
+        ports</strong> to break every loop — leaving a single loop-free tree that still connects everything.
+        The blocked links sit in reserve; if an active link dies, STP recomputes and brings a standby link up.
+        You get redundancy's safety without the loop's danger, at the cost of a little idle capacity and a few
+        seconds of reconvergence (modern <em>Rapid</em> STP is far quicker).
+      </p>
+
+      <primer-vignette title="Why can't switches just let the loop be, like the internet does?">
+        <p>
+          IP routers handle loops gracefully because every IP packet carries a <strong>TTL</strong> that
+          decrements at each hop and hits zero, so a looping packet eventually dies. The Ethernet frame has
+          <em>no such field</em> — it was designed for a simple shared cable with no loops in sight. A frame
+          caught in a layer-2 loop therefore circulates <em>forever</em>, and because switches <em>duplicate</em>
+          broadcasts out multiple ports, one frame becomes two becomes four — exponential growth, not a
+          single stubborn straggler. That asymmetry is exactly why layer 2 needs an explicit loop-breaker
+          (STP) while layer 3 does not.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "switchQuiz@1": { "instructions": "Check your grasp of switches vs hubs vs routers, self-learning tables, collision and broadcast domains, VLANs and spanning tree." } }
+    </script>
+    <primer-quiz name="switchQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/network-topologies",
+      "computer-science/networks/link-layer/multiple-access-and-ethernet"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // Static contrast (base content, shows on load): a hub with 4 hosts inside ONE
+  // collision-domain blob vs a switch with 4 hosts, each link its own blob.
+  registerGeometryScene("collisionDomains", ({ board, colors, sceneStrings }) => {
+    const dot = (x, y, s, col) =>
+      board.create("point", [x, y], {
+        size: 3, fixed: true, highlight: false, name: s, withLabel: true,
+        label: { offset: [0, 12], strokeColor: col, fontSize: 12 },
+        fillColor: col, strokeColor: col,
+      });
+    const node = (x, y, s, col) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true,
+        highlight: false, strokeColor: col, color: col, cssStyle: "font-weight:700",
+      });
+    const link = (a, b) =>
+      board.create("segment", [a, b], {
+        strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false,
+        straightFirst: false, straightLast: false,
+      });
+    const blob = (x, y, rx, ry) =>
+      board.create("ellipse",
+        [[x - rx, y], [x + rx, y], [x, y + ry]], {
+          strokeColor: colors.cat[1], strokeWidth: 1.5, dash: 2,
+          fillColor: colors.cat[1], fillOpacity: 0.07, fixed: true, highlight: false,
+        });
+
+    // ---- LEFT: HUB, one collision domain ----
+    const hx = -4, hy = 0;
+    blob(hx, hy, 2.6, 2.4);
+    node(hx, hy, "HUB", colors.cat[0]);
+    const hHosts = [[hx - 1.8, hy + 1.4], [hx + 1.8, hy + 1.4], [hx - 1.8, hy - 1.4], [hx + 1.8, hy - 1.4]];
+    hHosts.forEach((p, i) => { link([hx, hy], p); dot(p[0], p[1], "H" + (i + 1), colors.ink); });
+    node(hx, 3.2, sceneStrings("hubLabel"), colors.ink);
+    node(hx, -3.1, "one shared collision domain", colors.cat[1]);
+
+    // ---- RIGHT: SWITCH, one collision domain per link ----
+    const sx = 4, sy = 0;
+    node(sx, sy, "SWITCH", colors.cat[0]);
+    const sHosts = [[sx - 1.9, sy + 1.5], [sx + 1.9, sy + 1.5], [sx - 1.9, sy - 1.5], [sx + 1.9, sy - 1.5]];
+    sHosts.forEach((p, i) => {
+      link([sx, sy], p);
+      // a little blob hugging each individual link
+      const mx = (sx + p[0]) / 2, my = (sy + p[1]) / 2;
+      blob(mx, my, 1.15, 0.7);
+      dot(p[0], p[1], "H" + (i + 1), colors.ink);
+    });
+    node(sx, 3.2, sceneStrings("swLabel"), colors.ink);
+    node(sx, -3.1, "a collision domain per link (full-duplex)", colors.cat[1]);
+  }, {
+    boundingbox: [-8, 4, 8, -4],
+    keepAspect: false,
+    title: () => makeStrings("collisionDomains")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("switchQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "What does a hub (layer 1) do with an incoming frame?",
+      options: [
+        { text: "Repeats the raw bits out every other port — one shared collision domain", correct: true },
+        { text: "Reads the destination MAC and forwards only to the right port", correct: false },
+        { text: "Reads the destination IP and routes between networks", correct: false },
+        { text: "Stores the frame and forwards it after a fixed delay", correct: false },
+      ] },
+
+    { prompt: "The key difference between a switch and a hub is that a switch…",
+      options: [
+        { text: "reads MAC addresses and forwards each frame out only the port that reaches its destination", correct: true },
+        { text: "operates at layer 3 and routes by IP address", correct: false },
+        { text: "amplifies the electrical signal only", correct: false },
+        { text: "encrypts every frame it forwards", correct: false },
+      ] },
+
+    { prompt: "A switch differs from a router in that a switch…",
+      options: [
+        { text: "forwards frames by MAC within a LAN; a router forwards packets by IP between LANs", correct: true },
+        { text: "operates at a higher layer than a router", correct: false },
+        { text: "chooses routes across the whole internet", correct: false },
+        { text: "cannot forward frames without a configured table", correct: false },
+      ] },
+
+    { prompt: "How does a switch build its MAC-address table?",
+      options: [
+        { text: "It learns: records each frame's source MAC against the port it arrived on", correct: true },
+        { text: "An administrator types in every MAC-to-port mapping", correct: false },
+        { text: "It queries a central DNS server", correct: false },
+        { text: "It copies the table from the nearest router", correct: false },
+      ] },
+
+    { prompt: "When a switch receives a frame for a destination MAC that is NOT in its table, it…",
+      options: [
+        { text: "floods the frame out every port except the one it arrived on", correct: true },
+        { text: "drops the frame silently", correct: false },
+        { text: "sends it back out the port it came in on", correct: false },
+        { text: "converts it into a broadcast IP packet", correct: false },
+      ] },
+
+    { prompt: "Why do switch-table entries have an ageing timer?",
+      options: [
+        { text: "So the table forgets machines that move or unplug, staying accurate", correct: true },
+        { text: "To limit each machine to a few minutes of network access", correct: false },
+        { text: "To encrypt entries after a timeout", correct: false },
+        { text: "To synchronise clocks between switches", correct: false },
+      ] },
+
+    { prompt: "Why is a fully-switched Ethernet link full-duplex and collision-free?",
+      options: [
+        { text: "It's a point-to-point link between just two devices with separate send/receive pairs — no one to collide with", correct: true },
+        { text: "The switch runs CSMA/CD faster than a hub", correct: false },
+        { text: "Frames are made small enough never to overlap", correct: false },
+        { text: "The switch retransmits any collided frame automatically", correct: false },
+      ] },
+
+    { prompt: "On fully-switched full-duplex Ethernet, CSMA/CD is…",
+      options: [
+        { text: "switched off — there are no collisions to detect", correct: true },
+        { text: "run twice as often for safety", correct: false },
+        { text: "replaced by CSMA/CA", correct: false },
+        { text: "still essential on every link", correct: false },
+      ] },
+
+    { prompt: "A switch confines collision domains but does NOT, by itself, reduce…",
+      options: [
+        { text: "broadcast traffic — the whole switch is one broadcast domain", correct: true },
+        { text: "the number of ports available", correct: false },
+        { text: "the speed of each link", correct: false },
+        { text: "the size of the MAC table", correct: false },
+      ] },
+
+    { prompt: "To split one physical switch into isolated broadcast domains without extra hardware, you use…",
+      options: [
+        { text: "VLANs", correct: true },
+        { text: "a longer ageing timer", correct: false },
+        { text: "more collision domains", correct: false },
+        { text: "a faster CPU in the switch", correct: false },
+      ] },
+
+    { prompt: "What does IEEE 802.1Q define?",
+      options: [
+        { text: "A 4-byte tag carrying a 12-bit VLAN ID, inserted into the Ethernet header", correct: true },
+        { text: "The spanning-tree root election", correct: false },
+        { text: "The format of an IP packet", correct: false },
+        { text: "The CSMA/CD backoff algorithm", correct: false },
+      ] },
+
+    { prompt: "A trunk link between two switches carries…",
+      options: [
+        { text: "frames for many VLANs, each tagged with its VLAN ID", correct: true },
+        { text: "untagged frames for exactly one VLAN", correct: false },
+        { text: "only broadcast frames", correct: false },
+        { text: "IP packets only, never Ethernet frames", correct: false },
+      ] },
+
+    { prompt: "Moving traffic BETWEEN two VLANs requires…",
+      options: [
+        { text: "a router (or layer-3 switch), because VLANs are different IP subnets", correct: true },
+        { text: "nothing — a plain switch does it automatically", correct: false },
+        { text: "removing the 802.1Q tags", correct: false },
+        { text: "a hub between them", correct: false },
+      ] },
+
+    { prompt: "Why is a physical loop between switches dangerous at layer 2?",
+      options: [
+        { text: "Flooded/broadcast frames circulate and multiply forever — a broadcast storm — since frames have no TTL", correct: true },
+        { text: "It doubles the available bandwidth uncontrollably", correct: false },
+        { text: "It causes IP packets to be routed backwards", correct: false },
+        { text: "It disables the MAC-learning algorithm", correct: false },
+      ] },
+
+    { prompt: "What does the Spanning Tree Protocol do?",
+      options: [
+        { text: "Disables just enough redundant ports to leave a single loop-free tree, keeping standby links in reserve", correct: true },
+        { text: "Adds a TTL field to every Ethernet frame", correct: false },
+        { text: "Encrypts traffic between switches", correct: false },
+        { text: "Assigns VLAN IDs to each port automatically", correct: false },
+      ] },
+
+    { prompt: "Why do routers tolerate loops gracefully while switches need STP?",
+      options: [
+        { text: "IP packets carry a TTL that decrements to zero and dies; Ethernet frames have no TTL and switches duplicate broadcasts", correct: true },
+        { text: "Routers are simply faster than switches", correct: false },
+        { text: "Routers never forward broadcast traffic at all", correct: false },
+        { text: "Switches cannot have more than one link between them", correct: false },
+      ] },
+  ]);
+</script>

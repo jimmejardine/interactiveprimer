@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Clock Synchronization and NTP</primer-title>
+
+    <primer-card>
+      <p>
+        Two servers in the same rack, bought on the same day, running the same software, will
+        <em>disagree about what time it is</em> — and the gap grows every hour you leave them alone. It is not a
+        bug; it is physics. A computer's clock is a tiny quartz crystal oscillating at a nominal frequency, and
+        no two crystals oscillate at <em>exactly</em> the same rate. One machine's "one second" is fractionally
+        longer than another's, so their readings drift apart, silently, forever.
+      </p>
+      <p>
+        In a single computer this rarely matters. In a <primer-ref soft to="computer-science/distributed-systems/distributed-systems">
+        distributed system</primer-ref> — where a transaction touches three machines, a log stitches events
+        from ten, and a certificate's validity hinges on "now" — disagreeing clocks cause real, expensive bugs:
+        a file appears to be modified <em>before</em> it was created, a cache entry expires in the past,
+        distributed logs interleave nonsensically. This page is about <em>why</em> clocks drift, the clever
+        algorithms that drag them back into rough agreement (Cristian's, Berkeley, and NTP), and the crucial
+        limit lurking underneath: <strong>even perfectly synchronised clocks cannot reliably order events across
+        machines.</strong>
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Skew and drift: two different ways clocks disagree</h2>
+      <p>
+        Precision here demands two distinct words that beginners blur together.
+      </p>
+      <primer-theorem name="Skew vs drift">
+        <ul>
+          <li>
+            <strong>Clock skew</strong> — the <em>instantaneous difference</em> between two clocks' readings at
+            one moment. "Right now, server A reads 12:00:03 and server B reads 12:00:05" → a skew of 2 seconds.
+            It is a snapshot.
+          </li>
+          <li>
+            <strong>Clock drift</strong> — the <em>rate</em> at which that difference grows, because the clocks
+            tick at slightly different frequencies. It is a slope: e.g. "50 parts per million" means the clock
+            gains or loses 50 microseconds per second, roughly <strong>4 seconds per day</strong>.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The relationship is exactly like position and velocity: <em>skew is where the clocks are now; drift is
+        how fast the skew is changing.</em> You can zero the skew by setting both clocks equal — but if they
+        drift, the skew reopens immediately. That is why synchronisation is never "set it once": it must
+        <strong>repeat forever</strong>, nudging clocks back before drift pulls them apart again. A typical
+        quartz clock drifts tens of ppm; left unsynchronised for a month it can be off by minutes.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Cristian's algorithm: ask a time server, correct for the trip</h2>
+      <p>
+        The obvious fix: ask a machine that has the accurate time (say, one with a GPS or atomic clock) "what
+        time is it?" and set your clock to the reply. The catch is <strong>the network delay</strong>: by the
+        time the answer <em>reaches</em> you, it is already stale by however long the trip took. Cristian's
+        algorithm (1989) corrects for this with a beautifully simple estimate.
+      </p>
+      <ul>
+        <li>The client records its send time <primer-math>T_0</primer-math> and fires off a request.</li>
+        <li>The server, on receiving it, replies with its current time <primer-math>T_s</primer-math>.</li>
+        <li>The client records the reply's arrival time <primer-math>T_1</primer-math>.</li>
+      </ul>
+      <p>
+        The whole round trip took <primer-math>\text{RTT} = T_1 - T_0</primer-math>. If we <em>assume the
+        request and reply each took half</em> the round trip, then the server's clock, by the time the reply
+        lands, reads about <primer-math>T_s + \text{RTT}/2</primer-math>. So the client sets its clock to:
+      </p>
+      <primer-math display>T_{\text{new}} = T_s + \frac{T_1 - T_0}{2}</primer-math>
+      <p>
+        The error is bounded by half the round-trip time (the trip could have been lopsided), so
+        <strong>the shorter and more symmetric the path, the better the estimate.</strong> This "measure the
+        round trip, assume it split evenly" idea is the seed of every time-sync protocol, including NTP.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The Berkeley algorithm: average instead of trusting one oracle</h2>
+      <p>
+        Cristian's assumes there <em>is</em> an authoritative clock. The Berkeley algorithm (1989) takes the
+        opposite stance: <strong>no machine's clock is trusted more than any other's; agree on the average.</strong>
+        It is used when you just want a set of machines to <em>agree with each other</em>, even if none of them
+        has the "true" time.
+      </p>
+      <ul>
+        <li>One machine is elected the <strong>coordinator (master)</strong>.</li>
+        <li>It <em>polls</em> every other machine for its clock reading and measures the round-trip to each (so it can correct for network delay, Cristian-style).</li>
+        <li>It computes the <strong>average</strong> of everyone's (delay-corrected) clocks — often discarding outliers so one wildly wrong clock can't skew the result.</li>
+        <li>Instead of broadcasting the new time, it sends each machine the <strong>adjustment</strong> it should apply ("speed up by 12 ms", "slow down by 30 ms").</li>
+      </ul>
+      <p>
+        Sending <em>adjustments</em> rather than absolute times matters: it lets clocks be <strong>slewed</strong>
+        gradually (nudged faster or slower) rather than jumped, which avoids a clock ever <em>going
+        backwards</em> — a jump backward can make a later event appear to happen before an earlier one, breaking
+        any code that assumes time moves forward. Berkeley is <em>internal</em> synchronisation (agree with each
+        other); Cristian's and NTP are <em>external</em> (agree with a reference).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>NTP: the Internet's clock, in a stratum hierarchy</h2>
+      <p>
+        The Network Time Protocol (NTP) is Cristian's idea, industrialised and running on essentially every
+        connected device on Earth. Its two big ideas are a <strong>hierarchy of sources</strong> and a
+        <strong>four-timestamp exchange</strong> that separates offset from delay.
+      </p>
+      <p>
+        Time flows down a tree of <strong>strata</strong>:
+      </p>
+      <ul>
+        <li><strong>Stratum 0</strong> — the reference clocks themselves: atomic clocks, GPS receivers. Not on the network directly.</li>
+        <li><strong>Stratum 1</strong> — servers directly attached to a stratum-0 source; the primary time servers.</li>
+        <li><strong>Stratum 2</strong> — servers that sync <em>from</em> stratum-1 servers over the network.</li>
+        <li><strong>Stratum 3, 4, …</strong> — each level syncs from the one above; your laptop is typically stratum 3 or 4.</li>
+      </ul>
+      <p>
+        A higher stratum number means "further from the true source," and NTP prefers lower-stratum, lower-delay
+        peers. The hierarchy keeps the whole Internet's clocks anchored to a handful of atomic references without
+        everyone hammering the same few servers.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "ntpExchange": {
+            "title": "NTP's four timestamps: t0, t3 on the client; t1, t2 on the server",
+            "clientCol": "CLIENT",
+            "serverCol": "SERVER (higher stratum)",
+            "t0": "t0 — client sends the request (client clock)",
+            "req": "request travels up the network",
+            "t1": "t1 — server receives it (server clock)",
+            "t2": "t2 — server sends the reply (server clock)",
+            "rep": "reply travels back down",
+            "t3": "t3 — client receives the reply (client clock)",
+            "calc": "offset = ((t1−t0)+(t2−t3))/2     delay = (t3−t0)−(t2−t1)"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="ntpExchange"
+        caption="A two-column timeline. The client sends a request at time t0 by its own clock; the server stamps t1 when it receives it and t2 when it replies, both by the server clock; the client stamps t3 when the reply arrives. From these four timestamps NTP computes offset = ((t1−t0)+(t2−t3))/2 and round-trip delay = (t3−t0)−(t2−t1)."
+      ></primer-geometry>
+
+      <p>
+        The four timestamps are collected on one request/reply:
+      </p>
+      <ul>
+        <li><primer-math>t_0</primer-math> — client's send time (client clock)</li>
+        <li><primer-math>t_1</primer-math> — server's receive time (server clock)</li>
+        <li><primer-math>t_2</primer-math> — server's send time (server clock)</li>
+        <li><primer-math>t_3</primer-math> — client's receive time (client clock)</li>
+      </ul>
+      <p>
+        From these, NTP computes two quantities. The <strong>round-trip delay</strong> subtracts out the time
+        the server spent processing (<primer-math>t_2 - t_1</primer-math>) from the total elapsed on the client:
+      </p>
+      <primer-math display>\delta = (t_3 - t_0) - (t_2 - t_1)</primer-math>
+      <p>
+        And the <strong>clock offset</strong> — how far ahead (or behind) the client is relative to the
+        server — is the average of the two apparent one-way differences:
+      </p>
+      <primer-math display>\theta = \frac{(t_1 - t_0) + (t_2 - t_3)}{2}</primer-math>
+      <p>
+        The genius is the <em>averaging</em>: if the network delay is symmetric, the errors on the "up" trip and
+        the "down" trip cancel, leaving a clean estimate of the true offset regardless of how long the trip took.
+        The client then slews its clock by <primer-math>\theta</primer-math>. Let's compute both from real
+        numbers.
+      </p>
+
+      <primer-code run>
+        // NTP offset and round-trip delay from the four timestamps.
+        // t0,t3 are on the CLIENT clock; t1,t2 are on the SERVER clock.
+        function ntp(t0: number, t1: number, t2: number, t3: number) {
+          const offset = ((t1 - t0) + (t2 - t3)) / 2;   // client is this far off vs server
+          const delay = (t3 - t0) - (t2 - t1);           // round-trip network time
+          return { offset, delay };
+        }
+
+        // Example: server clock is genuinely 100 ms AHEAD of the client.
+        // Say the true one-way network delay is 20 ms each way.
+        // client sends at t0 = 1000 (client time)
+        // 20 ms later the server receives it; server clock = 1000 + 20 + 100 = 1120
+        // server replies "immediately"; t2 = 1120
+        // 20 ms later client receives; t3 = 1000 + 20 + 20 = 1040 (client time)
+        const { offset, delay } = ntp(1000, 1120, 1120, 1040);
+
+        console.log(`offset = ${offset} ms  (positive => client is BEHIND the server)`);
+        console.log(`delay  = ${delay} ms  (round-trip network time)`);
+        console.log(`=> client should add ${offset} ms to its clock`);
+
+        // Recovered: offset = +100 ms and delay = 40 ms, exactly as constructed,
+        // even though we never knew the one-way delays directly. The averaging cancels them.
+      </primer-code>
+
+      <p>
+        NTP repeats this exchange with several peers, filters out samples with high delay (they carry more
+        error), and disciplines the local clock <em>continuously</em> — steering its frequency to fight drift,
+        not just correcting the offset once. Over the public Internet it typically keeps machines within a few
+        <em>milliseconds</em> of true time; on a local network, well under a millisecond.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The hard limit: synced clocks still can't order events</h2>
+      <p>
+        Here is the twist that surprises everyone. Suppose you spend all that effort and get every machine's
+        clock agreeing to within, say, one millisecond. Can you now stamp each event with the wall-clock time
+        and sort them to recover the true order they happened in? <strong>No — and this is fundamental, not a
+        tuning problem.</strong>
+      </p>
+      <p>
+        The reason: synchronisation leaves a residual <em>uncertainty</em> (the offset estimate is never exact,
+        and delay is never perfectly symmetric). If two events on two machines happen <em>closer together in
+        time than that uncertainty</em>, their timestamps cannot tell you which truly came first. Worse, an
+        event on machine A that <em>caused</em> an event on machine B could carry a <em>later</em> wall-clock
+        timestamp than the effect, purely because A's clock was running a hair fast. You would conclude the
+        effect preceded its cause.
+      </p>
+
+      <primer-vignette title="Watch out! — never use wall-clock time to order events across machines">
+        <p>
+          The classic, costly mistake: "our clocks are synced by NTP, so I'll just compare timestamps to decide
+          which write happened first." <strong>Do not do this.</strong> NTP gives you clocks that <em>agree
+          approximately</em>, not clocks that are <em>identical</em>. There is always a residual skew of
+          milliseconds (sometimes much more after a network hiccup), and any two events that fall inside that
+          window can be ordered <em>backwards</em> by their timestamps — including a cause appearing to follow
+          its effect.
+        </p>
+        <p>
+          Real systems have lost data this way: a "last-write-wins" conflict resolver that trusts wall-clock
+          timestamps will silently discard the <em>newer</em> write whenever the writer's clock happened to run
+          slow. To order events by <em>causality</em> — "did X happen before Y in a way that could matter?" —
+          you need <primer-ref soft to="computer-science/distributed-systems/logical-clocks-and-time">logical
+          clocks</primer-ref> (Lamport timestamps, vector clocks), which track the <em>happens-before</em>
+          relation directly and never lie about causal order, regardless of how badly the physical clocks are
+          behaving. Physical sync is for <em>human-facing</em> timestamps and timeouts; logical clocks are for
+          <em>ordering</em>.
+        </p>
+      </primer-vignette>
+
+      <primer-vignette title="How do Google's databases dodge this with 'TrueTime'?">
+        <p>
+          Google's Spanner database confronts the ordering problem head-on with a service called
+          <strong>TrueTime</strong>. Instead of pretending its clocks are exact, TrueTime <em>embraces the
+          uncertainty</em>: every time query returns an <em>interval</em> <primer-math>[t_{\text{earliest}},
+          t_{\text{latest}}]</primer-math> that is <em>guaranteed</em> to contain the true time, kept tight
+          (single-digit milliseconds) using GPS and atomic clocks in every data centre.
+        </p>
+        <p>
+          The trick is what Spanner does with that interval: to commit a transaction at time
+          <primer-math>t</primer-math>, it deliberately <strong>waits out the uncertainty</strong> — it pauses
+          until it is <em>certain</em> that <primer-math>t</primer-math> has passed on every clock (until
+          <primer-math>t &lt; t_{\text{earliest}}</primer-math> everywhere). By waiting a few milliseconds it
+          buys a genuine global ordering guarantee. It is a striking lesson: you can't make clocks perfect, but
+          if you can <em>bound</em> how wrong they are, you can wait long enough to be safe. Most systems, which
+          can't afford atomic clocks everywhere, fall back on logical clocks instead.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "ntpQuiz@1": { "instructions": "Check your understanding of clock drift and skew, Cristian's and the Berkeley algorithms, NTP's strata and four timestamps, and why synchronised clocks still can't order distributed events." } }
+    </script>
+    <primer-quiz name="ntpQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/distributed-systems/models-and-failure",
+      "computer-science/distributed-systems/distributed-systems"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // NTP's four-timestamp exchange as a two-column timeline: client on the left
+  // stamps t0 (send) and t3 (receive); server on the right stamps t1 (receive)
+  // and t2 (send). Diagonal arrows show the request going up and reply coming down.
+  registerGeometryScene("ntpExchange", ({ board, step, colors, sceneStrings }) => {
+    const CX = -3.4, SX = 3.4;
+
+    const box = (x, y, s, col, size = 12) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: size, fixed: true,
+        highlight: false, strokeColor: col, color: col,
+        cssStyle: "font-weight:600; text-align:center; width:180px; display:inline-block",
+      });
+
+    const dot = (x, y, col) =>
+      board.create("point", [x, y], { name: "", fixed: true, highlight: false, size: 4, fillColor: col, strokeColor: col });
+
+    // headers + spines (base content)
+    box(CX, 4.4, sceneStrings("clientCol"), colors.cat[1], 13);
+    box(SX, 4.4, sceneStrings("serverCol"), colors.cat[0], 13);
+    board.create("segment", [[CX, 4], [CX, -4]], { strokeColor: colors.line, strokeOpacity: 0.3, fixed: true, highlight: false, straightFirst: false, straightLast: false });
+    board.create("segment", [[SX, 4], [SX, -4]], { strokeColor: colors.line, strokeOpacity: 0.3, fixed: true, highlight: false, straightFirst: false, straightLast: false });
+
+    // t0: client sends
+    step(sceneStrings("t0"), () => { dot(CX, 3, colors.cat[1]); box(CX - 0.2, 3.4, "t0", colors.cat[1], 13); });
+
+    // request travels up (t0 -> t1), diagonal arrow
+    step(sceneStrings("req"), () => {
+      board.create("arrow", [[CX + 0.3, 3], [SX - 0.3, 1.5]], { strokeColor: colors.cat[2], strokeWidth: 2, fixed: true, highlight: false });
+      box(0, 2.6, sceneStrings("req"), colors.ink, 10);
+    });
+
+    // t1: server receives
+    step(sceneStrings("t1"), () => { dot(SX, 1.5, colors.cat[0]); box(SX + 0.2, 1.9, "t1", colors.cat[0], 13); });
+
+    // t2: server sends
+    step(sceneStrings("t2"), () => { dot(SX, 0.4, colors.cat[0]); box(SX + 0.2, 0.8, "t2", colors.cat[0], 13); });
+
+    // reply travels down (t2 -> t3)
+    step(sceneStrings("rep"), () => {
+      board.create("arrow", [[SX - 0.3, 0.4], [CX + 0.3, -1.1]], { strokeColor: colors.cat[2], strokeWidth: 2, fixed: true, highlight: false });
+      box(0, -0.1, sceneStrings("rep"), colors.ink, 10);
+    });
+
+    // t3: client receives
+    step(sceneStrings("t3"), () => { dot(CX, -1.1, colors.cat[1]); box(CX - 0.2, -1.5, "t3", colors.cat[1], 13); });
+
+    // the formulas
+    step(sceneStrings("calc"), () => box(0, -3, sceneStrings("calc"), colors.cat[0], 11));
+  }, {
+    boundingbox: [-6.5, 5, 6.5, -4.4],
+    keepAspect: false,
+    title: () => makeStrings("ntpExchange")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("ntpQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "Why do two identical computers' clocks disagree over time?",
+      options: [
+        { text: "their quartz crystals oscillate at slightly different rates, so their readings drift apart", correct: true },
+        { text: "one of them must be broken", correct: false },
+        { text: "the operating system randomises the clock for security", correct: false },
+        { text: "clocks only disagree if the machines are far apart", correct: false },
+      ] },
+
+    { prompt: "Clock SKEW is…",
+      options: [
+        { text: "the instantaneous difference between two clocks' readings", correct: true },
+        { text: "the rate at which two clocks' difference grows", correct: false },
+        { text: "the time a packet takes to cross the network", correct: false },
+        { text: "the number of strata between two NTP servers", correct: false },
+      ] },
+
+    { prompt: "Clock DRIFT is…",
+      options: [
+        { text: "the rate at which the difference between clocks grows (different tick frequencies)", correct: true },
+        { text: "the instantaneous gap between two clock readings", correct: false },
+        { text: "a synonym for round-trip delay", correct: false },
+        { text: "the offset computed by NTP", correct: false },
+      ] },
+
+    { prompt: "In Cristian's algorithm, if the round trip took RTT and the server replied with time Ts, the client sets its clock to…",
+      options: [
+        { text: "Ts + RTT/2 — assuming the request and reply each took half the round trip", correct: true },
+        { text: "Ts exactly, ignoring network delay", correct: false },
+        { text: "Ts + RTT — the full round trip", correct: false },
+        { text: "Ts − RTT/2", correct: false },
+      ] },
+
+    { prompt: "The error bound of Cristian's estimate is roughly…",
+      options: [
+        { text: "half the round-trip time (the trip may have been lopsided)", correct: true },
+        { text: "the full round-trip time", correct: false },
+        { text: "zero — it is always exact", correct: false },
+        { text: "the server's stratum number", correct: false },
+      ] },
+
+    { prompt: "The Berkeley algorithm differs from Cristian's in that it…",
+      options: [
+        { text: "trusts no single clock; the coordinator averages everyone's clocks and sends each an adjustment", correct: true },
+        { text: "assumes one machine has the exact true time and copies it", correct: false },
+        { text: "requires a GPS receiver on every machine", correct: false },
+        { text: "never corrects for network delay", correct: false },
+      ] },
+
+    { prompt: "Why does the Berkeley algorithm send adjustments (and slew clocks) rather than jumping them?",
+      options: [
+        { text: "to avoid a clock going backwards, which could make a later event appear to precede an earlier one", correct: true },
+        { text: "because absolute times are illegal to transmit", correct: false },
+        { text: "to save network bandwidth only", correct: false },
+        { text: "because clocks cannot be set directly", correct: false },
+      ] },
+
+    { prompt: "In NTP's stratum hierarchy, stratum 1 servers are…",
+      options: [
+        { text: "servers directly attached to a stratum-0 reference clock (GPS/atomic)", correct: true },
+        { text: "ordinary laptops at the edge of the network", correct: false },
+        { text: "the reference atomic clocks themselves", correct: false },
+        { text: "the least accurate servers, furthest from the source", correct: false },
+      ] },
+
+    { prompt: "A higher NTP stratum number means…",
+      options: [
+        { text: "further from the true time source (more network hops of sync away)", correct: true },
+        { text: "closer to the atomic reference clock", correct: false },
+        { text: "a faster server", correct: false },
+        { text: "a more trusted server", correct: false },
+      ] },
+
+    { prompt: "NTP's four timestamps t0, t1, t2, t3 are, in order…",
+      options: [
+        { text: "client send, server receive, server send, client receive", correct: true },
+        { text: "server send, client receive, client send, server receive", correct: false },
+        { text: "all four taken on the client clock", correct: false },
+        { text: "all four taken on the server clock", correct: false },
+      ] },
+
+    { prompt: "NTP's round-trip delay is computed as…",
+      options: [
+        { text: "(t3 − t0) − (t2 − t1) — total elapsed minus the server's processing time", correct: true },
+        { text: "(t1 − t0) + (t2 − t3)", correct: false },
+        { text: "(t3 − t0) + (t2 − t1)", correct: false },
+        { text: "(t3 + t0) / 2", correct: false },
+      ] },
+
+    { prompt: "NTP's clock offset is computed as…",
+      options: [
+        { text: "((t1 − t0) + (t2 − t3)) / 2 — the average of the two apparent one-way differences", correct: true },
+        { text: "(t3 − t0) − (t2 − t1)", correct: false },
+        { text: "t1 − t0 only", correct: false },
+        { text: "(t2 − t1) / 2", correct: false },
+      ] },
+
+    { prompt: "Why does NTP AVERAGE the two directions in the offset formula?",
+      options: [
+        { text: "if the network delay is symmetric, the up-trip and down-trip errors cancel, isolating the true offset", correct: true },
+        { text: "to make the arithmetic look harder", correct: false },
+        { text: "because only the average of t0 and t3 matters", correct: false },
+        { text: "to double the round-trip delay", correct: false },
+      ] },
+
+    { prompt: "Can you use NTP-synchronised wall-clock timestamps to reliably order events across machines?",
+      options: [
+        { text: "No — residual skew means events closer together than the uncertainty can be ordered backwards", correct: true },
+        { text: "Yes — NTP makes all clocks perfectly identical", correct: false },
+        { text: "Yes, as long as the machines are in the same rack", correct: false },
+        { text: "Yes, but only for events more than one nanosecond apart", correct: false },
+      ] },
+
+    { prompt: "To correctly order events by causality across machines, you should use…",
+      options: [
+        { text: "logical clocks (Lamport timestamps or vector clocks) that track happens-before directly", correct: true },
+        { text: "the machine with the fastest CPU as the reference", correct: false },
+        { text: "whichever wall-clock timestamp is larger", correct: false },
+        { text: "the NTP stratum number as a tiebreaker", correct: false },
+      ] },
+
+    { prompt: "A 'last-write-wins' resolver that trusts wall-clock timestamps can lose data because…",
+      options: [
+        { text: "a writer whose clock runs slow gets its newer write discarded in favour of an older one with a larger timestamp", correct: true },
+        { text: "wall-clock timestamps are always identical, so ties are random", correct: false },
+        { text: "NTP forbids comparing timestamps", correct: false },
+        { text: "logical clocks overwrite the physical ones", correct: false },
+      ] },
+  ]);
+</script>

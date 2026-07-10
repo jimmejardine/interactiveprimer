@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>The Socket API</primer-title>
+
+    <primer-card>
+      <p>
+        Two programs on two machines want to talk. One is a web browser in a café in Lisbon; the other is a
+        server in a data centre in Virginia. Between them lie a Wi-Fi access point, a home router, a dozen ISP
+        backbones, an ocean of fibre, and a load balancer. And yet the code that opens that conversation is
+        astonishingly small — a handful of function calls. The abstraction that makes this possible, invented
+        for Berkeley Unix in <strong>1983</strong> and essentially unchanged since, is the <strong>socket</strong>.
+      </p>
+      <p>
+        A socket is the program's <strong>handle on a network connection</strong>: you write bytes into one
+        end and they come out the other, on a different computer, in order. It is deliberately shaped like a
+        file — you <code>read()</code> and <code>write()</code> a socket much as you read and write a file —
+        because the Unix designers had already taught a generation of programmers that everything is a file,
+        and a network connection is just a file whose other end is far away. This page is about what that
+        handle really is, the exact sequence of calls that sets one up, and the single most important truth
+        that trips up everyone writing their first networked program: <strong>a TCP socket is a stream of
+        bytes, not a stream of messages.</strong>
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What a socket actually identifies</h2>
+      <p>
+        When your program asks the operating system for a socket and connects it, the kernel creates an entry
+        in its table of open connections. A live TCP connection is pinned down by a <strong>4-tuple</strong> —
+        four numbers that, together, are unique across the whole machine:
+      </p>
+      <primer-math display>(\text{source IP},\ \text{source port},\ \text{destination IP},\ \text{destination port})</primer-math>
+      <p>
+        The <primer-ref soft to="computer-science/networks/ip-mac-and-dns">IP addresses</primer-ref> say
+        <em>which machines</em>; the <strong>ports</strong> say <em>which program on each machine</em>. A port
+        is a 16-bit number (0–65535) that the transport layer uses to
+        <primer-ref soft to="computer-science/networks/transport/multiplexing-and-sockets">demultiplex</primer-ref>
+        arriving bytes to the right socket. This is why a single server machine can hold tens of thousands of
+        simultaneous connections on port 443: they all share the server's IP and port 443, but each has a
+        <em>different</em> client IP-and-port, so every 4-tuple is still distinct. The socket is your program's
+        name for one such tuple.
+      </p>
+
+      <primer-theorem name="Socket types">
+        <ul>
+          <li>
+            A <strong>stream socket</strong> (<code>SOCK_STREAM</code>, backed by
+            <primer-ref soft to="computer-science/networks/transport/tcp-in-depth">TCP</primer-ref>) gives a
+            <em>reliable, ordered, connection-oriented</em> byte stream — bytes arrive exactly once, in the
+            order sent, or the connection reports an error.
+          </li>
+          <li>
+            A <strong>datagram socket</strong> (<code>SOCK_DGRAM</code>, backed by
+            <primer-ref soft to="computer-science/networks/transport/udp">UDP</primer-ref>) sends
+            <em>independent packets</em> that may be lost, duplicated or reordered, with no connection at all —
+            faster and message-shaped, but you handle the failures yourself.
+          </li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The lifecycle: two roles, seven calls</h2>
+      <p>
+        A TCP conversation is asymmetric. The <strong>server</strong> opens a door and waits; the
+        <strong>client</strong> walks through it. Each role runs a fixed sequence of system calls, and it is
+        worth memorising the shape once — every networked program you ever write is a variation on this
+        skeleton.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "socketLifecycle": {
+            "title": "The client and server socket call sequence",
+            "serverCol": "SERVER",
+            "clientCol": "CLIENT",
+            "srvSocket": "socket() — ask the OS for a socket",
+            "srvBind": "bind() — claim a port (e.g. 8080)",
+            "srvListen": "listen() — mark it passive, open the queue",
+            "srvAccept": "accept() — BLOCK until a client arrives",
+            "cliSocket": "socket() — ask the OS for a socket",
+            "cliConnect": "connect() — reach out to server:8080",
+            "handshake": "TCP 3-way handshake (SYN, SYN-ACK, ACK)",
+            "accepted": "accept() returns a NEW socket for this client",
+            "exchange": "read() / write() — exchange bytes both ways",
+            "close": "close() — tear the connection down"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="socketLifecycle"
+        caption="Two vertical timelines side by side. The server runs socket → bind → listen → accept (which blocks). The client runs socket → connect, triggering the TCP three-way handshake; accept then returns a fresh connected socket. Both sides exchange bytes with read/write, then close."
+      ></primer-geometry>
+
+      <p>
+        Three subtleties hide in that picture. First, <code>accept()</code> does not return the listening
+        socket — it returns a <strong>brand-new socket</strong> dedicated to this one client, leaving the
+        original free to keep accepting more. Second, <code>accept()</code> and <code>connect()</code>
+        <strong>block</strong>: the thread stops there until, respectively, a client shows up or the handshake
+        completes. Third, that handshake — <strong>SYN → SYN-ACK → ACK</strong> — happens <em>inside</em>
+        <code>connect()</code>, invisibly; by the time <code>connect()</code> returns, the two kernels have
+        already agreed sequence numbers and the pipe is live.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A TCP echo server and client</h2>
+      <p>
+        Here is the skeleton in TypeScript-flavoured pseudocode, close to Node's <code>net</code> module but
+        annotated with the underlying calls. Read it as the canonical shape, not as a fragment to run — real
+        sockets need a real network, which our sandbox does not have.
+      </p>
+
+      <primer-code lang="typescript">
+        // --- SERVER ---
+        const server = createServer((conn) =&gt; {   // callback fires once per accept()
+          conn.on("data", (bytes) =&gt; {             // read(): a chunk of the byte stream
+            conn.write(bytes);                     // write(): echo it straight back
+          });
+          conn.on("end", () =&gt; conn.close());      // the client sent FIN -> tear down
+        });
+        server.bind(8080);                          // bind() to the port
+        server.listen();                            // listen(): now accepting
+
+        // --- CLIENT ---
+        const sock = connect("server.example", 8080); // socket() + connect() + handshake
+        sock.write("hello");                           // push 5 bytes into the stream
+        sock.on("data", (reply) =&gt; {
+          console.log(reply.toString());               // "hello" comes echoing back
+          sock.close();                                // close(): send FIN
+        });
+      </primer-code>
+
+      <p>
+        Blink and you miss the whole networking stack: <code>connect</code> hides IP routing and the
+        handshake, <code>write</code> hides segmentation and retransmission, <code>data</code> hides
+        reassembly. That is exactly the point of the abstraction. But one leak in it is unavoidable, and it is
+        the thing to internalise next.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The big one: TCP is a stream, not messages</h2>
+      <p>
+        A beginner writes <code>write("hello")</code> then <code>write("world")</code> and imagines the
+        receiver will get two <code>data</code> events, "hello" and "world". <strong>It won't necessarily.</strong>
+        TCP does not preserve <em>write boundaries</em>. It guarantees only that the <em>bytes</em> arrive in
+        order; it is free to glue your two writes into one delivery (<code>helloworld</code>), or split one
+        write across two deliveries (<code>hel</code> then <code>lo</code>), depending on buffering, the
+        network's MTU (maximum transmission unit),
+        and Nagle's algorithm. The receiver sees a <em>faucet of bytes</em>, not a stack of envelopes.
+      </p>
+      <p>
+        The demo below makes this concrete. We send three logical messages, but simulate TCP delivering the
+        combined byte stream in <em>arbitrary chunks</em>. Watch how a naïve "one chunk = one message" reader
+        gets it hopelessly wrong — and why you must impose your own
+        <primer-ref soft to="computer-science/networks/programming/serialization-and-framing">framing</primer-ref>.
+      </p>
+
+      <primer-code run>
+        // Three application-level messages we "send" over one TCP connection.
+        const messages = ["LOGIN alice", "MSG hi there", "LOGOUT"];
+
+        // TCP concatenates them into ONE byte stream — write boundaries are gone.
+        const wire = messages.join("");
+        console.log(`On the wire, ${messages.length} messages became ${wire.length} bytes:`);
+        console.log(`  "${wire}"`);
+
+        // TCP delivers that stream in whatever chunk sizes it likes. We fake a few.
+        const arrivals = ["LOGIN aliceMSG h", "i ther", "eLOGOUT"];
+
+        // A NAIVE reader assumes "one recv() == one message". It is wrong:
+        console.log("\nNaive reader (1 chunk = 1 message):");
+        for (const chunk of arrivals) console.log(`  got message: "${chunk}"`);
+
+        // The FIX: length-prefix each message so the reader knows where each ends.
+        // Frame = 2-digit length + payload.  "LOGIN alice" (11 chars) -> "11LOGIN alice".
+        const framed = messages.map((m) =&gt; String(m.length).padStart(2, "0") + m).join("");
+        console.log(`\nLength-prefixed stream: "${framed}"`);
+
+        // A framed reader recovers the ORIGINAL messages no matter how bytes are chunked:
+        console.log("Framed reader recovers:");
+        let i = 0;
+        while (i &lt; framed.length) {
+          const len = Number(framed.slice(i, i + 2));   // read the 2-byte length header
+          const payload = framed.slice(i + 2, i + 2 + len);
+          console.log(`  message: "${payload}"`);
+          i += 2 + len;                                  // advance past header + payload
+        }
+      </primer-code>
+
+      <primer-vignette title="Watch out! — the classic 'it worked on localhost' bug">
+        <p>
+          On <code>localhost</code>, with tiny messages and no real latency, TCP very often delivers each
+          <code>write()</code> as exactly one <code>data</code> event. So the naïve reader <em>appears</em> to
+          work perfectly — through development, through testing, through the demo to your boss. Then you deploy
+          across a real network, packets get coalesced or fragmented, two messages arrive stuck together, and
+          the parser explodes in production. This is one of the most common networking bugs in existence, and
+          the cause is always the same: <strong>treating a byte stream as if it preserved message
+          boundaries.</strong> The cure is framing — length prefixes (as above), or a delimiter like
+          <code>\n</code>, or a self-describing format — applied on <em>every</em> connection from day one.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Blocking, and why one thread isn't enough</h2>
+      <p>
+        Look again at the server skeleton. <code>accept()</code> blocks; <code>read()</code> blocks until
+        bytes arrive; <code>write()</code> can block if the send buffer is full. A single-threaded server that
+        calls <code>accept()</code>, then talks to that one client with blocking reads, is <strong>deaf to
+        every other client</strong> for the entire duration of the conversation. One slow client — a phone on
+        a train, or a malicious client that opens a connection and never sends anything — freezes the whole
+        server.
+      </p>
+      <p>
+        There are three classic escapes from this trap, and each is its own lesson:
+      </p>
+      <ul>
+        <li>
+          <strong>A thread (or process) per connection</strong> — <code>accept()</code> in a loop, hand each
+          new socket to a fresh
+          <primer-ref soft to="computer-science/concurrency/threads-vs-processes">thread</primer-ref>. Simple,
+          but thousands of threads cost memory and scheduling — the
+          <primer-ref soft to="computer-science/networks/programming/concurrent-servers">C10K problem</primer-ref>.
+        </li>
+        <li>
+          <strong>Non-blocking sockets + an event loop</strong> — ask the OS "which of my thousand sockets are
+          ready right now?" via <code>select</code>/<code>epoll</code>, and service only those. One thread,
+          tens of thousands of connections. This is how
+          <primer-ref soft to="computer-science/networks/programming/nonblocking-and-event-driven-io">nginx and Node.js</primer-ref>
+          work.
+        </li>
+        <li>
+          <strong>Asynchronous I/O</strong> — tell the kernel "start this read and call me back when it's
+          done," never blocking at all.
+        </li>
+      </ul>
+      <p>
+        The socket API you have just met is the foundation all three build on. Master these seven calls and the
+        stream-not-messages truth, and the rest of network programming is choosing how to <em>wait</em>.
+      </p>
+
+      <primer-vignette title="Why is it called a 'socket' anyway?">
+        <p>
+          The metaphor is an electrical socket in the wall. A program "plugs into" the network through this
+          standard receptacle without caring what is on the other end — a printer, a database, another
+          continent. The name (and the API) came from a 1983 group at UC Berkeley building networking into
+          BSD Unix under a DARPA contract; their design was so clean that Windows' <em>Winsock</em>, decades
+          of Unix, and the guts of every modern language's networking library are all recognisably the same
+          seven calls. Few 40-year-old APIs are still the first thing every programmer reaches for.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "socketQuiz@1": { "instructions": "Check your grasp of sockets: the 4-tuple, the call sequence, socket types, and the crucial stream-vs-messages distinction." } }
+    </script>
+    <primer-quiz name="socketQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/client-server-and-the-web",
+      "computer-science/networks/protocols-and-the-tcp-ip-model"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // Two side-by-side vertical timelines (server left, client right) showing the
+  // socket() -> bind/listen/accept vs socket() -> connect sequence, the handshake
+  // arrow between them, then the data exchange and close.
+  registerGeometryScene("socketLifecycle", ({ board, step, colors, sceneStrings }) => {
+    const SX = -3.2, CX = 3.2;                 // x of server / client columns
+    const rows = [4, 3, 2, 1, 0, -1, -2, -3];  // y positions top -> bottom
+
+    const box = (x, y, s, col) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true,
+        highlight: false, strokeColor: col, color: col,
+        cssStyle: "font-weight:600; text-align:center; width:150px; display:inline-block",
+      });
+
+    // column headers (always visible base content)
+    box(SX, 4.7, sceneStrings("serverCol"), colors.cat[0]);
+    box(CX, 4.7, sceneStrings("clientCol"), colors.cat[1]);
+    // faint spine for each column
+    board.create("segment", [[SX, 4.2], [SX, -3.4]], { strokeColor: colors.line, strokeOpacity: 0.3, fixed: true, highlight: false, straightFirst: false, straightLast: false });
+    board.create("segment", [[CX, 4.2], [CX, -3.4]], { strokeColor: colors.line, strokeOpacity: 0.3, fixed: true, highlight: false, straightFirst: false, straightLast: false });
+
+    step(sceneStrings("srvSocket"), () => box(SX, rows[0], sceneStrings("srvSocket"), colors.ink));
+    step(sceneStrings("srvBind"),   () => box(SX, rows[1], sceneStrings("srvBind"), colors.ink));
+    step(sceneStrings("srvListen"), () => box(SX, rows[2], sceneStrings("srvListen"), colors.ink));
+    step(sceneStrings("srvAccept"), () => box(SX, rows[3], sceneStrings("srvAccept"), colors.ink));
+
+    step(sceneStrings("cliSocket"),  () => box(CX, rows[0], sceneStrings("cliSocket"), colors.ink));
+    step(sceneStrings("cliConnect"), () => box(CX, rows[3], sceneStrings("cliConnect"), colors.ink));
+
+    step(sceneStrings("handshake"), () => {
+      board.create("arrow", [[CX - 0.6, rows[3] + 0.2], [SX + 0.6, rows[3] + 0.2]], { strokeColor: colors.cat[2], strokeWidth: 2, fixed: true, highlight: false });
+      box(0, rows[3] + 0.55, sceneStrings("handshake"), colors.cat[2]);
+    });
+
+    step(sceneStrings("accepted"), () => box(SX, rows[4], sceneStrings("accepted"), colors.cat[0]));
+
+    step(sceneStrings("exchange"), () => {
+      board.create("arrow", [[SX + 0.6, rows[5]], [CX - 0.6, rows[5]]], { strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false });
+      board.create("arrow", [[CX - 0.6, rows[5] - 0.35], [SX + 0.6, rows[5] - 0.35]], { strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false });
+      box(0, rows[5] + 0.3, sceneStrings("exchange"), colors.ink);
+    });
+
+    step(sceneStrings("close"), () => {
+      box(SX, rows[7], sceneStrings("close"), colors.ink);
+      box(CX, rows[7], sceneStrings("close"), colors.ink);
+    });
+  }, {
+    boundingbox: [-6, 5.2, 6, -4],
+    keepAspect: false,
+    title: () => makeStrings("socketLifecycle")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("socketQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "A live TCP connection is uniquely identified by…",
+      options: [
+        { text: "the 4-tuple (source IP, source port, destination IP, destination port)", correct: true },
+        { text: "just the destination IP address", correct: false },
+        { text: "the process ID of the server program", correct: false },
+        { text: "the MAC address of the network card", correct: false },
+      ] },
+
+    { prompt: "How can one server hold thousands of simultaneous connections all on port 443?",
+      options: [
+        { text: "Each connection has a different client IP/port, so every 4-tuple is distinct", correct: true },
+        { text: "The server secretly uses thousands of different ports", correct: false },
+        { text: "TCP allows duplicate connections with identical tuples", correct: false },
+        { text: "Port 443 is special and unlimited by design", correct: false },
+      ] },
+
+    { prompt: "What does accept() return?",
+      options: [
+        { text: "a new socket dedicated to the just-connected client", correct: true },
+        { text: "the same listening socket, now connected", correct: false },
+        { text: "the client's IP address as a string", correct: false },
+        { text: "nothing — it just unblocks the thread", correct: false },
+      ] },
+
+    { prompt: "The TCP three-way handshake (SYN, SYN-ACK, ACK) happens during which client call?",
+      options: [
+        { text: "connect()", correct: true },
+        { text: "socket()", correct: false },
+        { text: "the first write()", correct: false },
+        { text: "close()", correct: false },
+      ] },
+
+    { prompt: "A SOCK_STREAM (TCP) socket provides…",
+      options: [
+        { text: "a reliable, ordered, connection-oriented byte stream", correct: true },
+        { text: "independent packets that may be lost or reordered", correct: false },
+        { text: "a guaranteed-latency real-time channel", correct: false },
+        { text: "message boundaries preserved exactly as written", correct: false },
+      ] },
+
+    { prompt: "A SOCK_DGRAM (UDP) socket provides…",
+      options: [
+        { text: "independent datagrams that may be lost, duplicated or reordered, with no connection", correct: true },
+        { text: "a reliable ordered byte stream", correct: false },
+        { text: "automatic retransmission of lost data", correct: false },
+        { text: "a permanent connection between two ports", correct: false },
+      ] },
+
+    { prompt: "You call write(\"hello\") then write(\"world\") on a TCP socket. The receiver…",
+      options: [
+        { text: "may see the bytes as one delivery, or split differently — TCP does not preserve write boundaries", correct: true },
+        { text: "always gets exactly two reads: \"hello\" then \"world\"", correct: false },
+        { text: "gets the two messages in reverse order", correct: false },
+        { text: "gets an error because you wrote twice", correct: false },
+      ] },
+
+    { prompt: "Why does the naïve 'one recv() = one message' reader often pass all local testing?",
+      options: [
+        { text: "On localhost with tiny messages, TCP usually delivers each write as one chunk — masking the bug", correct: true },
+        { text: "localhost uses UDP, which keeps message boundaries", correct: false },
+        { text: "The OS disables byte-stream mode for local connections", correct: false },
+        { text: "Testing frameworks add framing automatically", correct: false },
+      ] },
+
+    { prompt: "The standard cure for the stream-vs-messages problem is…",
+      options: [
+        { text: "framing — e.g. length prefixes or a delimiter — so the reader knows where each message ends", correct: true },
+        { text: "switching every connection to UDP", correct: false },
+        { text: "calling flush() after every write", correct: false },
+        { text: "sending only one message per connection, ever", correct: false },
+      ] },
+
+    { prompt: "In the demo, a length-prefixed frame like \"11LOGIN alice\" lets the reader…",
+      options: [
+        { text: "read the 2-byte length, then take exactly that many payload bytes — regardless of chunking", correct: true },
+        { text: "detect and correct transmission errors", correct: false },
+        { text: "compress the message to save bandwidth", correct: false },
+        { text: "encrypt the payload", correct: false },
+      ] },
+
+    { prompt: "Why does a single-threaded, blocking server struggle to serve many clients?",
+      options: [
+        { text: "A blocking read() on one client makes the server deaf to all others until that client responds", correct: true },
+        { text: "The OS forbids more than one socket per process", correct: false },
+        { text: "TCP only allows one connection per port", correct: false },
+        { text: "accept() can only ever be called once", correct: false },
+      ] },
+
+    { prompt: "Which approach lets ONE thread service tens of thousands of connections?",
+      options: [
+        { text: "non-blocking sockets with an event loop (select/epoll)", correct: true },
+        { text: "spawning one OS thread per connection", correct: false },
+        { text: "using a faster CPU", correct: false },
+        { text: "calling accept() in a tight busy-loop", correct: false },
+      ] },
+
+    { prompt: "Why is the socket deliberately shaped like a file (read/write)?",
+      options: [
+        { text: "Unix already modelled everything as a file, so a connection is just a file whose other end is remote", correct: true },
+        { text: "Sockets are literally stored on disk as files", correct: false },
+        { text: "Files are faster than network buffers", correct: false },
+        { text: "It was required by the TCP specification", correct: false },
+      ] },
+
+    { prompt: "On the server side, which call marks the socket passive and opens the connection queue?",
+      options: [
+        { text: "listen()", correct: true },
+        { text: "connect()", correct: false },
+        { text: "accept()", correct: false },
+        { text: "write()", correct: false },
+      ] },
+
+    { prompt: "A port number is…",
+      options: [
+        { text: "a 16-bit value (0–65535) the transport layer uses to route bytes to the right socket", correct: true },
+        { text: "a 32-bit value identifying the machine", correct: false },
+        { text: "the physical socket on the network card", correct: false },
+        { text: "the same thing as an IP address", correct: false },
+      ] },
+  ]);
+</script>

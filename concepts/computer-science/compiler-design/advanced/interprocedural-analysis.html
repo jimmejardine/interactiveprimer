@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Interprocedural Analysis</primer-title>
+
+    <primer-card>
+      <p>
+        Classical
+        <primer-ref to="computer-science/compiler-design/optimization/the-dataflow-analysis-framework">dataflow analysis</primer-ref>
+        lives inside the fence of a single function: it reasons about one control-flow graph, treating every
+        <code>call</code> as an opaque black box that might do <em>anything</em>. That is safe, but ruinously
+        pessimistic. A call to <code>strlen</code> cannot possibly write to your local <code>x</code>, yet an
+        intraprocedural analysis, seeing only "a call", must assume it clobbers the world. To recover the
+        precision hiding across the fence, we do <strong>interprocedural analysis</strong> — analysis that
+        follows information <em>through</em> calls and returns, over the whole program at once.
+      </p>
+      <p>
+        The prize is large: constants that flow into a callee's parameters, exceptions that can never be
+        thrown, pointers that a function never writes, side-effect-free calls that can be hoisted out of loops.
+        The difficulty is equally large, and it has a precise shape. A program is no longer one graph but a
+        <em>graph of graphs</em>, stitched together at call sites — and the naive way of stitching them leaks
+        information along paths that no real execution could ever take.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The call graph: the skeleton of the whole program</h2>
+      <p>
+        The first object every interprocedural analysis needs is the <strong>call graph</strong>: one node per
+        function, and a directed edge <primer-math>f \to g</primer-math> whenever the body of
+        <primer-math>f</primer-math> contains a call site that may invoke <primer-math>g</primer-math>. For a
+        language with direct calls this is trivial to read off the source. For anything with function pointers,
+        virtual dispatch or closures it is itself the output of an analysis — you need to know <em>what a
+        call target might be</em> before you can draw the edge, which is exactly the chicken-and-egg problem
+        that
+        <primer-ref todo to="advanced/devirtualization">devirtualization</primer-ref>
+        and points-to analysis exist to break.
+      </p>
+      <primer-geometry scene="callGraph"></primer-geometry>
+      <p>
+        A path in the call graph is a chain of calls: <code>main → parse → lex → advance</code>. Two facts about
+        the shape matter enormously. First, a <strong>cycle</strong> in the call graph is exactly a set of
+        mutually recursive functions — and just as loops force iteration to a fixed point <em>inside</em> a CFG,
+        recursion forces iteration to a fixed point <em>over the call graph</em>. Second, if the graph is
+        acyclic we can process functions <strong>bottom-up</strong> in reverse topological order: analyse a
+        callee fully before any of its callers, so that by the time we reach a call site we already know what
+        the callee does.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Context-insensitive vs context-sensitive</h2>
+      <p>
+        Here is the central design axis. Suppose <code>id(x) { return x; }</code> is called twice —
+        <code>id(3)</code> in one place and <code>id(7)</code> in another. A <strong>context-insensitive</strong>
+        analysis has a single summary of <code>id</code> shared by all callers: it merges the two calls, learns
+        that the argument is "3 or 7", and concludes the result is "3 or 7" everywhere. Cheap, but it has just
+        smeared two unrelated facts together.
+      </p>
+      <p>
+        A <strong>context-sensitive</strong> analysis keeps the calls apart. It distinguishes the abstract state
+        by the <em>context</em> in which the callee runs, so that the <code>id(3)</code> instance returns
+        exactly <code>3</code> and the <code>id(7)</code> instance returns exactly <code>7</code>. Two classic
+        ways to encode context:
+      </p>
+      <primer-theorem name="Two encodings of calling context">
+        <ul>
+          <li>
+            <strong>Call strings</strong> — tag each dataflow fact with a suffix of the call stack (the last
+            <primer-math>k</primer-math> call sites that led here). The parameter <primer-math>k</primer-math>
+            controls precision: <primer-math>k=0</primer-math> is context-insensitive; <primer-math>k=\infty</primer-math>
+            is fully context-sensitive (and undecidable in the presence of recursion).
+          </li>
+          <li>
+            <strong>Cloning (procedure specialisation)</strong> — conceptually make a separate copy of the
+            callee for each distinct context and analyse each copy independently. This is what
+            <em>inlining</em> does physically; cloning does it in the analysis' bookkeeping instead of in the
+            code.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Both are instances of the same idea: split the callee's single summary into several context-qualified
+        summaries. More splitting means more precision and more cost — potentially exponentially more.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The valid-paths problem: why naive propagation lies</h2>
+      <p>
+        Imagine gluing every caller's CFG to every callee's CFG with plain edges: a call becomes a jump into the
+        callee's entry, a return becomes a jump out of the callee's exit. Now run an ordinary reachability or
+        dataflow analysis on this giant <em>supergraph</em>. It over-approximates badly, and the reason is
+        beautiful. Consider two call sites <primer-math>c_1</primer-math> and <primer-math>c_2</primer-math>
+        that both call <primer-math>g</primer-math>:
+      </p>
+      <primer-math display>c_1 \longrightarrow \text{enter } g \;\cdots\; \text{exit } g \longrightarrow r_2</primer-math>
+      <p>
+        The supergraph happily lets a fact enter through call site <primer-math>c_1</primer-math> and leave
+        through the return edge belonging to <primer-math>c_2</primer-math> — a path that <em>enters via one
+        caller and returns to a different one</em>. No real execution does that; a function always returns to
+        whoever called it. Such a path is <strong>unrealizable</strong>. The precise interprocedural answer
+        counts only <strong>valid paths</strong> (also called <em>realizable</em> or <em>interprocedurally
+        valid</em> paths): those in which every return edge is matched to the most recent unmatched call edge,
+        exactly like balanced parentheses.
+      </p>
+      <p>
+        This "matched-parenthesis" structure is why interprocedural dataflow is often phrased as a
+        <strong>context-free-language (CFL) reachability</strong> problem — the valid paths are precisely those
+        whose call/return labels form a string in a balanced-bracket grammar. The celebrated
+        <strong>IFDS/IDE</strong> framework of Reps, Horwitz and Sagiv solves exactly this class of problems
+        (distributive, finite-domain) in polynomial time by threading summary edges through the graph.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Summary functions: solve the callee once</h2>
+      <p>
+        The workhorse technique for scalable, reasonably precise interprocedural analysis is the
+        <strong>summary function</strong> (or procedure summary). Instead of re-analysing a callee at every call
+        site, you compute <em>once</em> a compact description of its input/output behaviour — "given the abstract
+        state at entry, here is the abstract state at exit" — and then simply <em>apply</em> that summary at each
+        call. Because summaries are built for callees before callers, they compose bottom-up over an acyclic
+        call graph.
+      </p>
+      <p>
+        A summary can capture whatever the analysis tracks: a MOD/REF set (which globals and parameters a call
+        may modify or read), a constant-propagation transfer function, a "may-throw" bit, a points-to effect. A
+        well-known instance is the <strong>MOD/REF</strong> summary used to answer "can this call touch
+        <code>x</code>?" — if <code>x</code> is not in the call's MOD set, a load of <code>x</code> across the
+        call is safe to reuse.
+      </p>
+      <p>
+        Recursion breaks the tidy bottom-up order: to summarise <primer-math>f</primer-math> you would need
+        <primer-math>f</primer-math>'s own summary. The fix is the same one dataflow uses for loops — start from
+        an optimistic (bottom) summary and <strong>iterate the strongly-connected component of the call graph
+        to a fixed point</strong>, re-deriving each member's summary until nothing changes.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Inlining: the simplest interprocedural transform of all</h2>
+      <p>
+        Before any of that machinery, there is the bluntest interprocedural weapon: <strong>inlining</strong> —
+        physically replacing a call with a copy of the callee's body. Inlining is interprocedural analysis'
+        poor, powerful cousin. It <em>manufactures</em> context sensitivity for free (the copy is specialised to
+        exactly this call site), exposes the callee's internals to the caller's intraprocedural optimiser, and
+        kills call/return overhead. It is often the single most profitable optimisation a compiler performs,
+        precisely because it turns a hard interprocedural problem into an easy intraprocedural one.
+      </p>
+      <p>
+        Its cost is code growth: inline too eagerly and the binary explodes, instruction caches thrash, and
+        compile time balloons. Recursive functions cannot be inlined without bound. So real compilers inline by
+        <em>heuristic</em> — small callees, hot call sites, single-caller functions — and fall back on genuine
+        summary-based analysis for everything else.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Build a call graph and summarise, in code</h2>
+      <p>
+        The snippet builds a call graph from a tiny program, then computes two bottom-up summaries by fixed-point
+        iteration over the call graph: <em>reachability</em> (which functions can be transitively invoked) and a
+        <em>MOD summary</em> (which globals a function may write, directly or via callees). Notice the fixed-point
+        loop — it is what lets the analysis survive the recursive cycle.
+      </p>
+      <primer-code run>
+        // A function knows the globals it writes directly, and whom it calls.
+        type Fn = { name: string; writes: string[]; calls: string[] };
+
+        const program: Record&lt;string, Fn&gt; = {
+          main:  { name: "main",  writes: [],        calls: ["parse", "log"] },
+          parse: { name: "parse", writes: ["ast"],   calls: ["lex", "parse"] }, // self-recursive!
+          lex:   { name: "lex",   writes: ["pos"],   calls: ["log"] },
+          log:   { name: "log",   writes: ["out"],   calls: [] },
+        };
+
+        // Transitive MOD summary: globals a function may write, directly or through any callee.
+        // Solved by fixed-point iteration so recursion (parse -> parse) converges.
+        function modSummaries(prog: Record&lt;string, Fn&gt;): Record&lt;string, string[]&gt; {
+          const mod: Record&lt;string, Set&lt;string&gt;&gt; = {};
+          for (const f of Object.keys(prog)) mod[f] = new Set(prog[f].writes);
+
+          let changed = true;
+          while (changed) {                 // iterate to a fixed point over the call graph
+            changed = false;
+            for (const f of Object.keys(prog)) {
+              for (const g of prog[f].calls) {
+                for (const w of mod[g] ?? []) {
+                  if (!mod[f].has(w)) { mod[f].add(w); changed = true; }
+                }
+              }
+            }
+          }
+          const out: Record&lt;string, string[]&gt; = {};
+          for (const f of Object.keys(mod)) out[f] = [...mod[f]].sort();
+          return out;
+        }
+
+        const mod = modSummaries(program);
+        for (const f of Object.keys(program)) {
+          console.log(`${f} may write: {${mod[f].join(", ")}}`);
+        }
+        // A call to lex from main can only touch {pos, out} — so a load of `ast` across it is safe.
+        console.log("Is `ast` in MOD(lex)? " + mod["lex"].includes("ast"));
+      </primer-code>
+      <p>
+        The fixed point closes each summary under its callees: <code>main</code> ends up with
+        <code>{ast, out, pos}</code> — everything reachable — while <code>lex</code> stays at <code>{out, pos}</code>,
+        which is exactly the fact that licenses reusing a value of <code>ast</code> across a call to
+        <code>lex</code>.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If call strings are undecidable with recursion, how do real analyses cope?">
+      <p>
+        They <em>bound</em> the context. A <primer-math>k</primer-math>-call-site-sensitive analysis (call
+        strings truncated to length <primer-math>k</primer-math>) merges any two contexts that agree on their
+        last <primer-math>k</primer-math> calls, so recursion — which would generate infinitely long call
+        strings — folds into a finite set of length-<primer-math>k</primer-math> suffixes. Object-oriented
+        analyses often prefer <strong>object sensitivity</strong> (qualify context by the receiver object's
+        allocation site) which tends to be both cheaper and more precise for OO code than call strings. And the
+        IFDS/IDE family sidesteps the choice entirely: it is <em>fully</em> context-sensitive for the class of
+        distributive, finite-domain problems, in polynomial time, by encoding valid paths as CFL reachability
+        rather than by enumerating contexts.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Context sensitivity and call/return matching are two different things">
+      <p>
+        A frequent confusion: people conflate "being context-sensitive" with "not leaking across mismatched
+        returns". They are distinct. <strong>Valid-paths matching</strong> (returning to the right caller) is the
+        <em>minimum</em> for soundness of a precise analysis — even a context-insensitive analysis must respect
+        it, or it will report facts flowing along impossible paths. <strong>Context sensitivity</strong> is the
+        <em>extra</em> precision of keeping distinct calling contexts apart. You can have call/return matching
+        without context sensitivity (one merged summary per function, applied precisely). The real danger is the
+        other direction: cranking context sensitivity toward full call strings gives an <strong>exponential
+        blow-up</strong> in the number of contexts — the reason unbounded call strings with recursion are
+        undecidable, and why every practical analysis bounds <primer-math>k</primer-math>, clones selectively, or
+        switches to a summary-based framework.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "ipaQuiz@1": {
+          "intro": "Interprocedural analysis follows facts across calls and returns, over the whole program. Numbers change every attempt.",
+          "cgQ": "In a call graph, a directed edge f → g means…",
+          "cgCall": "the body of f contains a call site that may invoke g",
+          "cgRet": "g returns a value to f",
+          "cgData": "f and g share a global variable",
+          "cgInline": "g has been inlined into f",
+          "insQ": "A context-INSENSITIVE analysis of a function called from two sites…",
+          "insMerge": "keeps a single summary shared by all callers, merging the two contexts",
+          "insSplit": "clones the function once per caller",
+          "insNo": "refuses to analyse the function",
+          "insStack": "tracks the full call stack for each call",
+          "csQ": "Which technique encodes calling context by the last k call sites on the stack?",
+          "csCall": "call strings (k-limited)",
+          "csClone": "loop unrolling",
+          "csDom": "dominator trees",
+          "csSSA": "SSA renaming",
+          "vpQ": "An interprocedurally VALID (realizable) path is one where…",
+          "vpMatch": "every return is matched to the most recent unmatched call, like balanced parentheses",
+          "vpAny": "any path through the supergraph, matched or not",
+          "vpShort": "the shortest path between two functions",
+          "vpNoRec": "no recursion appears anywhere",
+          "leakQ": "Naively gluing callers and callees into one supergraph is imprecise because it allows…",
+          "leakCross": "a fact to enter via one call site and return to a different caller",
+          "leakSlow": "the analysis to run forever",
+          "leakDup": "duplicate function names",
+          "leakType": "type errors to slip through",
+          "sumQ": "A procedure summary lets an interprocedural analysis…",
+          "sumOnce": "solve a callee once and simply apply the result at each call site",
+          "sumSkip": "skip analysing the callee entirely and assume nothing changes",
+          "sumInline": "always inline every call",
+          "sumTypecheck": "check types across module boundaries",
+          "recQ": "How does a summary-based analysis handle mutual recursion (a cycle in the call graph)?",
+          "recFix": "iterate the strongly-connected component to a fixed point",
+          "recErr": "report an error and stop",
+          "recIgnore": "ignore the back edges",
+          "recRandom": "pick a random ordering once",
+          "inlineQ": "Why is inlining described as manufacturing context sensitivity 'for free'?",
+          "inlCopy": "the inlined copy is specialised to exactly one call site's context",
+          "inlFast": "it makes the clock faster",
+          "inlType": "it removes the need for a type checker",
+          "inlNoGrow": "it never increases code size",
+          "inlCostQ": "What is the chief cost of aggressive inlining?",
+          "inlGrow": "code growth — bigger binaries, I-cache pressure, longer compiles",
+          "inlWrong": "it produces wrong results",
+          "inlSlowRun": "the code always runs slower",
+          "inlNoOpt": "it disables all other optimisations",
+          "botQ": "In what order can summaries be built when the call graph is acyclic?",
+          "botUp": "bottom-up: analyse each callee before its callers (reverse topological order)",
+          "botDown": "top-down from main only, ignoring callees",
+          "botAlpha": "alphabetical by function name",
+          "botRandom": "any order gives the same cost",
+          "kQ": "A k-limited call-string analysis with $k = {k}$ distinguishes contexts by how many of the most recent call sites?",
+          "cntQ": "A function directly writes {d} globals; its callees add {c} more distinct globals to its MOD summary. How many globals total are in its transitive MOD set?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="ipaQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/optimization/the-dataflow-analysis-framework"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Reusable node/edge toolkit for call graphs, points-to graphs and pipelines.
+  function graphTools(board, colors) {
+    const node = (cx, cy, r, col, name) => {
+      board.create("circle", [[cx, cy], r], {
+        strokeColor: col, strokeWidth: 2, fillColor: col, fillOpacity: 0.12,
+        fixed: true, highlight: false,
+      });
+      board.create("text", [cx, cy, name], {
+        anchorX: "middle", anchorY: "middle", fontSize: 14, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    const lbl = (x, y, text, col = colors.ink) =>
+      board.create("text", [x, y, text], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    const edge = (a, b, r, col, text, off = 0.32) => {
+      const dx = b[0] - a[0], dy = b[1] - a[1], d = Math.hypot(dx, dy), ux = dx / d, uy = dy / d;
+      board.create("arrow", [[a[0] + ux * r, a[1] + uy * r], [b[0] - ux * r, b[1] - uy * r]], {
+        strokeColor: col, strokeWidth: 2, fixed: true, highlight: false,
+      });
+      if (text) lbl((a[0] + b[0]) / 2 - uy * off, (a[1] + b[1]) / 2 + ux * off, text, col);
+    };
+    const loop = (cx, cy, r, col, text) => {
+      const top = cy + r;
+      board.create("curve", [
+        (t) => cx + 1.0 * Math.sin(2 * Math.PI * t),
+        (t) => top + 0.85 * (1 - Math.cos(2 * Math.PI * t)),
+        0, 1,
+      ], { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false });
+      board.create("arrow", [[cx + 0.5, top + 0.32], [cx + 0.16, top + 0.02]], {
+        strokeColor: col, strokeWidth: 2, fixed: true, highlight: false,
+      });
+      if (text) lbl(cx, top + 1.05, text, col);
+    };
+    return { node, edge, loop, lbl };
+  }
+
+  registerGeometryScene("callGraph", ({ board, step, colors }) => {
+    const r = 0.75;
+    const T = graphTools(board, colors);
+    const main  = [0, 3];
+    const parse = [-3, 0.3];
+    const log   = [3, 0.3];
+    const lex   = [-3, -2.8];
+
+    step("main calls parse and log.", () => {
+      T.node(main[0], main[1], r, colors.cat[0], "main");
+      T.node(parse[0], parse[1], r, colors.cat[1], "parse");
+      T.node(log[0], log[1], r, colors.cat[2], "log");
+      T.edge(main, parse, r, colors.cat[1], "");
+      T.edge(main, log, r, colors.cat[2], "");
+    });
+    step("parse calls lex, and lex calls log.", () => {
+      T.node(lex[0], lex[1], r, colors.cat[3], "lex");
+      T.edge(parse, lex, r, colors.cat[3], "");
+      T.edge(lex, log, r, colors.cat[2], "");
+    });
+    step("parse is self-recursive — a cycle, so its summary needs a fixed point.", () => {
+      T.loop(parse[0], parse[1], r, colors.cat[4], "recurse");
+    });
+    step("Bottom-up order: summarise log, then lex, then parse, then main.", () => {
+      T.lbl(0, -4.4, "reverse topological order → callees before callers", colors.ink);
+    });
+  }, { boundingbox: [-6, 5, 6, -5.2], keepAspect: false, title: "A call graph — nodes are functions, edges are calls" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("ipaQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("cgQ"),
+      options: [
+        { text: () => sceneStrings("cgCall"), correct: true },
+        { text: () => sceneStrings("cgRet"), correct: false },
+        { text: () => sceneStrings("cgData"), correct: false },
+        { text: () => sceneStrings("cgInline"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("insQ"),
+      options: [
+        { text: () => sceneStrings("insMerge"), correct: true },
+        { text: () => sceneStrings("insSplit"), correct: false },
+        { text: () => sceneStrings("insNo"), correct: false },
+        { text: () => sceneStrings("insStack"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("csQ"),
+      options: [
+        { text: () => sceneStrings("csCall"), correct: true },
+        { text: () => sceneStrings("csClone"), correct: false },
+        { text: () => sceneStrings("csDom"), correct: false },
+        { text: () => sceneStrings("csSSA"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("vpQ"),
+      options: [
+        { text: () => sceneStrings("vpMatch"), correct: true },
+        { text: () => sceneStrings("vpAny"), correct: false },
+        { text: () => sceneStrings("vpShort"), correct: false },
+        { text: () => sceneStrings("vpNoRec"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("leakQ"),
+      options: [
+        { text: () => sceneStrings("leakCross"), correct: true },
+        { text: () => sceneStrings("leakSlow"), correct: false },
+        { text: () => sceneStrings("leakDup"), correct: false },
+        { text: () => sceneStrings("leakType"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sumQ"),
+      options: [
+        { text: () => sceneStrings("sumOnce"), correct: true },
+        { text: () => sceneStrings("sumSkip"), correct: false },
+        { text: () => sceneStrings("sumInline"), correct: false },
+        { text: () => sceneStrings("sumTypecheck"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("recQ"),
+      options: [
+        { text: () => sceneStrings("recFix"), correct: true },
+        { text: () => sceneStrings("recErr"), correct: false },
+        { text: () => sceneStrings("recIgnore"), correct: false },
+        { text: () => sceneStrings("recRandom"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("inlineQ"),
+      options: [
+        { text: () => sceneStrings("inlCopy"), correct: true },
+        { text: () => sceneStrings("inlFast"), correct: false },
+        { text: () => sceneStrings("inlType"), correct: false },
+        { text: () => sceneStrings("inlNoGrow"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("inlCostQ"),
+      options: [
+        { text: () => sceneStrings("inlGrow"), correct: true },
+        { text: () => sceneStrings("inlWrong"), correct: false },
+        { text: () => sceneStrings("inlSlowRun"), correct: false },
+        { text: () => sceneStrings("inlNoOpt"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("botQ"),
+      options: [
+        { text: () => sceneStrings("botUp"), correct: true },
+        { text: () => sceneStrings("botDown"), correct: false },
+        { text: () => sceneStrings("botAlpha"), correct: false },
+        { text: () => sceneStrings("botRandom"), correct: false },
+      ],
+    },
+    {
+      // k-limited call strings distinguish by the last k call sites.
+      prompt: (v) => sceneStrings("kQ", v),
+      variables: "k=[1:4]",
+      answer: (v) => v.k,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // transitive MOD size = direct + callee-added distinct.
+      prompt: (v) => sceneStrings("cntQ", v),
+      variables: "d=[1:5] c=[0:5]",
+      answer: (v) => v.d + v.c,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Namespaces and cgroups</primer-title>
+
+    <primer-card>
+      <p>
+        You have spent this course watching the kernel sell each process the illusion of a private machine — a
+        private
+        <primer-ref to="computer-science/advanced-operating-systems/kernel/the-process-address-space">address
+        space</primer-ref>, a private slice of CPU time. A container asks the kernel to extend that illusion one
+        enormous step further: give a process a private <em>view of the whole operating system</em> — its own
+        set of process IDs, its own root filesystem, its own network interfaces, its own hostname — while it
+        still runs as an ordinary process on the one shared kernel. No guest kernel, no emulated hardware. Docker,
+        containerd, runc, LXC, Kubernetes — every one of them is, underneath, a thin choreography of exactly
+        <strong>two Linux kernel features</strong>: <strong>namespaces</strong> and <strong>cgroups</strong>.
+      </p>
+      <p>
+        This is the pivotal realisation of the whole module, and it is worth saying bluntly:
+        <strong>a container is just a process.</strong> If you run <primer-math>\texttt{ps}</primer-math> on the
+        host you can see it, kill it, and read its memory maps like any other process. What makes it feel like a
+        separate machine is that the kernel has been told to lie to it — about what it can see (namespaces) and
+        how much it can take (cgroups). Learn these two primitives and containers stop being magic.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Namespaces — a private view of one kernel resource</h2>
+      <p>
+        A <strong>namespace</strong> partitions a single kind of global kernel resource so that processes inside
+        the namespace see their own instance of it, and cannot see the instances belonging to others. Crucially,
+        each namespace type covers <em>one</em> resource. You compose them: a "container" is a process that has
+        been placed into a fresh instance of <em>several</em> namespace types at once. The kernel call that does
+        it is
+        <primer-math>\texttt{clone()}</primer-math> (or
+        <primer-math>\texttt{unshare()}</primer-math> /
+        <primer-math>\texttt{setns()}</primer-math>) with the right flags.
+      </p>
+      <p>
+        The classic example is the <strong>PID namespace</strong>. Inside a fresh one, the first process becomes
+        <primer-math>\texttt{PID 1}</primer-math> — it thinks it is <primer-math>\texttt{init}</primer-math>, the
+        root of the process tree, and it cannot see any process outside its namespace. On the host, that very
+        same process has some ordinary large PID like <primer-math>\texttt{48213}</primer-math>. Two numbers, one
+        process: the kernel maintains a translation. That is the whole trick, repeated for each resource kind.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the namespace-composition figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "compose": {
+          "title": "A container = one process wrapped in several fresh namespaces + a cgroup",
+          "host": "HOST KERNEL (one shared kernel — no guest OS)",
+          "proc": "your process (on the host: PID 48213)",
+          "pid": "pid ns → sees itself as PID 1",
+          "mnt": "mount ns → its own root filesystem",
+          "net": "net ns → its own eth0, routes, ports",
+          "uts": "uts ns → its own hostname",
+          "cg": "cgroup → capped at 512 MB RAM, 1.5 CPUs",
+          "boundary": "everything inside the box is ONE process the host can still see and kill"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Assembling a container from primitives</h2>
+      <p>
+        Picture the process in the middle, and the namespaces wrapped around it like nested filters — each one
+        restricting what it can perceive of a different resource — with a cgroup underneath capping what it can
+        consume. Stack enough of them and the process is, for all it can tell, alone on its own machine.
+      </p>
+      <primer-geometry scene="compose"></primer-geometry>
+      <p>
+        Notice there is no line in this picture for "the guest kernel", because there is no guest kernel. The
+        process makes system calls straight to the <em>host</em> kernel, at full native speed; the kernel simply
+        consults which namespaces the caller belongs to before answering.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The seven namespace types</h2>
+      <p>
+        Linux ships (as of the 5.x/6.x series) seven namespace kinds. Each isolates exactly one class of global
+        resource. Real container runtimes create most of them at once; the odd one out is the
+        <strong>user</strong> namespace, which is what lets an <em>unprivileged</em> user run a "rootful"-looking
+        container (rootless Docker/Podman) by mapping container-root to an ordinary host UID.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Namespace</th><th>clone flag</th><th>Isolates</th><th>So inside you get…</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>pid</strong></td><td>CLONE_NEWPID</td><td>process IDs</td><td>your own PID 1 and a private process tree</td></tr>
+            <tr><td><strong>mount</strong></td><td>CLONE_NEWNS</td><td>the mount table</td><td>your own root filesystem &amp; mounts</td></tr>
+            <tr><td><strong>net</strong></td><td>CLONE_NEWNET</td><td>network stack</td><td>your own interfaces, routes, ports, firewall</td></tr>
+            <tr><td><strong>uts</strong></td><td>CLONE_NEWUTS</td><td>hostname &amp; domainname</td><td>your own <primer-math>\texttt{hostname}</primer-math></td></tr>
+            <tr><td><strong>ipc</strong></td><td>CLONE_NEWIPC</td><td>System V IPC, POSIX queues</td><td>your own shared-memory segments</td></tr>
+            <tr><td><strong>user</strong></td><td>CLONE_NEWUSER</td><td>UID/GID mappings</td><td>root inside, unprivileged UID outside</td></tr>
+            <tr><td><strong>cgroup</strong></td><td>CLONE_NEWCGROUP</td><td>the cgroup root view</td><td>your cgroup hierarchy looking like the root</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        (There is also a newer <strong>time</strong> namespace, which virtualizes the boot/monotonic clocks —
+        handy for checkpoint-restore. Seven is the number people usually memorise.)
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>cgroups — hierarchical limits and accounting</h2>
+      <p>
+        Namespaces control <em>what a process can see</em>. They do nothing about <em>how much it can take</em>: a
+        process alone in every namespace can still fork-bomb the box or eat all the RAM, because it shares the one
+        physical machine. That is the job of <strong>control groups</strong> — <strong>cgroups</strong>. A cgroup
+        is a node in a tree of processes to which the kernel attaches <em>controllers</em> that meter and cap a
+        resource:
+      </p>
+      <ul>
+        <li><strong>cpu</strong> — a share/quota of CPU time (e.g. "at most 1.5 CPUs", via a period + quota);</li>
+        <li><strong>memory</strong> — a hard ceiling on resident memory; exceed it and the cgroup's OOM killer
+          fires <em>inside</em> the group, not across the host;</li>
+        <li><strong>io</strong> — read/write bandwidth and IOPS limits per block device;</li>
+        <li><strong>pids</strong> — a cap on the number of processes (the fork-bomb defence).</li>
+      </ul>
+      <p>
+        Limits are <strong>hierarchical</strong>: a child cgroup can never exceed its parent's ceiling, so an
+        orchestrator like Kubernetes can hand a node's budget down to pods and containers with the guarantee that
+        the sums always fit. The kernel moved from <strong>cgroups v1</strong> (a separate hierarchy per
+        controller — flexible but confusing) to <strong>cgroups v2</strong> (a single unified hierarchy, one tree
+        all controllers share), which is now the default on modern distributions and the one Kubernetes targets.
+      </p>
+      <primer-theorem name="What makes a container">
+        <ul>
+          <li>a container is an <strong>ordinary host process</strong> — one shared kernel, no guest OS, native
+            syscall speed;</li>
+          <li><strong>namespaces</strong> give it a private <em>view</em> of a kernel resource (pid, mount, net,
+            uts, ipc, user, cgroup) — <em>isolation of visibility</em>;</li>
+          <li><strong>cgroups</strong> give it a bounded <em>share</em> of a resource (cpu, memory, io, pids),
+            metered and hierarchical — <em>isolation of consumption</em>;</li>
+          <li>a runtime (runc) just does <primer-math>\texttt{clone()}</primer-math> with the namespace flags,
+            writes the cgroup limits, pivots the root, drops privilege, and
+            <primer-math>\texttt{execve()}</primer-math>s your program.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Building one, in slow motion</h2>
+      <p>
+        The simulation below is the conceptual skeleton of what <primer-math>\texttt{runc}</primer-math> actually
+        does. It never touches a real kernel — it just walks the sequence of primitives so you can see that
+        "start a container" is a short recipe of namespace flags plus cgroup writes, ending in an ordinary
+        <primer-math>\texttt{exec}</primer-math>.
+      </p>
+      <primer-code run>
+        // A toy model of how a runtime (runc) assembles a container from kernel primitives.
+        // Nothing here is real isolation — it just narrates the sequence of steps.
+
+        interface Limits { cpus: number; memoryMB: number; maxPids: number; }
+
+        function createContainer(cmd: string, namespaces: string[], limits: Limits): void {
+          console.log(`# runc: launching "${cmd}" as a container\n`);
+
+          // 1) clone() with one flag per namespace -> a private view of each resource.
+          console.log("clone() flags (each = a private view of ONE kernel resource):");
+          for (const ns of namespaces) {
+            console.log(`   CLONE_NEW${ns.toUpperCase()}  -> private ${ns} namespace`);
+          }
+
+          // 2) Write cgroup limits (v2 unified hierarchy) -> a bounded share.
+          console.log("\ncgroup v2 limits written to /sys/fs/cgroup/mycontainer/:");
+          console.log(`   cpu.max     = ${Math.round(limits.cpus * 100000)} 100000   (${limits.cpus} CPUs)`);
+          console.log(`   memory.max  = ${limits.memoryMB} MiB   (OOM-kill inside the group past this)`);
+          console.log(`   pids.max    = ${limits.maxPids}         (fork-bomb defence)`);
+
+          // 3) pivot_root, drop caps, then become the target program.
+          console.log("\npivot_root -> new mount ns root; drop privileges; execve():");
+          console.log(`   host sees: PID 48213 running "${cmd}"`);
+          console.log(`   container sees: PID 1 running "${cmd}" — it thinks it is init`);
+          console.log(`\n=> one process, ${namespaces.length} namespaces, ${limits.cpus} CPU / ${limits.memoryMB} MiB cap. No guest kernel.`);
+        }
+
+        createContainer(
+          "/bin/nginx",
+          ["pid", "mnt", "net", "uts", "ipc", "user"],
+          { cpus: 1.5, memoryMB: 512, maxPids: 200 },
+        );
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="If a container is 'just a process', what does Docker actually add?">
+      <p>
+        Almost nothing at runtime, and that is the point. The kernel does the isolation; the userland stack just
+        makes it pleasant. <primer-math>\texttt{runc}</primer-math> is the tiny OCI runtime that performs the
+        <primer-math>\texttt{clone()}</primer-math> + cgroup + <primer-math>\texttt{pivot\_root}</primer-math>
+        dance and exits. <primer-math>\texttt{containerd}</primer-math> is the daemon that manages images, pulls
+        layers, and supervises many runc invocations. The <primer-math>\texttt{docker}</primer-math> CLI and
+        daemon add the friendly UX, build system, and networking on top. Kubernetes sits above <em>all</em> of it,
+        scheduling containers across a fleet. Peel every layer away and at the bottom is one process and two
+        kernel features. The tower is deep; the foundation is two ideas.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Namespaces isolate visibility, not the kernel itself">
+      <p>
+        A tempting misconception is that being in a full set of namespaces makes a container "as isolated as a
+        VM". It does not. Every process in every container shares the <em>same</em> kernel — the same scheduler,
+        the same syscall table, the same memory allocator, the same bugs. A namespace changes what a process can
+        <em>name and see</em>; it does not give it a separate copy of kernel code. So a single kernel
+        vulnerability (a bad <primer-math>\texttt{ioctl}</primer-math>, a race in a filesystem driver) is a
+        potential escape hatch out of <em>any</em> container on the host, in a way it simply is not for a true VM
+        with its own guest kernel. That shared-kernel attack surface is exactly why capabilities, seccomp, and
+        microVMs — the rest of this module — exist. Namespaces are containment, not a hypervisor.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: namespaces (what each isolates), cgroups (what each caps), "just a process", v1 vs v2.
+         Bank of 12, draws 5. Variable names avoid evaluator collisions (use cpu, memc, ...). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "nsQuiz@1": {
+          "intro": "The two primitives behind every container: namespaces (private view of a resource) and cgroups (bounded share of a resource).",
+          "twoQ": "Which two Linux kernel features are the foundation of all Linux containers?",
+          "twoRight": "namespaces and cgroups",
+          "twoWrong1": "a hypervisor and a guest kernel",
+          "twoWrong2": "chroot and a firewall",
+          "twoWrong3": "the page cache and the scheduler",
+          "justQ": "\"A container is just a process\" is true because…",
+          "justRight": "it runs on the host kernel as an ordinary process; namespaces/cgroups only change its view and limits",
+          "justWrong1": "it boots its own guest kernel like a lightweight VM",
+          "justWrong2": "it is written in a special container-only language",
+          "justWrong3": "the CPU has a dedicated container privilege mode",
+          "pidQ": "Inside a fresh PID namespace, the first process…",
+          "pidRight": "becomes PID 1 and cannot see processes outside its namespace",
+          "pidWrong1": "keeps its large host PID and can see every process",
+          "pidWrong2": "cannot make any system calls",
+          "pidWrong3": "runs on a separate CPU core reserved for it",
+          "nsRoleQ": "What does a NAMESPACE control?",
+          "nsRoleRight": "what a process can see of one kind of global kernel resource",
+          "nsRoleWrong1": "how much CPU and memory a process may consume",
+          "nsRoleWrong2": "the clock speed of the CPU",
+          "nsRoleWrong3": "which programming language the container uses",
+          "cgRoleQ": "What does a CGROUP control?",
+          "cgRoleRight": "how much of a resource (cpu, memory, io, pids) a group of processes may consume",
+          "cgRoleWrong1": "which process IDs a process can see",
+          "cgRoleWrong2": "the container's hostname",
+          "cgRoleWrong3": "the container's network interfaces",
+          "netQ": "The NET namespace gives a container its own…",
+          "netRight": "network interfaces, routing table, and port space",
+          "netWrong1": "list of process IDs",
+          "netWrong2": "memory limit",
+          "netWrong3": "hostname only",
+          "userQ": "The USER namespace is what makes possible…",
+          "userRight": "rootless containers — root inside maps to an unprivileged host UID",
+          "userWrong1": "limiting CPU shares",
+          "userWrong2": "giving the container a second kernel",
+          "userWrong3": "faster disk I/O",
+          "v2Q": "The key change from cgroups v1 to cgroups v2 is…",
+          "v2Right": "a single unified hierarchy shared by all controllers, instead of one hierarchy per controller",
+          "v2Wrong1": "cgroups v2 removed all resource limits",
+          "v2Wrong2": "v2 replaced namespaces",
+          "v2Wrong3": "v2 requires a guest kernel",
+          "forkQ": "Which cgroup controller defends against a fork bomb?",
+          "forkRight": "the pids controller (caps the number of processes)",
+          "forkWrong1": "the memory controller",
+          "forkWrong2": "the net namespace",
+          "forkWrong3": "the uts namespace",
+          "hierQ": "cgroup limits are hierarchical, which means…",
+          "hierRight": "a child cgroup can never exceed its parent's ceiling",
+          "hierWrong1": "children may freely exceed their parents",
+          "hierWrong2": "only the root cgroup has any limit",
+          "hierWrong3": "limits apply per CPU core only",
+          "kernQ": "How many guest kernels run inside a Linux container?",
+          "kernRight": "zero — it shares the single host kernel",
+          "kernWrong1": "one full guest kernel per container",
+          "kernWrong2": "one shared guest kernel for all containers",
+          "kernWrong3": "two, for redundancy",
+          "memQ": "A container's memory cgroup is set to ${memc}$ MiB. Its process tries to touch ${want}$ MiB of RAM. What happens?",
+          "memClamp": "the cgroup OOM killer fires inside the group",
+          "memOk": "it is allowed — under the cap",
+          "cpuNumQ": "cgroup v2 encodes an N-CPU limit as \"quota period\" with period 100000. For a ${cpu}$-CPU cap, what quota value (µs) is written to cpu.max?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="nsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/kernel/the-process-address-space",
+      "computer-science/advanced-operating-systems/virtualization/hypervisor-architectures"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Namespace-composition figure: a process at the centre, nested namespace "wrappers" as concentric
+     labelled boxes, a cgroup bar underneath, all inside a host-kernel frame. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "compose",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, text, ci, opacity, weight) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[ci], fillOpacity: opacity,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, text], {
+          strokeColor: colors.ink, fontSize: 11.5, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: `text-align:center; white-space:pre-line; ${weight ? "font-weight:700;" : ""} max-width:260px`,
+        });
+      };
+      const caption = (x, y, text, weight) =>
+        board.create("text", [x, y, text], {
+          strokeColor: colors.ink, fontSize: 11.5, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: weight ? "font-weight:700; max-width:520px" : "max-width:520px",
+        });
+
+      // Host kernel frame (base content — visible on load).
+      box(-0.2, -0.4, 11.2, 9.2, "", 2, 0.10, false);
+      caption(5.5, 8.7, sceneStrings("host"), true);
+
+      // The four namespace rows + the process, revealed one at a time.
+      step(sceneStrings("pid"), () => box(1.4, 6.3, 9.6, 7.3, sceneStrings("pid"), 0, 0.20, false));
+      step(sceneStrings("mnt"), () => box(1.4, 5.1, 9.6, 6.1, sceneStrings("mnt"), 0, 0.20, false));
+      step(sceneStrings("net"), () => box(1.4, 3.9, 9.6, 4.9, sceneStrings("net"), 0, 0.20, false));
+      step(sceneStrings("uts"), () => box(1.4, 2.7, 9.6, 3.7, sceneStrings("uts"), 0, 0.20, false));
+      step(sceneStrings("proc"), () => box(3.1, 0.9, 7.9, 2.3, sceneStrings("proc"), 1, 0.30, true));
+      step(sceneStrings("cg"), () => box(1.4, -0.1, 9.6, 0.6, sceneStrings("cg"), 2, 0.30, false));
+    },
+    {
+      boundingbox: [-1.2, 9.6, 12.0, -1.0],
+      keepAspect: false,
+      title: () => makeStrings("compose")("title"),
+    },
+  );
+
+  registerQuiz("nsQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("twoQ"), options: [
+      { text: () => sceneStrings("twoRight"), correct: true },
+      { text: () => sceneStrings("twoWrong1"), correct: false },
+      { text: () => sceneStrings("twoWrong2"), correct: false },
+      { text: () => sceneStrings("twoWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("justQ"), options: [
+      { text: () => sceneStrings("justRight"), correct: true },
+      { text: () => sceneStrings("justWrong1"), correct: false },
+      { text: () => sceneStrings("justWrong2"), correct: false },
+      { text: () => sceneStrings("justWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("pidQ"), options: [
+      { text: () => sceneStrings("pidRight"), correct: true },
+      { text: () => sceneStrings("pidWrong1"), correct: false },
+      { text: () => sceneStrings("pidWrong2"), correct: false },
+      { text: () => sceneStrings("pidWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("nsRoleQ"), options: [
+      { text: () => sceneStrings("nsRoleRight"), correct: true },
+      { text: () => sceneStrings("nsRoleWrong1"), correct: false },
+      { text: () => sceneStrings("nsRoleWrong2"), correct: false },
+      { text: () => sceneStrings("nsRoleWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cgRoleQ"), options: [
+      { text: () => sceneStrings("cgRoleRight"), correct: true },
+      { text: () => sceneStrings("cgRoleWrong1"), correct: false },
+      { text: () => sceneStrings("cgRoleWrong2"), correct: false },
+      { text: () => sceneStrings("cgRoleWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("netQ"), options: [
+      { text: () => sceneStrings("netRight"), correct: true },
+      { text: () => sceneStrings("netWrong1"), correct: false },
+      { text: () => sceneStrings("netWrong2"), correct: false },
+      { text: () => sceneStrings("netWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("userQ"), options: [
+      { text: () => sceneStrings("userRight"), correct: true },
+      { text: () => sceneStrings("userWrong1"), correct: false },
+      { text: () => sceneStrings("userWrong2"), correct: false },
+      { text: () => sceneStrings("userWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("v2Q"), options: [
+      { text: () => sceneStrings("v2Right"), correct: true },
+      { text: () => sceneStrings("v2Wrong1"), correct: false },
+      { text: () => sceneStrings("v2Wrong2"), correct: false },
+      { text: () => sceneStrings("v2Wrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("forkQ"), options: [
+      { text: () => sceneStrings("forkRight"), correct: true },
+      { text: () => sceneStrings("forkWrong1"), correct: false },
+      { text: () => sceneStrings("forkWrong2"), correct: false },
+      { text: () => sceneStrings("forkWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("hierQ"), options: [
+      { text: () => sceneStrings("hierRight"), correct: true },
+      { text: () => sceneStrings("hierWrong1"), correct: false },
+      { text: () => sceneStrings("hierWrong2"), correct: false },
+      { text: () => sceneStrings("hierWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("kernQ"), options: [
+      { text: () => sceneStrings("kernRight"), correct: true },
+      { text: () => sceneStrings("kernWrong1"), correct: false },
+      { text: () => sceneStrings("kernWrong2"), correct: false },
+      { text: () => sceneStrings("kernWrong3"), correct: false },
+    ] },
+    {
+      // memory cap decision: over the cap -> OOM-kill, under -> allowed.
+      prompt: (v) => sceneStrings("memQ", v),
+      variables: "memc=[128,256,512] want=[64,300,700,1024]",
+      options: [
+        { text: () => sceneStrings("memClamp"), correct: true },
+        { text: () => sceneStrings("memOk"), correct: false },
+      ],
+      constraints: "want > memc",
+    },
+    {
+      // quota = cpus * 100000.
+      prompt: (v) => sceneStrings("cpuNumQ", v),
+      variables: "cpu=[1,2,3,4]",
+      answer: (v) => v.cpu * 100000,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>A Simple Code Generator</primer-title>
+
+    <primer-card>
+      <p>
+        We have carved the program into
+        <primer-ref to="computer-science/compiler-design/codegen/basic-blocks-and-flow-graphs">basic blocks</primer-ref>.
+        Now comes the moment the whole front end was building toward: turning a block of three-address code
+        into <em>actual machine instructions</em>. The naïve way — load both operands, do the op, store the
+        result, for every single statement — works, but it is embarrassingly slow: memory traffic
+        everywhere, registers touched and immediately abandoned. The <strong>simple code generator</strong>
+        of the Dragon Book does far better with one modest ambition: <strong>keep values in registers as
+        long as they are useful, and touch memory only when you must</strong>.
+      </p>
+      <p>
+        To pull that off, the generator maintains a running picture of <em>where every value currently
+        lives</em>. It answers two questions at every step — "which registers hold a copy of variable
+        <primer-math>x</primer-math>?" and "where can I find an up-to-date value of
+        <primer-math>x</primer-math>?" — and it uses <strong>next-use information</strong> to decide which
+        registers it is safe to reuse. Get those bookkeeping structures right and good code almost falls
+        out.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two descriptors track reality</h2>
+      <primer-theorem name="Register and address descriptors">
+        <ul>
+          <li>a <strong>register descriptor</strong> records, for each register, the set of variables whose
+            current value is held there (a register may hold several at once, e.g. right after a copy);</li>
+          <li>an <strong>address descriptor</strong> records, for each variable, all the locations where its
+            current value can be found — some register, its memory home, or both.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        These two are inverse views of the same fact and must be kept <strong>consistent</strong>: if the
+        register descriptor says <code>R1</code> holds <primer-math>x</primer-math>, then
+        <primer-math>x</primer-math>'s address descriptor must list <code>R1</code>, and vice versa. Every
+        instruction the generator emits is immediately followed by a small descriptor update. The
+        discipline of updating both, correctly, after every instruction is <em>the</em> skill of writing a
+        code generator — most bugs are a descriptor that quietly drifted out of sync with the code actually
+        emitted.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Next-use: when is a value dead?</h2>
+      <p>
+        Before generating code, we scan the block <strong>backward</strong> and annotate each use of each
+        variable with its <strong>next use</strong> — the location of the next instruction in the block that
+        reads it — or the tag <strong>dead</strong> if no later instruction in the block reads it. A value
+        that is dead (and not <em>live on exit</em> from the block, i.e. not needed by a successor block)
+        does not need to be preserved: its register can be scavenged freely, and it never needs storing back
+        to memory.
+      </p>
+      <p>
+        This single piece of information is what turns a memory-thrashing translator into a decent one. If
+        <primer-math>t</primer-math> is a compiler-generated temporary computed into a register and dead
+        immediately after, we simply leave the result in that register and reuse it — no load, no store, no
+        wasted instruction. The backward scan is why we work one <em>block</em> at a time: within a block,
+        next-use is a purely local, single-pass computation.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The getReg heuristic and the code-gen rule</h2>
+      <p>
+        To emit code for <primer-math>x = y \;\text{op}\; z</primer-math>, the generator calls
+        <strong><code>getReg</code></strong> to choose a register <primer-math>R</primer-math> to hold the
+        result, then arranges for <primer-math>y</primer-math> and <primer-math>z</primer-math> to be in
+        registers, emits <code>OP R, Ry, Rz</code>, and updates the descriptors. <code>getReg</code> picks a
+        register by a small priority list:
+      </p>
+      <ol>
+        <li>if <primer-math>y</primer-math> is already in a register <primer-math>R_y</primer-math> that
+          holds <em>only</em> <primer-math>y</primer-math>, and <primer-math>y</primer-math> is
+          <strong>dead</strong> after this instruction — reuse <primer-math>R_y</primer-math> (the result
+          lands right on top of the operand);</li>
+        <li>otherwise, if there is an <strong>empty</strong> register, take it;</li>
+        <li>otherwise <strong>spill</strong>: pick an occupied register, store its variables to memory if
+          those values are not already safe, and steal it.</li>
+      </ol>
+      <p>
+        The full statement rule then reads: get registers for the operands (loading from memory if needed),
+        emit the operation, mark the result as living <em>only</em> in <primer-math>R</primer-math>
+        (its memory copy is now stale), and — if any operand was a variable that is now dead — free its
+        register in the descriptors. At the end of the block, any variable that is <em>live on exit</em> but
+        currently only in a register must be <strong>stored back</strong> to its memory home.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: <primer-math>d = (a-b) + (a-c) + (a-c)</primer-math></h2>
+      <p>
+        This is the Dragon Book's set piece. The block compiles to four TAC statements; assume
+        <primer-math>a, b, c</primer-math> live in memory on entry and only <primer-math>d</primer-math> is
+        live on exit, with two registers <code>R1, R2</code> available. Here
+        <primer-math>t, u, v</primer-math> are temporaries, each dead right after its last use:
+      </p>
+      <primer-math display>t = a - b, \quad u = a - c, \quad v = t + u, \quad d = v + u.</primer-math>
+      <p>
+        Following the descriptors instruction by instruction gives this trace — watch how
+        <primer-math>a</primer-math> stays cached in <code>R2</code> and gets reused, and how
+        <code>R1</code> is recycled the moment a temporary dies:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>TAC</th><th>Emitted code</th><th>R1 holds</th><th>R2 holds</th><th>Note</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><primer-math>t = a - b</primer-math></td><td><code>LD R1,a; LD R2,b; SUB R1,R1,R2</code></td><td>t</td><td>b</td><td>result in R1</td></tr>
+            <tr><td><primer-math>u = a - c</primer-math></td><td><code>LD R2,a; SUB R2,R2,c*</code></td><td>t</td><td>u</td><td>reload a into R2, subtract c</td></tr>
+            <tr><td><primer-math>v = t + u</primer-math></td><td><code>ADD R1,R1,R2</code></td><td>v</td><td>u</td><td>t dead → reuse R1; u still live</td></tr>
+            <tr><td><primer-math>d = v + u</primer-math></td><td><code>ADD R1,R1,R2</code></td><td>d</td><td>u</td><td>v dead → reuse R1</td></tr>
+            <tr><td><em>block exit</em></td><td><code>ST d,R1</code></td><td>d</td><td>—</td><td>d live on exit → store</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        No load appears unless a value is genuinely needed from memory, and the only store is the single
+        one demanded by <primer-math>d</primer-math>'s liveness. That is the whole game: registers held as
+        long as they pay, memory touched as little as the semantics allow.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A generator you can run</h2>
+      <p>
+        The code below is a compact but honest version: two descriptor maps, a <code>getReg</code> that
+        prefers a dead operand's register then an empty one then spills, and the per-statement rule that
+        emits loads, the operation, and the final live-on-exit stores. It compiles the block above and
+        prints the emitted pseudo-assembly.
+      </p>
+      <primer-code run>
+        type Reg = "R1" | "R2";
+        const REGS: Reg[] = ["R1", "R2"];
+
+        // regHolds[R] = variables currently in R.  addr[v] = places holding v ("mem" or a register).
+        const regHolds: Record&lt;Reg, Set&lt;string&gt;&gt; = { R1: new Set(), R2: new Set() };
+        const addr: Record&lt;string, Set&lt;string&gt;&gt; = {};
+        const code: string[] = [];
+        const isTemp = (v: string) =&gt; /^[tuv]$/.test(v);       // temporaries are dead after last use
+        function place(v: string): Set&lt;string&gt; {
+          if (!(v in addr)) addr[v] = new Set([isTemp(v) ? "" : "mem"]);
+          return addr[v];
+        }
+
+        function emit(line: string) { code.push(line); }
+
+        // Ensure variable v is in some register; return that register.
+        function intoReg(v: string): Reg {
+          for (const R of REGS) if (regHolds[R].has(v)) return R;   // already resident
+          const R = getReg(v);
+          emit(`LD ${R}, ${v}`);
+          regHolds[R] = new Set([v]);
+          place(v).add(R);
+          return R;
+        }
+
+        // Choose a register to define `target`.
+        function getReg(target: string): Reg {
+          for (const R of REGS) if (regHolds[R].size === 0) return R;  // empty register
+          // Spill the register whose variable has a safe memory copy (or store it first).
+          for (const R of REGS) {
+            for (const held of regHolds[R]) {
+              if (!place(held).has("mem") &amp;&amp; held !== target) { emit(`ST ${held}, ${R}  (spill)`); place(held).add("mem"); }
+            }
+            regHolds[R] = new Set();
+            place(target); // ensure record exists
+            return R;
+          }
+          return "R1";
+        }
+
+        // x = y op z
+        function gen(x: string, y: string, op: string, z: string, deadAfter: string[]) {
+          const Ry = intoReg(y);
+          const Rz = intoReg(z);
+          const Rx = Ry; // define result on top of the (assumed dead) left operand's register
+          emit(`${op} ${Rx}, ${Ry}, ${Rz}`);
+          // Result x now lives ONLY in Rx; its memory copy is stale.
+          for (const R of REGS) regHolds[R].delete(x);
+          regHolds[Rx] = new Set([x]);
+          addr[x] = new Set([Rx]);
+          // Free registers of operands that are now dead.
+          for (const d of deadAfter) {
+            for (const R of REGS) if (regHolds[R].has(d) &amp;&amp; d !== x) regHolds[R].delete(d);
+          }
+        }
+
+        // d = (a-b)+(a-c)+(a-c)   as   t=a-b; u=a-c; v=t+u; d=v+u
+        gen("t", "a", "SUB", "b", ["a", "b"]);
+        gen("u", "a", "SUB", "c", ["a", "c"]);
+        gen("v", "t", "ADD", "u", ["t"]);
+        gen("d", "v", "ADD", "u", ["v", "u"]);
+
+        // d is live on exit: store it back.
+        for (const R of REGS) if (regHolds[R].has("d")) emit(`ST d, ${R}`);
+
+        console.log(code.join("\n"));
+      </primer-code>
+      <p>
+        The exact instructions differ a little from the hand trace (a real generator's <code>getReg</code>
+        is smarter about which operand to reuse), but the shape is identical: a handful of loads, the
+        arithmetic, and one closing store. Tinker with the <code>deadAfter</code> lists and watch the store
+        traffic change — that is next-use information steering the whole thing.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why does 'live on exit' change the final code so much?">
+      <p>
+        Inside a single block, next-use tells you when a temporary dies. But at the <em>edge</em> of the
+        block, control leaves for a successor — and any variable a successor might read is
+        <strong>live on exit</strong>, so its latest value must actually exist in memory when the block
+        ends. That is why the generator issues closing <code>ST</code> instructions only for live-on-exit
+        variables currently stranded in registers. Compute liveness too conservatively (mark everything
+        live) and you drown the block in needless stores; compute it wrong (mark a needed value dead) and a
+        successor reads stale memory. Correct
+        <primer-ref soft to="computer-science/compiler-design/codegen/register-allocation-by-graph-colouring">liveness</primer-ref>
+        is what makes register-resident code both fast and correct.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Spilling, and keeping the two descriptors in lock-step">
+      <p>
+        When <code>getReg</code> finds no free register it must <strong>spill</strong> — but you cannot just
+        overwrite a register. First check the victim's address descriptor: if its value is <em>only</em> in
+        that register (no memory copy), you must emit a <code>ST</code> to save it, <em>then</em> update the
+        descriptor to record that memory now holds it. Skip the store and you have silently destroyed a live
+        value.
+      </p>
+      <p>
+        The subtler, more common bug is <strong>descriptor drift</strong>. After emitting
+        <code>OP R, Ry, Rz</code> you must do <em>all</em> of: remove the old occupant(s) of
+        <primer-math>R</primer-math>, record that <primer-math>R</primer-math> now holds only the result,
+        set the result's address descriptor to just <primer-math>R</primer-math> (its memory copy is now
+        stale!), and drop any dead operand from its register. Forget the "memory copy is now stale" step and
+        a later spill will "helpfully" skip storing a value that memory no longer actually has — a classic,
+        maddening miscompile. Update both descriptors, fully, after <em>every</em> instruction.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: descriptors / next-use / getReg / spilling concepts + small variable-driven counts. Bank of 13, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "codegenQuiz@1": {
+          "intro": "The simple code generator keeps values in registers using register and address descriptors plus next-use info. Numbers change every attempt.",
+          "regQ": "A REGISTER descriptor records…",
+          "rgHold": "for each register, which variables' current value it holds",
+          "rgAddr": "for each variable, where its value can be found",
+          "rgNext": "the next-use of each variable",
+          "rgCost": "the cost of each instruction",
+          "addrQ": "An ADDRESS descriptor records…",
+          "adPlaces": "for each variable, all locations (register and/or memory) holding its current value",
+          "adReg": "for each register, its variables",
+          "adCost": "the memory latency",
+          "adSize": "the size of each variable",
+          "nextQ": "Next-use information for a block is computed by…",
+          "nxBack": "a single backward scan over the block",
+          "nxFwd": "a forward scan over the block",
+          "nxGlobal": "solving a global dataflow problem across all blocks first",
+          "nxRandom": "guessing",
+          "deadQ": "A variable is 'dead' at a point (and safe to discard) when…",
+          "ddNone": "no later instruction in the block uses it and it is not live on exit",
+          "ddZero": "its value is zero",
+          "ddTemp": "it is a temporary, always",
+          "ddReg": "it is currently in a register",
+          "getregQ": "getReg's FIRST preference for a register to hold a result is…",
+          "grReuse": "a register holding only an operand that is dead after this instruction",
+          "grAny": "any register at random",
+          "grHigh": "the highest-numbered register",
+          "grMem": "always memory",
+          "spillQ": "Before stealing (spilling) an occupied register, you must…",
+          "spStore": "store its value to memory first if no memory copy exists",
+          "spDelete": "delete the variable from the program",
+          "spCrash": "halt the compiler",
+          "spNothing": "nothing — just overwrite it",
+          "staleQ": "Right after emitting OP R, Ry, Rz to compute x, the result x lives…",
+          "stOnly": "only in R — its memory copy is now stale",
+          "stBoth": "in both R and memory",
+          "stMem": "only in memory",
+          "stNowhere": "nowhere yet",
+          "exitQ": "At block exit, which variables must be stored back to memory?",
+          "exLive": "those that are live on exit but currently only in a register",
+          "exAll": "every variable ever used",
+          "exNone": "none, ever",
+          "exTemp": "only the temporaries",
+          "consistQ": "The register and address descriptors must always be…",
+          "csConsist": "mutually consistent — each agrees about where every value is",
+          "csEqual": "identical byte-for-byte",
+          "csEmpty": "empty",
+          "csSorted": "sorted alphabetically",
+          "goalQ": "The overriding goal of the simple code generator is to…",
+          "glReg": "keep values in registers and minimise memory traffic",
+          "glShort": "make the source code shorter",
+          "glMem": "use as much memory as possible",
+          "glReg0": "never use registers",
+          "loadCountQ": "A block reads variables a, b, c from memory, all initially only in memory. In the best case, how many LD (load) instructions are unavoidable to first bring each into a register once?",
+          "storeCountQ": "At block exit, ${n} variables are live-on-exit and each currently sits only in a register. How many ST (store) instructions must the generator emit?",
+          "regCountQ": "You have ${k} registers, all occupied by live values with no memory copies, and you need one more register. How many spill (ST) instructions are needed to free exactly one register holding a single value?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="codegenQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/codegen/basic-blocks-and-flow-graphs",
+      "computer-science/compiler-design/runtime/activation-records-and-the-stack"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("codegenQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("regQ"),
+      options: [
+        { text: () => sceneStrings("rgHold"), correct: true },
+        { text: () => sceneStrings("rgAddr"), correct: false },
+        { text: () => sceneStrings("rgNext"), correct: false },
+        { text: () => sceneStrings("rgCost"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("addrQ"),
+      options: [
+        { text: () => sceneStrings("adPlaces"), correct: true },
+        { text: () => sceneStrings("adReg"), correct: false },
+        { text: () => sceneStrings("adCost"), correct: false },
+        { text: () => sceneStrings("adSize"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("nextQ"),
+      options: [
+        { text: () => sceneStrings("nxBack"), correct: true },
+        { text: () => sceneStrings("nxFwd"), correct: false },
+        { text: () => sceneStrings("nxGlobal"), correct: false },
+        { text: () => sceneStrings("nxRandom"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("deadQ"),
+      options: [
+        { text: () => sceneStrings("ddNone"), correct: true },
+        { text: () => sceneStrings("ddZero"), correct: false },
+        { text: () => sceneStrings("ddTemp"), correct: false },
+        { text: () => sceneStrings("ddReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("getregQ"),
+      options: [
+        { text: () => sceneStrings("grReuse"), correct: true },
+        { text: () => sceneStrings("grAny"), correct: false },
+        { text: () => sceneStrings("grHigh"), correct: false },
+        { text: () => sceneStrings("grMem"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("spillQ"),
+      options: [
+        { text: () => sceneStrings("spStore"), correct: true },
+        { text: () => sceneStrings("spDelete"), correct: false },
+        { text: () => sceneStrings("spCrash"), correct: false },
+        { text: () => sceneStrings("spNothing"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("staleQ"),
+      options: [
+        { text: () => sceneStrings("stOnly"), correct: true },
+        { text: () => sceneStrings("stBoth"), correct: false },
+        { text: () => sceneStrings("stMem"), correct: false },
+        { text: () => sceneStrings("stNowhere"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("exitQ"),
+      options: [
+        { text: () => sceneStrings("exLive"), correct: true },
+        { text: () => sceneStrings("exAll"), correct: false },
+        { text: () => sceneStrings("exNone"), correct: false },
+        { text: () => sceneStrings("exTemp"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("consistQ"),
+      options: [
+        { text: () => sceneStrings("csConsist"), correct: true },
+        { text: () => sceneStrings("csEqual"), correct: false },
+        { text: () => sceneStrings("csEmpty"), correct: false },
+        { text: () => sceneStrings("csSorted"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("goalQ"),
+      options: [
+        { text: () => sceneStrings("glReg"), correct: true },
+        { text: () => sceneStrings("glShort"), correct: false },
+        { text: () => sceneStrings("glMem"), correct: false },
+        { text: () => sceneStrings("glReg0"), correct: false },
+      ],
+    },
+    {
+      // Three distinct variables each need at least one load to enter a register.
+      prompt: () => sceneStrings("loadCountQ"),
+      answer: 3,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Each live-on-exit register-only variable needs exactly one store.
+      prompt: (v) => sceneStrings("storeCountQ", v),
+      variables: "n=[1:6]",
+      answer: (v) => v.n,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Freeing ONE register holding a single value costs exactly one spill store.
+      prompt: (v) => sceneStrings("regCountQ", v),
+      variables: "k=[2:8]",
+      answer: 1,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

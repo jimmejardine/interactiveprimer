@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Register Allocation by Graph Colouring</primer-title>
+
+    <primer-card>
+      <p>
+        The
+        <primer-ref to="computer-science/compiler-design/codegen/a-simple-code-generator">simple code generator</primer-ref>
+        juggled two registers by hand. A real machine has a fixed, small pool — say
+        <primer-math>k = 16</primer-math> or <primer-math>32</primer-math> general registers — and a
+        function full of variables and temporaries that vastly outnumber them. The allocator's job is to map
+        that unbounded set of values onto <primer-math>k</primer-math> physical registers, keeping as much
+        as possible out of memory. The beautiful insight, due to <strong>Chaitin</strong> and refined by
+        <strong>Briggs</strong>, is that this is a <em>graph problem in disguise</em>.
+      </p>
+      <p>
+        Two values may share a register whenever they are never <em>needed at the same time</em>. So build a
+        graph whose nodes are the values and whose edges join values that <strong>interfere</strong> — that
+        are simultaneously live and therefore <em>cannot</em> share a register. Assigning registers so that
+        no two interfering values collide is exactly <strong>colouring the graph with
+        <primer-math>k</primer-math> colours</strong>, one colour per register. Register allocation
+        <em>is</em> graph colouring.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Liveness builds the interference graph</h2>
+      <p>
+        The edges come from <strong>liveness analysis</strong>. A variable is <em>live</em> at a program
+        point if its current value may be read later before being overwritten. Two variables
+        <strong>interfere</strong> if there is a point where both are live at once — more precisely, an edge
+        is added between a variable being <em>defined</em> and every other variable <em>live at that
+        definition</em> (they must survive the write into different registers).
+      </p>
+      <p>
+        Compute live sets across the
+        <primer-ref soft to="computer-science/compiler-design/codegen/basic-blocks-and-flow-graphs">control-flow graph</primer-ref>,
+        walk each block backward adding an edge from each defined value to everything then live, and you have
+        the <strong>interference graph</strong>. Its structure is everything the allocator needs: it has
+        forgotten the code entirely and reduced allocation to pure combinatorics on a graph.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Simplify and select: the Chaitin–Briggs stack</h2>
+      <p>
+        Colouring is driven by one deceptively powerful observation about degree. It gives a
+        <em>sufficient</em> condition for colourability and a way to peel the graph down to it:
+      </p>
+      <primer-theorem name="The degree-&lt; k rule">
+        <ul>
+          <li>if a node has <strong>fewer than <primer-math>k</primer-math></strong> neighbours, then
+            whatever colours those neighbours end up with, at most <primer-math>k-1</primer-math> colours are
+            blocked, so a free colour always remains for this node;</li>
+          <li>therefore we may <strong>remove</strong> any degree-<primer-math>&lt;k</primer-math> node from
+            the graph, push it on a stack, and colour it <em>later</em> — its removal can only lower its
+            neighbours' degrees, exposing more removable nodes;</li>
+          <li>consequently a graph in which <strong>every</strong> node has degree
+            <primer-math>&lt; k</primer-math> is guaranteed <primer-math>k</primer-math>-colourable.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        This gives the two-phase algorithm. <strong>Simplify</strong>: repeatedly remove a
+        degree-<primer-math>&lt;k</primer-math> node and push it, until the graph is empty.
+        <strong>Select</strong>: pop nodes off the stack one at a time, giving each the lowest-numbered
+        colour not used by its (already-coloured) neighbours. Because each node was removed while it had
+        <primer-math>&lt; k</primer-math> neighbours, a colour is always available on the way back up. Watch
+        it run on a small interference graph with <primer-math>k = 3</primer-math> registers:
+      </p>
+      <primer-geometry scene="interferenceColour"></primer-geometry>
+      <p>
+        The triangle <primer-math>A\text{–}B\text{–}C</primer-math> forces three distinct colours, so this
+        graph needs all three registers; node <primer-math>D</primer-math>, which does not interfere with
+        <primer-math>B</primer-math>, happily reuses <primer-math>B</primer-math>'s register
+        (<code>R2</code>). Four values, three registers, zero spills.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Optimistic colouring and real spills</h2>
+      <p>
+        What if simplify gets <strong>stuck</strong> — every remaining node has degree
+        <primer-math>\ge k</primer-math>? Chaitin's original allocator would immediately pick a node to
+        <strong>spill</strong> to memory. Briggs' improvement is <strong>optimistic colouring</strong>: push
+        the high-degree node onto the stack anyway (marking it a <em>potential</em> spill) and carry on
+        simplifying. On the way back up in select, that node <em>might</em> still find a free colour —
+        because its many neighbours, by luck, may not have used all <primer-math>k</primer-math> colours.
+        Optimism pays off surprisingly often and colours graphs Chaitin's method would have spilled.
+      </p>
+      <p>
+        If select really does find no colour for a node, that node becomes an <strong>actual spill</strong>:
+        its value is kept in memory, with loads before each use and stores after each definition. Crucially,
+        spilling <em>changes the code</em> — those new loads and stores are short-lived new values — so the
+        interference graph is <strong>rebuilt</strong> and the whole simplify/select process
+        <strong>repeats</strong>. After a round or two the graph colours cleanly and allocation is done.
+      </p>
+      <primer-code>
+        build interference graph
+        repeat:
+            SIMPLIFY: while some node has degree &lt; k, remove it and push on stack
+            if stuck: push a high-degree node optimistically (potential spill)
+            SELECT: pop each node, assign a colour not used by neighbours
+            if some node gets no colour → mark it an ACTUAL spill
+        until no actual spills
+        (spilled values get loads/stores; graph is rebuilt and we go again)
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Colouring by simplify/select, in code</h2>
+      <p>
+        The allocator below takes an interference graph as an adjacency map and
+        <primer-math>k</primer-math> registers. It simplifies (removing degree-<primer-math>&lt;k</primer-math>
+        nodes, or optimistically pushing the highest-degree one when stuck), then selects colours off the
+        stack. Run on the graph from the figure with <primer-math>k = 3</primer-math>:
+      </p>
+      <primer-code run>
+        type Graph = Record&lt;string, string[]&gt;;
+
+        function allocate(g: Graph, k: number): Record&lt;string, number&gt; | null {
+          const nodes = Object.keys(g);
+          const removed = new Set&lt;string&gt;();
+          const stack: string[] = [];
+          const liveDeg = (v: string) =&gt; g[v].filter((u) =&gt; !removed.has(u)).length;
+
+          // SIMPLIFY
+          while (removed.size &lt; nodes.length) {
+            let pick = nodes.find((v) =&gt; !removed.has(v) &amp;&amp; liveDeg(v) &lt; k);
+            if (pick === undefined) {
+              // Stuck: optimistically push the highest-degree remaining node.
+              let best = "", bd = -1;
+              for (const v of nodes) if (!removed.has(v) &amp;&amp; liveDeg(v) &gt; bd) { bd = liveDeg(v); best = v; }
+              pick = best;
+              console.log(`simplify: optimistic push ${pick} (degree ${bd} >= k)`);
+            } else {
+              console.log(`simplify: push ${pick} (degree ${liveDeg(pick)} < ${k})`);
+            }
+            removed.add(pick); stack.push(pick);
+          }
+
+          // SELECT
+          const colour: Record&lt;string, number&gt; = {};
+          while (stack.length) {
+            const v = stack.pop()!;
+            const used = new Set&lt;number&gt;();
+            for (const u of g[v]) if (u in colour) used.add(colour[u]);
+            let c = 0; while (used.has(c)) c++;
+            if (c &gt;= k) { console.log(`select: ${v} -> ACTUAL SPILL (no colour < ${k})`); return null; }
+            colour[v] = c;
+            console.log(`select: ${v} -> R${c + 1}`);
+          }
+          return colour;
+        }
+
+        // Interference graph: triangle A-B-C, plus D interfering with A and C only.
+        const g: Graph = {
+          A: ["B", "C", "D"],
+          B: ["A", "C"],
+          C: ["A", "B", "D"],
+          D: ["A", "C"],
+        };
+
+        const result = allocate(g, 3);
+        console.log("--- assignment ---");
+        if (result) for (const v of Object.keys(g)) console.log(`${v} -> R${result[v] + 1}`);
+        else console.log("needs a spill; rebuild graph and retry");
+      </primer-code>
+      <p>
+        Drop <primer-math>k</primer-math> to <code>2</code> and rerun: the triangle
+        <primer-math>A\text{–}B\text{–}C</primer-math> cannot be 2-coloured, so select reports an actual
+        spill — the signal to spill a value to memory, rebuild, and try again.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Coalescing: deleting the copies</h2>
+      <p>
+        One more trick makes colouring earn its keep. A move <primer-math>x := y</primer-math> is pure
+        overhead if <primer-math>x</primer-math> and <primer-math>y</primer-math> can be given the
+        <em>same</em> register — then the copy is a no-op and can be deleted. <strong>Coalescing</strong>
+        merges the two nodes in the interference graph into one (provided they do not interfere), so the
+        allocator assigns them a single register and the move vanishes. Overdo it, though, and the merged
+        super-node has so many neighbours it becomes uncolourable, forcing a spill. <strong>Conservative
+        coalescing</strong> (Briggs) merges two nodes only when the result is provably still colourable —
+        capturing most move savings without provoking spills.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If colouring is NP-hard, how does a compiler do it in a fraction of a second?">
+      <p>
+        Deciding whether a general graph is <primer-math>k</primer-math>-colourable is
+        <strong>NP-complete</strong> — there is no known efficient algorithm that is always optimal. But the
+        allocator does not <em>need</em> optimal. The simplify/select heuristic is <em>linear-ish</em> and,
+        thanks to the degree-<primer-math>&lt;k</primer-math> rule, colours the overwhelming majority of real
+        interference graphs perfectly; where it can't, it spills and retries. It trades guaranteed optimality
+        for guaranteed speed and near-optimal results in practice — the same bargain
+        <primer-ref soft to="computer-science/compiler-design/codegen/instruction-selection">maximal munch</primer-ref>
+        strikes in instruction selection. Interestingly, the interference graphs of programs without
+        <code>goto</code> spaghetti are often <em>chordal</em>, a class that <em>is</em> colourable
+        optimally in polynomial time — which is part of why the heuristic does so well.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Degree < k is sufficient, not necessary — and spilling means rebuild">
+      <p>
+        The degree-<primer-math>&lt;k</primer-math> rule is a <strong>one-way</strong> guarantee. If a node
+        has fewer than <primer-math>k</primer-math> neighbours it is <em>definitely</em> colourable — but a
+        node with degree <primer-math>\ge k</primer-math> is <em>not</em> necessarily uncolourable. A node
+        with many neighbours that among them use only a few colours still has a colour free. This is exactly
+        why Briggs' <strong>optimistic</strong> push works: never assume a high-degree node must spill;
+        push it and find out during select.
+      </p>
+      <p>
+        The second trap is treating a spill as the end. When select fails, you do <em>not</em> just leave
+        that value in memory and keep the rest of the assignment — spilling <strong>inserts new load/store
+        instructions</strong>, which create new short live ranges and thus a <em>different</em> interference
+        graph. You must <strong>rebuild the graph and run simplify/select again</strong>. Allocation is a
+        loop, not a single pass; forgetting the rebuild yields an inconsistent, incorrect assignment.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: interference / colouring / simplify-select / coalescing + variable-driven degree counts. Bank of 13, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "colourQuiz@1": {
+          "intro": "Register allocation = k-colouring an interference graph via Chaitin–Briggs simplify/select. Numbers change every attempt.",
+          "isQ": "Register allocation by graph colouring models registers as…",
+          "isColours": "colours, and interfering values as adjacent nodes that need different colours",
+          "isEdges": "edges of the control-flow graph",
+          "isBlocks": "basic blocks",
+          "isInstr": "instructions",
+          "interQ": "Two values INTERFERE (get an edge) when…",
+          "inLive": "they are simultaneously live and so cannot share a register",
+          "inSame": "they have the same name",
+          "inAdj": "they appear on adjacent source lines",
+          "inConst": "they are both constants",
+          "edgeSrcQ": "The interference graph's edges come from…",
+          "esLive": "liveness analysis",
+          "esSort": "sorting the variables",
+          "esRandom": "random pairing",
+          "esName": "matching variable names",
+          "kQ": "Colouring an interference graph with k colours corresponds to…",
+          "kReg": "assigning the values to k physical registers with no conflicts",
+          "kBlock": "splitting into k basic blocks",
+          "kInstr": "emitting k instructions",
+          "kLoop": "unrolling a loop k times",
+          "simpQ": "In SIMPLIFY, which node may be removed and pushed on the stack?",
+          "smLow": "any node with degree < k",
+          "smHigh": "only the highest-degree node",
+          "smAny": "any node at all, always safely",
+          "smLeaf": "only leaf nodes of the CFG",
+          "selQ": "In SELECT, each popped node is given…",
+          "slLowest": "the lowest-numbered colour not used by its already-coloured neighbours",
+          "slHighest": "the highest-numbered colour",
+          "slRandom": "a random colour",
+          "slSame": "the same colour as its first neighbour",
+          "optQ": "Briggs' OPTIMISTIC colouring means…",
+          "opPush": "push a high-degree node anyway; it may still get a colour during select",
+          "opSpill": "spill every high-degree node immediately",
+          "opStop": "stop the allocator",
+          "opRandom": "colour nodes at random",
+          "spillQ": "After an ACTUAL spill, the allocator must…",
+          "spRebuild": "insert loads/stores, rebuild the interference graph, and repeat simplify/select",
+          "spQuit": "stop — allocation has failed permanently",
+          "spKeep": "keep the current partial assignment unchanged",
+          "spDouble": "double the number of registers",
+          "coalQ": "COALESCING two move-related nodes x := y…",
+          "coMerge": "merges them (if they don't interfere) so the copy instruction can be deleted",
+          "coSplit": "splits them into two registers",
+          "coSpill": "always forces a spill",
+          "coLabel": "renames the labels",
+          "npQ": "Deciding k-colourability of a general graph is…",
+          "npHard": "NP-complete — the allocator uses a heuristic, not an exact optimum",
+          "npEasy": "solvable in constant time",
+          "npImp": "undecidable",
+          "npLinear": "always trivially linear and optimal",
+          "sufQ": "The 'degree < k ⇒ colourable' rule is…",
+          "sufSuff": "sufficient but not necessary — high-degree nodes may still be colourable",
+          "sufNec": "necessary but not sufficient",
+          "sufBoth": "both necessary and sufficient",
+          "sufNever": "never true",
+          "degQ": "A node in the interference graph has degree ${d}. With $k = {k}$ registers, is it GUARANTEED colourable by the degree rule? Enter 1 for yes, 0 for no.",
+          "safeQ": "You have $k = {k}$ registers. What is the largest node degree for which the degree rule still GUARANTEES a free colour?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="colourQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/codegen/a-simple-code-generator",
+      "computer-science/data-structures/graphs"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Interference-graph toolkit: coloured nodes (register = fill colour) and undirected edges.
+  function graphTools(board, colors) {
+    const R = 0.62;
+    const edge = (a, b, col) => {
+      const dx = b[0] - a[0], dy = b[1] - a[1], d = Math.hypot(dx, dy), ux = dx / d, uy = dy / d;
+      board.create("segment", [[a[0] + ux * R, a[1] + uy * R], [b[0] - ux * R, b[1] - uy * R]], {
+        strokeColor: col, strokeWidth: 2, fixed: true, highlight: false,
+        straightFirst: false, straightLast: false,
+      });
+    };
+    const node = (p, label, fill) => {
+      board.create("circle", [[p[0], p[1]], R], {
+        strokeColor: fill, strokeWidth: 2.5, fillColor: fill, fillOpacity: 0.28,
+        fixed: true, highlight: false,
+      });
+      board.create("text", [p[0], p[1], label], {
+        anchorX: "middle", anchorY: "middle", fontSize: 14, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    return { edge, node };
+  }
+
+  registerGeometryScene("interferenceColour", ({ board, step, colors }) => {
+    const T = graphTools(board, colors);
+    const A = [0, 3.5], B = [4.2, 0], C = [0, -3.5], D = [-4.2, 0];
+
+    // Base content: the interference edges (uncoloured graph), always visible.
+    T.edge(A, B, colors.line);
+    T.edge(B, C, colors.line);
+    T.edge(C, D, colors.line);
+    T.edge(D, A, colors.line);
+    T.edge(A, C, colors.line); // the diagonal makes A-B-C a triangle
+
+    step("A-B-C form a triangle → they must get three different registers. Colour A = R1.", () => {
+      T.node(A, "A:R1", colors.cat[0]);
+    });
+    step("B interferes with A and C → B needs a new register. Colour B = R2.", () => {
+      T.node(B, "B:R2", colors.cat[1]);
+    });
+    step("C interferes with A and B → the third register. Colour C = R3.", () => {
+      T.node(C, "C:R3", colors.cat[2]);
+    });
+    step("D interferes only with A and C (not B) → it can REUSE R2. Colour D = R2.", () => {
+      T.node(D, "D:R2", colors.cat[1]);
+    });
+  }, { boundingbox: [-6.6, 5, 6.6, -5], keepAspect: false, title: "3-colouring an interference graph (k = 3)" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("colourQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("isQ"),
+      options: [
+        { text: () => sceneStrings("isColours"), correct: true },
+        { text: () => sceneStrings("isEdges"), correct: false },
+        { text: () => sceneStrings("isBlocks"), correct: false },
+        { text: () => sceneStrings("isInstr"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("interQ"),
+      options: [
+        { text: () => sceneStrings("inLive"), correct: true },
+        { text: () => sceneStrings("inSame"), correct: false },
+        { text: () => sceneStrings("inAdj"), correct: false },
+        { text: () => sceneStrings("inConst"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("edgeSrcQ"),
+      options: [
+        { text: () => sceneStrings("esLive"), correct: true },
+        { text: () => sceneStrings("esSort"), correct: false },
+        { text: () => sceneStrings("esRandom"), correct: false },
+        { text: () => sceneStrings("esName"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("kQ"),
+      options: [
+        { text: () => sceneStrings("kReg"), correct: true },
+        { text: () => sceneStrings("kBlock"), correct: false },
+        { text: () => sceneStrings("kInstr"), correct: false },
+        { text: () => sceneStrings("kLoop"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("simpQ"),
+      options: [
+        { text: () => sceneStrings("smLow"), correct: true },
+        { text: () => sceneStrings("smHigh"), correct: false },
+        { text: () => sceneStrings("smAny"), correct: false },
+        { text: () => sceneStrings("smLeaf"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("selQ"),
+      options: [
+        { text: () => sceneStrings("slLowest"), correct: true },
+        { text: () => sceneStrings("slHighest"), correct: false },
+        { text: () => sceneStrings("slRandom"), correct: false },
+        { text: () => sceneStrings("slSame"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("optQ"),
+      options: [
+        { text: () => sceneStrings("opPush"), correct: true },
+        { text: () => sceneStrings("opSpill"), correct: false },
+        { text: () => sceneStrings("opStop"), correct: false },
+        { text: () => sceneStrings("opRandom"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("spillQ"),
+      options: [
+        { text: () => sceneStrings("spRebuild"), correct: true },
+        { text: () => sceneStrings("spQuit"), correct: false },
+        { text: () => sceneStrings("spKeep"), correct: false },
+        { text: () => sceneStrings("spDouble"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("coalQ"),
+      options: [
+        { text: () => sceneStrings("coMerge"), correct: true },
+        { text: () => sceneStrings("coSplit"), correct: false },
+        { text: () => sceneStrings("coSpill"), correct: false },
+        { text: () => sceneStrings("coLabel"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("npQ"),
+      options: [
+        { text: () => sceneStrings("npHard"), correct: true },
+        { text: () => sceneStrings("npEasy"), correct: false },
+        { text: () => sceneStrings("npImp"), correct: false },
+        { text: () => sceneStrings("npLinear"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sufQ"),
+      options: [
+        { text: () => sceneStrings("sufSuff"), correct: true },
+        { text: () => sceneStrings("sufNec"), correct: false },
+        { text: () => sceneStrings("sufBoth"), correct: false },
+        { text: () => sceneStrings("sufNever"), correct: false },
+      ],
+    },
+    {
+      // Guaranteed colourable by the degree rule iff degree < k.
+      prompt: (v) => sceneStrings("degQ", v),
+      variables: "d=[1:8] k=[2:6]",
+      answer: (v) => (v.d < v.k ? 1 : 0),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // The rule guarantees a colour for degree up to k-1.
+      prompt: (v) => sceneStrings("safeQ", v),
+      variables: "k=[2:9]",
+      answer: (v) => v.k - 1,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

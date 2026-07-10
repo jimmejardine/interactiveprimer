@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Union and Overlay Filesystems</primer-title>
+
+    <primer-card>
+      <p>
+        A container image for a Node.js app might be <primer-math>900</primer-math> MB. You run
+        <primer-math>50</primer-math> copies of it. Naively that is <primer-math>45</primer-math> GB of disk and
+        a fresh multi-second copy every time you start one. In reality Docker starts all fifty in well under a
+        second and they share almost all of that <primer-math>900</primer-math> MB on disk. The magic is a
+        <strong>union filesystem</strong>, and on Linux today that means <strong>overlayfs</strong> — a
+        <primer-ref to="computer-science/advanced-operating-systems/filesystems/the-vfs-layer">VFS</primer-ref>-level
+        filesystem that <em>merges several directory trees into one</em> without copying them.
+      </p>
+      <p>
+        This is the lesson that explains what a container "image" actually <em>is</em> and why building and
+        shipping them is so fast. The answer is a beautiful application of an old idea — copy-on-write — to
+        filesystem <em>layers</em>: a stack of read-only layers shared by everyone, plus one thin writable layer
+        per container, all fused into a single directory the process sees as its normal root.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Layers, stacked and merged</h2>
+      <p>
+        An image is not a monolithic disk blob; it is an ordered stack of <strong>layers</strong>, each layer a
+        set of file changes (a tarball of "these files were added/changed/deleted"). Each line in a
+        <primer-math>\texttt{Dockerfile}</primer-math> — <primer-math>\texttt{FROM ubuntu}</primer-math>,
+        <primer-math>\texttt{RUN apt install}</primer-math>,
+        <primer-math>\texttt{COPY . /app}</primer-math> — produces one layer. overlayfs's job is to take that stack
+        and present a single merged view. Its vocabulary is four directories:
+      </p>
+      <ul>
+        <li><strong>lowerdir</strong> — one or more <em>read-only</em> layers (the image), searched top-to-bottom;</li>
+        <li><strong>upperdir</strong> — the single <em>writable</em> layer for this container's changes;</li>
+        <li><strong>merged</strong> — the unified view the process actually sees as <primer-math>/</primer-math>;</li>
+        <li><strong>workdir</strong> — an empty scratch dir overlayfs needs internally for atomic operations.</li>
+      </ul>
+      <p>
+        A lookup for a file walks the stack from the top: if the upperdir has it, you get that; otherwise overlayfs
+        falls through to the first lowerdir that has it. Same-named files in higher layers <em>shadow</em> lower
+        ones. That is the whole "union" semantics.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the overlay-stack + copy-up figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "overlay": {
+          "title": "overlayfs merges read-only image layers under one thin writable layer",
+          "merged": "merged view  ( the container sees this as / )",
+          "upper": "upperdir — writable layer (this container only)",
+          "l3": "lowerdir 3 (RO):  COPY . /app",
+          "l2": "lowerdir 2 (RO):  RUN apt install nodejs",
+          "l1": "lowerdir 1 (RO):  FROM ubuntu:22.04",
+          "shared": "the read-only layers are SHARED & cached across every container",
+          "cutitle": "copy-up on first write",
+          "before": "read /etc/hosts → found in a lower RO layer, served directly",
+          "after": "write /etc/hosts → copied UP into upperdir first, then modified there"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The overlay stack</h2>
+      <p>
+        Picture the image as a pile of transparent sheets. Look down through them and you see the topmost mark at
+        each position; the writable sheet on top is where <em>this</em> container scribbles. Everyone else's pile
+        rests on the exact same lower sheets — read-only, so sharing them is safe.
+      </p>
+      <primer-geometry scene="overlay"></primer-geometry>
+      <p>
+        Because the lower layers are immutable, the kernel can point a thousand containers at the same on-disk
+        bytes for <primer-math>\texttt{FROM ubuntu}</primer-math>. The image is downloaded, decompressed, and
+        cached <em>once</em>; each container adds only its own tiny upperdir. That is the deduplication that makes
+        the "45 GB" collapse to "900 MB shared plus a few MB each".
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Copy-up: the moment a shared file becomes private</h2>
+      <p>
+        Reads are free — they fall through to the shared lower layers. The interesting event is the
+        <em>first write</em> to a file that only exists in a read-only layer. overlayfs cannot modify the lower
+        layer (it is shared and immutable), so it performs a <strong>copy-up</strong>: it copies the whole file
+        up into the writable upperdir, and the write — and every future access — goes to that private copy. The
+        lower original is untouched and still shared by everyone else.
+      </p>
+      <p>
+        This is <primer-ref to="computer-science/advanced-operating-systems/filesystems/the-vfs-layer">copy-on-write</primer-ref>
+        applied at file granularity: pay the copy cost only when, and only for the files, you actually mutate.
+        A container that only reads its image writes nothing to disk at all. One that edits a single config file
+        copies up exactly that one file. Deleting a file that lives in a lower layer is handled with a
+        <strong>whiteout</strong> — a special marker in the upperdir that hides the lower entry without touching
+        it.
+      </p>
+      <primer-code run>
+        // A toy overlayfs: read falls through RO layers; the FIRST write copies the file UP.
+        // Deletes leave a whiteout marker. Nothing here is a real FS — it just narrates the semantics.
+
+        const lower: Record&lt;string, string&gt; = {          // shared read-only image layers
+          "/etc/hosts": "127.0.0.1 localhost",
+          "/app/config": "mode=prod",
+          "/usr/bin/node": "&lt;binary&gt;",
+        };
+        const upper: Record&lt;string, string&gt; = {};          // this container's private writable layer
+        const whiteout = new Set&lt;string&gt;();                  // files "deleted" from the merged view
+
+        function read(path: string): string {
+          if (whiteout.has(path)) return `ENOENT (whited-out)`;
+          if (path in upper) return `${upper[path]}   [from upperdir]`;
+          if (path in lower) return `${lower[path]}   [from lowerdir — shared, no copy]`;
+          return "ENOENT";
+        }
+        function write(path: string, data: string): void {
+          if (!(path in upper) && path in lower) {
+            console.log(`  copy-up: ${path} copied lower → upper before first write`);
+          }
+          upper[path] = data;
+          whiteout.delete(path);
+        }
+        function remove(path: string): void {
+          delete upper[path];
+          if (path in lower) whiteout.add(path);   // hide the lower version
+        }
+
+        console.log("read  /etc/hosts :", read("/etc/hosts"));      // served from lower, shared
+        write("/etc/hosts", "127.0.0.1 localhost\n10.0.0.5 db");    // triggers copy-up
+        console.log("read  /etc/hosts :", read("/etc/hosts"));      // now from upper
+        console.log("read  /app/config:", read("/app/config"));     // still shared, never copied
+        remove("/usr/bin/node");
+        console.log("read  /usr/bin/node:", read("/usr/bin/node")); // whited out
+        console.log(`\nupperdir now holds ${Object.keys(upper).length} file(s); the rest stays shared on disk.`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Content addressing — why layers dedup and cache</h2>
+      <p>
+        How does Docker know two images share the <primer-math>\texttt{FROM ubuntu:22.04}</primer-math> layer, so
+        it stores and pulls it once? Each layer is <strong>content-addressed</strong>: its identity is the
+        cryptographic hash (a SHA-256 <primer-math>\texttt{digest}</primer-math>) of its contents. Two layers with
+        identical bytes have identical digests and are therefore <em>the same object</em> — stored once, pulled
+        once, cached once, whether they appear in one image or a hundred. This is the same content-addressed idea
+        behind Git objects.
+      </p>
+      <p>
+        Content addressing also powers the <strong>build cache</strong>. When you rebuild an image, Docker hashes
+        each build step's inputs; if nothing changed, the step's layer digest is unchanged and the cached layer is
+        reused instead of re-run. This is why ordering a <primer-math>\texttt{Dockerfile}</primer-math> from
+        least- to most-frequently-changed (dependencies before your source) makes rebuilds fast: the expensive
+        early layers stay cache-hits.
+      </p>
+      <primer-theorem name="Union/overlay filesystems for containers">
+        <ul>
+          <li>An image is an ordered stack of <strong>read-only layers</strong>; a running container adds one
+            thin <strong>writable layer</strong> (upperdir) on top.</li>
+          <li><strong>overlayfs</strong> merges lowerdir(s) + upperdir into one <strong>merged</strong> view; a
+            lookup falls through top-to-bottom, higher layers shadow lower ones.</li>
+          <li><strong>Copy-up</strong>: the first write to a lower-layer file copies it into the upperdir
+            (copy-on-write at file granularity); deletes use a <strong>whiteout</strong> marker.</li>
+          <li>Layers are <strong>content-addressed</strong> (hash of contents), so identical layers are stored,
+            pulled, and cached <strong>once</strong> and shared across all containers — the source of both dedup
+            and the build cache.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Why does a fresh container start in milliseconds even from a 1 GB image?">
+      <p>
+        Because starting it copies almost nothing. The gigabyte of read-only layers is already on disk from the
+        <primer-math>\texttt{docker pull}</primer-math> and is <em>shared</em> — the runtime just mounts an
+        overlay that points the new container's lowerdir at those existing layers and gives it a brand-new,
+        <em>empty</em> upperdir. Creating an empty directory and mounting an overlay is a handful of syscalls, not
+        a gigabyte copy. The container then <primer-math>\texttt{exec}</primer-math>s its process against that
+        merged view. All the "weight" of the image was paid once, at pull time; startup is nearly free. This is
+        the storage half of why containers cold-start in milliseconds — the compute half was the shared kernel.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The writable layer is ephemeral — don't store data you care about in it">
+      <p>
+        A classic production mistake: an app writes its database or user uploads into the container's filesystem,
+        the container is later replaced (a deploy, a crash, a reschedule), and the data vanishes. The upperdir
+        lives and <em>dies with the container</em> — remove the container and its writable layer is discarded.
+        overlayfs's copy-on-write is designed for <em>image</em> state, not <em>application</em> state. Anything
+        that must survive the container's lifetime belongs in a <strong>volume</strong> or bind mount — real
+        storage mounted <em>through</em> the overlay, outside the layer stack. Rule of thumb: treat the container
+        filesystem as scratch, and put durable data somewhere the copy-up machinery never touches. Also beware
+        write-heavy workloads: every first-write triggers a full-file copy-up, so churning large files on the
+        upperdir is slower than on a native filesystem — another reason to use a volume.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: layers, lower/upper/merged, copy-up, whiteout, content addressing, dedup. Bank of 12, draws 5.
+         Variable names avoid evaluator collisions (imgs, base, per, ...). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "ovlQuiz@1": {
+          "intro": "How container images layer: read-only layers + a writable upperdir merged by overlayfs, copy-up on first write, content-addressed sharing.",
+          "imgQ": "A container image is best described as…",
+          "imgRight": "an ordered stack of read-only layers of filesystem changes",
+          "imgWrong1": "a single monolithic disk image copied per container",
+          "imgWrong2": "a running process with its own kernel",
+          "imgWrong3": "a compressed virtual machine snapshot",
+          "dirQ": "In overlayfs, which directory is the single WRITABLE layer for a container?",
+          "dirRight": "upperdir",
+          "dirWrong1": "lowerdir",
+          "dirWrong2": "merged",
+          "dirWrong3": "workdir",
+          "lowerQ": "The lowerdir layers in overlayfs are…",
+          "lowerRight": "read-only and shared across all containers using that image",
+          "lowerWrong1": "writable and private to each container",
+          "lowerWrong2": "deleted when the container starts",
+          "lowerWrong3": "stored only in RAM",
+          "lookupQ": "When the container opens a file, overlayfs resolves it by…",
+          "lookupRight": "searching the stack top-down; the upperdir shadows lower layers",
+          "lookupWrong1": "searching only the bottom layer",
+          "lookupWrong2": "merging the bytes of all layers together",
+          "lookupWrong3": "asking the guest kernel",
+          "cuQ": "\"Copy-up\" happens when…",
+          "cuRight": "a file that exists only in a read-only lower layer is written for the first time",
+          "cuWrong1": "the container is first pulled from a registry",
+          "cuWrong2": "a file is merely read",
+          "cuWrong3": "the container is deleted",
+          "cuReadQ": "If a container only READS files from its image and never writes, how much does it copy up?",
+          "cuReadRight": "nothing — reads fall through to the shared read-only layers",
+          "cuReadWrong1": "the entire image, on startup",
+          "cuReadWrong2": "one layer per read",
+          "cuReadWrong3": "half the image",
+          "woQ": "Deleting a file that lives in a lower read-only layer is done with…",
+          "woRight": "a whiteout marker in the upperdir that hides the lower entry",
+          "woWrong1": "editing the lower layer in place",
+          "woWrong2": "deleting the whole lower layer",
+          "woWrong3": "rebuilding the image",
+          "caQ": "Container layers are 'content-addressed', meaning…",
+          "caRight": "a layer's identity is the hash of its contents, so identical layers are stored once",
+          "caWrong1": "layers are named after the container that made them",
+          "caWrong2": "layers are addressed by their position on disk",
+          "caWrong3": "each layer gets a random UUID every pull",
+          "dedupQ": "Why can 100 containers from the same image share ~all of its bytes on disk?",
+          "dedupRight": "the read-only layers are immutable, so the kernel points them all at the same cached layers",
+          "dedupWrong1": "each container recompresses the image",
+          "dedupWrong2": "the layers are stored in each container's RAM",
+          "dedupWrong3": "images are never larger than a few KB",
+          "cacheQ": "Ordering a Dockerfile from least- to most-frequently-changed makes rebuilds fast because…",
+          "cacheRight": "unchanged early steps keep the same layer digest and hit the build cache",
+          "cacheWrong1": "Docker compiles the Dockerfile faster that way",
+          "cacheWrong2": "later layers are always free",
+          "cacheWrong3": "it reduces the number of namespaces",
+          "ephQ": "Where should durable application data (a database, uploads) live?",
+          "ephRight": "in a volume or bind mount, outside the ephemeral writable layer",
+          "ephWrong1": "in the container's upperdir — it is the safest place",
+          "ephWrong2": "in a lower read-only layer",
+          "ephWrong3": "nowhere — containers cannot store data",
+          "diskQ": "${imgs}$ containers run from one image. The shared read-only layers total ${base}$ MB; each container's writable layer averages ${per}$ MB. What is the TOTAL disk used (MB)?",
+          "saveQ": "${imgs}$ containers, image ${base}$ MB. Naive per-container copies would use ${imgs}·{base}$ MB. With shared layers (image once + ${per}$ MB each), how many MB are SAVED?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="ovlQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/containers/namespaces-and-cgroups",
+      "computer-science/advanced-operating-systems/filesystems/the-vfs-layer"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Overlay layer-stack figure: bottom three read-only lowerdirs, a writable upperdir, a merged-view
+     box on top, plus a copy-up before/after callout revealed as a step. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "overlay",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, text, ci, opacity, weight) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[ci], fillOpacity: opacity,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, text], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: `text-align:center; white-space:pre-line; ${weight ? "font-weight:700;" : ""} max-width:360px`,
+        });
+      };
+      const caption = (x, y, text, weight, size) =>
+        board.create("text", [x, y, text], {
+          strokeColor: colors.ink, fontSize: size || 11, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: (weight ? "font-weight:700;" : "") + "max-width:420px",
+        });
+
+      const X0 = 0.3, X1 = 8.7;
+
+      // Read-only image layers (base content, visible on load).
+      box(X0, 0.3, X1, 1.2, sceneStrings("l1"), 2, 0.18, false);
+      box(X0, 1.4, X1, 2.3, sceneStrings("l2"), 2, 0.22, false);
+      box(X0, 2.5, X1, 3.4, sceneStrings("l3"), 2, 0.26, false);
+      caption(X1 + 0.15, 1.85, sceneStrings("shared"), false, 10);
+
+      // Writable upperdir + merged view revealed as steps.
+      step(sceneStrings("upper"), () => box(X0, 3.6, X1, 4.5, sceneStrings("upper"), 1, 0.30, true));
+      step(sceneStrings("merged"), () => box(X0, 4.8, X1, 5.8, sceneStrings("merged"), 0, 0.28, true));
+
+      // Copy-up callout.
+      step(sceneStrings("cutitle"), () => {
+        caption((X0 + X1) / 2, 6.5, sceneStrings("cutitle"), true, 12);
+        caption((X0 + X1) / 2, 6.05, sceneStrings("before"), false, 10);
+        caption((X0 + X1) / 2, 6.28, sceneStrings("after"), false, 10);
+      });
+    },
+    {
+      boundingbox: [-0.4, 7.0, 12.4, -0.2],
+      keepAspect: false,
+      title: () => makeStrings("overlay")("title"),
+    },
+  );
+
+  registerQuiz("ovlQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("imgQ"), options: [
+      { text: () => sceneStrings("imgRight"), correct: true },
+      { text: () => sceneStrings("imgWrong1"), correct: false },
+      { text: () => sceneStrings("imgWrong2"), correct: false },
+      { text: () => sceneStrings("imgWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dirQ"), options: [
+      { text: () => sceneStrings("dirRight"), correct: true },
+      { text: () => sceneStrings("dirWrong1"), correct: false },
+      { text: () => sceneStrings("dirWrong2"), correct: false },
+      { text: () => sceneStrings("dirWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("lowerQ"), options: [
+      { text: () => sceneStrings("lowerRight"), correct: true },
+      { text: () => sceneStrings("lowerWrong1"), correct: false },
+      { text: () => sceneStrings("lowerWrong2"), correct: false },
+      { text: () => sceneStrings("lowerWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("lookupQ"), options: [
+      { text: () => sceneStrings("lookupRight"), correct: true },
+      { text: () => sceneStrings("lookupWrong1"), correct: false },
+      { text: () => sceneStrings("lookupWrong2"), correct: false },
+      { text: () => sceneStrings("lookupWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cuQ"), options: [
+      { text: () => sceneStrings("cuRight"), correct: true },
+      { text: () => sceneStrings("cuWrong1"), correct: false },
+      { text: () => sceneStrings("cuWrong2"), correct: false },
+      { text: () => sceneStrings("cuWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cuReadQ"), options: [
+      { text: () => sceneStrings("cuReadRight"), correct: true },
+      { text: () => sceneStrings("cuReadWrong1"), correct: false },
+      { text: () => sceneStrings("cuReadWrong2"), correct: false },
+      { text: () => sceneStrings("cuReadWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("woQ"), options: [
+      { text: () => sceneStrings("woRight"), correct: true },
+      { text: () => sceneStrings("woWrong1"), correct: false },
+      { text: () => sceneStrings("woWrong2"), correct: false },
+      { text: () => sceneStrings("woWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("caQ"), options: [
+      { text: () => sceneStrings("caRight"), correct: true },
+      { text: () => sceneStrings("caWrong1"), correct: false },
+      { text: () => sceneStrings("caWrong2"), correct: false },
+      { text: () => sceneStrings("caWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dedupQ"), options: [
+      { text: () => sceneStrings("dedupRight"), correct: true },
+      { text: () => sceneStrings("dedupWrong1"), correct: false },
+      { text: () => sceneStrings("dedupWrong2"), correct: false },
+      { text: () => sceneStrings("dedupWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cacheQ"), options: [
+      { text: () => sceneStrings("cacheRight"), correct: true },
+      { text: () => sceneStrings("cacheWrong1"), correct: false },
+      { text: () => sceneStrings("cacheWrong2"), correct: false },
+      { text: () => sceneStrings("cacheWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("ephQ"), options: [
+      { text: () => sceneStrings("ephRight"), correct: true },
+      { text: () => sceneStrings("ephWrong1"), correct: false },
+      { text: () => sceneStrings("ephWrong2"), correct: false },
+      { text: () => sceneStrings("ephWrong3"), correct: false },
+    ] },
+    {
+      // total = base + imgs*per.
+      prompt: (v) => sceneStrings("diskQ", v),
+      variables: "imgs=[3:20] base=[200,500,900] per=[2,5,10]",
+      answer: (v) => v.base + v.imgs * v.per,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // saved = imgs*base - (base + imgs*per) = (imgs-1)*base - imgs*per.
+      prompt: (v) => sceneStrings("saveQ", v),
+      variables: "imgs=[3:20] base=[200,500,900] per=[2,5,10]",
+      answer: (v) => v.imgs * v.base - (v.base + v.imgs * v.per),
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

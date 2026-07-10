@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>RPC and gRPC</primer-title>
+
+    <primer-card>
+      <p>
+        Here is a function call you have written a thousand times:
+      </p>
+      <primer-code lang="typescript">
+        const total = getAccountBalance("alice");
+      </primer-code>
+      <p>
+        The machine pushes an argument, jumps to the function, runs it, and hands back a value. Microseconds,
+        deterministic, boring. Now imagine that <code>getAccountBalance</code> does not live in your program at
+        all — it runs on a server three thousand kilometres away, guarding a database you cannot even see. What
+        if you could call it <em>with exactly the same line of code</em>, and have the argument fly across the
+        internet, the function run over there, and the answer come back — all hidden behind that innocent
+        <code>getAccountBalance("alice")</code>?
+      </p>
+      <p>
+        That dream is <strong>Remote Procedure Call</strong> (RPC): make a call to another machine
+        <em>look and feel like a local call</em>. It is one of the oldest and most seductive ideas in
+        distributed computing — and, as we will see, one of the most quietly dangerous, because the network it
+        hides never truly goes away. This page builds on the
+        <primer-ref soft to="computer-science/distributed-systems/remote-procedure-call">idea of a remote
+        procedure call</primer-ref> toward the machinery of a <strong>modern</strong> RPC system, and then
+        makes it concrete with <strong>gRPC</strong>, the framework running inside a large fraction of today's
+        data centres.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Stubs, skeletons, and marshalling</h2>
+      <p>
+        For a remote call to <em>look</em> local, something must stand in for the far-away function on each
+        side. Those stand-ins are generated code, and they have names worth memorising:
+      </p>
+      <ul>
+        <li>
+          The <strong>client stub</strong> is a fake local function with the same signature as the real one.
+          You call <code>getAccountBalance("alice")</code>; secretly the stub packs the method name and
+          arguments into a byte buffer, ships it over the network, waits, unpacks the reply, and returns it —
+          so <em>to you</em> it was just a function that returned a number.
+        </li>
+        <li>
+          The <strong>server skeleton</strong> (or <em>dispatcher</em>) does the mirror image: it receives the
+          buffer, unpacks the method name and arguments, calls the <em>real</em> function, packs the return
+          value back up, and sends it home.
+        </li>
+      </ul>
+      <p>
+        The packing and unpacking is <strong>marshalling</strong> (and <strong>unmarshalling</strong>): turning
+        in-memory values — integers, strings, structs, lists — into a flat sequence of bytes that can travel a
+        wire, and back again. It is the same problem as
+        <primer-ref soft to="computer-science/networks/programming/serialization-and-framing">serialization
+        and framing</primer-ref>, applied to whole call: <em>which method, with which arguments, returning
+        what</em>. Marshalling has to agree on byte order, how integers are encoded, how a string's length is
+        recorded, how a missing field is represented — because the two machines may run different CPUs,
+        languages, and operating systems.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "rpcPath": {
+            "title": "The path of one remote procedure call",
+            "clientCol": "CLIENT",
+            "serverCol": "SERVER",
+            "call": "Your code calls stub.getBalance(\"alice\")",
+            "marshal": "Stub MARSHALS: method + args → bytes",
+            "send": "Request bytes cross the network",
+            "unmarshal": "Skeleton UNMARSHALS the request",
+            "execute": "The REAL getBalance() runs here",
+            "marshalReply": "Skeleton marshals the return value",
+            "reply": "Reply bytes cross the network back",
+            "unmarshalReply": "Stub unmarshals → returns 250 to your code",
+            "wait": "your thread BLOCKS, waiting"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="rpcPath"
+        caption="Two vertical timelines. On the client, your code calls the stub, which marshals the method name and arguments into bytes; the request crosses the network to the server. The server skeleton unmarshals it, runs the real function, and marshals the return value; the reply crosses back and the stub unmarshals it into a normal return value. Throughout, the client thread is blocked waiting."
+      ></primer-geometry>
+
+      <p>
+        The beautiful part: <strong>you write none of this</strong>. Both stubs are generated automatically
+        from a single description of the interface — which is the next piece.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The IDL: one contract, many languages</h2>
+      <p>
+        How do the client stub and the server skeleton agree on <em>exactly</em> what a call looks like — the
+        method names, the argument types, the return types — when the client might be written in TypeScript and
+        the server in Go? They share a single, language-neutral description called an <strong>Interface
+        Definition Language</strong> (IDL). You write the interface once; a code generator emits the stub in
+        the client's language and the skeleton in the server's language, both guaranteed to marshal bytes the
+        same way.
+      </p>
+      <p>
+        The IDL is the <em>contract</em>. Here is a tiny one in gRPC's IDL, Protocol Buffers:
+      </p>
+      <primer-code lang="text">
+        // accounts.proto — the shared contract
+        syntax = "proto3";
+
+        message BalanceRequest  { string account_id = 1; }
+        message BalanceReply     { int64  cents      = 1; }
+
+        service Accounts {
+          rpc GetBalance(BalanceRequest) returns (BalanceReply);
+        }
+      </primer-code>
+      <p>
+        From this one file, <code>protoc</code> generates a <code>GetBalance</code> stub for the client and a
+        <code>GetBalance</code> handler interface for the server, in whatever languages you ask for. The odd
+        little numbers (<code>= 1</code>) are <strong>field tags</strong> — the field's identity on the wire.
+        The <em>name</em> <code>account_id</code> is for humans; the <em>tag</em> <code>1</code> is what
+        actually gets written into the bytes. That indirection is what lets Protocol Buffers evolve a schema
+        without breaking old clients, which we will return to in a moment.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Watch the marshalling happen</h2>
+      <p>
+        Let's strip a stub down to its essence and actually run it. Below, a toy stub marshals a call into a
+        request "object" (a simple tagged string standing in for the wire bytes), a toy skeleton unmarshals it,
+        runs the real function, and marshals a reply that the stub unmarshals back into a plain return value.
+        No real network — but every step a real RPC framework performs is here.
+      </p>
+
+      <primer-code run>
+        // ---- the REAL functions that live "on the server" ----
+        const impl: Record&lt;string, (args: string[]) =&gt; string&gt; = {
+          getBalance: (args) =&gt; (args[0] === "alice" ? "25000" : "0"),
+          add:        (args) =&gt; String(Number(args[0]) + Number(args[1])),
+        };
+
+        // ---- MARSHAL: pack a method name + args into a flat "wire" string ----
+        function marshal(method: string, args: string[]): string {
+          // frame = method | argCount | each arg length-prefixed  (see serialization/framing)
+          const parts = [method, String(args.length), ...args.map((a) =&gt; a.length + ":" + a)];
+          return parts.join("|");
+        }
+        function unmarshal(wire: string): { method: string; args: string[] } {
+          const [method, n, ...rest] = wire.split("|");
+          const args = rest.slice(0, Number(n)).map((p) =&gt; p.slice(p.indexOf(":") + 1));
+          return { method, args };
+        }
+
+        // ---- the SERVER SKELETON: unmarshal, dispatch to impl, marshal reply ----
+        function serverHandle(requestBytes: string): string {
+          const { method, args } = unmarshal(requestBytes);
+          const result = impl[method](args);
+          return "OK|" + result;               // marshal the reply
+        }
+
+        // ---- the CLIENT STUB: looks like a normal function, hides all of the above ----
+        function callRemote(method: string, ...args: string[]): string {
+          const requestBytes = marshal(method, args);
+          console.log(`  → on the wire: "${requestBytes}"`);
+          const replyBytes = serverHandle(requestBytes);   // "network round trip"
+          console.log(`  ← reply bytes: "${replyBytes}"`);
+          return replyBytes.split("|")[1];                 // unmarshal → plain value
+        }
+
+        // ---- your code just calls it like a local function ----
+        console.log("getBalance('alice'):");
+        console.log("returned:", callRemote("getBalance", "alice"));
+        console.log("\nadd(20, 22):");
+        console.log("returned:", callRemote("add", "20", "22"));
+      </primer-code>
+
+      <p>
+        Notice how <code>callRemote(...)</code> reads like an ordinary call and hands back an ordinary value.
+        That is the whole magic trick — and also, as the next section argues, the whole trap.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The leaky abstraction: a remote call is <em>not</em> a local call</h2>
+      <p>
+        Making a remote call look local is a wonderful convenience and a subtle lie. A local call and a remote
+        call differ in ways no amount of generated code can paper over:
+      </p>
+      <ul>
+        <li>
+          <strong>Latency.</strong> A local call is nanoseconds; a call across a data centre is hundreds of
+          microseconds; across an ocean, hundreds of <em>milli</em>seconds — a factor of a million. Code that
+          calls <code>getBalance</code> in a tight loop is fine locally and a catastrophe remotely.
+        </li>
+        <li>
+          <strong>Partial failure.</strong> A local call either runs or your whole process crashes. A remote
+          call has a terrifying third outcome: the request left, but <em>you never hear back</em>. Did the
+          server run it and the reply got lost? Did the request never arrive? You genuinely cannot tell from
+          the caller's side — and that ambiguity is the source of most distributed-systems pain.
+        </li>
+        <li>
+          <strong>No shared memory.</strong> Locally you can pass a pointer to a huge object for free. Remotely
+          there are no shared pointers — everything must be <em>copied</em> (marshalled) across, so a
+          "reference" argument silently becomes a deep copy, and mutating it does not affect the caller's copy.
+        </li>
+        <li>
+          <strong>Concurrency and ordering.</strong> Other clients are calling the same server at the same
+          time; messages can arrive out of order; the network can duplicate them. None of this exists for a
+          local call.
+        </li>
+      </ul>
+      <p>
+        These are not implementation bugs to be fixed; they are the <em>nature</em> of a network. The classic
+        catalogue of the assumptions that RPC tempts you to forget is the <strong>eight fallacies of
+        distributed computing</strong> (L. Peter Deutsch and colleagues at Sun): the network is reliable;
+        latency is zero; bandwidth is infinite; the network is secure; topology doesn't change; there is one
+        administrator; transport cost is zero; the network is homogeneous. Every one is false, and every RPC
+        that pretends otherwise eventually pays for it.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>gRPC, concretely</h2>
+      <p>
+        <strong>gRPC</strong> (open-sourced by Google in 2015) is a modern RPC framework that makes three
+        specific, opinionated choices for the three pieces we have met — the IDL, the wire format, and the
+        transport:
+      </p>
+      <ul>
+        <li>
+          <strong>IDL and wire format: Protocol Buffers.</strong> The same <code>.proto</code> file is both the
+          interface contract <em>and</em> the marshalling scheme. Protobuf is a compact <em>binary</em> format —
+          it writes field tags and values, not field names, so a message is far smaller than the equivalent
+          JSON, and parsing is fast. Because fields are identified by tag number, you can add new fields
+          without breaking old readers (they skip tags they don't recognise) — schema evolution built in.
+        </li>
+        <li>
+          <strong>Transport: HTTP/2.</strong> gRPC runs over
+          <primer-ref soft to="computer-science/networks/application/http">HTTP/2</primer-ref>, which
+          <em>multiplexes</em> many concurrent calls over one TCP connection (no head-of-line blocking between
+          calls), supports binary framing and header compression, and — crucially — allows
+          <strong>streaming</strong> in both directions on a single call.
+        </li>
+        <li>
+          <strong>Four kinds of call.</strong> Because HTTP/2 streams flow both ways, gRPC is not limited to
+          "one request, one reply." It offers four call shapes.
+        </li>
+      </ul>
+
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Call type</th><th>Client sends</th><th>Server sends</th><th>Good for</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Unary</strong></td><td>one message</td><td>one message</td><td>ordinary request/reply (getBalance)</td></tr>
+            <tr><td><strong>Server-streaming</strong></td><td>one message</td><td>a stream of messages</td><td>subscribe to updates, download a large result set</td></tr>
+            <tr><td><strong>Client-streaming</strong></td><td>a stream of messages</td><td>one message</td><td>upload a file in chunks, batch of metrics</td></tr>
+            <tr><td><strong>Bidirectional</strong></td><td>a stream</td><td>a stream</td><td>chat, live telemetry, a two-way conversation</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+
+      <primer-vignette title="Why binary Protocol Buffers instead of human-readable JSON?">
+        <p>
+          JSON is lovely to read and debug, and REST-over-JSON dominates public web APIs for exactly that
+          reason. But inside a data centre, where two services exchange millions of messages a second, JSON's
+          costs bite: it ships the field <em>names</em> as text on every message, numbers are decimal strings
+          that must be parsed, and there is no schema to catch a typo'd field. Protobuf ships only tiny numeric
+          tags and packed binary values, is typically several times smaller, and parses much faster — and the
+          <code>.proto</code> schema is checked at compile time. The tradeoff is that a Protobuf message is
+          opaque bytes you cannot read with your eyes; you need the schema to decode it. Inside the machine
+          room, that trade is usually worth it.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Delivery semantics: how many times did it run?</h2>
+      <p>
+        Return to partial failure. Your stub sent a request and the reply never came. The safe thing to do is
+        <em>retry</em> — but retrying is exactly where "how many times did the call actually execute?" becomes a
+        design decision with three possible answers:
+      </p>
+
+      <primer-theorem name="Delivery semantics">
+        <ul>
+          <li>
+            <strong>At-most-once</strong> — the call runs zero or one times, never more. On a lost reply the
+            client gives up (does not retry). No duplicate execution, but a call can be silently lost.
+          </li>
+          <li>
+            <strong>At-least-once</strong> — the client retries until it gets a reply, so the call runs one or
+            more times. Nothing is lost, but the server may execute the same request twice (the first reply was
+            merely lost, not the request).
+          </li>
+          <li>
+            <strong>Exactly-once</strong> — the ideal: the effect happens precisely one time. It is not
+            achievable by transport alone; it is <em>manufactured</em> by combining at-least-once delivery with
+            <strong>idempotent</strong> operations (or deduplication of request IDs).
+          </li>
+        </ul>
+      </primer-theorem>
+
+      <p>
+        An operation is <strong>idempotent</strong> if doing it twice has the same effect as doing it once.
+        "Set the balance to $250" is idempotent — run it five times, the balance is $250. "Add $250 to the
+        balance" is <em>not</em> — run it five times and you have handed the customer $1000 they don't have.
+        This is why real RPC systems attach a unique <strong>request ID</strong> to each call: the server
+        remembers which IDs it has already processed, and a retried request with a seen ID returns the stored
+        reply instead of running the operation again. That turns a naturally at-least-once transport into an
+        effectively exactly-once <em>effect</em> — the only honest way to get "exactly once."
+      </p>
+
+      <primer-vignette title="Watch out! — RPC hides the network, but you must never forget it">
+        <p>
+          The single most expensive mistake with RPC is believing the abstraction. A remote call is dressed up
+          to look like <code>getBalance("alice")</code>, so it is desperately tempting to treat it like one:
+          call it in a loop, ignore that it can hang, assume it either fully succeeds or fully fails. It does
+          not. Keep the <strong>eight fallacies</strong> pinned to the wall — the network is <em>not</em>
+          reliable, latency is <em>not</em> zero, bandwidth is <em>not</em> infinite, the network is
+          <em>not</em> secure. Every remote call needs a <strong>timeout</strong> (so a dead server can't hang
+          you forever) and usually a <strong>retry</strong> — and the instant you add retries you have chosen
+          <em>at-least-once</em> delivery, which means duplicates <em>will</em> happen. So any operation you
+          retry <strong>must be idempotent</strong> (or deduplicated by request ID). "Retry" and "idempotent"
+          are two halves of one thought; add one without the other and you get either lost calls or
+          double-charged customers. RPC is a convenience, not a licence to forget you are on a network.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "rpcQuiz@1": { "instructions": "Check your understanding of RPC machinery (stubs, marshalling, the IDL), the leaky-abstraction problem, gRPC's choices, and delivery semantics." } }
+    </script>
+    <primer-quiz name="rpcQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/distributed-systems/remote-procedure-call",
+      "computer-science/networks/programming/serialization-and-framing"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // Two side-by-side vertical timelines showing one RPC round trip: the client
+  // stub marshals + sends, the server skeleton unmarshals + runs + marshals the
+  // reply, which the stub unmarshals back into a plain return value.
+  registerGeometryScene("rpcPath", ({ board, step, colors, sceneStrings }) => {
+    const CX = -3.2, SX = 3.2;
+
+    const box = (x, y, s, col) =>
+      board.create("text", [x, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true,
+        highlight: false, strokeColor: col, color: col,
+        cssStyle: "font-weight:600; text-align:center; width:170px; display:inline-block",
+      });
+
+    box(CX, 4.7, sceneStrings("clientCol"), colors.cat[0]);
+    box(SX, 4.7, sceneStrings("serverCol"), colors.cat[1]);
+    board.create("segment", [[CX, 4.2], [CX, -4.2]], { strokeColor: colors.line, strokeOpacity: 0.3, fixed: true, highlight: false });
+    board.create("segment", [[SX, 4.2], [SX, -4.2]], { strokeColor: colors.line, strokeOpacity: 0.3, fixed: true, highlight: false });
+
+    step(sceneStrings("call"),    () => box(CX, 3.4, sceneStrings("call"), colors.ink));
+    step(sceneStrings("marshal"), () => box(CX, 2.3, sceneStrings("marshal"), colors.ink));
+    step(sceneStrings("send"), () => {
+      board.create("arrow", [[CX + 0.9, 1.4], [SX - 0.9, 1.4]], { strokeColor: colors.cat[2], strokeWidth: 2, fixed: true, highlight: false });
+      box(0, 1.75, sceneStrings("send"), colors.cat[2]);
+    });
+    step(sceneStrings("unmarshal"),  () => box(SX, 0.6, sceneStrings("unmarshal"), colors.ink));
+    step(sceneStrings("execute"),    () => box(SX, -0.5, sceneStrings("execute"), colors.cat[1]));
+    step(sceneStrings("marshalReply"), () => box(SX, -1.6, sceneStrings("marshalReply"), colors.ink));
+    step(sceneStrings("reply"), () => {
+      board.create("arrow", [[SX - 0.9, -2.5], [CX + 0.9, -2.5]], { strokeColor: colors.cat[2], strokeWidth: 2, fixed: true, highlight: false });
+      box(0, -2.15, sceneStrings("reply"), colors.cat[2]);
+    });
+    step(sceneStrings("unmarshalReply"), () => box(CX, -3.5, sceneStrings("unmarshalReply"), colors.cat[0]));
+    step(sceneStrings("wait"), () => box(CX, -0.5, sceneStrings("wait"), colors.line));
+  }, {
+    boundingbox: [-6, 5.2, 6, -4.8],
+    keepAspect: false,
+    title: () => makeStrings("rpcPath")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("rpcQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "What is the job of the client STUB in an RPC system?",
+      options: [
+        { text: "Present a local-looking function that secretly marshals the call, sends it, and unmarshals the reply", correct: true },
+        { text: "Store the server's data on the client for offline use", correct: false },
+        { text: "Encrypt the network link between client and server", correct: false },
+        { text: "Balance requests across several servers", correct: false },
+      ] },
+
+    { prompt: "'Marshalling' means…",
+      options: [
+        { text: "turning in-memory values into a flat sequence of bytes for the wire (and back, unmarshalling)", correct: true },
+        { text: "choosing which server should handle a request", correct: false },
+        { text: "retrying a call that timed out", correct: false },
+        { text: "compressing a video stream", correct: false },
+      ] },
+
+    { prompt: "What is an IDL (Interface Definition Language) used for?",
+      options: [
+        { text: "A single language-neutral contract from which client stubs and server skeletons are generated", correct: true },
+        { text: "A query language for the server's database", correct: false },
+        { text: "A markup language for rendering the response in a browser", correct: false },
+        { text: "A protocol for electing a leader among servers", correct: false },
+      ] },
+
+    { prompt: "Why is 'a remote call looks just like a local call' a LEAKY abstraction?",
+      options: [
+        { text: "Remote calls add latency, partial failure, copying instead of shared memory, and concurrency the local call never had", correct: true },
+        { text: "Because remote calls are always faster than local calls", correct: false },
+        { text: "Because the compiler cannot generate stubs for remote functions", correct: false },
+        { text: "Because local calls can also fail in the same ways", correct: false },
+      ] },
+
+    { prompt: "'Partial failure' in RPC refers to…",
+      options: [
+        { text: "the request may have run on the server, but the reply was lost — so the caller cannot tell what happened", correct: true },
+        { text: "only part of the marshalled bytes being encrypted", correct: false },
+        { text: "the server running out of disk space", correct: false },
+        { text: "a function returning only some of its results", correct: false },
+      ] },
+
+    { prompt: "The 'eight fallacies of distributed computing' are…",
+      options: [
+        { text: "false assumptions RPC tempts you to make (network reliable, latency zero, bandwidth infinite, network secure, …)", correct: true },
+        { text: "eight required steps to marshal a message", correct: false },
+        { text: "the eight layers of the OSI model", correct: false },
+        { text: "eight consensus algorithms you must choose between", correct: false },
+      ] },
+
+    { prompt: "In gRPC, what plays the role of BOTH the IDL and the wire format?",
+      options: [
+        { text: "Protocol Buffers (the .proto schema + its compact binary encoding)", correct: true },
+        { text: "JSON over REST", correct: false },
+        { text: "XML with an XSD schema", correct: false },
+        { text: "The HTTP/2 header table", correct: false },
+      ] },
+
+    { prompt: "Which transport does gRPC run over, and why does it matter?",
+      options: [
+        { text: "HTTP/2 — it multiplexes many calls on one connection and allows streaming in both directions", correct: true },
+        { text: "Plain UDP — for the lowest possible latency with no handshakes", correct: false },
+        { text: "HTTP/1.0 — because it is the most widely supported", correct: false },
+        { text: "Raw Ethernet frames — to avoid the IP layer entirely", correct: false },
+      ] },
+
+    { prompt: "Which is NOT one of gRPC's four call types?",
+      options: [
+        { text: "Broadcast (one client message delivered to every other client)", correct: true },
+        { text: "Unary (one request, one reply)", correct: false },
+        { text: "Server-streaming (one request, a stream of replies)", correct: false },
+        { text: "Bidirectional streaming (a stream each way)", correct: false },
+      ] },
+
+    { prompt: "Uploading a large file in chunks to a server that replies once at the end is best served by which gRPC call type?",
+      options: [
+        { text: "Client-streaming", correct: true },
+        { text: "Server-streaming", correct: false },
+        { text: "Unary", correct: false },
+        { text: "Broadcast", correct: false },
+      ] },
+
+    { prompt: "'At-least-once' delivery semantics means…",
+      options: [
+        { text: "the client retries until it gets a reply, so the call may execute more than once", correct: true },
+        { text: "the call executes zero or one time and is never retried", correct: false },
+        { text: "the call is guaranteed to execute exactly one time by the transport alone", correct: false },
+        { text: "the reply is delivered to at least one client", correct: false },
+      ] },
+
+    { prompt: "Why can't 'exactly-once' be guaranteed by the network transport by itself?",
+      options: [
+        { text: "It is manufactured by combining at-least-once retries with idempotent operations or request-ID deduplication", correct: true },
+        { text: "Because TCP already guarantees exactly-once, so nothing else is needed", correct: false },
+        { text: "Because exactly-once requires UDP instead of TCP", correct: false },
+        { text: "It can — any reliable transport gives exactly-once for free", correct: false },
+      ] },
+
+    { prompt: "An operation is 'idempotent' if…",
+      options: [
+        { text: "performing it twice has the same effect as performing it once", correct: true },
+        { text: "it can only be performed by one client at a time", correct: false },
+        { text: "it never returns a value", correct: false },
+        { text: "it always runs in constant time", correct: false },
+      ] },
+
+    { prompt: "Which of these operations is NOT idempotent (so retrying it is dangerous)?",
+      options: [
+        { text: "\"Add $250 to the balance\"", correct: true },
+        { text: "\"Set the balance to $250\"", correct: false },
+        { text: "\"Read the current balance\"", correct: false },
+        { text: "\"Mark order #42 as shipped\"", correct: false },
+      ] },
+
+    { prompt: "How do real RPC systems turn a naturally at-least-once transport into an exactly-once EFFECT?",
+      options: [
+        { text: "Attach a unique request ID; the server stores replies and returns the stored one if it sees a duplicate ID", correct: true },
+        { text: "Disable all retries so a call can never run twice", correct: false },
+        { text: "Send every request over a separate TCP connection", correct: false },
+        { text: "Increase the timeout so replies never get lost", correct: false },
+      ] },
+
+    { prompt: "Why should every remote call have a timeout?",
+      options: [
+        { text: "So a slow or dead server cannot hang the caller forever (partial failure is invisible otherwise)", correct: true },
+        { text: "Because timeouts make marshalling faster", correct: false },
+        { text: "Because HTTP/2 forbids calls without one", correct: false },
+        { text: "So the reply is guaranteed to be idempotent", correct: false },
+      ] },
+  ]);
+</script>

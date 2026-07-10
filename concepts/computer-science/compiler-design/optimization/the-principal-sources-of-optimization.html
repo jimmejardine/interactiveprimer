@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The Principal Sources of Optimization</primer-title>
+
+    <primer-card>
+      <p>
+        A correct compiler that emits naïve code is only half a compiler. The front end has faithfully
+        translated the source into
+        <primer-ref to="computer-science/compiler-design/codegen/basic-blocks-and-flow-graphs">basic blocks and a flow graph</primer-ref>,
+        but that intermediate code is full of avoidable work: the same address computed three times in a row,
+        a variable copied only to be read once, an expression whose value never changes recomputed on every
+        trip round a loop. The <strong>optimizer</strong> is the middle end whose job is to <em>make the
+        program do less</em> while computing exactly the same answer. This page is the catalogue — the
+        "principal sources of optimization" from Chapter 9 of the Dragon Book — a menu of
+        <strong>machine-independent transformations</strong> that pay off on essentially every target.
+      </p>
+      <p>
+        "Machine-independent" is the key phrase. These transformations reason about the program's meaning, not
+        about how many registers your chip has or how deep its pipeline is. That comes later, in the back end.
+        Here we ask only: <em>is this computation redundant, dead, or movable?</em> — and answer in a way that
+        would help an ARM, an x86 and a RISC-V equally.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The two questions every optimization must pass</h2>
+      <p>
+        Before we list the transformations, internalise the framing that governs all of them. An optimization
+        is a rewrite of the program, and every rewrite must clear two hurdles, <strong>in order</strong>:
+      </p>
+      <primer-theorem name="Safety before profitability">
+        <ul>
+          <li>
+            <strong>Safety (semantics preservation).</strong> The rewritten program must compute the same
+            observable result as the original on <em>every</em> input and every control-flow path. This is a
+            hard constraint — a "faster" program that is sometimes wrong is not an optimization, it is a bug.
+          </li>
+          <li>
+            <strong>Profitability.</strong> Given that it is safe, the rewrite should actually make the program
+            better — fewer instructions, fewer cycles, less memory traffic. Profitability is a heuristic,
+            often target-dependent, and occasionally a transformation is safe but not worth doing.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Safety is where the <primer-ref forward to="computer-science/compiler-design/optimization/the-dataflow-analysis-framework">dataflow analyses</primer-ref>
+        earn their keep: they are the proofs that a rewrite is legal. Profitability is where cost models and
+        heuristics live. Keep the two separate in your mind — conflating them is the classic student mistake,
+        and the subject of this page's "Watch out!" below.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The catalogue</h2>
+      <p>
+        Here are the workhorse transformations. Each is defined by a local pattern it matches and a rewrite it
+        applies; several depend on a supporting analysis to prove safety.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Transformation</th><th>What it does</th><th>Before → after</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Common-subexpression elimination (CSE)</strong></td>
+              <td>Reuse a value already computed instead of recomputing it.</td>
+              <td><code>t1=b+c; … t2=b+c</code> → <code>t1=b+c; … t2=t1</code></td>
+            </tr>
+            <tr>
+              <td><strong>Copy propagation</strong></td>
+              <td>After <code>x=y</code>, replace later uses of <code>x</code> with <code>y</code>.</td>
+              <td><code>x=y; z=x+1</code> → <code>x=y; z=y+1</code></td>
+            </tr>
+            <tr>
+              <td><strong>Constant folding</strong></td>
+              <td>Evaluate a constant expression at compile time.</td>
+              <td><code>t=3*4</code> → <code>t=12</code></td>
+            </tr>
+            <tr>
+              <td><strong>Constant propagation</strong></td>
+              <td>Substitute a variable known to hold a constant.</td>
+              <td><code>x=5; y=x+2</code> → <code>x=5; y=7</code></td>
+            </tr>
+            <tr>
+              <td><strong>Dead-code elimination (DCE)</strong></td>
+              <td>Delete a computation whose result is never used.</td>
+              <td><code>x=y+z; // x unused</code> → <em>(removed)</em></td>
+            </tr>
+            <tr>
+              <td><strong>Code motion (loop-invariant)</strong></td>
+              <td>Hoist a computation that does not change inside a loop to just before it.</td>
+              <td><code>while(…){ t=a*b; … }</code> → <code>t=a*b; while(…){ … }</code></td>
+            </tr>
+            <tr>
+              <td><strong>Strength reduction</strong></td>
+              <td>Replace an expensive operation with a cheaper equivalent.</td>
+              <td><code>i*4</code> in a loop → running add <code>t=t+4</code></td>
+            </tr>
+            <tr>
+              <td><strong>Induction-variable elimination</strong></td>
+              <td>Remove a loop variable derived from another by keeping only one counter.</td>
+              <td>drop <code>j=i*4</code>, iterate the address directly</td>
+            </tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        These do not act in isolation — they <em>feed</em> one another. Constant propagation exposes constant
+        folding; folding and copy propagation expose more dead code; removing dead code frees a register that
+        lets another value live. This is why real optimizers run passes to a <strong>fixed point</strong>,
+        cycling until nothing more changes.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Three scopes: local, global, and loop</h2>
+      <p>
+        The same transformation costs different amounts of analysis depending on how far you look:
+      </p>
+      <ul>
+        <li>
+          <strong>Local</strong> — within a single basic block. No control flow to worry about; a straight
+          line of instructions. CSE, copy propagation and DCE inside one block need nothing more than a walk
+          over the block, and are elegantly captured by the
+          <primer-ref forward to="computer-science/compiler-design/optimization/local-optimization-and-the-dag">DAG of a basic block</primer-ref>.
+        </li>
+        <li>
+          <strong>Global</strong> — across the whole flow graph of a procedure. Now a value defined in one
+          block may or may not reach a use in another, depending on the paths between them. Proving safety
+          requires <em>dataflow analysis</em> — reaching definitions, available expressions, live variables.
+        </li>
+        <li>
+          <strong>Loop</strong> — the special, high-value case of global optimization that focuses on cycles
+          in the flow graph. Loop-invariant code motion, strength reduction and induction-variable elimination
+          all live here.
+        </li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why loops get all the attention: the 90/10 rule</h2>
+      <p>
+        Optimizers pour a disproportionate effort into loops, and the justification is empirical and blunt: a
+        program typically spends about <strong>90% of its running time in about 10% of its code</strong>, and
+        that hot 10% is almost always inside loops. A statement in the body of a doubly-nested loop that runs
+        <primer-math>n</primer-math> times each may execute <primer-math>n^2</primer-math> times per call;
+        shaving one operation off it is worth far more than removing a hundred operations from straight-line
+        setup code that runs once.
+      </p>
+      <primer-math display>\text{payoff} \;\approx\; (\text{ops saved per execution}) \times (\text{execution frequency}).</primer-math>
+      <p>
+        The frequency factor is enormous inside loops and tiny outside them, so the arithmetic settles the
+        priorities. Hoisting one loop-invariant multiply out of a loop that runs a million times removes a
+        million multiplies; folding a constant in start-up code removes one. Both are safe; only the first is
+        seriously profitable. This is the profitability half of our framing made concrete.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: cleaning up a basic block</h2>
+      <p>
+        Take a short block and apply the local transformations by hand, then let the code do the same. Start
+        with this three-address code:
+      </p>
+      <primer-code lang="text">
+        a = 3
+        b = 4
+        t1 = a * b      // both operands constant
+        c = t1
+        t2 = c + a      // c is a copy of t1
+        d = t2
+      </primer-code>
+      <p>
+        <strong>Constant propagation + folding:</strong> <code>a=3, b=4</code> so <code>t1 = 3*4 = 12</code>.
+        <strong>Copy propagation:</strong> <code>c</code> is just <code>t1</code>, so <code>t2 = t1 + a =
+        12 + 3 = 15</code>, and <code>d = 15</code>. If <code>a, b, c, t1, t2</code> turn out to be unused
+        afterwards, <strong>dead-code elimination</strong> deletes them, leaving only what the block's live
+        outputs need. The runnable version below performs constant folding and copy propagation on exactly
+        this style of block:
+      </p>
+      <primer-code run>
+        // A tiny three-address instruction: dst = a op b, or a plain copy dst = a.
+        type Instr = { dst: string; a: string; op?: "+" | "*"; b?: string };
+
+        function isConst(s: string): boolean { return /^-?\d+$/.test(s); }
+
+        // Apply constant folding + constant/copy propagation over a straight-line block.
+        function optimize(block: Instr[]): Instr[] {
+          const known = new Map&lt;string, string&gt;();  // var -> constant literal OR the var it copies
+          const out: Instr[] = [];
+
+          const resolve = (s: string): string =&gt; {
+            // Follow copy/constant chains until we hit a literal or an unknown var.
+            let seen = new Set&lt;string&gt;();
+            while (known.has(s) &amp;&amp; !seen.has(s)) { seen.add(s); s = known.get(s)!; }
+            return s;
+          };
+
+          for (const ins of block) {
+            const a = resolve(ins.a);
+            if (ins.op === undefined) {
+              // copy: dst = a
+              known.set(ins.dst, a);
+              out.push({ dst: ins.dst, a });
+              continue;
+            }
+            const b = resolve(ins.b!);
+            if (isConst(a) &amp;&amp; isConst(b)) {
+              // constant folding
+              const v = ins.op === "+" ? +a + +b : +a * +b;
+              known.set(ins.dst, String(v));
+              out.push({ dst: ins.dst, a: String(v) });
+            } else {
+              known.delete(ins.dst);
+              out.push({ dst: ins.dst, a, op: ins.op, b });
+            }
+          }
+          return out;
+        }
+
+        const block: Instr[] = [
+          { dst: "a", a: "3" },
+          { dst: "b", a: "4" },
+          { dst: "t1", a: "a", op: "*", b: "b" },
+          { dst: "c", a: "t1" },
+          { dst: "t2", a: "c", op: "+", b: "a" },
+          { dst: "d", a: "t2" },
+        ];
+
+        for (const ins of optimize(block)) {
+          const rhs = ins.op ? `${ins.a} ${ins.op} ${ins.b}` : ins.a;
+          console.log(`${ins.dst} = ${rhs}`);
+        }
+      </primer-code>
+      <p>
+        Every right-hand side collapses to a literal: the optimizer has folded and propagated its way to
+        <code>d = 15</code> without ever running the program. A following dead-code pass would then sweep away
+        any of these assignments whose targets are not live on exit.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Is aggressive optimization always what you want?">
+      <p>
+        Not blindly. Optimizations that are perfectly safe under the language's abstract semantics can still
+        surprise you. Floating-point arithmetic is not associative, so reordering <code>(a+b)+c</code> to
+        <code>a+(b+c)</code> — tempting for a scheduler — can change the last bit of a result; compilers keep
+        this behind a <code>-ffast-math</code>-style flag for exactly this reason. Aggressive elimination of a
+        "dead" store to a security-sensitive buffer can leave a password in memory. And heavy inlining trades
+        speed for code size, which can <em>hurt</em> if it blows the instruction cache. The catalogue tells you
+        what is legal; judgement and cost models tell you what is wise.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Safe first, profitable second — never the other way round">
+      <p>
+        The single most dangerous habit is to spot a "faster" rewrite and apply it because it looks like a win,
+        without first proving it preserves meaning. Consider hoisting <code>t = a[i]</code> out of a loop
+        because it looks invariant — but if the loop writes to <code>a</code> or to a pointer that might alias
+        <code>a</code>, the load is <em>not</em> invariant and hoisting it changes the answer. Profitability
+        can never buy back a lost correctness: an optimization that is 10× faster and occasionally wrong has
+        negative value. Always run the analysis that establishes safety <em>before</em> you reach for the
+        cost model. Every transformation in the catalogue has a matching safety condition; know it before you
+        apply the rewrite.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "sourcesQuiz@1": {
+          "intro": "The principal machine-independent optimizations, and the safety-before-profitability rule that governs them all. Numbers change each attempt.",
+          "orderQ": "In what order must an optimization satisfy its two obligations?",
+          "oSafe": "safety (semantics preservation) first, then profitability",
+          "oProf": "profitability first, then safety",
+          "oEither": "either order — they are independent and equally optional",
+          "oNeither": "neither is required as long as the code is smaller",
+          "cseQ": "Common-subexpression elimination replaces a recomputation of an expression with…",
+          "cseReuse": "a reference to the previously computed value",
+          "cseConst": "the constant zero",
+          "cseCall": "a function call",
+          "cseNop": "a no-op instruction",
+          "foldQ": "Constant folding does what?",
+          "foldEval": "evaluates a compile-time-constant expression during compilation",
+          "foldRun": "delays all arithmetic until run time",
+          "foldCopy": "copies one variable into another",
+          "foldDce": "deletes unreachable blocks",
+          "dceQ": "Dead-code elimination removes a computation when…",
+          "dceUnused": "its result is never used on any subsequent path",
+          "dceConst": "its operands are constants",
+          "dceLoop": "it appears inside a loop",
+          "dceSlow": "it is the slowest instruction in the block",
+          "copyQ": "After the copy x = y, copy propagation lets us…",
+          "cpReplace": "replace later uses of x with y (while the copy still holds)",
+          "cpDelete": "delete y immediately",
+          "cpSwap": "swap the values of x and y",
+          "cpConst": "assume x is a constant",
+          "loopQ": "Why do optimizers focus so heavily on loops?",
+          "lp9010": "roughly 90% of run time is spent in about 10% of the code, mostly loops",
+          "lpEasy": "loops are the easiest code to analyse",
+          "lpShort": "loop bodies are always short",
+          "lpRare": "loops are rare, so each one is special",
+          "motionQ": "Loop-invariant code motion moves a computation…",
+          "mtPre": "out of the loop to a point that executes once, before the loop",
+          "mtIn": "deeper into the loop body",
+          "mtAfter": "to after the program ends",
+          "mtDup": "into every iteration twice",
+          "strengthQ": "Strength reduction replaces an operation with…",
+          "srCheap": "a cheaper equivalent operation (e.g. a multiply by a running add)",
+          "srMore": "a more precise but slower operation",
+          "srCall": "a library function call",
+          "srNothing": "nothing — it only reorders code",
+          "scopeQ": "An optimization confined to a single basic block is called…",
+          "scLocal": "a local optimization",
+          "scGlobal": "a global optimization",
+          "scInter": "an interprocedural optimization",
+          "scLoop": "a loop optimization",
+          "globalQ": "Global (whole-procedure) optimization generally requires…",
+          "glData": "dataflow analysis to prove a rewrite is safe across paths",
+          "glNone": "no analysis at all",
+          "glRun": "actually running the program first",
+          "glUser": "user annotations on every line",
+          "machQ": "Why are these transformations called 'machine-independent'?",
+          "miMeaning": "they reason about program meaning, not the specific target hardware",
+          "miArm": "they only work on ARM chips",
+          "miAsm": "they operate on hand-written assembly",
+          "miGpu": "they require a GPU",
+          "payoffQ": "A loop-invariant statement is hoisted out of a loop that runs {n} times, saving 1 operation per iteration. How many operations does the hoist remove in total? (the statement now runs once instead of {n} times)",
+          "foldNumQ": "Constant folding evaluates the expression {x} * {y} + {z} at compile time. What literal does it become?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="sourcesQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/codegen/basic-blocks-and-flow-graphs"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("sourcesQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("orderQ"),
+      options: [
+        { text: () => sceneStrings("oSafe"), correct: true },
+        { text: () => sceneStrings("oProf"), correct: false },
+        { text: () => sceneStrings("oEither"), correct: false },
+        { text: () => sceneStrings("oNeither"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cseQ"),
+      options: [
+        { text: () => sceneStrings("cseReuse"), correct: true },
+        { text: () => sceneStrings("cseConst"), correct: false },
+        { text: () => sceneStrings("cseCall"), correct: false },
+        { text: () => sceneStrings("cseNop"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("foldQ"),
+      options: [
+        { text: () => sceneStrings("foldEval"), correct: true },
+        { text: () => sceneStrings("foldRun"), correct: false },
+        { text: () => sceneStrings("foldCopy"), correct: false },
+        { text: () => sceneStrings("foldDce"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dceQ"),
+      options: [
+        { text: () => sceneStrings("dceUnused"), correct: true },
+        { text: () => sceneStrings("dceConst"), correct: false },
+        { text: () => sceneStrings("dceLoop"), correct: false },
+        { text: () => sceneStrings("dceSlow"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("copyQ"),
+      options: [
+        { text: () => sceneStrings("cpReplace"), correct: true },
+        { text: () => sceneStrings("cpDelete"), correct: false },
+        { text: () => sceneStrings("cpSwap"), correct: false },
+        { text: () => sceneStrings("cpConst"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("loopQ"),
+      options: [
+        { text: () => sceneStrings("lp9010"), correct: true },
+        { text: () => sceneStrings("lpEasy"), correct: false },
+        { text: () => sceneStrings("lpShort"), correct: false },
+        { text: () => sceneStrings("lpRare"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("motionQ"),
+      options: [
+        { text: () => sceneStrings("mtPre"), correct: true },
+        { text: () => sceneStrings("mtIn"), correct: false },
+        { text: () => sceneStrings("mtAfter"), correct: false },
+        { text: () => sceneStrings("mtDup"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("strengthQ"),
+      options: [
+        { text: () => sceneStrings("srCheap"), correct: true },
+        { text: () => sceneStrings("srMore"), correct: false },
+        { text: () => sceneStrings("srCall"), correct: false },
+        { text: () => sceneStrings("srNothing"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("scopeQ"),
+      options: [
+        { text: () => sceneStrings("scLocal"), correct: true },
+        { text: () => sceneStrings("scGlobal"), correct: false },
+        { text: () => sceneStrings("scInter"), correct: false },
+        { text: () => sceneStrings("scLoop"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("globalQ"),
+      options: [
+        { text: () => sceneStrings("glData"), correct: true },
+        { text: () => sceneStrings("glNone"), correct: false },
+        { text: () => sceneStrings("glRun"), correct: false },
+        { text: () => sceneStrings("glUser"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("machQ"),
+      options: [
+        { text: () => sceneStrings("miMeaning"), correct: true },
+        { text: () => sceneStrings("miArm"), correct: false },
+        { text: () => sceneStrings("miAsm"), correct: false },
+        { text: () => sceneStrings("miGpu"), correct: false },
+      ],
+    },
+    {
+      // Hoisting a per-iteration op out of an n-iteration loop removes n-1 executions.
+      prompt: (v) => sceneStrings("payoffQ", v),
+      variables: "n=[3:20]",
+      answer: (v) => v.n - 1,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Constant folding: x*y + z.
+      prompt: (v) => sceneStrings("foldNumQ", v),
+      variables: "x=[2:9] y=[2:9] z=[0:9]",
+      answer: (v) => v.x * v.y + v.z,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

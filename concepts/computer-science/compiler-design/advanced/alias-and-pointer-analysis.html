@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Alias and Pointer Analysis</primer-title>
+
+    <primer-card>
+      <p>
+        Two names <strong>alias</strong> when they can refer to the same memory location. The instant a language
+        admits pointers, references, or arrays, aliasing appears — and with it, the single greatest obstacle to
+        optimisation. Consider this fragment:
+      </p>
+      <primer-code lang="typescript">
+        *p = 1;      // store through p
+        *q = 2;      // store through q
+        use(*p);     // can we reuse the value 1 we just wrote?
+      </primer-code>
+      <p>
+        Can the compiler forward the constant <code>1</code> into <code>use(*p)</code>? <em>Only if it can prove
+        that <code>p</code> and <code>q</code> do not alias.</em> If <code>q</code> might point at the same cell
+        as <code>p</code>, then <code>*q = 2</code> may have overwritten it, and the value is <code>2</code>, not
+        <code>1</code>. Almost every memory optimisation — redundant-load elimination, store forwarding,
+        register promotion, code motion of loads out of loops, reordering for parallelism — rests on the same
+        question: <em>do these two accesses touch disjoint memory?</em> To move code safely you usually need to
+        prove <strong>must-not-alias</strong>, and that is precisely what pointer analysis exists to establish.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>May-alias vs must-alias</h2>
+      <p>
+        Because the exact answer is generally unknowable, alias analysis gives one of two <em>approximate</em>
+        answers, and it is vital to know which:
+      </p>
+      <primer-theorem name="The two questions">
+        <ul>
+          <li>
+            <strong>May-alias</strong> — "is it <em>possible</em> that <primer-math>p</primer-math> and
+            <primer-math>q</primer-math> refer to the same location on some execution?" A <em>may</em>-analysis
+            is a conservative over-approximation: if it says "no may-alias", the two truly never alias.
+          </li>
+          <li>
+            <strong>Must-alias</strong> — "do <primer-math>p</primer-math> and <primer-math>q</primer-math>
+            <em>definitely</em> refer to the same location on <em>every</em> execution that reaches here?" A
+            <em>must</em>-analysis is an under-approximation used to justify propagating a value from one name to
+            another.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The optimiser's typical need is the <em>negation</em> of may-alias: to reorder or reuse a load it wants
+        <strong>"no-alias"</strong> = "not may-alias". So a good may-alias analysis is one that says "may-alias"
+        as <em>rarely</em> as it soundly can — every spurious "maybe" is a missed optimisation. Note the
+        asymmetry with soundness: a may-analysis errs by saying "maybe" too often; a must-analysis errs by
+        saying "definitely" too rarely. Both stay safe; both leave performance on the table.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Points-to analysis: the underlying machinery</h2>
+      <p>
+        You rarely compute aliasing directly. Instead you compute a <strong>points-to</strong> relation —
+        <primer-math>\mathit{pt}(p)</primer-math>, the set of abstract memory objects (typically named by their
+        <em>allocation site</em>) that pointer <primer-math>p</primer-math> may hold — and then read aliasing
+        off it: <primer-math>p</primer-math> and <primer-math>q</primer-math> may-alias exactly when their
+        points-to sets <em>intersect</em>.
+      </p>
+      <primer-math display>p \text{ may-alias } q \iff \mathit{pt}(p) \cap \mathit{pt}(q) \neq \varnothing.</primer-math>
+      <p>
+        The two foundational algorithms are <strong>flow-insensitive</strong> — they ignore statement order and
+        control flow, treating the program as an unordered bag of pointer assignments, and computing one
+        points-to set per variable valid for the whole program. That sounds crude, but it scales to millions of
+        lines, and it is the backbone of what production compilers actually run.
+      </p>
+      <primer-geometry scene="pointsTo"></primer-geometry>
+      <p>
+        Above, nodes are pointer variables and heap objects; an edge <primer-math>p \to o</primer-math> means
+        "<primer-math>p</primer-math> may point at object <primer-math>o</primer-math>". Because <code>p</code>
+        and <code>r</code> both point at <primer-math>o_1</primer-math>, their points-to sets intersect, so
+        <code>p</code> and <code>r</code> may-alias.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Andersen vs Steensgaard: inclusion vs unification</h2>
+      <p>
+        The two classic flow-insensitive analyses differ in exactly one design choice — how they treat an
+        assignment <code>p = q</code> — and that choice sets their entire precision/scalability character.
+      </p>
+      <p>
+        <strong>Andersen's analysis (1994)</strong> is <em>inclusion-based</em>. It reads <code>p = q</code> as
+        a subset constraint <primer-math>\mathit{pt}(q) \subseteq \mathit{pt}(p)</primer-math>: everything
+        <code>q</code> can point to, <code>p</code> can point to. It collects such constraints across the whole
+        program and computes their least solution by iterating to a fixed point — which amounts to a dynamic
+        transitive closure and costs <primer-math>O(n^3)</primer-math> in the worst case. Precise, but heavy.
+      </p>
+      <p>
+        <strong>Steensgaard's analysis (1996)</strong> is <em>unification-based</em>. It reads <code>p = q</code>
+        as an <em>equality</em>: <code>p</code> and <code>q</code> must henceforth have the <em>same</em>
+        points-to set, so it <strong>merges</strong> their nodes with a union-find structure. Because merges
+        never split, each variable ends up in one equivalence class, and the whole analysis runs in
+        <strong>near-linear time</strong> — <primer-math>O(n\,\alpha(n))</primer-math>. The price is precision:
+        forcing equality where inclusion would suffice conflates objects that Andersen keeps apart.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th></th><th>Andersen</th><th>Steensgaard</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Treats <code>p = q</code> as</td><td>inclusion <primer-math>\mathit{pt}(q)\subseteq\mathit{pt}(p)</primer-math></td><td>unification <primer-math>\mathit{pt}(p)=\mathit{pt}(q)</primer-math></td></tr>
+            <tr><td>Direction</td><td>directed (one-way) constraints</td><td>undirected (symmetric) merge</td></tr>
+            <tr><td>Data structure</td><td>constraint graph + worklist</td><td>union-find (disjoint sets)</td></tr>
+            <tr><td>Worst-case cost</td><td><primer-math>O(n^3)</primer-math></td><td><primer-math>O(n\,\alpha(n))</primer-math> near-linear</td></tr>
+            <tr><td>Precision</td><td>higher</td><td>lower (over-merges)</td></tr>
+            <tr><td>Typical use</td><td>when precision matters most</td><td>whole-program at massive scale</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-card>
+      <h2>A Steensgaard-style analysis in code</h2>
+      <p>
+        Here is the unification idea in miniature: a union-find over pointer variables, with each class carrying
+        the heap object it points to. Assignment merges classes; address-of records a points-to target. Two
+        variables may-alias exactly when they end up pointing to the same object.
+      </p>
+      <primer-code run>
+        // Union-find (disjoint-set) over pointer variables.
+        class UnionFind {
+          private parent = new Map&lt;string, string&gt;();
+          private target = new Map&lt;string, string | null&gt;(); // the object a class points to
+
+          make(x: string): void {
+            if (!this.parent.has(x)) { this.parent.set(x, x); this.target.set(x, null); }
+          }
+          find(x: string): string {
+            this.make(x);
+            let root = x;
+            while (this.parent.get(root) !== root) root = this.parent.get(root)!;
+            let cur = x;                                   // path compression
+            while (cur !== root) { const nx = this.parent.get(cur)!; this.parent.set(cur, root); cur = nx; }
+            return root;
+          }
+          // Steensgaard: p = q  ==&gt;  unify p and q (equality of points-to).
+          unify(a: string, b: string): void {
+            const ra = this.find(a), rb = this.find(b);
+            if (ra === rb) return;
+            const ta = this.target.get(ra)!, tb = this.target.get(rb)!;
+            this.parent.set(rb, ra);
+            const merged = ta ?? tb;
+            this.target.set(ra, merged);
+            if (ta &amp;&amp; tb &amp;&amp; ta !== tb) this.unify(ta, tb);  // pointed-to objects merge too
+          }
+          pointAt(p: string, obj: string): void { this.make(obj); this.target.set(this.find(p), obj); }
+          pointsTo(p: string): string | null { return this.target.get(this.find(p)) ?? null; }
+          mayAlias(a: string, b: string): boolean {
+            const ta = this.pointsTo(a), tb = this.pointsTo(b);
+            return ta !== null &amp;&amp; ta === tb;
+          }
+        }
+
+        // Program:   a = &amp;o1;  b = &amp;o2;  p = &amp;a;  r = &amp;a;  p = r;
+        const uf = new UnionFind();
+        uf.pointAt("a", "o1");
+        uf.pointAt("b", "o2");
+        uf.pointAt("p", "a");   // p -&gt; a
+        uf.pointAt("r", "a");   // r -&gt; a
+        uf.unify("p", "r");     // p = r : same points-to class
+
+        console.log("p may-alias r? " + uf.mayAlias("p", "r")); // true: both -&gt; a
+        console.log("a may-alias b? " + uf.mayAlias("a", "b")); // false: o1 vs o2
+      </primer-code>
+      <p>
+        Because unification is symmetric and never undone, the class structure only ever grows coarser — which
+        is exactly why it is fast, and exactly why it sometimes says "may-alias" where Andersen's directed
+        constraints would prove disjointness.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The precision knobs</h2>
+      <p>
+        Beyond the inclusion/unification split, a pointer analysis is tuned along several orthogonal
+        <em>sensitivity</em> dimensions, each trading precision for cost:
+      </p>
+      <ul>
+        <li>
+          <strong>Flow sensitivity</strong> — respect statement order (a per-program-point points-to set)
+          instead of one global set. More precise; far more expensive.
+        </li>
+        <li>
+          <strong>Field sensitivity</strong> — distinguish <code>o.f</code> from <code>o.g</code> rather than
+          collapsing every field of an object into one cell. Cheap and usually well worth it.
+        </li>
+        <li>
+          <strong>Context sensitivity</strong> — keep points-to facts separate per calling context (call-site or
+          object sensitivity), exactly as in
+          <primer-ref to="computer-science/compiler-design/advanced/interprocedural-analysis">interprocedural analysis</primer-ref>.
+        </li>
+        <li>
+          <strong>Heap modelling</strong> — how finely abstract objects are named: one node per allocation site
+          is the standard; coarser models merge more, finer models (e.g. per-context heap) split more.
+        </li>
+      </ul>
+      <p>
+        Every knob you turn up shrinks spurious may-alias pairs and enables more optimisation — until the
+        analysis stops finishing in reasonable time. Choosing where to sit on this curve <em>is</em> the
+        engineering of a pointer analysis.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why do C and Rust give the compiler alias promises the analysis can't derive?">
+      <p>
+        Because sound whole-program pointer analysis is expensive and often imprecise, languages let the
+        <em>programmer</em> assert non-aliasing that the compiler may then assume. C's <code>restrict</code>
+        keyword promises that a pointer is the only access path to the object it points to for its lifetime,
+        licensing aggressive load/store reordering. C99's strict-aliasing rule lets the compiler assume pointers
+        of incompatible types don't alias. Rust goes furthest: its ownership and borrowing rules guarantee at
+        compile time that a <code>&amp;mut</code> reference is <em>unique</em> — a language-level must-not-alias
+        proof — which is precisely why Rust can hand LLVM <code>noalias</code> annotations that C code usually
+        can't, and sometimes optimise better than equivalent C.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Perfect alias analysis is impossible — every real one is a conservative approximation">
+      <p>
+        Deciding whether two pointers may alias in a general program is <strong>undecidable</strong> — it
+        reduces to the halting problem (you can make aliasing depend on whether an arbitrary computation
+        terminates). So there is no "exact" alias analysis, only sound approximations that err on the safe side.
+        The safe side for a <em>may</em>-analysis is to say "may-alias" when unsure: a spurious yes only forgoes
+        an optimisation, whereas a spurious no would let the compiler miscompile. Never read "may-alias" as "does
+        alias" — it means "the analysis could not prove they don't". The whole game is building analyses precise
+        enough to say "no" often, while never unsoundly saying "no" when the answer might be "yes".
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "aliasQuiz@1": {
+          "intro": "Alias analysis asks whether two names can touch the same memory. Points-to sets underlie it. Numbers change every attempt.",
+          "defQ": "Two names alias when they…",
+          "dSame": "may refer to the same memory location",
+          "dType": "have the same type",
+          "dName": "have the same name",
+          "dScope": "are declared in the same scope",
+          "whyQ": "Why does aliasing block reusing a value loaded through p across a store through q?",
+          "whyOver": "if p and q may alias, the store through q may have overwritten p's location",
+          "whySlow": "loads are always slower than stores",
+          "whyType": "the types might differ",
+          "whyReg": "there are not enough registers",
+          "mayQ": "A 'may-alias' analysis is…",
+          "mayOver": "a conservative over-approximation: 'no may-alias' means they truly never alias",
+          "mayUnder": "an under-approximation that can miss real aliases",
+          "mayExact": "always exact",
+          "mayFlow": "only about control flow",
+          "ptQ": "In points-to terms, p and q may-alias exactly when…",
+          "ptInt": "their points-to sets intersect",
+          "ptEq": "their points-to sets are identical",
+          "ptDis": "their points-to sets are disjoint",
+          "ptEmpty": "both points-to sets are empty",
+          "andQ": "Andersen's analysis treats an assignment p = q as…",
+          "andInc": "an inclusion constraint pt(q) ⊆ pt(p)",
+          "andEq": "an equality that merges p and q",
+          "andDel": "a deletion of q",
+          "andNop": "a no-op",
+          "steQ": "Steensgaard's analysis treats p = q as…",
+          "steUni": "unification: p and q are merged into one equivalence class",
+          "steInc": "a one-way subset constraint",
+          "steCopy": "a fresh copy of q's set",
+          "steIgnore": "ignored unless p is a heap object",
+          "costAQ": "The worst-case time complexity of Andersen's inclusion-based analysis is…",
+          "caCubic": "cubic, O(n³)",
+          "caLin": "linear, O(n)",
+          "caLog": "logarithmic, O(log n)",
+          "caExp": "exponential, O(2ⁿ)",
+          "costSQ": "Steensgaard's unification-based analysis runs in…",
+          "csNear": "near-linear time (union-find)",
+          "csCubic": "cubic time",
+          "csExp": "exponential time",
+          "csQuad": "quadratic time",
+          "fieldQ": "Field sensitivity means the analysis…",
+          "fldSplit": "distinguishes o.f from o.g instead of merging all fields into one cell",
+          "fldFlow": "respects statement order",
+          "fldCtx": "separates calling contexts",
+          "fldHeap": "uses one node for the whole heap",
+          "decQ": "In general, deciding whether two pointers may alias is…",
+          "decUndec": "undecidable — so all practical analyses are conservative approximations",
+          "decLin": "solvable in linear time",
+          "decEasy": "trivial for any program",
+          "decNP": "always exactly computable given enough memory",
+          "interQ": "Two pointers p and q have points-to sets of sizes {a} and {b}; they share exactly {s} common objects. Do they may-alias — enter 1 for yes, 0 for no?",
+          "unionQ": "Steensgaard merges a class of {x} variables with a class of {y} variables. How many variables are in the resulting class?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="aliasQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/optimization/the-dataflow-analysis-framework"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  function graphTools(board, colors) {
+    const node = (cx, cy, r, col, name, square = false) => {
+      if (square) {
+        board.create("polygon", [
+          [cx - r, cy - r], [cx + r, cy - r], [cx + r, cy + r], [cx - r, cy + r],
+        ], { strokeColor: col, strokeWidth: 2, fillColor: col, fillOpacity: 0.12, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: col } });
+      } else {
+        board.create("circle", [[cx, cy], r], {
+          strokeColor: col, strokeWidth: 2, fillColor: col, fillOpacity: 0.12, fixed: true, highlight: false,
+        });
+      }
+      board.create("text", [cx, cy, name], {
+        anchorX: "middle", anchorY: "middle", fontSize: 14, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    const lbl = (x, y, text, col = colors.ink) =>
+      board.create("text", [x, y, text], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    const edge = (a, b, r, col, text, off = 0.3) => {
+      const dx = b[0] - a[0], dy = b[1] - a[1], d = Math.hypot(dx, dy), ux = dx / d, uy = dy / d;
+      board.create("arrow", [[a[0] + ux * r, a[1] + uy * r], [b[0] - ux * r, b[1] - uy * r]], {
+        strokeColor: col, strokeWidth: 2, fixed: true, highlight: false,
+      });
+      if (text) lbl((a[0] + b[0]) / 2 - uy * off, (a[1] + b[1]) / 2 + ux * off, text, col);
+    };
+    return { node, edge, lbl };
+  }
+
+  // Points-to graph for:  p = &o1;  r = &o1;  q = &o2;
+  registerGeometryScene("pointsTo", ({ board, step, colors }) => {
+    const r = 0.7;
+    const T = graphTools(board, colors);
+    const p = [-4, 2], rr = [-4, -2], q = [-4, 0];
+    const o1 = [3, 1], o2 = [3, -2];
+
+    step("Pointers p, r, q and heap objects o₁, o₂.", () => {
+      T.node(p[0], p[1], r, colors.cat[0], "p");
+      T.node(rr[0], rr[1], r, colors.cat[1], "r");
+      T.node(q[0], q[1], r, colors.cat[2], "q");
+      T.node(o1[0], o1[1], r, colors.cat[3], "o₁", true);
+      T.node(o2[0], o2[1], r, colors.cat[4], "o₂", true);
+    });
+    step("p → o₁ and r → o₁ : both point at the same object.", () => {
+      T.edge(p, o1, r, colors.cat[0], "");
+      T.edge(rr, o1, r, colors.cat[1], "");
+    });
+    step("q → o₂ : a disjoint object.", () => {
+      T.edge(q, o2, r, colors.cat[2], "");
+    });
+    step("pt(p) ∩ pt(r) = {o₁} ≠ ∅ → p and r MAY-ALIAS; q is disjoint.", () => {
+      T.lbl(0, -3.6, "shared target ⇒ may-alias", colors.ink);
+    });
+  }, { boundingbox: [-6.5, 3.4, 6, -4.4], keepAspect: false, title: "A points-to graph — shared targets mean aliasing" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("aliasQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("defQ"),
+      options: [
+        { text: () => sceneStrings("dSame"), correct: true },
+        { text: () => sceneStrings("dType"), correct: false },
+        { text: () => sceneStrings("dName"), correct: false },
+        { text: () => sceneStrings("dScope"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("whyOver"), correct: true },
+        { text: () => sceneStrings("whySlow"), correct: false },
+        { text: () => sceneStrings("whyType"), correct: false },
+        { text: () => sceneStrings("whyReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("mayQ"),
+      options: [
+        { text: () => sceneStrings("mayOver"), correct: true },
+        { text: () => sceneStrings("mayUnder"), correct: false },
+        { text: () => sceneStrings("mayExact"), correct: false },
+        { text: () => sceneStrings("mayFlow"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ptQ"),
+      options: [
+        { text: () => sceneStrings("ptInt"), correct: true },
+        { text: () => sceneStrings("ptEq"), correct: false },
+        { text: () => sceneStrings("ptDis"), correct: false },
+        { text: () => sceneStrings("ptEmpty"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("andQ"),
+      options: [
+        { text: () => sceneStrings("andInc"), correct: true },
+        { text: () => sceneStrings("andEq"), correct: false },
+        { text: () => sceneStrings("andDel"), correct: false },
+        { text: () => sceneStrings("andNop"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("steQ"),
+      options: [
+        { text: () => sceneStrings("steUni"), correct: true },
+        { text: () => sceneStrings("steInc"), correct: false },
+        { text: () => sceneStrings("steCopy"), correct: false },
+        { text: () => sceneStrings("steIgnore"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("costAQ"),
+      options: [
+        { text: () => sceneStrings("caCubic"), correct: true },
+        { text: () => sceneStrings("caLin"), correct: false },
+        { text: () => sceneStrings("caLog"), correct: false },
+        { text: () => sceneStrings("caExp"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("costSQ"),
+      options: [
+        { text: () => sceneStrings("csNear"), correct: true },
+        { text: () => sceneStrings("csCubic"), correct: false },
+        { text: () => sceneStrings("csExp"), correct: false },
+        { text: () => sceneStrings("csQuad"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fieldQ"),
+      options: [
+        { text: () => sceneStrings("fldSplit"), correct: true },
+        { text: () => sceneStrings("fldFlow"), correct: false },
+        { text: () => sceneStrings("fldCtx"), correct: false },
+        { text: () => sceneStrings("fldHeap"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("decQ"),
+      options: [
+        { text: () => sceneStrings("decUndec"), correct: true },
+        { text: () => sceneStrings("decLin"), correct: false },
+        { text: () => sceneStrings("decEasy"), correct: false },
+        { text: () => sceneStrings("decNP"), correct: false },
+      ],
+    },
+    {
+      // may-alias iff shared > 0.
+      prompt: (v) => sceneStrings("interQ", v),
+      variables: "a=[1:5] b=[1:5] s=[0:3]",
+      constraints: "s <= a && s <= b",
+      answer: (v) => (v.s > 0 ? 1 : 0),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // merged class size = x + y.
+      prompt: (v) => sceneStrings("unionQ", v),
+      variables: "x=[1:6] y=[1:6]",
+      answer: (v) => v.x + v.y,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

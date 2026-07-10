@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Priority Inversion and Deadlock Revisited</primer-title>
+
+    <primer-card>
+      <p>
+        In July 1997 the Mars Pathfinder rover landed, sent back gorgeous pictures — and then began mysteriously
+        rebooting itself, again and again, tens of millions of kilometres from the nearest engineer. The bug was
+        not a cosmic ray or a cracked solder joint. It was a <strong>priority inversion</strong>: a textbook
+        concurrency fault, in flight software written by some of the most careful engineers alive. This lesson
+        revisits two classic hazards — <strong>priority inversion</strong> and <strong>deadlock</strong> — at
+        graduate depth, where they stop being undergraduate puzzles and become the reason real-time and kernel
+        systems are hard.
+      </p>
+      <p>
+        Both hazards share a root: <em>a resource held by one task blocks another</em>. In deadlock, the blocking
+        is <em>mutual</em> and permanent. In priority inversion, a low-priority task's grip on a lock silently
+        defeats the scheduler's whole purpose, letting an <em>unrelated</em> medium task starve the most urgent
+        one. Understanding both — and their protocol-level fixes, priority inheritance and the Coffman-condition
+        toolkit — is core to building systems that meet deadlines and never freeze.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Priority inversion: the urgent task waits on the trivial one</h2>
+      <p>
+        Take three tasks by
+        <primer-ref to="computer-science/advanced-operating-systems/scheduling/real-time-scheduling">real-time
+        priority</primer-ref>: <strong>High (H)</strong>, <strong>Medium (M)</strong>, <strong>Low (L)</strong>.
+        The sequence that bit Pathfinder:
+      </p>
+      <ol>
+        <li><strong>L</strong> acquires a shared mutex (say, a data bus) and starts its short critical section;</li>
+        <li><strong>H</strong> wakes, wants the same mutex, and <em>blocks</em> — fine so far, it will only wait for
+          L's brief critical section;</li>
+        <li>but now <strong>M</strong> wakes. M doesn't need the mutex, but it outranks L, so the scheduler
+          <em>pre-empts L</em> to run M. L can't release the mutex because it isn't running. And H, the highest
+          priority task in the system, is stuck waiting on L — <em>which is waiting on M</em>.</li>
+      </ol>
+      <p>
+        The result is an <strong>inversion</strong>: a medium-priority task effectively runs ahead of a
+        high-priority one, for as long as M cares to run. If M runs long enough, a watchdog notices H missed its
+        deadline and — on Pathfinder — <em>resets the whole computer</em>. The scheduler's priorities have been
+        stood on their head by an accident of lock ownership.
+      </p>
+      <primer-geometry scene="inversion"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The fix: make priority follow the lock</h2>
+      <p>
+        The cure is to stop letting an unrelated M starve H through L. Two protocols do this:
+      </p>
+      <primer-theorem name="Priority inheritance and priority ceiling">
+        <ul>
+          <li><strong>Priority inheritance protocol (PIP)</strong> — while a low task L holds a lock that a high
+            task H is blocked on, L <em>temporarily inherits H's priority</em>. Now M cannot pre-empt L, so L
+            finishes its critical section promptly, releases the lock, and H proceeds. L drops back to its own
+            priority afterwards. This is the fix NASA uploaded to Pathfinder;</li>
+          <li><strong>Priority ceiling protocol (PCP)</strong> — each lock is given a <em>ceiling</em> equal to the
+            highest priority of any task that can ever take it; a task acquiring the lock immediately runs at that
+            ceiling. Stronger than inheritance: it also <em>prevents deadlock</em> and bounds blocking to a single
+            critical section, at the cost of needing to know the ceilings in advance;</li>
+          <li>both bound the <strong>blocking time</strong> of a high task to the length of one low task's critical
+            section — restoring the schedulability analysis that priority inversion had wrecked.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The deep lesson: in a real-time system, <em>a lock silently couples the priorities of everyone who touches
+        it</em>. You cannot reason about a task's worst-case timing without accounting for every lower-priority
+        task it might have to wait behind — which is exactly what these protocols make analysable.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Deadlock, at graduate depth: the four Coffman conditions</h2>
+      <p>
+        Deadlock is the other face of "held resources block progress" — but here the block is <em>circular</em> and
+        <em>permanent</em>. The classic result (Coffman, 1971) is that deadlock requires <em>all four</em> of these
+        conditions to hold simultaneously; break any one and deadlock becomes impossible:
+      </p>
+      <primer-theorem name="The four Coffman conditions for deadlock">
+        <ul>
+          <li><strong>Mutual exclusion</strong> — at least one resource is held in a non-shareable mode;</li>
+          <li><strong>Hold and wait</strong> — a task holding one resource can request another while keeping the
+            first;</li>
+          <li><strong>No pre-emption</strong> — a resource cannot be forcibly taken from its holder; it must be
+            released voluntarily;</li>
+          <li><strong>Circular wait</strong> — there is a cycle of tasks, each waiting on a resource held by the
+            next. <em>All four together</em> are necessary and sufficient.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The three strategies for handling deadlock map directly onto these conditions:
+      </p>
+      <ul>
+        <li><strong>Prevention</strong> — structurally deny one condition. The most common: impose a global
+          <em>lock-ordering</em> so a cycle (circular wait) can never form — always acquire lock A before lock B.
+          The Linux kernel enforces exactly this, and <primer-math>\texttt{lockdep}</primer-math> catches
+          violations;</li>
+        <li><strong>Avoidance</strong> — allow the conditions but refuse any allocation that <em>could</em> lead to
+          deadlock, using advance knowledge of maximum needs. This is <strong>Dijkstra's Banker's algorithm</strong>:
+          grant a request only if the resulting state is still "safe" (some ordering of tasks can finish);</li>
+        <li><strong>Detection &amp; recovery</strong> — allow deadlock to happen, periodically look for a cycle in
+          the <strong>wait-for graph</strong>, and break it (kill a task, roll back a transaction). Databases do
+          this constantly.</li>
+      </ul>
+    </primer-card>
+
+    <!-- Strings for the wait-for-graph cycle figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "waitfor": {
+          "title": "The wait-for graph: a cycle T1→T2→T3→T1 means deadlock — no task can proceed",
+          "t1": "T1", "t2": "T2", "t3": "T3", "t4": "T4",
+          "w12": "waits for", "w23": "waits for", "w31": "waits for", "w4": "waits for",
+          "cycle": "cycle = deadlock",
+          "free": "T4 outside the cycle — can still finish"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Detecting deadlock: find the cycle</h2>
+      <p>
+        Detection reduces to a graph problem you already know. Build the <strong>wait-for graph</strong>: one node
+        per task, a directed edge <primer-math>T_i \to T_j</primer-math> whenever <primer-math>T_i</primer-math> is
+        blocked waiting for a resource currently held by <primer-math>T_j</primer-math>. <strong>A cycle in this
+        graph is a deadlock</strong> — each task in the cycle waits on the next, forever. Detecting deadlock is
+        therefore just cycle detection, a depth-first search. Below, <primer-math>T_1 \to T_2 \to T_3 \to
+        T_1</primer-math> forms a cycle (all three are stuck); <primer-math>T_4</primer-math> waits into the cycle
+        but is not part of it, so it is blocked but not itself deadlocked in the classic sense.
+      </p>
+      <primer-geometry scene="waitfor"></primer-geometry>
+      <primer-code run>
+        // Deadlock detection = cycle detection in the wait-for graph.
+        // Edge i -> j means "task i is waiting for a resource held by task j".
+        const waitsFor: Record&lt;string, string[]&gt; = {
+          T1: ["T2"],   // T1 waits on T2
+          T2: ["T3"],   // T2 waits on T3
+          T3: ["T1"],   // T3 waits on T1  -> cycle T1->T2->T3->T1
+          T4: ["T2"],   // T4 waits into the cycle but is not on it
+        };
+
+        // DFS with colouring: WHITE unvisited, GREY on the current path, BLACK done.
+        // A back-edge to a GREY node is a cycle.
+        function findCycle(graph: Record&lt;string, string[]&gt;): string[] | null {
+          const colour: Record&lt;string, number&gt; = {};
+          const parent: Record&lt;string, string | null&gt; = {};
+          for (const n of Object.keys(graph)) colour[n] = 0;   // WHITE
+          let cycleStart: string | null = null, cycleEnd: string | null = null;
+
+          function dfs(u: string): boolean {
+            colour[u] = 1;                                     // GREY
+            for (const v of graph[u] ?? []) {
+              if (colour[v] === 0) { parent[v] = u; if (dfs(v)) return true; }
+              else if (colour[v] === 1) { cycleStart = v; cycleEnd = u; return true; }  // back-edge!
+            }
+            colour[u] = 2;                                     // BLACK
+            return false;
+          }
+
+          for (const n of Object.keys(graph))
+            if (colour[n] === 0 &amp;&amp; dfs(n)) {
+              const path = [cycleEnd as string];
+              for (let x = cycleEnd as string; x !== cycleStart; x = parent[x] as string) path.push(parent[x] as string);
+              return path.reverse();
+            }
+          return null;
+        }
+
+        const cycle = findCycle(waitsFor);
+        console.log(cycle ? `DEADLOCK: cycle ${cycle.concat(cycle[0]).join(" -> ")}` : "no deadlock");
+
+        // Break the deadlock by pre-empting T3 (drop its edge), then re-check.
+        waitsFor.T3 = [];
+        console.log(findCycle(waitsFor) ? "still deadlocked" : "resolved: broke the cycle by aborting T3");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Livelock and convoys: stuck without a cycle</h2>
+      <p>
+        Deadlock is not the only way progress dies. Two cousins:
+      </p>
+      <ul>
+        <li><strong>Livelock</strong> — tasks are <em>not</em> blocked; they are furiously <em>active</em>, but
+          their actions keep undoing each other so no net progress is made. The two-people-in-a-corridor dance:
+          both step left, both step right, forever. In systems, two tasks that each detect a possible deadlock and
+          politely back off — then both retry in lockstep and back off again. The CPU is 100% busy achieving
+          nothing. Naive livelock "fixes" (retry immediately on conflict) cause it; randomised back-off breaks it;</li>
+        <li><strong>Lock convoy</strong> — under a fair (FIFO) lock, if the holder is descheduled while others
+          queue, the whole queue serializes behind it and stays clumped together long after the original stall,
+          like cars bunched behind a slow truck. Throughput craters even though no deadlock exists. Fixes include
+          back-off, lock-free structures, or letting a woken waiter re-contend rather than being handed the lock
+          blindly.</li>
+      </ul>
+      <p>
+        The unifying idea across all four — deadlock, priority inversion, livelock, convoys — is that
+        <em>correctness of each task in isolation guarantees nothing about the system's liveness</em>. Progress is
+        a global property that emerges (or fails) from how tasks interact through shared resources.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="How did NASA debug a priority inversion on another planet?">
+      <p>
+        The Pathfinder engineers could reproduce the resets in their lab replica, and — crucially — they had left
+        a debugging feature enabled: the VxWorks real-time OS could be told to trace and log task scheduling. The
+        traces revealed the total resets coincided with the meteorological data task (low priority) holding a mutex
+        on the information bus while the high-priority bus-management task blocked on it — classic three-task
+        inversion. The fix was a one-line change: flip on <em>priority inheritance</em> for that mutex (a
+        parameter VxWorks already supported), and uplink the patched code across interplanetary space. The system
+        had shipped with inheritance <em>disabled</em> for performance. The moral, quoted ever since: turn on the
+        safety feature, and never disable diagnostics you might need when your computer is on Mars.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Priority inversion is not deadlock, and inheritance does not fix deadlock">
+      <p>
+        Students routinely blur these. <strong>Priority inversion</strong> is a <em>scheduling</em> fault: nobody
+        is permanently stuck, and the high task <em>will</em> eventually run — just far too late to meet its
+        deadline. <strong>Deadlock</strong> is a <em>liveness</em> fault: a circular wait means the involved tasks
+        <em>never</em> proceed, deadline or no deadline. They need different cures. Priority inheritance solves
+        <em>inversion</em> by lending priority, but it does nothing about a genuine circular wait — two tasks each
+        holding a lock the other wants will deadlock regardless of whose priority is boosted. Conversely, a
+        lock-ordering discipline prevents <em>deadlock</em> but does nothing for inversion. Diagnose which hazard
+        you actually have — a task that is late versus a set of tasks that are frozen — before reaching for a fix,
+        or you will apply the right medicine to the wrong disease. (The priority <em>ceiling</em> protocol is the
+        exception that happens to prevent both — which is precisely why hard real-time systems favour it.)
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: priority inversion, PIP/PCP, Coffman conditions, prevention/avoidance/detection, wait-for cycle, livelock/convoy. Bank of 14, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "invDeadQuiz@1": {
+          "intro": "Priority inversion: a medium task starves a high one via a lock a low task holds — fix with priority inheritance/ceiling. Deadlock needs all four Coffman conditions; handle by prevention (lock ordering), avoidance (Banker's), or detection (cycle in the wait-for graph). Livelock/convoys stall without a cycle.",
+          "invQ": "In the classic three-task priority inversion, the high task H is effectively delayed by…",
+          "ivRight": "a medium task M that pre-empts the low task L holding the lock H needs",
+          "ivDead": "a permanent circular wait among H, M and L",
+          "ivHw": "a hardware failure",
+          "ivNone": "nothing — H always runs first",
+          "pipQ": "The priority inheritance protocol fixes inversion by…",
+          "piRight": "temporarily raising the lock holder's priority to that of the highest task blocked on it",
+          "piKill": "killing the medium task",
+          "piBan": "forbidding low-priority tasks from taking locks",
+          "piNone": "lowering the high task's priority",
+          "pcpQ": "Beyond inheritance, the priority ceiling protocol also…",
+          "pcRight": "prevents deadlock and bounds blocking to a single critical section",
+          "pcSlow": "makes every task run slower",
+          "pcNo": "does nothing inheritance doesn't",
+          "pcRandom": "assigns priorities randomly",
+          "coffmanQ": "How many of the four Coffman conditions must hold for deadlock to be possible?",
+          "coRight": "all four simultaneously — breaking any one prevents deadlock",
+          "coOne": "just any one of them",
+          "coTwo": "exactly two",
+          "coNone": "none — deadlock is unrelated to them",
+          "muQ": "Which is one of the four Coffman conditions?",
+          "muRight": "circular wait — a cycle of tasks each waiting on the next",
+          "muPrio": "priority inheritance being disabled",
+          "muClock": "a slow CPU clock",
+          "muRam": "insufficient RAM",
+          "preventQ": "The most common deadlock PREVENTION technique in kernels is…",
+          "prRight": "a global lock-ordering so a circular wait can never form",
+          "prBank": "running the Banker's algorithm on every allocation",
+          "prKill": "killing a random task periodically",
+          "prNone": "ignoring locks entirely",
+          "bankerQ": "Dijkstra's Banker's algorithm is a deadlock-AVOIDANCE method that…",
+          "baRight": "grants a request only if the resulting state stays 'safe' — some task ordering can still finish",
+          "baDetect": "detects cycles after deadlock has already happened",
+          "baPrevent": "physically prevents mutual exclusion",
+          "baRandom": "grants requests at random",
+          "detectQ": "Deadlock detection reduces to which graph problem?",
+          "deRight": "finding a cycle in the wait-for graph",
+          "deShort": "finding the shortest path",
+          "deSpan": "computing a minimum spanning tree",
+          "deColor": "graph colouring with two colours",
+          "edgeQ": "In the wait-for graph, an edge Ti → Tj means…",
+          "edRight": "Ti is blocked waiting for a resource currently held by Tj",
+          "edHold": "Ti holds a resource Tj wants",
+          "edPrio": "Ti has higher priority than Tj",
+          "edNone": "Ti and Tj never interact",
+          "recoverQ": "Once a deadlock cycle is detected, a typical recovery is to…",
+          "reRight": "break the cycle by aborting or rolling back one task in it (e.g. a victim transaction)",
+          "reWait": "wait indefinitely for it to resolve itself",
+          "reReboot": "always reboot the whole machine",
+          "reIgnore": "ignore it — cycles resolve on their own",
+          "livelockQ": "Livelock differs from deadlock in that the tasks are…",
+          "liRight": "actively running and changing state, but their actions cancel out so no progress is made",
+          "liBlocked": "permanently blocked in a circular wait",
+          "liSleep": "all asleep waiting for a timer",
+          "liDone": "finished successfully",
+          "convoyQ": "A lock convoy is when…",
+          "cvRight": "a FIFO lock holder is descheduled and the whole queue clumps and serializes behind it",
+          "cvDead": "two tasks form a circular wait",
+          "cvPrio": "a medium task starves a high task",
+          "cvNone": "the lock is never contended",
+          "diffQ": "Priority inversion versus deadlock: the key difference is that inversion is…",
+          "dfRight": "a scheduling fault (H is merely late) while deadlock is a liveness fault (tasks never proceed)",
+          "dfSame": "identical to deadlock in every way",
+          "dfWorse": "always permanent, unlike deadlock",
+          "dfNone": "unrelated to shared resources"
+        }
+      }
+    </script>
+
+    <primer-quiz name="invDeadQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/operating-systems/deadlock",
+      "computer-science/advanced-operating-systems/scheduling/real-time-scheduling"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Two figures: (1) a priority-inversion timeline (three task rows H/M/L over time, with the inversion
+     region marked); (2) a wait-for graph with a cycle T1->T2->T3->T1 plus an outside node T4.
+     Colours only from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ---- Figure 1: priority-inversion timeline ----
+  registerGeometryScene(
+    "inversion",
+    ({ board, colors, sceneStrings }) => {
+      // Time axis.
+      board.create("arrow", [[0.6, 0.5], [11.4, 0.5]], { strokeColor: colors.line, strokeWidth: 2, lastArrow: { type: 2, size: 5 }, highlight: false, fixed: true });
+      // Three task rows: H (top), M, L (bottom).
+      const rows = [{ y: 5.2, key: "H", ci: 0 }, { y: 3.6, key: "M", ci: 1 }, { y: 2.0, key: "L", ci: 2 }];
+      rows.forEach((r) => board.create("text", [0.2, r.y, r.key], { strokeColor: colors.ink, fontSize: 16, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:700" }));
+
+      // Execution segments [x0,x1] running at each task's row. (thick bars)
+      const run = (y, x0, x1, ci) => board.create("segment", [[x0, y], [x1, y]], { strokeColor: colors.cat[ci], strokeWidth: 10, highlight: false, fixed: true });
+      // L runs and holds the lock; M pre-empts; H blocked; after M, L resumes+releases; then H runs.
+      run(2.0, 1.2, 3.0, 2);   // L runs (holds lock)
+      run(3.6, 3.0, 6.4, 1);   // M pre-empts L and runs (inversion!)
+      run(2.0, 6.4, 7.0, 2);   // L resumes, finishes, releases lock
+      run(5.2, 7.0, 9.4, 0);   // H finally runs
+
+      // H blocked band (dashed) from when H wakes (x=3.0) until it runs (x=7.0).
+      board.create("segment", [[3.0, 5.2], [7.0, 5.2]], { strokeColor: colors.cat[0], strokeWidth: 2, dash: 2, highlight: false, fixed: true });
+      board.create("text", [5.0, 5.7, "H blocked (waiting on L's lock)"], { strokeColor: colors.cat[0], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+
+      // Inversion region marker.
+      board.create("polygon", [[3.0, 1.2], [6.4, 1.2], [6.4, 6.0], [3.0, 6.0]], {
+        fillColor: colors.cat[1], fillOpacity: 0.1, strokeColor: colors.cat[1], strokeWidth: 1, dash: 2,
+        fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.cat[1], dash: 2, highlight: false },
+      });
+      board.create("text", [4.7, 0.95, "INVERSION: M (medium) runs while H (high) waits"], { strokeColor: colors.cat[1], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "max-width:260px" });
+      board.create("text", [2.1, 1.55, "L takes lock"], { strokeColor: colors.ink, fontSize: 9, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+    },
+    { boundingbox: [-0.4, 6.4, 12.0, 0.0], keepAspect: false, title: () => makeStrings("inversion")("title") },
+  );
+
+  // ---- Figure 2: wait-for graph with a cycle ----
+  registerGeometryScene(
+    "waitfor",
+    ({ board, colors, sceneStrings }) => {
+      const node = (x, y, key, ci) => {
+        board.create("circle", [[x, y], 0.7], { strokeColor: colors.line, strokeWidth: 2, fillColor: colors.cat[ci], fillOpacity: 0.18, fixed: true, highlight: false });
+        board.create("text", [x, y, sceneStrings(key)], { strokeColor: colors.ink, fontSize: 16, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:700" });
+      };
+      const P = { t1: [2, 5], t2: [6, 5.6], t3: [4.4, 1.6], t4: [9.2, 4.4] };
+      // Edge from a to b, trimmed to circle radius, with an optional label.
+      const edge = (a, b, ci, key) => {
+        const A = P[a], B = P[b];
+        const dx = B[0] - A[0], dy = B[1] - A[1];
+        const L = Math.hypot(dx, dy), ux = dx / L, uy = dy / L, R = 0.7;
+        board.create("arrow", [[A[0] + ux * R, A[1] + uy * R], [B[0] - ux * R, B[1] - uy * R]], {
+          strokeColor: colors.cat[ci], strokeWidth: 2, lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+        });
+        if (key) board.create("text", [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2 + 0.25, sceneStrings(key)], { strokeColor: colors.cat[ci], fontSize: 9, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      };
+      node(...P.t1, "t1", 1); node(...P.t2, "t2", 1); node(...P.t3, "t3", 1); node(...P.t4, "t4", 0);
+      edge("t1", "t2", 1, "w12");
+      edge("t2", "t3", 1, "w23");
+      edge("t3", "t1", 1, "w31");
+      edge("t4", "t2", 0, "w4");
+      board.create("text", [4.1, 3.7, sceneStrings("cycle")], { strokeColor: colors.cat[1], fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600" });
+      board.create("text", [9.2, 3.2, sceneStrings("free")], { strokeColor: colors.cat[0], fontSize: 9, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "max-width:170px" });
+    },
+    { boundingbox: [0.5, 6.8, 10.8, 0.4], keepAspect: true, title: () => makeStrings("waitfor")("title") },
+  );
+
+  registerQuiz("invDeadQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("invQ"),
+      options: [
+        { text: () => sceneStrings("ivRight"), correct: true },
+        { text: () => sceneStrings("ivDead"), correct: false },
+        { text: () => sceneStrings("ivHw"), correct: false },
+        { text: () => sceneStrings("ivNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pipQ"),
+      options: [
+        { text: () => sceneStrings("piRight"), correct: true },
+        { text: () => sceneStrings("piKill"), correct: false },
+        { text: () => sceneStrings("piBan"), correct: false },
+        { text: () => sceneStrings("piNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pcpQ"),
+      options: [
+        { text: () => sceneStrings("pcRight"), correct: true },
+        { text: () => sceneStrings("pcSlow"), correct: false },
+        { text: () => sceneStrings("pcNo"), correct: false },
+        { text: () => sceneStrings("pcRandom"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("coffmanQ"),
+      options: [
+        { text: () => sceneStrings("coRight"), correct: true },
+        { text: () => sceneStrings("coOne"), correct: false },
+        { text: () => sceneStrings("coTwo"), correct: false },
+        { text: () => sceneStrings("coNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("muQ"),
+      options: [
+        { text: () => sceneStrings("muRight"), correct: true },
+        { text: () => sceneStrings("muPrio"), correct: false },
+        { text: () => sceneStrings("muClock"), correct: false },
+        { text: () => sceneStrings("muRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("preventQ"),
+      options: [
+        { text: () => sceneStrings("prRight"), correct: true },
+        { text: () => sceneStrings("prBank"), correct: false },
+        { text: () => sceneStrings("prKill"), correct: false },
+        { text: () => sceneStrings("prNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bankerQ"),
+      options: [
+        { text: () => sceneStrings("baRight"), correct: true },
+        { text: () => sceneStrings("baDetect"), correct: false },
+        { text: () => sceneStrings("baPrevent"), correct: false },
+        { text: () => sceneStrings("baRandom"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("detectQ"),
+      options: [
+        { text: () => sceneStrings("deRight"), correct: true },
+        { text: () => sceneStrings("deShort"), correct: false },
+        { text: () => sceneStrings("deSpan"), correct: false },
+        { text: () => sceneStrings("deColor"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("edgeQ"),
+      options: [
+        { text: () => sceneStrings("edRight"), correct: true },
+        { text: () => sceneStrings("edHold"), correct: false },
+        { text: () => sceneStrings("edPrio"), correct: false },
+        { text: () => sceneStrings("edNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("recoverQ"),
+      options: [
+        { text: () => sceneStrings("reRight"), correct: true },
+        { text: () => sceneStrings("reWait"), correct: false },
+        { text: () => sceneStrings("reReboot"), correct: false },
+        { text: () => sceneStrings("reIgnore"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("livelockQ"),
+      options: [
+        { text: () => sceneStrings("liRight"), correct: true },
+        { text: () => sceneStrings("liBlocked"), correct: false },
+        { text: () => sceneStrings("liSleep"), correct: false },
+        { text: () => sceneStrings("liDone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("convoyQ"),
+      options: [
+        { text: () => sceneStrings("cvRight"), correct: true },
+        { text: () => sceneStrings("cvDead"), correct: false },
+        { text: () => sceneStrings("cvPrio"), correct: false },
+        { text: () => sceneStrings("cvNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("diffQ"),
+      options: [
+        { text: () => sceneStrings("dfRight"), correct: true },
+        { text: () => sceneStrings("dfSame"), correct: false },
+        { text: () => sceneStrings("dfWorse"), correct: false },
+        { text: () => sceneStrings("dfNone"), correct: false },
+      ],
+    },
+  ]);
+</script>

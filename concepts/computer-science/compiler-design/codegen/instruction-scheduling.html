@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Instruction Scheduling</primer-title>
+
+    <primer-card>
+      <p>
+        A modern processor is a pipeline: it starts a new instruction most cycles, but each instruction's
+        <em>result</em> takes several cycles to appear. A load might not deliver its value for three or four
+        cycles; a multiply for two or three. If the very next instruction needs that result, the pipeline
+        <strong>stalls</strong> — it inserts bubbles and waits, wasting cycles. <strong>Instruction
+        scheduling</strong> reorders the instructions of a block so that independent work fills those waiting
+        cycles, hiding the latencies, <em>without changing what the program computes</em>.
+      </p>
+      <p>
+        The catch is the italic clause. You may reorder only in ways that preserve the results, which means
+        you must respect every <strong>data dependence</strong> between instructions. Those dependences form
+        a directed acyclic graph, and scheduling is the problem of laying the DAG's nodes out in time — one
+        legal topological order among many — so as to minimise stalls.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Three kinds of dependence pin instructions in order</h2>
+      <p>
+        An instruction <primer-math>B</primer-math> must stay after an instruction
+        <primer-math>A</primer-math> whenever moving it would change a value. There are exactly three ways
+        that happens:
+      </p>
+      <primer-theorem name="Data dependences">
+        <ul>
+          <li><strong>RAW</strong> (read-after-write, a <em>true</em> dependence):
+            <primer-math>A</primer-math> writes a value that <primer-math>B</primer-math> reads —
+            <primer-math>B</primer-math> must wait for <primer-math>A</primer-math>'s result;</li>
+          <li><strong>WAR</strong> (write-after-read, an <em>anti</em>-dependence):
+            <primer-math>A</primer-math> reads a location that <primer-math>B</primer-math> overwrites —
+            <primer-math>B</primer-math> must not clobber it before <primer-math>A</primer-math> has read;</li>
+          <li><strong>WAW</strong> (write-after-write, an <em>output</em> dependence): both write the same
+            location — their order fixes which write survives.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Only RAW is a <em>real</em> flow of data; WAR and WAW are artefacts of <em>reusing</em> a register
+        or memory cell. That distinction matters enormously: RAW dependences are fundamental and cannot be
+        removed, but WAR and WAW can often be dissolved by <strong>renaming</strong> — giving the second
+        writer a fresh register so the false conflict disappears and the schedule gains freedom.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The dependence DAG</h2>
+      <p>
+        Draw one node per instruction and an edge <primer-math>A \to B</primer-math> whenever
+        <primer-math>B</primer-math> depends on <primer-math>A</primer-math>, weighting the edge by
+        <primer-math>A</primer-math>'s <strong>latency</strong> — how many cycles before its result is
+        usable. Any topological order of this DAG is a <em>correct</em> program; scheduling picks the order
+        that runs <em>fastest</em>. Here is the DAG for a small block that computes
+        <primer-math>x = (a + b) \times c</primer-math> with loads of latency 3 and a multiply of latency 2:
+      </p>
+      <primer-geometry scene="depDag"></primer-geometry>
+      <p>
+        The three loads <primer-math>i_1, i_2, i_4</primer-math> have no incoming edges — they are
+        independent and can go in any order, or be spread out to overlap their long latencies. The
+        <strong>critical path</strong> <primer-math>i_1 \to i_3 \to i_5 \to i_6</primer-math> (weight
+        <primer-math>3+1+2+1 = 7</primer-math>) is the longest latency-weighted chain; no schedule can finish
+        sooner than the critical path allows, so it sets the lower bound and tells the scheduler which
+        instructions are most urgent.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>List scheduling: the workhorse heuristic</h2>
+      <p>
+        Optimal scheduling of a DAG is NP-hard, so compilers use <strong>list scheduling</strong> — a
+        greedy, cycle-by-cycle simulation of the pipeline. Maintain a <strong>ready list</strong> of
+        instructions all of whose predecessors have completed (their results are available). Each cycle,
+        issue the ready instruction of highest <strong>priority</strong>; the usual priority is the
+        <strong>critical-path length</strong> from that node, so the most latency-critical work goes first.
+        If nothing is ready, the cycle is a stall.
+      </p>
+      <primer-code>
+        compute latency-weighted critical path from each node
+        cycle ← 0
+        while not all instructions scheduled:
+            ready ← instructions whose predecessors have all COMPLETED by `cycle`
+            if ready is empty:
+                cycle ← cycle + 1            // an unavoidable stall
+            else:
+                pick p ∈ ready with the greatest critical-path length
+                issue p at `cycle`;  mark its result available at cycle + latency(p)
+                cycle ← cycle + 1
+      </primer-code>
+      <p>
+        List scheduling is not guaranteed optimal, but with a good priority — critical path, ties broken by,
+        say, the number of successors an instruction unblocks — it comes very close and runs in near-linear
+        time. It is the scheduler in essentially every production compiler.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Scheduling the block, cycle by cycle</h2>
+      <p>
+        The code below builds the dependence DAG for our block, computes each node's critical-path length,
+        and list-schedules it on a single-issue in-order pipeline. Watch how it fires the three loads early
+        to cover their three-cycle latency, then stalls exactly where the data genuinely isn't ready yet:
+      </p>
+      <primer-code run>
+        interface Op { id: string; text: string; lat: number; deps: string[]; }
+
+        // x = (a+b)*c : loads have latency 3, the multiply latency 2, add/store latency 1.
+        const block: Op[] = [
+          { id: "i1", text: "LD  r1, a",       lat: 3, deps: [] },
+          { id: "i2", text: "LD  r2, b",       lat: 3, deps: [] },
+          { id: "i3", text: "ADD r3, r1, r2",  lat: 1, deps: ["i1", "i2"] },
+          { id: "i4", text: "LD  r4, c",       lat: 3, deps: [] },
+          { id: "i5", text: "MUL r5, r3, r4",  lat: 2, deps: ["i3", "i4"] },
+          { id: "i6", text: "ST  x, r5",       lat: 1, deps: ["i5"] },
+        ];
+
+        const byId: Record&lt;string, Op&gt; = Object.fromEntries(block.map((o) =&gt; [o.id, o]));
+        const succ: Record&lt;string, string[]&gt; = {};
+        block.forEach((o) =&gt; (succ[o.id] = []));
+        block.forEach((o) =&gt; o.deps.forEach((d) =&gt; succ[d].push(o.id)));
+
+        // Latency-weighted critical path from each node to a sink.
+        const cp: Record&lt;string, number&gt; = {};
+        function crit(id: string): number {
+          if (cp[id] !== undefined) return cp[id];
+          const s = succ[id];
+          return (cp[id] = byId[id].lat + (s.length ? Math.max(...s.map(crit)) : 0));
+        }
+        block.forEach((o) =&gt; crit(o.id));
+
+        // List scheduling on a single-issue in-order pipeline.
+        const issuedAt: Record&lt;string, number&gt; = {};
+        const done = new Set&lt;string&gt;();
+        let cycle = 0, guard = 0;
+        while (done.size &lt; block.length &amp;&amp; guard++ &lt; 100) {
+          const ready = block.filter((o) =&gt;
+            !done.has(o.id) &amp;&amp; o.deps.every((d) =&gt; done.has(d) &amp;&amp; issuedAt[d] + byId[d].lat &lt;= cycle));
+          if (ready.length === 0) { console.log(`cycle ${cycle}: (stall)`); cycle++; continue; }
+          ready.sort((a, b) =&gt; cp[b.id] - cp[a.id] || a.id.localeCompare(b.id));
+          const p = ready[0];
+          issuedAt[p.id] = cycle;
+          done.add(p.id);
+          console.log(`cycle ${cycle}: issue ${p.id}  ${p.text}   (crit=${cp[p.id]})`);
+          cycle++;
+        }
+        console.log(`finishes at cycle ${cycle - 1 + byId["i6"].lat}`);
+      </primer-code>
+      <p>
+        The loads are hoisted to cycles 0–2, their latencies overlap, and only two genuine stalls remain —
+        far better than the source order, which would stall after every load. Change a latency or add a
+        dependence and the schedule reshapes itself around the new critical path.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why not just schedule perfectly AND allocate registers perfectly?">
+      <p>
+        Because the two goals <strong>fight each other</strong> — the notorious <em>phase-ordering</em>
+        problem. A scheduler hides latency by spreading independent computations out and keeping many values
+        <em>in flight at once</em>; but every value in flight occupies a register, so aggressive scheduling
+        drives up <strong>register pressure</strong> and can force
+        <primer-ref soft to="computer-science/compiler-design/codegen/register-allocation-by-graph-colouring">the allocator</primer-ref>
+        to spill — and spills add loads and stores that create <em>new</em> latencies to schedule. Schedule
+        first and you may spill; allocate first and the allocator's register reuse adds WAR/WAW dependences
+        that shackle the scheduler. There is no universally right order; real compilers interleave the two,
+        use pressure-aware scheduling, or schedule–allocate–reschedule. It is one of the most-studied
+        tensions in back-end design.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Anti- and output dependences constrain reordering too">
+      <p>
+        It is tempting to think only <strong>RAW</strong> ("this reads what that wrote") limits reordering.
+        It does not. If instruction <primer-math>A</primer-math> reads register <code>r5</code> and a later
+        <primer-math>B</primer-math> overwrites <code>r5</code>, you <em>cannot</em> hoist
+        <primer-math>B</primer-math> above <primer-math>A</primer-math> — that is a <strong>WAR</strong>
+        anti-dependence, and violating it makes <primer-math>A</primer-math> read the wrong value. Likewise
+        two writes to the same register carry a <strong>WAW</strong> output dependence fixing their order.
+        These false dependences are not about data flow at all — they exist only because a register got
+        <em>reused</em> — but ignore them and you produce a wrong program. The good news: because they are
+        false, <strong>register renaming</strong> can often remove them, which is exactly what
+        out-of-order hardware and SSA-based compilers do to unlock more scheduling freedom.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: dependences / DAG / list scheduling / phase ordering + variable-driven critical-path / latency counts. Bank of 12, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "schedQuiz@1": {
+          "intro": "Instruction scheduling reorders a block to hide latencies without changing its meaning, respecting the dependence DAG. Numbers change every attempt.",
+          "goalQ": "The goal of instruction scheduling is to…",
+          "goHide": "reorder instructions to hide latencies and reduce pipeline stalls, preserving semantics",
+          "goFewer": "delete instructions to make the program shorter",
+          "goReg": "assign registers",
+          "goParse": "parse the source faster",
+          "rawQ": "A RAW (read-after-write) dependence is…",
+          "rawTrue": "a true data dependence — the reader must wait for the writer's value",
+          "rawFalse": "a false dependence removable by renaming",
+          "rawNone": "not a dependence at all",
+          "rawCtrl": "a control dependence",
+          "warQ": "A WAR (write-after-read) dependence is…",
+          "warAnti": "an anti-dependence — the writer must not clobber the value before the reader reads it",
+          "warTrue": "a true flow of data",
+          "warRaw": "the same thing as RAW",
+          "warCtrl": "a jump",
+          "falseQ": "Which dependences are 'false' (artefacts of reusing a register) and often removable by renaming?",
+          "flWarWaw": "WAR and WAW",
+          "flRaw": "RAW only",
+          "flAll": "all three",
+          "flNone": "none — all are fundamental",
+          "dagQ": "In the dependence DAG, an edge A -> B means…",
+          "dgDep": "B depends on A, so A must be scheduled (and complete) before B can proceed",
+          "dgSize": "A is bigger than B",
+          "dgReg": "A and B share a register",
+          "dgJump": "A jumps to B",
+          "legalQ": "Which orderings of the DAG are guaranteed to preserve program meaning?",
+          "lgTopo": "any topological order of the dependence DAG",
+          "lgAny": "any order at all",
+          "lgSorted": "only alphabetical order",
+          "lgRev": "only the reverse of the source order",
+          "critQ": "The 'critical path' of the DAG is…",
+          "crLong": "the longest latency-weighted chain — it lower-bounds the schedule length",
+          "crShort": "the shortest chain of instructions",
+          "crReg": "the path using the most registers",
+          "crFirst": "the first instruction only",
+          "listQ": "List scheduling issues, each cycle…",
+          "lsPrio": "the highest-priority READY instruction (often greatest critical-path length)",
+          "lsFirst": "the textually first instruction",
+          "lsRand": "a random instruction",
+          "lsLast": "the lowest-priority instruction",
+          "readyQ": "An instruction is 'ready' when…",
+          "rdDeps": "all its predecessors have completed (results available) by the current cycle",
+          "rdName": "its name is next alphabetically",
+          "rdReg": "it has a free register",
+          "rdAny": "always — instructions are always ready",
+          "phaseQ": "Scheduling and register allocation interact because…",
+          "phTension": "aggressive scheduling raises register pressure and may force spills (a phase-ordering tension)",
+          "phNone": "they never interact",
+          "phSame": "they are the same pass",
+          "phParse": "both happen during parsing",
+          "optQ": "Optimal instruction scheduling of a general DAG is…",
+          "opNP": "NP-hard, so compilers use heuristics like list scheduling",
+          "opEasy": "trivial and always optimal in practice",
+          "opImp": "undecidable",
+          "opLinear": "always solved optimally in linear time",
+          "critNumQ": "A dependence chain issues a load (latency ${a}), then an add (latency $1$) reading it, then a store (latency $1$) reading that. What is the latency-weighted critical-path length?",
+          "stallNumQ": "A load has latency ${L} and its result is needed by the very next instruction, with NO independent work to fill the gap. How many stall cycles must be inserted after issuing the load before the dependent instruction can issue?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="schedQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/codegen/a-simple-code-generator"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // DAG toolkit: instruction nodes (rounded boxes) + directed, latency-labelled edges.
+  function dagTools(board, colors) {
+    const boxNode = (p, label, col) => {
+      const w = 2.7, h = 0.95, x0 = p[0] - w / 2, x1 = p[0] + w / 2, y0 = p[1] - h / 2, y1 = p[1] + h / 2;
+      board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+        borders: { strokeColor: col, strokeWidth: 2 },
+        vertices: { visible: false }, fillColor: col, fillOpacity: 0.12,
+        fixed: true, highlight: false, withLabel: false,
+      });
+      board.create("text", [p[0], p[1], label], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    const arrow = (a, b, col, latency) => {
+      const dx = b[0] - a[0], dy = b[1] - a[1], d = Math.hypot(dx, dy), ux = dx / d, uy = dy / d;
+      const pad = 0.62;
+      board.create("arrow", [[a[0] + ux * pad, a[1] + uy * pad], [b[0] - ux * pad, b[1] - uy * pad]], {
+        strokeColor: col, strokeWidth: 2, fixed: true, highlight: false, lastArrow: { size: 7 },
+      });
+      board.create("text", [(a[0] + b[0]) / 2 - uy * 0.35, (a[1] + b[1]) / 2 + ux * 0.35, latency], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true, highlight: false,
+        strokeColor: col, color: col,
+      });
+    };
+    return { boxNode, arrow };
+  }
+
+  registerGeometryScene("depDag", ({ board, step, colors }) => {
+    const T = dagTools(board, colors);
+    const i1 = [-4, 4], i2 = [-0.3, 4], i4 = [4, 4], i3 = [-2, 1], i5 = [1.5, -1.6], i6 = [1.5, -4.2];
+
+    step("Three independent loads — no incoming edges, so they may be scheduled in any order.", () => {
+      T.boxNode(i1, "i1: LD r1,a", colors.cat[0]);
+      T.boxNode(i2, "i2: LD r2,b", colors.cat[0]);
+      T.boxNode(i4, "i4: LD r4,c", colors.cat[0]);
+    });
+    step("i3 = ADD r3,r1,r2 has RAW edges from i1 and i2 (latency 3 each).", () => {
+      T.boxNode(i3, "i3: ADD r3", colors.cat[1]);
+      T.arrow(i1, i3, colors.cat[1], "3");
+      T.arrow(i2, i3, colors.cat[1], "3");
+    });
+    step("i5 = MUL r5,r3,r4 depends on i3 (latency 1) and i4 (latency 3).", () => {
+      T.boxNode(i5, "i5: MUL r5", colors.cat[2]);
+      T.arrow(i3, i5, colors.cat[2], "1");
+      T.arrow(i4, i5, colors.cat[2], "3");
+    });
+    step("i6 = ST x,r5 depends on i5 (latency 2). Critical path i1→i3→i5→i6 = 3+1+2+1 = 7.", () => {
+      T.boxNode(i6, "i6: ST x,r5", colors.cat[3]);
+      T.arrow(i5, i6, colors.cat[3], "2");
+    });
+  }, { boundingbox: [-6.2, 5, 6.2, -5.4], keepAspect: false, title: "Dependence DAG for x = (a+b)×c" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("schedQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("goalQ"),
+      options: [
+        { text: () => sceneStrings("goHide"), correct: true },
+        { text: () => sceneStrings("goFewer"), correct: false },
+        { text: () => sceneStrings("goReg"), correct: false },
+        { text: () => sceneStrings("goParse"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rawQ"),
+      options: [
+        { text: () => sceneStrings("rawTrue"), correct: true },
+        { text: () => sceneStrings("rawFalse"), correct: false },
+        { text: () => sceneStrings("rawNone"), correct: false },
+        { text: () => sceneStrings("rawCtrl"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("warQ"),
+      options: [
+        { text: () => sceneStrings("warAnti"), correct: true },
+        { text: () => sceneStrings("warTrue"), correct: false },
+        { text: () => sceneStrings("warRaw"), correct: false },
+        { text: () => sceneStrings("warCtrl"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("falseQ"),
+      options: [
+        { text: () => sceneStrings("flWarWaw"), correct: true },
+        { text: () => sceneStrings("flRaw"), correct: false },
+        { text: () => sceneStrings("flAll"), correct: false },
+        { text: () => sceneStrings("flNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dagQ"),
+      options: [
+        { text: () => sceneStrings("dgDep"), correct: true },
+        { text: () => sceneStrings("dgSize"), correct: false },
+        { text: () => sceneStrings("dgReg"), correct: false },
+        { text: () => sceneStrings("dgJump"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("legalQ"),
+      options: [
+        { text: () => sceneStrings("lgTopo"), correct: true },
+        { text: () => sceneStrings("lgAny"), correct: false },
+        { text: () => sceneStrings("lgSorted"), correct: false },
+        { text: () => sceneStrings("lgRev"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("critQ"),
+      options: [
+        { text: () => sceneStrings("crLong"), correct: true },
+        { text: () => sceneStrings("crShort"), correct: false },
+        { text: () => sceneStrings("crReg"), correct: false },
+        { text: () => sceneStrings("crFirst"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("listQ"),
+      options: [
+        { text: () => sceneStrings("lsPrio"), correct: true },
+        { text: () => sceneStrings("lsFirst"), correct: false },
+        { text: () => sceneStrings("lsRand"), correct: false },
+        { text: () => sceneStrings("lsLast"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("readyQ"),
+      options: [
+        { text: () => sceneStrings("rdDeps"), correct: true },
+        { text: () => sceneStrings("rdName"), correct: false },
+        { text: () => sceneStrings("rdReg"), correct: false },
+        { text: () => sceneStrings("rdAny"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("phaseQ"),
+      options: [
+        { text: () => sceneStrings("phTension"), correct: true },
+        { text: () => sceneStrings("phNone"), correct: false },
+        { text: () => sceneStrings("phSame"), correct: false },
+        { text: () => sceneStrings("phParse"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("optQ"),
+      options: [
+        { text: () => sceneStrings("opNP"), correct: true },
+        { text: () => sceneStrings("opEasy"), correct: false },
+        { text: () => sceneStrings("opImp"), correct: false },
+        { text: () => sceneStrings("opLinear"), correct: false },
+      ],
+    },
+    {
+      // Critical path = load latency a + add latency 1 + store latency 1.
+      prompt: (v) => sceneStrings("critNumQ", v),
+      variables: "a=[2:6]",
+      answer: (v) => v.a + 2,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // A latency-L load with a dependent next instruction and no filler stalls for L-1 cycles.
+      prompt: (v) => sceneStrings("stallNumQ", v),
+      variables: "L=[2:6]",
+      answer: (v) => v.L - 1,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

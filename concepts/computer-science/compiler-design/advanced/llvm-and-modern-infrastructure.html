@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>LLVM and Modern Compiler Infrastructure</primer-title>
+
+    <primer-card>
+      <p>
+        For decades every serious compiler was a monolith: a front end, optimiser and back end welded together,
+        sharing private data structures, impossible to reuse. Writing a compiler for a new language meant
+        rebuilding the optimiser and every code generator from scratch. <strong>LLVM</strong> — begun by Chris
+        Lattner in the early 2000s — dissolved that monolith by insisting on one radical discipline: a single,
+        well-specified <strong>intermediate representation</strong> that <em>every</em> front end targets and
+        <em>every</em> back end consumes. Get your language down to LLVM IR and you inherit, for free, a
+        world-class optimiser and code generation for x86, ARM, RISC-V, GPUs and more.
+      </p>
+      <p>
+        The payoff is the "<strong>hourglass</strong>" architecture. Many source languages funnel down through
+        their front ends into the narrow waist — LLVM IR — and then fan back out to many machine targets. The
+        waist is the whole trick: because every optimisation and every back end speaks exactly one IR, the
+        <primer-math>m</primer-math> front ends and <primer-math>n</primer-math> back ends need
+        <primer-math>m + n</primer-math> pieces of engineering instead of <primer-math>m \times n</primer-math>.
+      </p>
+      <primer-geometry scene="hourglass"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The IR: a typed, SSA, virtual assembly language</h2>
+      <p>
+        LLVM IR is not bytecode and not source — it is a low-level, RISC-like <em>virtual instruction set</em>
+        with two defining properties that make it a superb optimisation substrate:
+      </p>
+      <primer-theorem name="What LLVM IR is">
+        <ul>
+          <li><strong>Statically typed.</strong> Every value has an explicit type — <code>i32</code>, <code>double</code>, <code>i8*</code>, <code>[4 x i32]</code> — so passes can reason about sizes, alignment and legality without guessing.</li>
+          <li><strong>In <primer-ref to="computer-science/compiler-design/ir/static-single-assignment-form">SSA form</primer-ref>.</strong> Every virtual register is assigned exactly once; <code>phi</code> nodes merge values at control-flow joins. Unlimited virtual registers, so def-use chains are explicit and dataflow is trivial to follow.</li>
+          <li><strong>Three isomorphic forms.</strong> The same IR exists as a human-readable text file (<code>.ll</code>), a compact binary <em>bitcode</em> (<code>.bc</code>), and an in-memory C++ data structure — you can round-trip between them losslessly.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Here is what a small function looks like in the textual IR. Note the explicit types on every operand,
+        the single-assignment virtual registers <code>%…</code>, and the <code>phi</code> node that reconciles
+        the two predecessors of the loop-free branch:
+      </p>
+      <primer-code lang="text">
+        ; int max(int a, int b) { return a > b ? a : b; }
+        define i32 @max(i32 %a, i32 %b) {
+        entry:
+          %cmp = icmp sgt i32 %a, %b        ; signed a > b  ->  i1
+          br i1 %cmp, label %ret_a, label %ret_b
+
+        ret_a:
+          br label %done
+        ret_b:
+          br label %done
+
+        done:
+          ; phi picks the value based on which block we came from (SSA merge)
+          %r = phi i32 [ %a, %ret_a ], [ %b, %ret_b ]
+          ret i32 %r
+        }
+      </primer-code>
+      <p>
+        Every front end — no matter how different C, Rust and Swift are on the surface — lowers to exactly this
+        kind of typed SSA. From here on, the optimiser neither knows nor cares which language it came from.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The pass manager and the pipeline</h2>
+      <p>
+        LLVM's optimiser is a <strong>pipeline of passes</strong>, each a self-contained transformation or
+        analysis over the IR, sequenced and scheduled by the <strong>pass manager</strong>. The crucial
+        distinction:
+      </p>
+      <ul>
+        <li>
+          <strong>Analysis passes</strong> compute information without changing the IR — dominator trees, loop
+          info, alias analysis, scalar evolution. They <em>produce</em> results other passes consume.
+        </li>
+        <li>
+          <strong>Transform passes</strong> rewrite the IR — mem2reg (promote stack slots to SSA registers),
+          instruction combining, GVN, dead-code elimination, inlining, loop unrolling, vectorization.
+        </li>
+      </ul>
+      <p>
+        Passes have <strong>dependencies</strong>: a transform declares which analyses it needs, and the pass
+        manager makes sure those are available and — critically — tracks which analyses a transform
+        <em>invalidates</em>, so stale information is recomputed rather than trusted. A transform runs, possibly
+        invalidating the dominator tree; the next pass that needs it triggers a fresh computation. This
+        bookkeeping is exactly what lets dozens of passes compose safely into the pipelines behind
+        <code>-O2</code> and <code>-O3</code>. (LLVM's modern "new pass manager" makes this dependency and
+        invalidation tracking explicit and fast.)
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Link-time optimisation</h2>
+      <p>
+        Ordinary compilation optimises one translation unit at a time; a call across a file boundary is opaque,
+        so no inlining or interprocedural reasoning can cross it. <strong>Link-time optimisation (LTO)</strong>
+        breaks that wall. Each source file is compiled to LLVM <em>bitcode</em> rather than final machine code;
+        at link time the bitcode modules are combined and the optimiser runs across the <em>whole program</em> —
+        now able to inline across files, propagate constants globally, and prune truly-dead functions.
+      </p>
+      <p>
+        Full LTO merges everything into one giant module (maximally precise, but memory-hungry and serial).
+        <strong>ThinLTO</strong> is the scalable compromise: it builds a lightweight cross-module summary index,
+        then optimises each module in parallel while importing just the functions worth inlining from others —
+        most of LTO's benefit at a fraction of the cost, which is why it is the production default.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>MLIR: raising the IR to many levels</h2>
+      <p>
+        LLVM IR sits at one level of abstraction — roughly, typed scalar assembly. But a compiler for machine
+        learning, or for a high-level DSL, wants to optimise at <em>higher</em> levels too: tensor operations,
+        loop nests, dataflow graphs, whole domain-specific constructs that flatten badly into LLVM IR's low-level
+        world. <strong>MLIR (Multi-Level IR)</strong>, the modern evolution from the LLVM project, answers this
+        with <strong>dialects</strong>: a common IR infrastructure in which many co-existing sub-languages —
+        a <code>tensor</code> dialect, an <code>affine</code> dialect (loops as polyhedra), a <code>gpu</code>
+        dialect, and ultimately the <code>llvm</code> dialect — live in one framework and are
+        <strong>progressively lowered</strong> from high abstraction to low.
+      </p>
+      <p>
+        The philosophy is the same one that made LLVM win, applied one level up: don't force everything into a
+        single fixed abstraction; provide shared infrastructure (the pass manager, the printer, the verifier,
+        the rewrite engine) that <em>many</em> IRs can reuse, and lower between them in steps. MLIR is the
+        backbone of modern ML compilers (TensorFlow, IREE, the Torch stack) for exactly this reason.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Counting the hourglass advantage</h2>
+      <p>
+        The economic argument for the shared-IR model is worth making concrete. Without a common waist, every
+        front end needs its own back end for every target — a full <primer-math>m \times n</primer-math> matrix.
+        With the waist, you write each front end once and each back end once.
+      </p>
+      <primer-code run>
+        // The hourglass economics: m front ends, n back ends.
+        function withoutSharedIR(m: number, n: number): number { return m * n; } // one back end per (lang, target)
+        function withSharedIR(m: number, n: number): number { return m + n; }    // each written once
+
+        const langs = 5;    // C, C++, Rust, Swift, Julia
+        const targets = 6;  // x86, ARM, RISC-V, PowerPC, WebAssembly, GPU
+
+        const naive = withoutSharedIR(langs, targets);
+        const llvm = withSharedIR(langs, targets);
+        console.log(`without shared IR: ${naive} language-target back ends`);
+        console.log(`with LLVM IR:      ${llvm} pieces (${langs} front ends + ${targets} back ends)`);
+        console.log(`saved: ${naive - llvm} pieces of engineering`);
+      </primer-code>
+      <p>
+        Five languages and six targets: 30 bespoke back ends collapse to 11 reusable pieces. That
+        multiplicative-to-additive collapse is <em>why</em> Clang, rustc, the Swift compiler, Julia, and dozens
+        of research languages all chose to emit LLVM IR rather than build their own back ends.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why did LLVM win when earlier reusable-compiler efforts didn't?">
+      <p>
+        Two engineering decisions, mostly. First, <strong>library design</strong>: LLVM was built as a set of
+        modular C++ libraries with clean APIs, not a take-it-or-leave-it monolithic tool — you could embed the
+        optimiser in a JIT, a shader compiler, or a database query engine and use only the parts you needed.
+        Second, a <strong>stable, well-documented, textual IR</strong> that was pleasant to read, easy to emit,
+        and durable across versions, so front-end authors could target it confidently. Add a permissive licence
+        (which let companies adopt it without friction) and Clang proving the whole stack could match GCC on a
+        real C/C++ compiler, and you get a virtuous cycle: more front ends justified more back-end investment,
+        which attracted more front ends. GCC had long had an internal IR (GIMPLE/RTL), but it was deliberately
+        <em>not</em> exposed as a reusable substrate — LLVM's bet that the IR itself should be a public product
+        is what made the ecosystem.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! LLVM IR is not portable bytecode you can ship">
+      <p>
+        A tempting misconception is to treat LLVM IR (or its bitcode) like Java bytecode or WebAssembly — a
+        universal, target-independent artifact you distribute and run anywhere. It is not. LLVM IR carries
+        <strong>target-specific assumptions</strong> almost from the start: data-layout strings fix pointer
+        size, endianness and alignment; the ABI, calling conventions, and even which operations are legal depend
+        on the target the front end had in mind. As the pipeline <em>lowers</em> toward machine code it becomes
+        progressively more target-committed. So a <code>.bc</code> file produced for 64-bit ARM is not a clean
+        drop-in for 32-bit x86. LLVM IR is a compiler's <em>internal</em> waist for optimisation and code
+        generation — brilliant at that job — not a portable shipping format. When people want genuine "compile
+        once, run anywhere", they reach for WebAssembly or a VM bytecode, not raw LLVM IR.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "llvmQuiz@1": {
+          "intro": "LLVM centres a typed SSA IR that many front ends target and many back ends consume — the hourglass. Numbers change every attempt.",
+          "hourQ": "In LLVM's 'hourglass' architecture, the narrow waist is…",
+          "hIR": "a single shared IR that every front end targets and every back end consumes",
+          "hCPU": "one specific CPU",
+          "hOS": "the operating system kernel",
+          "hLang": "one specific source language",
+          "irQ": "LLVM IR is best described as…",
+          "iSSA": "a typed, SSA-form, RISC-like virtual instruction set",
+          "iSrc": "the original source code, unchanged",
+          "iByte": "untyped portable bytecode with no types",
+          "iTree": "an abstract syntax tree",
+          "ssaQ": "That LLVM IR is in SSA form means…",
+          "sOnce": "every virtual register is assigned exactly once, with phi nodes at merges",
+          "sMany": "registers can be reassigned freely",
+          "sNoType": "values have no types",
+          "sStack": "everything lives on the stack",
+          "analysisQ": "An LLVM analysis pass…",
+          "anInfo": "computes information (e.g. dominators, alias info) without changing the IR",
+          "anRewrite": "always rewrites the IR aggressively",
+          "anEmit": "emits final machine code",
+          "anLink": "links object files",
+          "transQ": "An LLVM transform pass…",
+          "trRewrite": "rewrites the IR — e.g. inlining, GVN, dead-code elimination",
+          "trReadonly": "only reads the IR, never changing it",
+          "trParse": "parses the source language",
+          "trSchedule": "schedules threads at runtime",
+          "invalQ": "Why must the pass manager track which analyses a transform invalidates?",
+          "invStale": "so stale analysis results are recomputed rather than trusted",
+          "invSpeed": "to make the clock faster",
+          "invRam": "to free all memory",
+          "invType": "to type-check the source",
+          "ltoQ": "Link-time optimisation (LTO) enables…",
+          "ltoWhole": "whole-program optimisation across file boundaries, e.g. cross-file inlining",
+          "ltoNo": "optimising a single function only",
+          "ltoParse": "faster parsing",
+          "ltoGC": "garbage collection",
+          "thinQ": "ThinLTO differs from full LTO by…",
+          "thinPar": "using a summary index to optimise modules in parallel, importing only what's worth inlining",
+          "thinNo": "disabling all optimisation",
+          "thinSrc": "recompiling from source each time",
+          "thinOne": "merging everything into one serial module (that's full LTO)",
+          "mlirQ": "MLIR extends the LLVM idea by providing…",
+          "mDialects": "multiple co-existing IR dialects, progressively lowered from high to low abstraction",
+          "mOne": "exactly one fixed low-level IR and nothing else",
+          "mCPU": "a new CPU design",
+          "mGC": "a garbage collector",
+          "portQ": "Is a raw LLVM bitcode (.bc) file a portable 'compile once, run anywhere' format?",
+          "pNo": "No — it carries target-specific assumptions (data layout, ABI) and grows more target-committed as it lowers",
+          "pYes": "Yes — it runs unchanged on any CPU",
+          "pJava": "Yes — it is identical to Java bytecode",
+          "pText": "Yes, but only in textual form",
+          "hourNumQ": "With $m = {m}$ front ends and $n = {n}$ back ends, how many reusable pieces does the shared-IR (m + n) model need?",
+          "saveNumQ": "With {m} front ends and {n} back ends, how many language-target back ends does the naive m × n model require?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="llvmQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/ir/static-single-assignment-form",
+      "computer-science/compiler-design/optimization/the-dataflow-analysis-framework"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  function graphTools(board, colors) {
+    const box = (cx, cy, w, h, col, name) => {
+      board.create("polygon", [
+        [cx - w / 2, cy - h / 2], [cx + w / 2, cy - h / 2],
+        [cx + w / 2, cy + h / 2], [cx - w / 2, cy + h / 2],
+      ], { strokeColor: col, strokeWidth: 2, fillColor: col, fillOpacity: 0.12, fixed: true, highlight: false,
+           vertices: { visible: false }, borders: { strokeColor: col } });
+      board.create("text", [cx, cy, name], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    const arrow = (a, b, col) =>
+      board.create("arrow", [a, b], { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false, lastArrow: { size: 5 } });
+    return { box, arrow };
+  }
+
+  registerGeometryScene("hourglass", ({ board, step, colors }) => {
+    const T = graphTools(board, colors);
+    const w = 2.4, h = 1.0;
+    const fronts = [["clang (C/C++)", 3], ["rustc", 0], ["swiftc", -3]];
+    const backs = [["x86-64", 3], ["AArch64", 0], ["RISC-V", -3]];
+    const waist = [0, 0];
+
+    step("Many front ends: clang, rustc, swiftc …", () => {
+      fronts.forEach(([name, y], i) => T.box(-6, y, w, h, colors.cat[i], name));
+    });
+    step("… all lower into one shared waist: LLVM IR (typed SSA).", () => {
+      T.box(waist[0], waist[1], 3, 1.3, colors.cat[3], "LLVM IR");
+      fronts.forEach(([, y], i) => T.arrow([-6 + w / 2, y], [waist[0] - 1.5, waist[1] + y * 0.12], colors.cat[i]));
+    });
+    step("The optimiser (pass pipeline) runs entirely on the IR.", () => {
+      board.create("text", [0, 1.9, "optimiser: analysis + transform passes"], {
+        anchorX: "middle", fontSize: 12, fixed: true, highlight: false, strokeColor: colors.ink, color: colors.ink,
+      });
+    });
+    step("… then fans out to many back ends: x86, ARM, RISC-V …", () => {
+      backs.forEach(([name, y], i) => {
+        T.box(6, y, w, h, colors.cat[i], name);
+        T.arrow([waist[0] + 1.5, waist[1] + y * 0.12], [6 - w / 2, y], colors.cat[i]);
+      });
+    });
+  }, { boundingbox: [-8, 3, 8, -4.4], keepAspect: false, title: "LLVM's hourglass: m front ends + n back ends, one IR waist" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("llvmQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("hourQ"),
+      options: [
+        { text: () => sceneStrings("hIR"), correct: true },
+        { text: () => sceneStrings("hCPU"), correct: false },
+        { text: () => sceneStrings("hOS"), correct: false },
+        { text: () => sceneStrings("hLang"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("irQ"),
+      options: [
+        { text: () => sceneStrings("iSSA"), correct: true },
+        { text: () => sceneStrings("iSrc"), correct: false },
+        { text: () => sceneStrings("iByte"), correct: false },
+        { text: () => sceneStrings("iTree"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ssaQ"),
+      options: [
+        { text: () => sceneStrings("sOnce"), correct: true },
+        { text: () => sceneStrings("sMany"), correct: false },
+        { text: () => sceneStrings("sNoType"), correct: false },
+        { text: () => sceneStrings("sStack"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("analysisQ"),
+      options: [
+        { text: () => sceneStrings("anInfo"), correct: true },
+        { text: () => sceneStrings("anRewrite"), correct: false },
+        { text: () => sceneStrings("anEmit"), correct: false },
+        { text: () => sceneStrings("anLink"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("transQ"),
+      options: [
+        { text: () => sceneStrings("trRewrite"), correct: true },
+        { text: () => sceneStrings("trReadonly"), correct: false },
+        { text: () => sceneStrings("trParse"), correct: false },
+        { text: () => sceneStrings("trSchedule"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("invalQ"),
+      options: [
+        { text: () => sceneStrings("invStale"), correct: true },
+        { text: () => sceneStrings("invSpeed"), correct: false },
+        { text: () => sceneStrings("invRam"), correct: false },
+        { text: () => sceneStrings("invType"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ltoQ"),
+      options: [
+        { text: () => sceneStrings("ltoWhole"), correct: true },
+        { text: () => sceneStrings("ltoNo"), correct: false },
+        { text: () => sceneStrings("ltoParse"), correct: false },
+        { text: () => sceneStrings("ltoGC"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("thinQ"),
+      options: [
+        { text: () => sceneStrings("thinPar"), correct: true },
+        { text: () => sceneStrings("thinNo"), correct: false },
+        { text: () => sceneStrings("thinSrc"), correct: false },
+        { text: () => sceneStrings("thinOne"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("mlirQ"),
+      options: [
+        { text: () => sceneStrings("mDialects"), correct: true },
+        { text: () => sceneStrings("mOne"), correct: false },
+        { text: () => sceneStrings("mCPU"), correct: false },
+        { text: () => sceneStrings("mGC"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("portQ"),
+      options: [
+        { text: () => sceneStrings("pNo"), correct: true },
+        { text: () => sceneStrings("pYes"), correct: false },
+        { text: () => sceneStrings("pJava"), correct: false },
+        { text: () => sceneStrings("pText"), correct: false },
+      ],
+    },
+    {
+      // shared-IR pieces = m + n.
+      prompt: (v) => sceneStrings("hourNumQ", v),
+      variables: "m=[2:8] n=[2:8]",
+      answer: (v) => v.m + v.n,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // naive back ends = m * n.
+      prompt: (v) => sceneStrings("saveNumQ", v),
+      variables: "m=[2:8] n=[2:8]",
+      answer: (v) => v.m * v.n,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

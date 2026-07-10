@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Disks and I/O Scheduling</primer-title>
+
+    <primer-card>
+      <p>
+        A hard disk is the last great mechanical device in your computer: a stack of platters spinning at
+        5 400–15 000 RPM under a head that must physically <em>fly</em> to the right track before it can read a
+        byte. That machinery makes the disk the one place in the system where <strong>the order you issue
+        requests changes how long they take</strong> — sometimes by an order of magnitude. The
+        <primer-ref to="computer-science/advanced-operating-systems/storage/the-block-io-layer">block layer's</primer-ref>
+        power to <em>reorder</em> requests exists almost entirely to serve this device.
+      </p>
+      <p>
+        This lesson does two things. First, the mechanics: exactly what makes a random read cost ~10 ms while a
+        sequential read of the same data costs almost nothing. Second, the classic <strong>disk-scheduling
+        algorithms</strong> — FCFS, SSTF, the SCAN "elevator" family, deadline, CFQ/BFQ — and the twist that
+        makes half of them obsolete on an SSD, where there is no head to move at all.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The anatomy of one disk access</h2>
+      <p>
+        The time to service a single random request is a sum of three physically distinct parts:
+      </p>
+      <primer-math display>T_{\text{access}} \;=\; T_{\text{seek}} \;+\; T_{\text{rotation}} \;+\; T_{\text{transfer}}</primer-math>
+      <ul>
+        <li><strong>Seek time</strong> — moving the arm to the target track. A full stroke is ~10–15 ms; an
+          <em>average</em> seek is ~4–10 ms. This dominates.</li>
+        <li><strong>Rotational latency</strong> — waiting for the target sector to rotate under the head. On
+          average, half a revolution. At 7 200 RPM that is one revolution every
+          <primer-math>60/7200 = 8.33</primer-math> ms, so ~<strong>4.17 ms</strong> on average.</li>
+        <li><strong>Transfer time</strong> — the data streaming past the head once you are there. At ~200 MB/s a
+          4 KiB block transfers in ~20 µs — <em>negligible</em> beside the seek and rotation.</li>
+      </ul>
+      <p>
+        Add them up: a random 4 KiB read is roughly <primer-math>8 + 4.17 + 0.02 \approx 12</primer-math> ms, of
+        which <strong>99.8% is mechanical positioning</strong>. Now read the <em>next</em> block sequentially: no
+        seek, no rotational wait — just 20 µs of transfer. That is why <strong>sequential ≫ random</strong> on a
+        HDD, by a factor of hundreds. Every storage design in this module is, at bottom, a scheme to convert
+        random access into sequential.
+      </p>
+      <primer-geometry scene="platter"></primer-geometry>
+    </primer-card>
+
+    <!-- Strings for the platter figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "platter": {
+          "title": "A disk access = seek (arm to track) + rotation (sector under head) + transfer",
+          "spindle": "spindle",
+          "head": "head + arm",
+          "seekLbl": "seek: move arm across tracks",
+          "rotLbl": "rotation: platter spins sector under head",
+          "target": "target sector"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Scheduling: reordering the queue to cut head travel</h2>
+      <p>
+        Because seek time grows with how far the head moves, and because many requests sit in the queue at once,
+        the OS can <em>reorder</em> them to shrink total head travel. This is the classic disk-scheduling problem.
+        Suppose the head is at cylinder 53 and the queue holds requests for
+        <primer-math>98, 183, 37, 122, 14, 124, 65, 67</primer-math>.
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th>Algorithm</th><th>Idea</th><th>Strength</th><th>Weakness</th></tr></thead>
+          <tbody>
+            <tr><td><strong>FCFS</strong></td><td>serve in arrival order</td><td>fair, simple, no starvation</td><td>wild head swings — worst travel</td></tr>
+            <tr><td><strong>SSTF</strong></td><td>always nearest request next</td><td>low average seek</td><td><em>starves</em> far-away requests</td></tr>
+            <tr><td><strong>SCAN</strong> (elevator)</td><td>sweep one way, then reverse</td><td>bounded wait, good travel</td><td>edges wait longest</td></tr>
+            <tr><td><strong>C-SCAN</strong></td><td>sweep one way, snap back, repeat</td><td>uniform wait times</td><td>the return trip is "wasted"</td></tr>
+            <tr><td><strong>Deadline</strong></td><td>elevator + expiry deadlines</td><td>bounds worst-case latency</td><td>slightly lower throughput</td></tr>
+            <tr><td><strong>CFQ / BFQ</strong></td><td>fair-share time slices per process</td><td>interactive fairness</td><td>overhead; less raw throughput</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The <strong>elevator</strong> metaphor is the key intuition: a lift does not rush to whoever pressed the
+        button most recently (that would ping-pong forever). It sweeps steadily up serving every request in its
+        path, then sweeps down. SCAN does exactly this with the disk head — bounding how long any request can
+        wait while still keeping the arm moving efficiently. <strong>Deadline</strong> refines it by attaching an
+        expiry to each request (e.g. reads 500 ms, writes 5 s); an expiring request jumps the queue, guaranteeing
+        no request starves — the default choice on Linux for spinning disks.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Elevator vs FCFS: count the head travel</h2>
+      <p>
+        The simulation runs the same request queue through <strong>FCFS</strong> (arrival order) and
+        <strong>SCAN</strong> (the elevator, sweeping toward larger cylinders first), and totals the head
+        movement. The elevator's win is the reduction in total cylinders travelled — directly proportional to
+        total seek time.
+      </p>
+      <primer-code run>
+        // FCFS vs SCAN (elevator). Head starts at 53; disk has cylinders 0..199.
+        const start = 53, MAXCYL = 199;
+        const queue = [98, 183, 37, 122, 14, 124, 65, 67];
+
+        // FCFS: serve in arrival order.
+        let head = start, fcfs = 0;
+        for (const c of queue) { fcfs += Math.abs(c - head); head = c; }
+
+        // SCAN: sweep UP to the end serving everything >= start, then sweep DOWN.
+        head = start;
+        let scan = 0;
+        const up = queue.filter((c) =&gt; c &gt;= start).sort((a, b) =&gt; a - b);
+        const down = queue.filter((c) =&gt; c &lt; start).sort((a, b) =&gt; b - a);
+        for (const c of up)   { scan += Math.abs(c - head); head = c; }
+        scan += Math.abs(MAXCYL - head); head = MAXCYL;   // reach the edge, then reverse
+        for (const c of down) { scan += Math.abs(c - head); head = c; }
+
+        console.log(`FCFS order: ${[start, ...queue].join(" -> ")}`);
+        console.log(`FCFS total head movement: ${fcfs} cylinders`);
+        console.log(`SCAN order: ${[start, ...up, MAXCYL, ...down].join(" -> ")}`);
+        console.log(`SCAN total head movement: ${scan} cylinders`);
+        console.log(`elevator saves ${fcfs - scan} cylinders of travel (${(100 * (fcfs - scan) / fcfs).toFixed(0)}% less)`);
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="Why does an SSD use the 'no-op' scheduler?">
+      <p>
+        Every scheduler above optimises for <em>one</em> physical fact: moving the head is slow and distance
+        matters. An SSD has <strong>no head</strong>. Any logical block is reachable in about the same ~100 µs no
+        matter where the last one was — access time is essentially <em>uniform and random-friendly</em>. So the
+        elaborate elevator logic buys nothing and its sorting overhead actually <em>hurts</em>. That is why Linux
+        pairs SSDs with <code>none</code> (the old "noop") or the lightweight <code>mq-deadline</code>/<code>kyber</code>
+        schedulers: skip the reordering, just merge adjacent requests and fire them at the device's many parallel
+        queues as fast as possible. The scheduler you pick is a statement about the <em>physics</em> of the media
+        underneath — and NVMe's blk-mq multi-queue design leans into that parallelism rather than fighting it.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! SSTF is not the same as SCAN — and it can starve">
+      <p>
+        Students often blur "shortest seek" (SSTF) with "the elevator" (SCAN) because both prefer nearby
+        requests. They are different, and the difference is <strong>starvation</strong>. SSTF <em>always</em>
+        jumps to the globally nearest pending request. If a steady trickle of requests keeps arriving near the
+        head, a lone request out at cylinder 190 can wait <em>forever</em> — it is never the nearest. SCAN cannot
+        do this: it commits to a direction and sweeps, so every request is guaranteed service within one full
+        pass, no matter how many closer ones arrive. Low average seek is not enough; a real scheduler must also
+        bound the <em>worst</em> case. That is the whole reason deadline schedulers exist.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>A worked seek-time example</h2>
+      <p>
+        Put numbers on a single access. A 7 200 RPM disk has average seek 9 ms and transfers at 150 MB/s. What is
+        the expected time to read one random 4 KiB block?
+      </p>
+      <ul>
+        <li>Seek: <primer-math>9</primer-math> ms (given average).</li>
+        <li>Rotation: one revolution is <primer-math>60000/7200 = 8.33</primer-math> ms, so average
+          <primer-math>8.33/2 = 4.17</primer-math> ms.</li>
+        <li>Transfer: <primer-math>4\text{ KiB} / 150\text{ MB/s} \approx 0.027</primer-math> ms.</li>
+        <li><strong>Total</strong>: <primer-math>9 + 4.17 + 0.027 \approx 13.2</primer-math> ms → about
+          <strong>76 random IOPS</strong>. Compare an NVMe SSD at hundreds of thousands of IOPS.</li>
+      </ul>
+      <primer-theorem name="Disk access & scheduling — the essentials">
+        <ul>
+          <li><strong>access time = seek + rotational latency + transfer</strong>; on a HDD the first two
+            (mechanical) dominate, so <strong>sequential ≫ random</strong>;</li>
+          <li>average rotational latency is <strong>half a revolution</strong> =
+            <primer-math>\tfrac{1}{2}\cdot\tfrac{60}{\text{RPM}}</primer-math>;</li>
+          <li><strong>SSTF</strong> minimises average seek but can <strong>starve</strong> distant requests;
+            <strong>SCAN/C-SCAN</strong> (the elevator) bound waiting time;</li>
+          <li><strong>SSDs</strong> have uniform access, so they use <code>none</code>/<code>mq-deadline</code> —
+            reordering by distance is pointless without a head.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Quiz: disk mechanics + scheduling concepts + numeric seek/rotation calcs.
+         Variables avoid evaluator collisions (rpm, sk, tr, hd, a, b). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "diskQuiz@1": {
+          "intro": "HDD access = seek + rotational latency + transfer (mechanics dominate, so sequential wins); the FCFS/SSTF/SCAN/C-SCAN/deadline schedulers; and why SSDs need none of it.",
+          "partsQ": "The three components of a single HDD access time are…",
+          "paRight": "seek time, rotational latency, and transfer time",
+          "paWrong1": "compile, link, and load time",
+          "paWrong2": "cache, TLB, and page-fault time",
+          "paWrong3": "encryption, compression, and checksum time",
+          "seqQ": "Sequential reads vastly beat random reads on a HDD because…",
+          "seRight": "sequential access avoids the seek and rotational latency that dominate a random access",
+          "seWrong1": "sequential data is compressed",
+          "seWrong2": "random reads use more electricity only",
+          "seWrong3": "there is no difference on a HDD",
+          "rotQ": "Average rotational latency equals…",
+          "roRight": "half of one revolution's time",
+          "roWrong1": "a full revolution's time",
+          "roWrong2": "the seek time",
+          "roWrong3": "the transfer time of one block",
+          "sstfQ": "The danger of the SSTF (shortest-seek-time-first) scheduler is…",
+          "ssRight": "starvation — a distant request may never be the nearest if closer ones keep arriving",
+          "ssWrong1": "it moves the head too far every time",
+          "ssWrong2": "it cannot be implemented",
+          "ssWrong3": "it only works on SSDs",
+          "scanQ": "The SCAN ('elevator') scheduler works by…",
+          "scRight": "sweeping in one direction serving all requests in its path, then reversing",
+          "scWrong1": "always jumping to the most recent request",
+          "scWrong2": "serving requests in random order",
+          "scWrong3": "ignoring the queue entirely",
+          "cscanQ": "C-SCAN differs from SCAN by…",
+          "csRight": "snapping back to the start after each sweep, giving more uniform wait times",
+          "csWrong1": "never reversing direction and serving nothing",
+          "csWrong2": "using two disk heads",
+          "csWrong3": "sorting by process priority only",
+          "deadlineQ": "The deadline scheduler prevents starvation by…",
+          "deRight": "attaching an expiry to each request so an expiring one jumps the elevator queue",
+          "deWrong1": "deleting old requests",
+          "deWrong2": "doubling the disk speed",
+          "deWrong3": "serving only writes",
+          "ssdQ": "SSDs typically use the 'none'/mq-deadline scheduler because…",
+          "sdRight": "with no head to move, access is uniform, so distance-based reordering buys nothing",
+          "sdWrong1": "SSDs cannot queue requests",
+          "sdWrong2": "SSDs have a much slower seek than HDDs",
+          "sdWrong3": "the elevator algorithm is illegal on flash",
+          "fairQ": "CFQ/BFQ schedulers primarily aim to provide…",
+          "faRight": "fair sharing of disk bandwidth among competing processes",
+          "faWrong1": "the absolute maximum raw throughput",
+          "faWrong2": "encryption of all I/O",
+          "faWrong3": "wear leveling of flash cells",
+          "rotNumQ": "A disk spins at {rpm} RPM. What is its AVERAGE rotational latency, in milliseconds? (average = half a revolution; answer to 2 dp)",
+          "accNumQ": "Average seek is {sk} ms and average rotational latency is {rot} ms. Ignoring transfer, what is the average access time in ms?",
+          "iopsNumQ": "If a random access averages {at} ms, how many random reads can the disk do per second (IOPS)? Round to the nearest whole number. (IOPS = 1000 / at)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="diskQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/storage/the-block-io-layer"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The platter: a circle (platter) with a spindle dot, a target-sector wedge, and an arm/head arrow that
+     seeks across a couple of concentric track circles. Static BASE content, visible on load.
+     Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "platter",
+    ({ board, colors, sceneStrings }) => {
+      const cx = 0, cy = 0;
+      // Platter and a couple of tracks.
+      board.create("circle", [[cx, cy], 3.0], {
+        strokeColor: colors.line, strokeWidth: 1.5, fillColor: colors.cat[0], fillOpacity: 0.12,
+        fixed: true, highlight: false,
+      });
+      [1.2, 2.0, 2.7].forEach((r) => board.create("circle", [[cx, cy], r], {
+        strokeColor: colors.line, strokeWidth: 0.8, dash: 2, fillOpacity: 0, fixed: true, highlight: false,
+      }));
+      // Spindle.
+      board.create("point", [cx, cy], { size: 3, fillColor: colors.ink, strokeColor: colors.ink, fixed: true, name: "", highlight: false });
+      board.create("text", [cx + 0.15, cy - 0.35, sceneStrings("spindle")], {
+        strokeColor: colors.ink, fontSize: 10, anchorX: "left", fixed: true, highlight: false,
+      });
+      // Target sector: a small marker on the outer track.
+      const ang = 55 * Math.PI / 180;
+      const tx = cx + 2.7 * Math.cos(ang), ty = cy + 2.7 * Math.sin(ang);
+      board.create("point", [tx, ty], { size: 4, fillColor: colors.cat[1], strokeColor: colors.cat[1], fixed: true, name: "", highlight: false });
+      board.create("text", [tx + 0.15, ty + 0.2, sceneStrings("target")], {
+        strokeColor: colors.cat[1], fontSize: 10, anchorX: "left", fixed: true, highlight: false,
+      });
+      // Rotation arrow (curved suggestion via an arrow near the rim).
+      board.create("arrow", [[cx - 2.7, cy + 0.6], [cx - 2.4, cy + 1.5]], {
+        strokeColor: colors.cat[3], strokeWidth: 2, lastArrow: { size: 5 }, fixed: true, highlight: false,
+      });
+      board.create("text", [cx - 3.3, cy + 1.2, sceneStrings("rotLbl")], {
+        strokeColor: colors.ink, fontSize: 9, anchorX: "middle", fixed: true, highlight: false, cssStyle: "max-width:110px; opacity:0.85",
+      });
+      // Arm + head: an arrow from outside the platter in toward the target track.
+      board.create("arrow", [[6.0, 3.4], [tx + 0.25, ty + 0.18]], {
+        strokeColor: colors.cat[2], strokeWidth: 2.5, lastArrow: { size: 6 }, fixed: true, highlight: false,
+      });
+      board.create("text", [6.1, 3.6, sceneStrings("head")], {
+        strokeColor: colors.ink, fontSize: 10, anchorX: "left", fixed: true, highlight: false,
+      });
+      board.create("text", [4.6, 1.4, sceneStrings("seekLbl")], {
+        strokeColor: colors.ink, fontSize: 9, anchorX: "middle", fixed: true, highlight: false, cssStyle: "max-width:120px; opacity:0.85",
+      });
+    },
+    {
+      boundingbox: [-4.2, 4.2, 7.6, -4.0],
+      keepAspect: true,
+      title: () => makeStrings("platter")("title"),
+    },
+  );
+
+  registerQuiz("diskQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("partsQ"), options: [
+      { text: () => sceneStrings("paRight"), correct: true },
+      { text: () => sceneStrings("paWrong1"), correct: false },
+      { text: () => sceneStrings("paWrong2"), correct: false },
+      { text: () => sceneStrings("paWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("seqQ"), options: [
+      { text: () => sceneStrings("seRight"), correct: true },
+      { text: () => sceneStrings("seWrong1"), correct: false },
+      { text: () => sceneStrings("seWrong2"), correct: false },
+      { text: () => sceneStrings("seWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("rotQ"), options: [
+      { text: () => sceneStrings("roRight"), correct: true },
+      { text: () => sceneStrings("roWrong1"), correct: false },
+      { text: () => sceneStrings("roWrong2"), correct: false },
+      { text: () => sceneStrings("roWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("sstfQ"), options: [
+      { text: () => sceneStrings("ssRight"), correct: true },
+      { text: () => sceneStrings("ssWrong1"), correct: false },
+      { text: () => sceneStrings("ssWrong2"), correct: false },
+      { text: () => sceneStrings("ssWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("scanQ"), options: [
+      { text: () => sceneStrings("scRight"), correct: true },
+      { text: () => sceneStrings("scWrong1"), correct: false },
+      { text: () => sceneStrings("scWrong2"), correct: false },
+      { text: () => sceneStrings("scWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cscanQ"), options: [
+      { text: () => sceneStrings("csRight"), correct: true },
+      { text: () => sceneStrings("csWrong1"), correct: false },
+      { text: () => sceneStrings("csWrong2"), correct: false },
+      { text: () => sceneStrings("csWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("deadlineQ"), options: [
+      { text: () => sceneStrings("deRight"), correct: true },
+      { text: () => sceneStrings("deWrong1"), correct: false },
+      { text: () => sceneStrings("deWrong2"), correct: false },
+      { text: () => sceneStrings("deWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("ssdQ"), options: [
+      { text: () => sceneStrings("sdRight"), correct: true },
+      { text: () => sceneStrings("sdWrong1"), correct: false },
+      { text: () => sceneStrings("sdWrong2"), correct: false },
+      { text: () => sceneStrings("sdWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fairQ"), options: [
+      { text: () => sceneStrings("faRight"), correct: true },
+      { text: () => sceneStrings("faWrong1"), correct: false },
+      { text: () => sceneStrings("faWrong2"), correct: false },
+      { text: () => sceneStrings("faWrong3"), correct: false },
+    ] },
+    {
+      // Average rotational latency (ms) = 0.5 * 60000 / rpm = 30000 / rpm.
+      prompt: (v) => sceneStrings("rotNumQ", v),
+      variables: "rpm=[5400,7200,10000,15000]",
+      answer: (v) => Math.round((30000 / v.rpm) * 100) / 100,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Access time = sk + rot.
+      prompt: (v) => sceneStrings("accNumQ", v),
+      variables: "sk=[4,6,8,9] rot=[2,3,4]",
+      answer: (v) => v.sk + v.rot,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // IOPS = round(1000 / at).
+      prompt: (v) => sceneStrings("iopsNumQ", v),
+      variables: "at=[8,10,12,13,16]",
+      answer: (v) => Math.round(1000 / v.at),
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

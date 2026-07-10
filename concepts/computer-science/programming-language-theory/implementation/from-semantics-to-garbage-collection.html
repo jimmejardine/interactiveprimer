@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>From Semantics to Garbage Collection</primer-title>
+
+    <primer-card>
+      <p>
+        The semantics never mentioned memory. A big-step rule says
+        <primer-math>\rho \vdash e \Downarrow v</primer-math> and a
+        <primer-ref to="computer-science/programming-language-theory/implementation/closures-and-environments">closure</primer-ref>
+        is "code plus a captured environment" — clean mathematical objects with no notion of allocation,
+        lifetime, or reclamation. But the moment you <em>run</em> the interpreter, those objects have to live
+        somewhere. Environment frames are allocated as <code>let</code>s and calls push them; closures are
+        allocated as <primer-math>\lambda</primer-math>s are evaluated; and because a returned closure keeps its
+        captured frame alive, these things <strong>cannot all live on the stack</strong>. They live on the
+        <strong>heap</strong> — and now the question the semantics quietly ignored becomes unavoidable:
+        <em>when is it safe to reclaim a heap object?</em>
+      </p>
+      <p>
+        This page connects the runtime structures of the previous pages to the discipline that reclaims them.
+        The central identity is beautiful and exact: the heap that the interpreter builds — frames pointing to
+        parent frames, closures pointing to captured frames, data structures pointing to their fields — is a
+        directed <primer-ref to="computer-science/data-structures/graphs">graph</primer-ref>, and the
+        <strong>roots</strong> of that graph are precisely the things the semantics keeps in its hand: the
+        <em>current environment</em> and the <em>evaluation stack</em> (the pending continuations). An object is
+        <strong>live</strong> exactly when a root can reach it. "Garbage" is not a property of an object in
+        isolation — it is a property of the graph. Garbage collection is applied reachability.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Liveness is reachability, not "still in use"</h2>
+      <p>
+        What does it mean for a heap object to be <em>live</em>? The tempting answer — "the program will use it
+        again" — is uncomputable (it is the halting problem in disguise). So every real collector uses a sound,
+        decidable <strong>approximation</strong>: an object is live if it is <strong>reachable</strong> from a
+        root by following pointers. Anything unreachable is definitely dead (the program has no way to name it,
+        so it can never use it); some reachable objects may in fact never be touched again, but reclaiming those
+        would need clairvoyance, so we keep them. Reachability is the conservative, correct-by-construction
+        notion of "live".
+      </p>
+      <primer-theorem name="Roots, reachability, garbage">
+        <ul>
+          <li>
+            <strong>Roots</strong> are the references the running program holds <em>directly</em>: in an
+            interpreter, the <em>current environment</em> (the frame chain in scope) and the
+            <em>evaluation/continuation stack</em> (values and pending computations), plus any global bindings.
+            These are exactly the <primer-math>\rho</primer-math> and control context of the operational
+            semantics.
+          </li>
+          <li>
+            <strong>Reachable</strong> = you can get to it by following pointer edges from some root. A closure
+            edge to its captured frame counts; a frame's parent-pointer counts; a data structure's field
+            pointers count.
+          </li>
+          <li>
+            <strong>Garbage</strong> = not reachable from any root — <em>regardless of how many other objects
+            point at it</em>. A cycle with no root pointing in is garbage; a lone object no root can name is
+            garbage.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Formally, if <primer-math>R</primer-math> is the set of roots and
+        <primer-math>\to</primer-math> the "points-to" relation, the live set is the reflexive-transitive
+        closure
+      </p>
+      <primer-math display>\text{Live} \;=\; \{\, o \;:\; \exists r \in R,\; r \to^{*} o \,\}, \qquad \text{Garbage} \;=\; \text{Heap} \setminus \text{Live}.</primer-math>
+    </primer-card>
+
+    <primer-card>
+      <h2>The interpreter's heap, drawn as an object graph</h2>
+      <p>
+        Here is the heap of a running closure-based interpreter. The <strong>roots</strong> are the current
+        environment frame and the evaluation stack. From them we can reach a live closure and the environment
+        frame it captured — that frame stays alive <em>because</em> a reachable closure points at it, even
+        though the call that created it has long returned. Off to the side sits an orphaned frame and a stale
+        closure that only point at each other: a cycle no root can reach. Watch the mark trace the live set:
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "heapReach": {
+            "title": "The interpreter's heap: roots reach live closures & frames; a cycle is garbage",
+            "caption": "Roots = the current environment frame and the evaluation stack. From them, the mark phase reaches closure C1 and its captured frame F1 (kept alive by C1's capture edge). The orphaned frame F2 and stale closure C2 point only at each other — a cycle no root reaches — so both are collected.",
+            "roots": "Roots: the current environment frame Fenv and the evaluation stack — the semantics' ρ and control context.",
+            "live": "Mark: from the roots follow edges. We reach closure C1, and via C1's capture edge, frame F1. Both are LIVE.",
+            "why": "F1 is alive only because a reachable closure C1 captured it — the call that made F1 already returned, yet the closure keeps it reachable.",
+            "cycle": "Off to the side: stale closure C2 captured frame F2, and F2 still references C2 — a cycle. No root points in.",
+            "sweep": "Sweep: C2 and F2 are unreachable garbage and are reclaimed. Reachability, not reference count, is what frees the cycle."
+          }
+        }
+      </script>
+      <primer-geometry scene="heapReach" caption="A heap object graph for a running interpreter. Roots (the current environment frame and evaluation stack) point to closure C1, which has a capture edge to frame F1, so both are marked live. A separate stale closure C2 and orphaned frame F2 point only at each other, forming a cycle no root reaches, so the sweep collects both."></primer-geometry>
+      <p>
+        This is the whole bridge from semantics to GC in one figure. The objects are the interpreter's own
+        (frames, closures); the roots are the semantics' own (<primer-math>\rho</primer-math> and the control
+        stack); and "collectable" means "the mark phase, starting from those roots, never colours it". Nothing
+        about garbage collection is separate from the language's runtime — it <em>is</em> the runtime's object
+        graph, swept.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A mark-sweep collector over closures and frames</h2>
+      <p>
+        Below is a mark-and-sweep sketch over a heap whose objects are exactly the interpreter's — number
+        cells, environment <code>frame</code>s (with a parent and bindings), and <code>closure</code>s (with a
+        captured-frame edge). The roots are the current environment plus the evaluation stack. Mark follows
+        every edge from the roots; sweep frees whatever stayed white. Note that the orphaned closure/frame cycle
+        is collected precisely because reachability — not reference counting — decides. Press <strong>Run</strong>:
+      </p>
+      <primer-code run>
+        // A heap object is one of the interpreter's runtime shapes. `refs` lists the ids it points at.
+        type HObj =
+          | { id: number; kind: "num"; n: number; refs: number[] }
+          | { id: number; kind: "frame";   refs: number[] }   // parent frame + bound values
+          | { id: number; kind: "closure"; refs: number[] };  // captured frame (+ maybe more)
+
+        // The heap the interpreter has built up.
+        const heap: HObj[] = [
+          { id: 0, kind: "frame",   refs: [] },        // F1: a captured environment frame
+          { id: 1, kind: "closure", refs: [0] },       // C1: closure capturing F1   ← reachable
+          { id: 2, kind: "num",     n: 42, refs: [] }, // a live value on the eval stack
+          { id: 3, kind: "frame",   refs: [4] },       // F2: orphaned frame → C2
+          { id: 4, kind: "closure", refs: [3] },       // C2: stale closure → F2   (a cycle)
+        ];
+
+        // Roots = current environment frame + evaluation stack. Here: C1 (in scope) and the num 42.
+        const roots: number[] = [1, 2];
+
+        const byId = (id: number) =&gt; heap.find((o) =&gt; o.id === id)!;
+
+        function markSweep(): { live: number[]; collected: number[] } {
+          const marked = new Set&lt;number&gt;();
+          const grey = [...roots];                     // worklist of reachable-but-unscanned ids
+          while (grey.length &gt; 0) {
+            const id = grey.pop()!;
+            if (marked.has(id)) continue;              // already black — this tames cycles
+            marked.add(id);                            // colour it black
+            for (const r of byId(id).refs) grey.push(r);  // follow every out-edge
+          }
+          const live      = heap.filter((o) =&gt; marked.has(o.id)).map((o) =&gt; o.id);
+          const collected = heap.filter((o) =&gt; !marked.has(o.id)).map((o) =&gt; o.id);
+          return { live, collected };
+        }
+
+        const { live, collected } = markSweep();
+        console.log("roots        :", roots);
+        console.log("LIVE (kept)  :", live);        // [0,1,2] — F1 survives BECAUSE C1 captured it
+        console.log("COLLECTED    :", collected);   // [3,4]   — the F2⇄C2 cycle, unreachable
+        console.log("=> F1 (id 0) is live only via the closure C1's capture edge;");
+        console.log("   the C2⇄F2 cycle is freed because no ROOT can reach it.");
+      </primer-code>
+      <p>
+        Frame <code>F1</code> (id 0) is kept although the call that built it is gone — a reachable closure holds
+        it. The <code>F2</code>/<code>C2</code> cycle is reclaimed although each still points at the other,
+        because reachability, not reference count, is the verdict. This is the same reason reference counting
+        leaks cycles: it asks "how many point at me?", the collector asks "can a root reach me?".
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Three ways to act on reachability</h2>
+      <p>
+        Every tracing collector computes the same live set; they differ in <em>what they do with it</em> and
+        <em>how they lay memory out</em>. At a high level:
+      </p>
+      <primer-theorem name="Mark-sweep, copying, generational">
+        <ul>
+          <li>
+            <strong>Mark-sweep.</strong> Mark the reachable set from the roots, then sweep the heap freeing the
+            unmarked. Simple and non-moving (object addresses never change, so it suits C interop), but it
+            <em>fragments</em> the heap and its sweep cost is proportional to the whole heap.
+          </li>
+          <li>
+            <strong>Copying (semi-space / Cheney).</strong> Split the heap in two. Trace the live objects and
+            <em>copy</em> them compactly into the other half; then flip. Cost is proportional to the
+            <em>live</em> data only (dead objects are never touched), and it compacts as it goes — at the price
+            of using half the memory and moving objects (so pointers must be forwarded).
+          </li>
+          <li>
+            <strong>Generational.</strong> Exploit the <em>generational hypothesis</em> — most objects die
+            young. Allocate into a small nursery collected often (usually by copying, since survivors are few);
+            promote survivors to an old space collected rarely. Nursery collection needs a
+            <strong>remembered set</strong> to track old→young pointers so it can treat them as extra roots
+            without scanning the whole old space. This is how the JVM, .NET and V8 keep pauses short.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        A subtle point the semantics-to-GC view makes clear: a copying or generational collector <em>moves</em>
+        objects, so it must fix up every pointer to a moved object — including the capture edges inside
+        closures and the parent pointers inside frames. The collector must understand the interpreter's object
+        layout exactly, because it is rewriting the very graph the interpreter walks. GC and the runtime are
+        not neighbours; they share one data structure.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Cheney's two-finger trick — a copying collector with no recursion and no stack">
+      <p>
+        C. J. Cheney's 1970 algorithm copies a live graph <em>breadth-first using the to-space itself as the
+        queue</em> — no explicit stack, no recursion. Two pointers walk the to-space: <em>scan</em> trails
+        behind, <em>free</em> races ahead. You copy the roots' targets to the front; then <em>scan</em> advances
+        object by object, and for each pointer it finds, if the target hasn't moved yet you copy it to
+        <em>free</em> (leaving a <strong>forwarding pointer</strong> behind so you never copy it twice) and bump
+        <em>free</em>. When <em>scan</em> catches up to <em>free</em>, every live object has been copied and
+        compacted, and the old space can be wiped wholesale. It is one of those algorithms that feels like a
+        magic trick the first time you trace it: an entire graph traversal, in constant auxiliary space,
+        falling out of two integers chasing each other across a block of memory.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out!">
+      <ul>
+        <li>
+          <strong>Reachable ≠ will-be-used; unreachable = definitely dead.</strong> GC keeps every reachable
+          object even if the program will never touch it again (deciding otherwise is the halting problem). So
+          a "leak" in a managed language is almost always an <em>accidental root or edge</em> — a global cache,
+          a closure captured in a long-lived listener, a stale frame still referenced — keeping garbage
+          reachable. To fix a managed-language leak, find what still points at the object, not the collector.
+        </li>
+        <li>
+          <strong>Closures are sneaky roots.</strong> A closure keeps its <em>entire</em> captured environment
+          alive, not just the variables it uses — if the frame binds a huge structure the body never mentions,
+          a naïve capture can pin megabytes. This is why some compilers do <em>closure conversion</em> that
+          captures only the free variables actually referenced. Capturing a whole frame is correct but can be
+          costly.
+        </li>
+        <li>
+          <strong>Moving collectors must forward every pointer.</strong> Copying and generational GC relocate
+          objects, so every reference — including a closure's capture edge and a frame's parent pointer — must
+          be updated to the new address (via forwarding pointers). Miss one and you have a dangling pointer into
+          freed space. A non-moving mark-sweep sidesteps this but pays in fragmentation.
+        </li>
+      </ul>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "gcSemQuiz@1": {
+          "intro": "Reachability is the runtime meaning of 'live'; the roots are the interpreter's environment and stack. Numbers change each attempt.",
+          "liveQ": "In a tracing collector, an object is treated as LIVE when it is…",
+          "liveA": "reachable from some root by following pointers",
+          "liveB": "referenced by at least one other heap object",
+          "liveC": "the newest object allocated",
+          "liveD": "larger than one frame",
+          "whyApproxQ": "Why do collectors use reachability instead of 'the program will use it again'?",
+          "whyApproxA": "'will be used again' is undecidable (halting problem); reachability is a sound, decidable approximation",
+          "whyApproxB": "reachability is faster to type",
+          "whyApproxC": "programs never reuse objects",
+          "whyApproxD": "reference counts are exact",
+          "rootsQ": "In a closure-based interpreter, the GC ROOTS are…",
+          "rootsA": "the current environment (frame chain) and the evaluation/continuation stack, plus globals",
+          "rootsB": "every object ever allocated",
+          "rootsC": "only the largest object",
+          "rootsD": "the source code text",
+          "semQ": "How do the operational semantics' ρ and control context relate to GC roots?",
+          "semA": "they ARE the roots — the environment ρ and the pending computations are what the program holds directly",
+          "semB": "they are unrelated to memory",
+          "semC": "they are always garbage",
+          "semD": "they live only on disk",
+          "frameLiveQ": "In the figure, why does the captured frame F1 stay live after its creating call returned?",
+          "frameLiveA": "a reachable closure C1 captured it, so a root can still reach F1 through C1",
+          "frameLiveB": "frames are never collected",
+          "frameLiveC": "it has a high reference count",
+          "frameLiveD": "it is on the stack",
+          "cycleQ": "Why does mark-sweep collect the C2⇄F2 cycle that reference counting would leak?",
+          "cycleA": "no root can reach the cycle, so the mark phase never visits it — reachability, not counts, decides",
+          "cycleB": "cycles are always freed immediately",
+          "cycleC": "the objects are too small to keep",
+          "cycleD": "reference counting also frees it",
+          "copyQ": "A COPYING (semi-space) collector's work is proportional to…",
+          "copyA": "the amount of LIVE data (dead objects are never touched), and it compacts as it copies",
+          "copyB": "the total heap size, always",
+          "copyC": "the number of source lines",
+          "copyD": "the depth of recursion",
+          "genQ": "Generational GC is motivated by the observation that…",
+          "genA": "most objects die young, so a small nursery can be collected often and cheaply",
+          "genB": "old objects die faster than young ones",
+          "genC": "objects never become garbage",
+          "genD": "the heap is always full",
+          "remQ": "A generational collector needs a REMEMBERED SET to…",
+          "remA": "track old→young pointers so a nursery collection can treat them as extra roots without scanning the old space",
+          "remB": "count how many objects exist",
+          "remC": "store the source code",
+          "remD": "remember the order of allocation",
+          "moveQ": "A moving collector (copying/generational) must, when it relocates an object…",
+          "moveA": "update every pointer to it — including closures' capture edges and frames' parent pointers — via forwarding pointers",
+          "moveB": "delete all references to it",
+          "moveC": "leave pointers stale; they fix themselves",
+          "moveD": "never move objects with pointers",
+          "cheneyQ": "Cheney's copying algorithm is notable because it…",
+          "cheneyA": "copies the live graph breadth-first using the to-space as its queue — no explicit stack or recursion",
+          "cheneyB": "requires reference counting",
+          "cheneyC": "never moves objects",
+          "cheneyD": "only works on trees, not graphs",
+          "leakQ": "A memory 'leak' in a garbage-collected language is usually caused by…",
+          "leakA": "an accidental root or edge keeping garbage reachable (e.g. a growing global cache or a captured closure)",
+          "leakB": "the collector running too often",
+          "leakC": "using too little memory",
+          "leakD": "an impossibility — GC languages cannot leak",
+          "closureLeakQ": "Why can a closure accidentally keep a lot of memory alive?",
+          "closureLeakA": "it keeps its entire captured frame reachable, even bindings its body never uses",
+          "closureLeakB": "closures copy the whole heap",
+          "closureLeakC": "closures disable the collector",
+          "closureLeakD": "closures have infinite reference counts",
+          "countQ": "A heap has ${N}$ objects; the mark phase reaches ${M}$ of them from the roots. How many does the sweep collect?",
+          "liveCountQ": "Roots reach ${M}$ objects directly, and those transitively keep ${K}$ more alive. How many objects are live in total?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="gcSemQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/programming-language-theory/implementation/closures-and-environments"],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // The interpreter's heap as an object graph: roots → closure C1 → captured frame F1 (live);
+  // a separate C2 ⇄ F2 cycle unreachable (garbage). Mark rings the live set; sweep boxes the cycle.
+  registerGeometryScene(
+    "heapReach",
+    ({ board, colors, step, sceneStrings }) => {
+      const P = {
+        Roots: [-4.6, 0.4],   // roots: env frame + eval stack
+        C1:    [-1.6, 1.6],   // live closure
+        F1:    [1.4, 1.6],    // captured frame (live via C1)
+        Num:   [-1.6, -0.9],  // a live value on the stack
+        C2:    [1.0, -2.2],   // stale closure  (garbage cycle)
+        F2:    [3.6, -2.2],   // orphaned frame (garbage cycle)
+      };
+      const arrow = (p, q, col, dash = 0) =>
+        board.create("arrow", [P[p], P[q]], {
+          strokeColor: col, strokeWidth: 2, dash, lastArrow: { type: 2, size: 6 },
+          fixed: true, highlight: false,
+        });
+      // edges
+      arrow("Roots", "C1", colors.line);
+      arrow("Roots", "Num", colors.line);
+      arrow("C1", "F1", colors.cat[0], 2);   // capture edge (dashed, highlighted)
+      arrow("C2", "F2", colors.line);
+      arrow("F2", "C2", colors.line);
+      board.create("text", [-0.1, 1.95, "captures"], {
+        strokeColor: colors.cat[0], fontSize: 11, anchorX: "middle", fixed: true, highlight: false,
+      });
+
+      const nodes = [
+        { k: "Roots", label: "roots (env + stack)", col: colors.cat[2] },
+        { k: "C1", label: "C1 closure", col: colors.cat[1] },
+        { k: "F1", label: "F1 frame", col: colors.cat[1] },
+        { k: "Num", label: "42", col: colors.cat[1] },
+        { k: "C2", label: "C2 closure", col: colors.cat[3] },
+        { k: "F2", label: "F2 frame", col: colors.cat[3] },
+      ];
+      for (const n of nodes) {
+        board.create("point", P[n.k], {
+          size: 7, strokeColor: n.col, fillColor: n.col,
+          name: n.label, label: { offset: [10, 12], fontSize: 13, strokeColor: colors.ink },
+          fixed: true, highlight: false,
+        });
+      }
+
+      // Step 1: identify roots.
+      step(sceneStrings("roots"), () =>
+        board.create("circle", [P.Roots, 0.5], {
+          strokeColor: colors.cat[2], strokeWidth: 2.5, fillOpacity: 0, fixed: true, highlight: false,
+        }));
+
+      // Step 2: mark the reachable set (roots, C1, F1, Num).
+      step(sceneStrings("live"), () => {
+        for (const k of ["C1", "F1", "Num"]) {
+          board.create("circle", [P[k], 0.46], {
+            strokeColor: colors.cat[0], strokeWidth: 2.5, fillOpacity: 0, fixed: true, highlight: false,
+          });
+        }
+      });
+
+      // Step 3: annotate why F1 is alive.
+      step(sceneStrings("why"), () =>
+        board.create("text", [1.4, 0.9, "kept alive by C1's capture"], {
+          strokeColor: colors.cat[0], fontSize: 11, anchorX: "middle", fixed: true, highlight: false,
+        }));
+
+      // Step 4: point out the cycle.
+      step(sceneStrings("cycle"), () =>
+        board.create("text", [2.3, -1.4, "cycle: C2 ⇄ F2"], {
+          strokeColor: colors.cat[3], fontSize: 12, anchorX: "middle", fixed: true, highlight: false,
+        }));
+
+      // Step 5: sweep the garbage cycle.
+      step(sceneStrings("sweep"), () => {
+        board.create("polygon", [[-0.1, -1.3], [4.9, -1.3], [4.9, -3.1], [-0.1, -3.1]], {
+          borders: { strokeColor: colors.cat[3], strokeWidth: 2, dash: 2 },
+          fillColor: colors.cat[3], fillOpacity: 0.08,
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [2.4, -3.0, "garbage — collected"], {
+          strokeColor: colors.cat[3], fontSize: 13, anchorX: "middle", fixed: true, highlight: false,
+        });
+      });
+    },
+    {
+      boundingbox: [-6.0, 2.8, 6.2, -3.6],
+      keepAspect: true,
+      title: () => makeStrings("heapReach")("title"),
+      caption: () => makeStrings("heapReach")("caption"),
+    },
+  );
+
+  registerQuiz("gcSemQuiz@1", ({ sceneStrings }) => {
+    const mc = (q, a, b, c, d) => ({
+      prompt: () => sceneStrings(q),
+      options: [
+        { text: () => sceneStrings(a), correct: true },
+        { text: () => sceneStrings(b), correct: false },
+        { text: () => sceneStrings(c), correct: false },
+        { text: () => sceneStrings(d), correct: false },
+      ],
+    });
+    return [
+      { num_questions: 6, preamble: () => sceneStrings("intro") },
+
+      mc("liveQ", "liveA", "liveB", "liveC", "liveD"),
+      mc("whyApproxQ", "whyApproxA", "whyApproxB", "whyApproxC", "whyApproxD"),
+      mc("rootsQ", "rootsA", "rootsB", "rootsC", "rootsD"),
+      mc("semQ", "semA", "semB", "semC", "semD"),
+      mc("frameLiveQ", "frameLiveA", "frameLiveB", "frameLiveC", "frameLiveD"),
+      mc("cycleQ", "cycleA", "cycleB", "cycleC", "cycleD"),
+      mc("copyQ", "copyA", "copyB", "copyC", "copyD"),
+      mc("genQ", "genA", "genB", "genC", "genD"),
+      mc("remQ", "remA", "remB", "remC", "remD"),
+      mc("moveQ", "moveA", "moveB", "moveC", "moveD"),
+      mc("cheneyQ", "cheneyA", "cheneyB", "cheneyC", "cheneyD"),
+      mc("leakQ", "leakA", "leakB", "leakC", "leakD"),
+      mc("closureLeakQ", "closureLeakA", "closureLeakB", "closureLeakC", "closureLeakD"),
+
+      // variable-driven counting.
+      {
+        prompt: (v) => sceneStrings("countQ", { N: v.N, M: v.M }),
+        variables: "N=[8:24] M=[1:6]",
+        constraints: "M < N",
+        answer: (v) => v.N - v.M,
+        keyboard: "geometry-lengths",
+      },
+      {
+        prompt: (v) => sceneStrings("liveCountQ", { M: v.M, K: v.K }),
+        variables: "M=[1:8] K=[1:12]",
+        answer: (v) => v.M + v.K,
+        keyboard: "geometry-lengths",
+      },
+    ];
+  });
+</script>

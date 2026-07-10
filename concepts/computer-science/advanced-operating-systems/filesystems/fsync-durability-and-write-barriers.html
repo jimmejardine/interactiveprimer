@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>fsync, Durability and Write Barriers</primer-title>
+
+    <primer-card>
+      <p>
+        Every previous lesson kept the file system <em>consistent</em>. This one is about a different, sharper promise:
+        <strong>durability</strong> — the guarantee that data you wrote is <em>actually on stable media</em> and will
+        survive a power failure. The two are constantly confused, and the confusion has cost real companies real data.
+        Here is the uncomfortable truth: when your program's <primer-math>\texttt{write()}</primer-math> call
+        <strong>returns successfully</strong>, your data is almost certainly <em>not on the disk</em>. It is sitting in
+        volatile RAM, and a power cut in the next instant would erase it without a trace — even though
+        <primer-math>\texttt{write()}</primer-math> told you it succeeded.
+      </p>
+      <p>
+        That gap between "the write call returned" and "the bytes are on the platter" is the subject of this lesson. To
+        close it deliberately you use <primer-math>\texttt{fsync}</primer-math>, and to make
+        <primer-math>\texttt{fsync}</primer-math> actually work the operating system must punch a
+        <strong>write barrier</strong> through several layers of caching all the way down to the spinning rust or flash.
+        Getting this right is subtle enough that it has produced famous data-loss bugs in ext3, ext4, and countless
+        applications.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The page cache: why write() is a lie of omission</h2>
+      <p>
+        For speed, <primer-math>\texttt{write()}</primer-math> does not go to the disk. It copies your bytes into the
+        <strong>page cache</strong> — an area of kernel RAM — marks that page <strong>dirty</strong>, and returns
+        immediately. Your program races on, believing the write is done, while the actual disk I/O happens
+        <em>later</em>, asynchronously, when the kernel's <strong>writeback</strong> threads get around to it (in Linux,
+        dirty pages can linger up to ~30 seconds by default). This buffering is a huge performance win — it batches
+        writes, lets the elevator reorder them, and absorbs rewrites of the same block — but it means the window between
+        "wrote" and "safe" can be tens of seconds wide.
+      </p>
+      <primer-theorem name="The durability vocabulary">
+        <ul>
+          <li><strong>write()</strong> — copies data into the page cache and returns; <em>not</em> durable;</li>
+          <li><strong>fsync(fd)</strong> — force <em>all</em> dirty pages of this file, <em>and</em> its metadata, to
+            stable storage, issuing a cache flush; returns only when durable;</li>
+          <li><strong>fdatasync(fd)</strong> — like <primer-math>\texttt{fsync}</primer-math> but skips inessential
+            metadata (e.g. timestamps), so it can avoid an extra metadata write — faster when only the data must be safe;</li>
+          <li><strong>write barrier / FLUSH / FUA</strong> — the low-level command that forces the <em>drive's own</em>
+            cache out to the physical medium (or writes straight through it).</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Strings for the write-path figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "wpath": {
+          "title": "The write path: app → page cache → disk cache → platter. Only the platter is stable.",
+          "app": "application",
+          "pc": "page cache (kernel RAM)",
+          "dc": "disk write cache (drive RAM)",
+          "plat": "platter / flash (STABLE)",
+          "wr": "write()",
+          "wb": "writeback (later)",
+          "fl": "FLUSH / FUA",
+          "volatile": "◀ volatile (lost on power failure) ▶",
+          "stable": "stable",
+          "fsyncSpan": "fsync() drives data all the way to here",
+          "s1": "write() copies into the page cache and returns — data is only in volatile RAM",
+          "s2": "Writeback later moves it to the drive's cache — STILL volatile!",
+          "s3": "Only a FLUSH/FUA barrier forces it onto the stable platter — this is what fsync guarantees"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Two volatile caches, one stable medium</h2>
+      <p>
+        There is not <em>one</em> cache in the way but <strong>two</strong>. Data leaving the page cache lands in the
+        <strong>disk's own write cache</strong> — a chunk of RAM on the drive itself — which reports the write "complete"
+        the moment it arrives there, long before the head has actually put it on the platter. So even after the kernel
+        has flushed the page cache, the bytes can still evaporate on power loss. Only a <strong>FLUSH CACHE</strong>
+        command (or writing with the <strong>FUA</strong> — Force Unit Access — bit set) drives them through that last
+        volatile layer onto stable media. Trace the whole path:
+      </p>
+      <primer-geometry scene="wpath"></primer-geometry>
+      <p>
+        <primer-math>\texttt{fsync}</primer-math>'s real job is to push a barrier through <em>every</em> stage here —
+        flush the relevant dirty pages out of the page cache <em>and</em> issue the drive FLUSH — so that when it returns,
+        the data has genuinely crossed the volatile/stable line.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Where does a crash bite?</h2>
+      <p>
+        The model below tracks a write as it moves down the stack and asks, at each stage, "if the power failed
+        <em>now</em>, would this survive?" The answer is <em>no</em> until the very last stage — which is exactly why an
+        explicit <primer-math>\texttt{fsync}</primer-math> is the only way to <em>know</em> your data is safe.
+      </p>
+      <primer-code run>
+        // Where does data live as it flows down the write path, and does it survive a crash at each stage?
+        type Stage = "page-cache (kernel RAM)" | "disk-cache (drive RAM)" | "platter (STABLE)";
+        const survives = (s: Stage): boolean =&gt; s === "platter (STABLE)";
+
+        function report(label: string, s: Stage): void {
+          console.log(`${label.padEnd(26)} data in ${s.padEnd(24)} survives crash? ${survives(s) ? "YES" : "no"}`);
+        }
+
+        // App just calls write() and moves on — no fsync.
+        report("after write()", "page-cache (kernel RAM)");
+        // Background writeback fires seconds later; still only in the drive's volatile cache.
+        report("after writeback", "disk-cache (drive RAM)");
+        // The app instead calls fsync(): forces writeback AND a FLUSH/FUA barrier to the platter.
+        report("after fsync() + FLUSH", "platter (STABLE)");
+
+        console.log("\nLesson: only fsync()+FLUSH crosses the volatile→stable line.");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The atomic-replace pattern — and its classic trap</h2>
+      <p>
+        The safe way to update a config file so a reader never sees a half-written mess is <strong>write-temp-then-rename</strong>,
+        because <primer-math>\texttt{rename}</primer-math> over an existing name is atomic:
+      </p>
+      <ol>
+        <li>write the new contents to <primer-math>\texttt{file.tmp}</primer-math>;</li>
+        <li><primer-math>\texttt{fsync(file.tmp)}</primer-math> — make the <em>data</em> durable;</li>
+        <li><primer-math>\texttt{rename(file.tmp, file)}</primer-math> — atomically swap it into place;</li>
+        <li><primer-math>\texttt{fsync(directory)}</primer-math> — make the <em>rename itself</em> durable.</li>
+      </ol>
+      <p>
+        Miss step 2 and a crash can leave the renamed file full of garbage. Miss step 4 — the one everyone forgets — and
+        a crash can lose the <em>rename</em>, leaving you with the old file or no file, even though the data was safe.
+        Durability of the <em>data</em> and durability of the <em>directory entry</em> are separate fsyncs, because the
+        file and its parent directory are separate on-disk objects.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="The great ext3 → ext4 fsync betrayal of 2009 — what happened?">
+      <p>
+        For years, applications got away with <em>skipping</em> <primer-math>\texttt{fsync}</primer-math> after the
+        rename trick, and nobody noticed. Why? ext3's default <em>ordered</em> mode had an accidental property: because it
+        flushed all pending data on every metadata commit (every few seconds), the data usually hit the disk right around
+        the rename anyway. Programs were relying on a durability guarantee the standard never made. Then <strong>ext4</strong>
+        arrived with <em>delayed allocation</em> — it deliberately held data in the page cache <em>longer</em> to pick
+        better block placement — and suddenly the window widened to tens of seconds. Users who crashed after replacing a
+        file found it truncated to <strong>zero bytes</strong>: the rename had committed but the data had not. The uproar
+        was so loud that ext4 added heuristics to auto-flush data on a rename-over-existing-file, papering over the buggy
+        apps. The real lesson, seared into a generation of systems programmers: <em>if you did not call
+        <primer-math>\texttt{fsync}</primer-math>, you have no durability guarantee — full stop — no matter what the file
+        system happened to do for you yesterday.</em>
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Ordering is not durability — and fsync gives you both, at a price">
+      <p>
+        Two promises get tangled here. <strong>Ordering</strong> means "write B never becomes durable before write A" —
+        it constrains the <em>sequence</em> in which things reach stable storage (journaling leans on this: the commit
+        record must not precede the journal blocks). <strong>Durability</strong> means "this specific write is on stable
+        media <em>now</em>." A write barrier enforces ordering; <primer-math>\texttt{fsync}</primer-math> enforces
+        durability (and, as a side effect, ordering up to that point). Confusing them leads to two opposite mistakes:
+        thinking your data is safe because writes were <em>ordered</em> (they may all still be in volatile cache), or
+        calling <primer-math>\texttt{fsync}</primer-math> after every tiny write and destroying throughput because each
+        one forces a full drive FLUSH — often milliseconds, an eternity. The art is to fsync at the <em>transaction
+        boundaries</em> that actually matter (a committed database row, a saved document), and let everything in between
+        stream through the caches. Databases fsync once per group-commit for exactly this reason.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The module, closed</h2>
+      <p>
+        You now have the full stack. The
+        <primer-ref to="computer-science/advanced-operating-systems/filesystems/the-vfs-layer">VFS</primer-ref>
+        gives one interface to many file systems; inodes and allocation lay bytes on disk; crash consistency,
+        journaling, log-structured and copy-on-write designs keep the structures coherent across failures; and
+        <primer-math>\texttt{fsync}</primer-math> with write barriers finally lets an application demand that a specific
+        write is <em>durably</em> saved. Consistency keeps the file system alive; durability keeps <em>your</em> data
+        alive — and only you, by calling <primer-math>\texttt{fsync}</primer-math> at the right moment, can ask for the
+        second.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: durability/fsync/barriers + numeric (durability window, fsync cost). Bank of 12, draws 5.
+         Variable names: ds (dirty seconds), rt (MB/s), nw (writes), fl (ms). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "fsyncQuiz@1": {
+          "intro": "write() only fills the volatile page cache; data is durable only after fsync()+a FLUSH barrier reaches the platter. Ordering ≠ durability. Atomic replace needs fsync of the file AND the directory.",
+          "writeQ": "When write() returns successfully, your data is…",
+          "wrRight": "in the volatile page cache (kernel RAM) — not yet on stable storage",
+          "wrWrong1": "guaranteed on the disk platter",
+          "wrWrong2": "already backed up to the cloud",
+          "wrWrong3": "erased from memory",
+          "fsyncQ": "The purpose of fsync(fd) is to…",
+          "fsRight": "force this file's dirty pages and metadata to stable storage, issuing a cache flush",
+          "fsWrong1": "delete the file safely",
+          "fsWrong2": "make write() faster",
+          "fsWrong3": "read the file into cache",
+          "twoCacheQ": "Between the page cache and the platter sits another volatile layer, namely…",
+          "tcRight": "the disk's own write cache (RAM on the drive)",
+          "tcWrong1": "the CPU's L1 cache",
+          "tcWrong2": "a second copy of the page cache",
+          "tcWrong3": "nothing — the page cache writes straight to the platter",
+          "barrierQ": "A FLUSH / FUA write barrier exists to…",
+          "baRight": "force the drive's volatile cache out to the stable medium (or write through it)",
+          "baWrong1": "speed up random reads",
+          "baWrong2": "encrypt the data",
+          "baWrong3": "compress dirty pages",
+          "fdatasyncQ": "fdatasync differs from fsync by…",
+          "fdRight": "skipping inessential metadata (like timestamps), so it may avoid an extra write",
+          "fdWrong1": "not writing the data at all",
+          "fdWrong2": "flushing every file on the system",
+          "fdWrong3": "being slower and safer",
+          "renameQ": "In the write-temp-then-rename atomic-replace pattern, you must ALSO…",
+          "reRight": "fsync the directory, so the rename itself is durable",
+          "reWrong1": "reboot after the rename",
+          "reWrong2": "delete the original first",
+          "reWrong3": "never call fsync at all",
+          "ext4Q": "The 2009 ext4 data-loss surprise happened because apps…",
+          "e4Right": "skipped fsync and relied on ext3's accidental flushing; ext4's delayed allocation widened the window",
+          "e4Wrong1": "called fsync too often",
+          "e4Wrong2": "used the wrong file system entirely",
+          "e4Wrong3": "encrypted their files",
+          "orderQ": "Ordering and durability differ in that ordering…",
+          "orRight": "constrains the SEQUENCE writes become durable in; durability means a write is on stable media NOW",
+          "orWrong1": "is exactly the same as durability",
+          "orWrong2": "means data is encrypted",
+          "orWrong3": "is provided only by write(), not fsync",
+          "costQ": "Calling fsync after every tiny write destroys throughput because each fsync…",
+          "csRight": "forces a full drive FLUSH — often milliseconds — instead of streaming through the cache",
+          "csWrong1": "recompiles the program",
+          "csWrong2": "is completely free",
+          "csWrong3": "deletes the page cache",
+          "windowNumQ": "Dirty pages are flushed every {ds} seconds and the app writes {rt} MB/s. At most how many MB of data are at risk on a crash?",
+          "fsyncCostNumQ": "An app writes {nw} records and calls fsync after each; each fsync costs {fl} ms. What is the total fsync time, in ms?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="fsyncQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/filesystems/journaling-file-systems"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Write path: four stage boxes left→right (app, page cache, disk cache, platter), volatile/stable divider,
+     writeback and FLUSH arrows, fsync span. Revealed in steps. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "wpath",
+    ({ board, colors, step, sceneStrings }) => {
+      const stage = (cx, key, ci, stableFlag) => {
+        board.create("polygon", [[cx - 1.4, 3.0], [cx + 1.4, 3.0], [cx + 1.4, 4.4], [cx - 1.4, 4.4]], {
+          fillColor: colors.cat[ci % 6], fillOpacity: stableFlag ? 0.34 : 0.18,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, dash: stableFlag ? 0 : 2, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [cx, 3.7, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "max-width:200px",
+        });
+      };
+      const flow = (x0, x1, key, ci) => {
+        board.create("arrow", [[x0, 3.7], [x1, 3.7]], {
+          strokeColor: colors.cat[ci % 6], strokeWidth: 2, lastArrow: { size: 6 }, fixed: true, highlight: false,
+        });
+        board.create("text", [(x0 + x1) / 2, 4.15, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 9, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "opacity:0.85",
+        });
+      };
+
+      const X = { app: 1.6, pc: 5.4, dc: 9.2, plat: 13.0 };
+
+      // Base: the app box (always visible).
+      stage(X.app, "app", 0, false);
+
+      step(sceneStrings("s1"), () => {
+        flow(X.app + 1.45, X.pc - 1.45, "wr", 1);
+        stage(X.pc, "pc", 2, false);
+      });
+      step(sceneStrings("s2"), () => {
+        flow(X.pc + 1.45, X.dc - 1.45, "wb", 1);
+        stage(X.dc, "dc", 3, false);
+      });
+      step(sceneStrings("s3"), () => {
+        flow(X.dc + 1.45, X.plat - 1.45, "fl", 1);
+        stage(X.plat, "plat", 4, true);
+
+        // Volatile / stable divider between disk cache and platter.
+        const divX = (X.dc + X.plat) / 2;
+        board.create("line", [[divX, 2.3], [divX, 5.0]], {
+          strokeColor: colors.cat[1], strokeWidth: 2, dash: 3, straightFirst: false, straightLast: false,
+          fixed: true, highlight: false,
+        });
+        board.create("text", [(X.app + X.dc) / 2, 2.1, sceneStrings("volatile")], {
+          strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+          cssStyle: "opacity:0.9",
+        });
+        board.create("text", [X.plat, 2.1, sceneStrings("stable")], {
+          strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+          cssStyle: "opacity:0.9",
+        });
+        // fsync span arrow underneath, app → platter.
+        board.create("arrow", [[X.app, 1.4], [X.plat, 1.4]], {
+          strokeColor: colors.cat[3], strokeWidth: 2, lastArrow: { size: 6 }, fixed: true, highlight: false,
+        });
+        board.create("text", [(X.app + X.plat) / 2, 1.05, sceneStrings("fsyncSpan")], {
+          strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+          cssStyle: "font-weight:600",
+        });
+      });
+    },
+    {
+      boundingbox: [-0.6, 5.3, 14.8, 0.5],
+      keepAspect: false,
+      title: () => makeStrings("wpath")("title"),
+    },
+  );
+
+  registerQuiz("fsyncQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("writeQ"), options: [
+      { text: () => sceneStrings("wrRight"), correct: true },
+      { text: () => sceneStrings("wrWrong1"), correct: false },
+      { text: () => sceneStrings("wrWrong2"), correct: false },
+      { text: () => sceneStrings("wrWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fsyncQ"), options: [
+      { text: () => sceneStrings("fsRight"), correct: true },
+      { text: () => sceneStrings("fsWrong1"), correct: false },
+      { text: () => sceneStrings("fsWrong2"), correct: false },
+      { text: () => sceneStrings("fsWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("twoCacheQ"), options: [
+      { text: () => sceneStrings("tcRight"), correct: true },
+      { text: () => sceneStrings("tcWrong1"), correct: false },
+      { text: () => sceneStrings("tcWrong2"), correct: false },
+      { text: () => sceneStrings("tcWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("barrierQ"), options: [
+      { text: () => sceneStrings("baRight"), correct: true },
+      { text: () => sceneStrings("baWrong1"), correct: false },
+      { text: () => sceneStrings("baWrong2"), correct: false },
+      { text: () => sceneStrings("baWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fdatasyncQ"), options: [
+      { text: () => sceneStrings("fdRight"), correct: true },
+      { text: () => sceneStrings("fdWrong1"), correct: false },
+      { text: () => sceneStrings("fdWrong2"), correct: false },
+      { text: () => sceneStrings("fdWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("renameQ"), options: [
+      { text: () => sceneStrings("reRight"), correct: true },
+      { text: () => sceneStrings("reWrong1"), correct: false },
+      { text: () => sceneStrings("reWrong2"), correct: false },
+      { text: () => sceneStrings("reWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("ext4Q"), options: [
+      { text: () => sceneStrings("e4Right"), correct: true },
+      { text: () => sceneStrings("e4Wrong1"), correct: false },
+      { text: () => sceneStrings("e4Wrong2"), correct: false },
+      { text: () => sceneStrings("e4Wrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("orderQ"), options: [
+      { text: () => sceneStrings("orRight"), correct: true },
+      { text: () => sceneStrings("orWrong1"), correct: false },
+      { text: () => sceneStrings("orWrong2"), correct: false },
+      { text: () => sceneStrings("orWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("costQ"), options: [
+      { text: () => sceneStrings("csRight"), correct: true },
+      { text: () => sceneStrings("csWrong1"), correct: false },
+      { text: () => sceneStrings("csWrong2"), correct: false },
+      { text: () => sceneStrings("csWrong3"), correct: false },
+    ] },
+    {
+      // Data at risk = ds * rt MB.
+      prompt: (v) => sceneStrings("windowNumQ", v),
+      variables: "ds=[5,10,30] rt=[2:20]",
+      answer: (v) => v.ds * v.rt,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Total fsync time = nw * fl ms.
+      prompt: (v) => sceneStrings("fsyncCostNumQ", v),
+      variables: "nw=[10:60] fl=[2:12]",
+      answer: (v) => v.nw * v.fl,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The Dataflow Analysis Framework</primer-title>
+
+    <primer-card>
+      <p>
+        Global optimizations need <em>facts</em> — "is this definition still in force here?", "has this
+        expression already been computed on every path to here?", "will this variable ever be read again?".
+        Every one of these questions has the same shape: attach a piece of information to each point in the
+        <primer-ref to="computer-science/compiler-design/codegen/basic-blocks-and-flow-graphs">flow graph</primer-ref>,
+        say how each basic block <em>transforms</em> that information, say how information from several
+        incoming paths <em>combines</em>, and then solve the whole tangle of mutually-dependent equations by
+        iterating to a <strong>fixed point</strong>. That single recipe is the <strong>dataflow analysis
+        framework</strong>, and once you see it, a dozen separate-looking analyses become one algorithm with
+        four knobs.
+      </p>
+      <p>
+        The framework is due to Kildall, and its monotone/lattice-theoretic foundations to Kam and Ullman. Its
+        beauty is that you never argue about the solver again: you specify the four knobs, and the same
+        round-robin loop computes the answer for reaching definitions, live variables, available expressions,
+        constant propagation and more.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The four knobs</h2>
+      <p>
+        A dataflow problem is completely specified by four choices:
+      </p>
+      <ul>
+        <li>
+          <strong>A domain (lattice) of values</strong> — what fact lives at each program point. Usually a set
+          (of definitions, of expressions, of variables), ordered by <primer-math>\subseteq</primer-math>,
+          with a <strong>top</strong> element <primer-math>\top</primer-math> (the identity of the meet) as the
+          safe starting guess for interior points.
+        </li>
+        <li>
+          <strong>A transfer function</strong> <primer-math>f_B</primer-math> per block, describing how the
+          block changes the fact. The overwhelmingly common form is <em>gen/kill</em>:
+          <primer-math>f_B(X) = \text{gen}_B \cup (X - \text{kill}_B)</primer-math> — the block generates some
+          new facts and destroys (kills) some old ones.
+        </li>
+        <li>
+          <strong>A meet operator</strong> <primer-math>\wedge</primer-math> — either union
+          <primer-math>\cup</primer-math> or intersection <primer-math>\cap</primer-math> — that combines the
+          facts arriving from several neighbours into one.
+        </li>
+        <li>
+          <strong>A direction</strong> — <em>forward</em> (facts flow along edges, from predecessors) or
+          <em>backward</em> (facts flow against edges, from successors).
+        </li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>The dataflow equations</h2>
+      <p>
+        With the knobs chosen, the analysis is two equations per block, coupled across the graph. For a
+        <strong>forward</strong> problem:
+      </p>
+      <primer-math display>\text{IN}[B] \;=\; \bigwedge_{P \,\in\, \text{pred}(B)} \text{OUT}[P], \qquad \text{OUT}[B] \;=\; f_B\big(\text{IN}[B]\big).</primer-math>
+      <p>
+        For a <strong>backward</strong> problem, the roles of IN/OUT and predecessor/successor swap:
+      </p>
+      <primer-math display>\text{OUT}[B] \;=\; \bigwedge_{S \,\in\, \text{succ}(B)} \text{IN}[S], \qquad \text{IN}[B] \;=\; f_B\big(\text{OUT}[B]\big).</primer-math>
+      <p>
+        With the gen/kill transfer expanded, the forward pair reads:
+      </p>
+      <primer-math display>\text{OUT}[B] \;=\; \text{gen}_B \,\cup\, \big(\text{IN}[B] - \text{kill}_B\big).</primer-math>
+      <p>
+        There is one special block. In a forward problem the graph's <strong>ENTRY</strong> node has no
+        predecessors, so its IN is set to a fixed <em>boundary value</em> (often
+        <primer-math>\varnothing</primer-math>). In a backward problem the boundary is <strong>EXIT</strong>'s
+        OUT. Get that boundary right and the rest follows.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The lattice, and why iteration terminates</h2>
+      <p>
+        The domain is a <strong>lattice</strong>: the meet of any two facts is well-defined, and there is a top
+        element <primer-math>\top</primer-math>. Picture the powerset of two definitions
+        <primer-math>\{d_1, d_2\}</primer-math> as a Hasse diagram — every set sits above the sets it contains:
+      </p>
+      <primer-geometry scene="latticeHasse"></primer-geometry>
+      <p>
+        Iteration works because the transfer and meet functions are <strong>monotone</strong> (they never undo
+        progress) and the lattice has <strong>finite height</strong>. Each block's estimate can only move in
+        one direction along the lattice as we iterate; since there are finitely many steps to the top or
+        bottom, the estimates must stop changing — the <strong>fixed point</strong>. The round-robin solver
+        below is just "recompute every block's equation until nothing changes".
+      </p>
+      <primer-theorem name="Monotone dataflow framework — convergence">
+        <ul>
+          <li>the value domain is a lattice of <strong>finite height</strong>;</li>
+          <li>every transfer function <primer-math>f_B</primer-math> and the meet <primer-math>\wedge</primer-math> are <strong>monotone</strong>;</li>
+          <li>therefore round-robin iteration reaches a unique <strong>maximum fixed point</strong> in a finite number of passes, independent of the visiting order.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The four canonical analyses</h2>
+      <p>
+        Almost every classical bit-vector analysis is one cell of a 2×2 grid — direction crossed with meet:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th></th><th>Meet = union (∪) — "may"</th><th>Meet = intersection (∩) — "must"</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Forward</strong></td>
+              <td><strong>Reaching definitions</strong> — which defs may reach here</td>
+              <td><strong>Available expressions</strong> — which exprs are computed on all paths</td>
+            </tr>
+            <tr>
+              <td><strong>Backward</strong></td>
+              <td><strong>Live variables</strong> — which vars may be used later</td>
+              <td><strong>Very busy (anticipated) expressions</strong> — which exprs are used on all later paths</td>
+            </tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The two <em>union</em> ("may") analyses ask "is there <strong>some</strong> path…?" and start each
+        interior point at <primer-math>\varnothing</primer-math>. The two <em>intersection</em> ("must")
+        analyses ask "on <strong>every</strong> path…?" and start each interior point at the full universal
+        set <primer-math>U</primer-math> (the top of the meet). This single grid organises most of Chapter 9.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A generic round-robin solver</h2>
+      <p>
+        Here is the whole framework as one function. Facts are sets of numbers; you pass in the CFG, the
+        gen/kill sets, the meet, the direction and the boundary — and it iterates every block's equation until
+        a whole pass changes nothing. Below we instantiate it as a forward-union analysis over a tiny
+        three-block loop.
+      </p>
+      <primer-code run>
+        type Set = number[]; // a fact = a sorted list of ids
+        const union = (a: Set, b: Set): Set =&gt; [...new Set([...a, ...b])].sort((x, y) =&gt; x - y);
+        const inter = (a: Set, b: Set): Set =&gt; a.filter((x) =&gt; b.includes(x));
+        const minus = (a: Set, k: Set): Set =&gt; a.filter((x) =&gt; !k.includes(x));
+        const eq = (a: Set, b: Set): boolean =&gt; a.length === b.length &amp;&amp; a.every((x, i) =&gt; x === b[i]);
+
+        interface Block { succ: number[]; pred: number[]; gen: Set; kill: Set; }
+
+        // Generic solver. forward=true uses pred+IN/OUT; meet combines neighbours.
+        function solve(blocks: Block[], forward: boolean, meet: (a: Set, b: Set) =&gt; Set, boundary: Set) {
+          const IN: Set[] = blocks.map(() =&gt; []);
+          const OUT: Set[] = blocks.map(() =&gt; []);
+          const order = forward ? blocks.map((_, i) =&gt; i) : blocks.map((_, i) =&gt; i).reverse();
+          let round = 0, changed = true;
+          while (changed) {
+            changed = false; round++;
+            for (const i of order) {
+              const B = blocks[i];
+              if (forward) {
+                // Meet over predecessors; ENTRY (no preds) takes the boundary value.
+                // [] is the identity for union; for an intersection problem start from the universal set instead.
+                let inB: Set = B.pred.length ? [] : boundary.slice();
+                for (const p of B.pred) inB = meet(inB, OUT[p]);
+                IN[i] = inB;
+                const newOut = union(B.gen, minus(inB, B.kill));   // gen ∪ (IN − kill)
+                if (!eq(newOut, OUT[i])) { OUT[i] = newOut; changed = true; }
+              }
+            }
+          }
+          return { IN, OUT, round };
+        }
+
+        // Three blocks: B0 -> B1 -> B2 -> B1 (a loop). Each defines one definition id.
+        const blocks: Block[] = [
+          { succ: [1], pred: [],     gen: [1], kill: []  },  // B0: d1
+          { succ: [2], pred: [0, 2], gen: [2], kill: []  },  // B1: d2
+          { succ: [1], pred: [1],    gen: [3], kill: [1] },  // B2: d3, kills d1
+        ];
+
+        const { IN, OUT, round } = solve(blocks, true, union, []);
+        console.log(`converged in ${round} passes`);
+        blocks.forEach((_, i) =&gt; console.log(`B${i}: IN={${IN[i].join(",")}}  OUT={${OUT[i].join(",")}}`));
+      </primer-code>
+      <p>
+        Swap <code>union</code> for <code>inter</code> and set the boundary to the universal set and the very
+        same loop computes an available-expressions-style "must" analysis instead. That interchangeability is
+        the whole point of a <em>framework</em>.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why 'maximum fixed point' and not just 'a solution'?">
+      <p>
+        The equations can have many solutions — any consistent assignment of IN/OUT sets that satisfies them
+        is technically a fixed point. We want the <strong>most precise safe</strong> one. Starting every
+        interior point at the top element <primer-math>\top</primer-math> and iterating downward with monotone
+        functions lands on the <em>maximum</em> fixed point: the tightest set of facts that is still
+        consistent with every path. Start too low (an unsafe guess) and you might converge to something that
+        <em>claims</em> more than the program guarantees — a wrong answer that an optimizer would act on. The
+        lattice direction and the initial value are what pin you to the safe, maximally-precise solution rather
+        than merely <em>a</em> solution.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Direction, meet, and initial value must all match the problem">
+      <p>
+        The framework is only as correct as its four knobs. Three classic mistakes: <strong>(1) wrong
+        initial value.</strong> Initialise a "must" (intersection) analysis to <primer-math>\varnothing</primer-math>
+        instead of the universal set <primer-math>U</primer-math> and the very first meet wipes everything out
+        — you converge instantly to a useless empty answer. The interior initial value must be the meet's
+        <em>identity</em> (<primer-math>\top</primer-math>): <primer-math>U</primer-math> for
+        <primer-math>\cap</primer-math>, <primer-math>\varnothing</primer-math> for <primer-math>\cup</primer-math>.
+        <strong>(2) wrong boundary.</strong> ENTRY (forward) or EXIT (backward) carries the problem's boundary
+        condition, not the interior default. <strong>(3) mismatched direction and meet.</strong> A backward
+        problem solved with forward equations gives nonsense. Live variables is backward-union; run it forward,
+        or with intersection, and every downstream optimization built on it is unsound. Fix the four knobs
+        first; only then trust the solver.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "frameworkQuiz@1": {
+          "intro": "The dataflow framework: a lattice of facts, a per-block transfer function, a meet operator, a direction — solved to a fixed point. Numbers change each attempt.",
+          "knobQ": "A dataflow problem is fully specified by which four choices?",
+          "knFour": "domain/lattice, transfer function, meet operator, and direction",
+          "knTwo": "just gen and kill",
+          "knSpeed": "clock speed, cache size, registers, and pipeline depth",
+          "knSyntax": "the source language's keywords",
+          "transferQ": "The common gen/kill transfer function f_B(X) equals…",
+          "tfGK": "gen ∪ (X − kill)",
+          "tfKG": "kill ∪ (X − gen)",
+          "tfUnion": "X ∪ gen ∪ kill",
+          "tfInter": "X ∩ gen",
+          "meetQ": "The meet operator's job is to…",
+          "mtCombine": "combine the facts arriving from several neighbouring blocks into one",
+          "mtRun": "run the program",
+          "mtSort": "sort the basic blocks",
+          "mtParse": "parse the source",
+          "dirQ": "In a FORWARD analysis, IN[B] is the meet over…",
+          "dirPred": "the OUT sets of B's predecessors",
+          "dirSucc": "the IN sets of B's successors",
+          "dirSelf": "B's own gen set",
+          "dirAll": "every block in the program",
+          "backQ": "In a BACKWARD analysis, information flows…",
+          "bkAgainst": "against the edges, from successors to predecessors",
+          "bkAlong": "along the edges, from predecessors",
+          "bkNone": "not at all",
+          "bkRandom": "in a random direction each pass",
+          "termQ": "Why is the iterative solver guaranteed to terminate?",
+          "tmMono": "monotone functions on a finite-height lattice can change each value only finitely often",
+          "tmInput": "the input program is finite",
+          "tmTime": "there is a one-second timeout",
+          "tmLuck": "it is not guaranteed to terminate",
+          "mayQ": "A 'may' analysis (meet = union) answers a question of the form…",
+          "mayPath": "is the fact true on SOME path?",
+          "mayAll": "is the fact true on EVERY path?",
+          "mayNever": "is the fact never true?",
+          "mayOnce": "is the fact true exactly once?",
+          "mustQ": "A 'must' analysis (meet = intersection) initialises interior points to…",
+          "mustU": "the universal set U (the top of the meet)",
+          "mustEmpty": "the empty set",
+          "mustGen": "the gen set",
+          "mustEntry": "the ENTRY block's fact",
+          "gridQ": "Available-expressions analysis sits in which cell of the direction × meet grid?",
+          "gridFI": "forward, intersection",
+          "gridBI": "backward, intersection",
+          "gridFU": "forward, union",
+          "gridBU": "backward, union",
+          "boundQ": "The ENTRY node of a forward problem gets its IN from…",
+          "bdFixed": "a fixed boundary value, since it has no predecessors",
+          "bdMeet": "the meet of all other blocks",
+          "bdGen": "its successors' gen sets",
+          "bdSkip": "nothing — it is skipped",
+          "fpQ": "A dataflow solution is reached when…",
+          "fpFix": "a full pass over all blocks changes no IN or OUT set (a fixed point)",
+          "fpOne": "one block is updated once",
+          "fpInput": "the input string ends",
+          "fpEntry": "ENTRY is visited",
+          "passQ": "A bit-vector analysis over a lattice of height {h} needs at most about {h} sweeps in the worst case to stabilise per value. If a full solve took {p} productive passes, and one final pass confirmed no change, how many passes were executed in total including that confirming pass?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="frameworkQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/codegen/basic-blocks-and-flow-graphs"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Hasse diagram of the powerset of {d1,d2}, ordered by ⊆. Bottom ∅, top {d1,d2}.
+  registerGeometryScene("latticeHasse", ({ board, step, colors }) => {
+    const r = 0.62;
+    const node = (x, y, text, col) => {
+      board.create("circle", [[x, y], r], {
+        strokeColor: col, strokeWidth: 2, fillColor: col, fillOpacity: 0.14, fixed: true, highlight: false,
+      });
+      board.create("text", [x, y, text], {
+        anchorX: "middle", anchorY: "middle", fontSize: 14, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    const link = (ax, ay, bx, by, col) => {
+      const dx = bx - ax, dy = by - ay, d = Math.hypot(dx, dy), ux = dx / d, uy = dy / d;
+      board.create("segment", [[ax + ux * r, ay + uy * r], [bx - ux * r, by - uy * r]], {
+        strokeColor: col, strokeWidth: 2, fixed: true, highlight: false, straightFirst: false, straightLast: false,
+      });
+    };
+    const bottom = [0, 0], left = [-2.4, 2.4], right = [2.4, 2.4], top = [0, 4.8];
+
+    // base content: the full lattice, always visible
+    link(bottom[0], bottom[1], left[0], left[1], colors.line);
+    link(bottom[0], bottom[1], right[0], right[1], colors.line);
+    link(left[0], left[1], top[0], top[1], colors.line);
+    link(right[0], right[1], top[0], top[1], colors.line);
+    node(bottom[0], bottom[1], "∅", colors.cat[0]);
+    node(left[0], left[1], "{d₁}", colors.cat[1]);
+    node(right[0], right[1], "{d₂}", colors.cat[2]);
+    node(top[0], top[1], "{d₁,d₂}", colors.cat[3]);
+
+    board.create("text", [-4.6, 4.8, "⊤ (top): full set"], {
+      anchorX: "left", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+      strokeColor: colors.ink, color: colors.ink,
+    });
+    board.create("text", [-4.6, 0, "⊥ (bottom): ∅"], {
+      anchorX: "left", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+      strokeColor: colors.ink, color: colors.ink,
+    });
+  }, { boundingbox: [-5, 5.7, 5, -1], keepAspect: false, title: "Lattice (Hasse diagram) of the powerset of {d₁,d₂}, ordered by ⊆" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("frameworkQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("knobQ"),
+      options: [
+        { text: () => sceneStrings("knFour"), correct: true },
+        { text: () => sceneStrings("knTwo"), correct: false },
+        { text: () => sceneStrings("knSpeed"), correct: false },
+        { text: () => sceneStrings("knSyntax"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("transferQ"),
+      options: [
+        { text: () => sceneStrings("tfGK"), correct: true },
+        { text: () => sceneStrings("tfKG"), correct: false },
+        { text: () => sceneStrings("tfUnion"), correct: false },
+        { text: () => sceneStrings("tfInter"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("meetQ"),
+      options: [
+        { text: () => sceneStrings("mtCombine"), correct: true },
+        { text: () => sceneStrings("mtRun"), correct: false },
+        { text: () => sceneStrings("mtSort"), correct: false },
+        { text: () => sceneStrings("mtParse"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dirQ"),
+      options: [
+        { text: () => sceneStrings("dirPred"), correct: true },
+        { text: () => sceneStrings("dirSucc"), correct: false },
+        { text: () => sceneStrings("dirSelf"), correct: false },
+        { text: () => sceneStrings("dirAll"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("backQ"),
+      options: [
+        { text: () => sceneStrings("bkAgainst"), correct: true },
+        { text: () => sceneStrings("bkAlong"), correct: false },
+        { text: () => sceneStrings("bkNone"), correct: false },
+        { text: () => sceneStrings("bkRandom"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("termQ"),
+      options: [
+        { text: () => sceneStrings("tmMono"), correct: true },
+        { text: () => sceneStrings("tmInput"), correct: false },
+        { text: () => sceneStrings("tmTime"), correct: false },
+        { text: () => sceneStrings("tmLuck"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("mayQ"),
+      options: [
+        { text: () => sceneStrings("mayPath"), correct: true },
+        { text: () => sceneStrings("mayAll"), correct: false },
+        { text: () => sceneStrings("mayNever"), correct: false },
+        { text: () => sceneStrings("mayOnce"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("mustQ"),
+      options: [
+        { text: () => sceneStrings("mustU"), correct: true },
+        { text: () => sceneStrings("mustEmpty"), correct: false },
+        { text: () => sceneStrings("mustGen"), correct: false },
+        { text: () => sceneStrings("mustEntry"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gridQ"),
+      options: [
+        { text: () => sceneStrings("gridFI"), correct: true },
+        { text: () => sceneStrings("gridBI"), correct: false },
+        { text: () => sceneStrings("gridFU"), correct: false },
+        { text: () => sceneStrings("gridBU"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("boundQ"),
+      options: [
+        { text: () => sceneStrings("bdFixed"), correct: true },
+        { text: () => sceneStrings("bdMeet"), correct: false },
+        { text: () => sceneStrings("bdGen"), correct: false },
+        { text: () => sceneStrings("bdSkip"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fpQ"),
+      options: [
+        { text: () => sceneStrings("fpFix"), correct: true },
+        { text: () => sceneStrings("fpOne"), correct: false },
+        { text: () => sceneStrings("fpInput"), correct: false },
+        { text: () => sceneStrings("fpEntry"), correct: false },
+      ],
+    },
+    {
+      // Total passes = productive passes p plus one confirming no-change pass.
+      prompt: (v) => sceneStrings("passQ", v),
+      variables: "h=[2:6] p=[2:5]",
+      answer: (v) => v.p + 1,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

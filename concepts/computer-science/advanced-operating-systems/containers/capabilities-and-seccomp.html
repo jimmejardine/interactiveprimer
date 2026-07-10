@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Capabilities and seccomp</primer-title>
+
+    <primer-card>
+      <p>
+        The last few lessons kept circling one uncomfortable fact: a container shares the host kernel, so the
+        kernel's syscall interface <em>is</em> the container's attack surface. If a process inside a container
+        runs as <primer-math>\texttt{root}</primer-math> and can call any of the kernel's ~<primer-math>400</primer-math>
+        system calls, then a single kernel bug reachable from those calls is a potential escape. Two Linux
+        mechanisms exist to shrink that surface, and every serious container runtime uses both:
+        <strong>capabilities</strong> (split root's power into pieces and drop the pieces you don't need) and
+        <strong>seccomp</strong> (filter <em>which</em> syscalls a process may make at all).
+      </p>
+      <p>
+        The through-line is the <strong>principle of least privilege</strong>: a process should hold only the
+        powers it actually uses. Traditional Unix violated this spectacularly — you were either
+        <primer-math>\texttt{root}</primer-math> (all powers) or not (none). Capabilities and seccomp are the two
+        tools that break that all-or-nothing, from two different angles: capabilities carve up
+        <em>authority</em>, seccomp restricts the <em>interface</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Capabilities — root, unbundled</h2>
+      <p>
+        Classic Unix has one magic user: UID <primer-math>0</primer-math>, root, for whom the kernel skips almost
+        every permission check. That is a disaster for least privilege — a program that merely needs to bind to
+        port <primer-math>80</primer-math> (a "privileged" port) traditionally had to run as full root, gaining
+        the power to also reboot the machine, load kernel modules, and read every file. Linux
+        <strong>capabilities</strong> shatter that monolithic root into roughly <strong>40 independent
+        bits</strong>, each granting one slice of privilege. You grant a process only the slices it needs.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Capability</th><th>Grants the power to…</th><th>Notes</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><primer-math>\texttt{CAP\_NET\_BIND\_SERVICE}</primer-math></td><td>bind to ports below 1024</td><td>the classic "just need port 80" case</td></tr>
+            <tr><td><primer-math>\texttt{CAP\_NET\_ADMIN}</primer-math></td><td>configure interfaces, routes, firewall</td><td>powerful — networking control</td></tr>
+            <tr><td><primer-math>\texttt{CAP\_SYS\_ADMIN}</primer-math></td><td>mount, pivot_root, and a huge grab-bag</td><td>"the new root" — avoid granting it</td></tr>
+            <tr><td><primer-math>\texttt{CAP\_SYS\_MODULE}</primer-math></td><td>load/unload kernel modules</td><td>full kernel takeover — never in a container</td></tr>
+            <tr><td><primer-math>\texttt{CAP\_SYS\_PTRACE}</primer-math></td><td>trace/inspect other processes</td><td>can read others' memory</td></tr>
+            <tr><td><primer-math>\texttt{CAP\_CHOWN}</primer-math></td><td>change file ownership</td><td>dropped by default in Docker</td></tr>
+            <tr><td><primer-math>\texttt{CAP\_DAC\_OVERRIDE}</primer-math></td><td>bypass file read/write/execute checks</td><td>ignore all permission bits</td></tr>
+            <tr><td><primer-math>\texttt{CAP\_KILL}</primer-math></td><td>send signals to any process</td><td>bypasses the UID-match rule</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Docker's default is to run the container as root but <strong>drop all but ~14</strong> of the
+        capabilities, keeping a conservative set (like <primer-math>\texttt{CAP\_CHOWN}</primer-math>,
+        <primer-math>\texttt{CAP\_NET\_BIND\_SERVICE}</primer-math>,
+        <primer-math>\texttt{CAP\_KILL}</primer-math>) and dropping the dangerous ones
+        (<primer-math>\texttt{CAP\_SYS\_ADMIN}</primer-math>,
+        <primer-math>\texttt{CAP\_SYS\_MODULE}</primer-math>, …). The best practice is
+        <primer-math>\texttt{--cap-drop=ALL}</primer-math> then <primer-math>\texttt{--cap-add}</primer-math> only
+        what the workload proves it needs.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the two-gate figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "gates": {
+          "title": "Two gates between a container process and the kernel: syscall filter + capability check",
+          "proc": "container process (running as 'root')",
+          "seccomp": "GATE 1 — seccomp-bpf: is this syscall on the allow-list?",
+          "denied": "not allowed → SIGSYS / EPERM (never reaches the kernel)",
+          "cap": "GATE 2 — capability check: does the process hold the required CAP_* bit?",
+          "capdenied": "missing capability → EPERM",
+          "kernel": "kernel executes the syscall",
+          "note": "seccomp shrinks WHICH syscalls exist; capabilities shrink WHAT root may do"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>seccomp — filtering the syscall interface</h2>
+      <p>
+        Capabilities restrict <em>authority</em>, but every syscall the process can name is still
+        <em>reachable</em> code in the kernel — including obscure ones the app will never use but that might
+        harbour a bug. <strong>seccomp</strong> (secure computing) attacks this directly: it lets a process
+        install a filter that the kernel consults on <em>every</em> system call, deciding whether to allow it,
+        deny it (with an error or a fatal <primer-math>\texttt{SIGSYS}</primer-math>), log it, or trap it. The
+        modern form, <strong>seccomp-bpf</strong>, expresses the filter as a small
+        <strong>BPF</strong> program over
+        the syscall number and its arguments — evaluated in-kernel, cheaply, on the syscall fast path.
+      </p>
+      <p>
+        Once installed, a filter is <em>irrevocable</em> and inherited across
+        <primer-math>\texttt{fork}</primer-math>/<primer-math>\texttt{exec}</primer-math>, so a process can only
+        ever <em>reduce</em> its own reachable interface — it can never grant itself back a syscall. Docker ships
+        a <strong>default seccomp profile</strong> that allows the ~<primer-math>300</primer-math> syscalls normal
+        programs use and blocks around <primer-math>40</primer-math> dangerous or rarely-needed ones
+        (<primer-math>\texttt{keyctl}</primer-math>, <primer-math>\texttt{ptrace}</primer-math> in some configs,
+        <primer-math>\texttt{mount}</primer-math>, <primer-math>\texttt{reboot}</primer-math>,
+        <primer-math>\texttt{kexec\_load}</primer-math>, …). That single default profile has historically blocked
+        real kernel exploits whose trigger syscall simply wasn't on the list.
+      </p>
+      <primer-geometry scene="gates"></primer-geometry>
+      <p>
+        Read the two gates as defence in depth. A syscall must pass <em>both</em>: seccomp asks "is this syscall
+        even permitted?" and, if so, the capability check asks "does this process hold the right to do it?" Drop
+        the capability <em>and</em> block the syscall and you have closed the door twice.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A seccomp filter, in slow motion</h2>
+      <p>
+        The simulation models a tiny allow-list seccomp profile: a set of permitted syscalls, everything else
+        denied. Watch a normal workload sail through and a suspicious one — trying to
+        <primer-math>\texttt{mount}</primer-math> a filesystem or
+        <primer-math>\texttt{reboot}</primer-math> the host — get stopped at the gate before the kernel ever
+        sees it.
+      </p>
+      <primer-code run>
+        // A toy seccomp-bpf allow-list. Real filters are BPF over syscall number + args; this just
+        // narrates the allow/deny decision on the syscall fast path.
+        const ALLOW = new Set(["read", "write", "openat", "close", "mmap", "futex", "clock_gettime", "exit_group"]);
+        const DENY_ACTION: Record&lt;string, string&gt; = {
+          mount: "SIGSYS (kill)", reboot: "EPERM", kexec_load: "SIGSYS (kill)",
+          ptrace: "EPERM", keyctl: "EPERM",
+        };
+
+        function seccomp(syscall: string): boolean {
+          if (ALLOW.has(syscall)) {
+            console.log(`  ${syscall.padEnd(14)} → ALLOW  (passes to kernel)`);
+            return true;
+          }
+          const action = DENY_ACTION[syscall] ?? "EPERM";
+          console.log(`  ${syscall.padEnd(14)} → DENY   (${action}) — kernel never runs it`);
+          return false;
+        }
+
+        console.log("Normal web-server workload:");
+        ["openat", "read", "write", "close", "futex"].forEach((s) =&gt; seccomp(s));
+
+        console.log("\nCompromised process probing for an escape:");
+        ["ptrace", "mount", "kexec_load", "reboot"].forEach((s) =&gt; seccomp(s));
+
+        const dangerous = ["ptrace", "mount", "kexec_load", "reboot"];
+        const blocked = dangerous.filter((s) =&gt; !ALLOW.has(s)).length;
+        console.log(`\n${blocked}/${dangerous.length} escape attempts blocked at the seccomp gate — before touching kernel code.`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The design law</h2>
+      <primer-theorem name="Least privilege for containers">
+        <ul>
+          <li><strong>Capabilities</strong> split the all-or-nothing root into ~40 independent bits
+            (<primer-math>\texttt{CAP\_NET\_ADMIN}</primer-math>,
+            <primer-math>\texttt{CAP\_SYS\_ADMIN}</primer-math>, …); drop every bit the workload doesn't use.</li>
+          <li><strong>seccomp / seccomp-bpf</strong> filters <em>which syscalls</em> a process may issue,
+            evaluated in-kernel per call; a filter can only ever <em>reduce</em> the interface and is inherited
+            across <primer-math>\texttt{exec}</primer-math>.</li>
+          <li>They are <strong>orthogonal, complementary</strong> defences: capabilities restrict
+            <em>authority</em>, seccomp restricts the reachable <em>interface</em> — together they shrink the
+            shared-kernel attack surface.</li>
+          <li>Docker applies <strong>both by default</strong>: dropped capabilities plus a default seccomp
+            profile blocking ~40 dangerous syscalls — defence in depth over the one shared kernel.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="How did one dropped capability turn 'container root' into something almost safe?">
+      <p>
+        The scary phrase "the container runs as root" is much less scary once you know that Docker's root is a
+        <em>declawed</em> root. The most dangerous single capability is
+        <primer-math>\texttt{CAP\_SYS\_ADMIN}</primer-math> — so sprawling that kernel developers joke it is "the
+        new root": it enables mounting filesystems, manipulating namespaces, and dozens of other operations that
+        are stepping-stones to escape. Docker drops it by default. Combined with a
+        <primer-math>\texttt{user}</primer-math> namespace mapping container-root to an unprivileged host UID and
+        the default seccomp profile blocking <primer-math>\texttt{mount}</primer-math> outright, a would-be
+        escapee finds that the powers it would reach for are simply <em>absent</em> — not forbidden by a policy it
+        might argue with, but not present in the process at all. Least privilege turns "root" from a master key
+        into a key that opens almost nothing.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Dropping capabilities is not the same as blocking syscalls">
+      <p>
+        A common conflation: "I dropped <primer-math>\texttt{CAP\_SYS\_ADMIN}</primer-math>, so
+        <primer-math>\texttt{mount}</primer-math> is blocked — seccomp is redundant." Not quite. Capabilities and
+        seccomp gate <em>different things</em>. A capability check asks "does this process have the
+        <em>authority</em> for this privileged operation?" — the <primer-math>\texttt{mount}</primer-math> syscall
+        still <em>runs</em>, walks into the kernel, and returns <primer-math>\texttt{EPERM}</primer-math>. seccomp
+        asks "is this syscall <em>permitted to be attempted at all</em>?" — a blocked
+        <primer-math>\texttt{mount}</primer-math> never enters the kernel's mount code, so a bug <em>in that
+        code path</em> is never reached. That difference matters for kernel-bug defence: many exploits don't need
+        a capability, they need to <em>reach vulnerable kernel code</em> with crafted arguments. Only seccomp
+        keeps them out of that code. Use both; they are not substitutes.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: capabilities (what they split, examples), seccomp (what it filters, one-way), Docker defaults,
+         orthogonality. Bank of 12, draws 5. Variable names avoid evaluator collisions (caps, drop, total, ...). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "capQuiz@1": {
+          "intro": "Breaking all-or-nothing root: capabilities split root's authority into ~40 bits; seccomp filters which syscalls a process may make.",
+          "capQ": "Linux capabilities exist to…",
+          "capRight": "split the all-or-nothing root privilege into ~40 independent bits you can grant or drop individually",
+          "capWrong1": "make the CPU run faster in kernel mode",
+          "capWrong2": "give a process a second kernel",
+          "capWrong3": "encrypt the container's filesystem",
+          "seccompQ": "seccomp (seccomp-bpf) restricts…",
+          "seccompRight": "which system calls a process is allowed to make",
+          "seccompWrong1": "how much memory a process may allocate",
+          "seccompWrong2": "which files a process may open",
+          "seccompWrong3": "the container's hostname",
+          "orthoQ": "How do capabilities and seccomp differ?",
+          "orthoRight": "capabilities restrict authority for privileged ops; seccomp restricts which syscalls are reachable at all",
+          "orthoWrong1": "they are two names for the same mechanism",
+          "orthoWrong2": "capabilities filter syscalls; seccomp splits root",
+          "orthoWrong3": "seccomp only works inside a VM",
+          "adminQ": "Why is CAP_SYS_ADMIN nicknamed 'the new root'?",
+          "adminRight": "it grants a huge grab-bag of powers (mount, namespaces, …) and is a common escape stepping-stone",
+          "adminWrong1": "it is required to run any program",
+          "adminWrong2": "it only allows reading system logs",
+          "adminWrong3": "it makes the process a system administrator user",
+          "bindQ": "A web server only needs to bind to port 80. Least privilege says grant…",
+          "bindRight": "just CAP_NET_BIND_SERVICE, not full root",
+          "bindWrong1": "full root (UID 0 with all capabilities)",
+          "bindWrong2": "CAP_SYS_MODULE",
+          "bindWrong3": "CAP_SYS_ADMIN",
+          "onewayQ": "Once a process installs a seccomp filter, it can…",
+          "onewayRight": "only further reduce its reachable syscalls — never grant one back",
+          "onewayWrong1": "add new syscalls whenever it likes",
+          "onewayWrong2": "remove the filter with a normal syscall",
+          "onewayWrong3": "escalate to full root",
+          "dockerQ": "By default, a Docker container…",
+          "dockerRight": "drops most capabilities AND applies a seccomp profile blocking ~40 dangerous syscalls",
+          "dockerWrong1": "grants all capabilities and no syscall filter",
+          "dockerWrong2": "runs with no kernel access at all",
+          "dockerWrong3": "boots its own guest kernel for safety",
+          "surfaceQ": "Why does filtering syscalls reduce the container's attack surface?",
+          "surfaceRight": "fewer reachable syscalls means fewer kernel code paths an exploit can trigger",
+          "surfaceWrong1": "it makes syscalls run faster",
+          "surfaceWrong2": "it encrypts syscall arguments",
+          "surfaceWrong3": "it moves syscalls to user space",
+          "bestQ": "The recommended way to set capabilities on a container is…",
+          "bestRight": "--cap-drop=ALL then --cap-add only the ones actually needed",
+          "bestWrong1": "add every capability so nothing breaks",
+          "bestWrong2": "never change the defaults",
+          "bestWrong3": "run the container as UID 0 with no restrictions",
+          "moduleQ": "Which capability should essentially NEVER be given to a container?",
+          "moduleRight": "CAP_SYS_MODULE — it can load kernel modules (full kernel takeover)",
+          "moduleWrong1": "CAP_NET_BIND_SERVICE",
+          "moduleWrong2": "CAP_CHOWN",
+          "moduleWrong3": "CAP_KILL",
+          "bothQ": "You drop CAP_SYS_ADMIN. Does the mount syscall still enter the kernel?",
+          "bothRight": "yes — it runs and returns EPERM; only seccomp stops it entering the kernel",
+          "bothWrong1": "no — dropping the capability removes the syscall entirely",
+          "bothWrong2": "no — the syscall is deleted from the kernel",
+          "bothWrong3": "yes, and it always succeeds anyway",
+          "dropQ": "Full root has ${caps}$ capabilities. Docker drops ${drop}$ of them by default. How many capabilities remain?",
+          "blockQ": "A default seccomp profile allows ${allow}$ syscalls out of ${total}$ total. How many syscalls does it BLOCK?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="capQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/containers/namespaces-and-cgroups"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Two-gate figure: process at top, syscall passes through GATE 1 (seccomp) then GATE 2 (capability
+     check) to reach the kernel, with side branches for the two denials. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "gates",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, text, ci, opacity, weight) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[ci], fillOpacity: opacity,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, text], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: `text-align:center; white-space:pre-line; ${weight ? "font-weight:700;" : ""} max-width:300px`,
+        });
+      };
+      const arrow = (x0, y0, x1, y1) =>
+        board.create("arrow", [[x0, y0], [x1, y1]], { strokeColor: colors.line, strokeWidth: 2, lastArrow: { size: 6 }, fixed: true, highlight: false });
+      const caption = (x, y, text, size) =>
+        board.create("text", [x, y, text], {
+          strokeColor: colors.ink, fontSize: size || 10.5, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "max-width:260px",
+        });
+
+      const CX0 = 1.6, CX1 = 7.4;   // central column
+
+      // Central pipeline (base content).
+      box(CX0, 8.0, CX1, 9.0, sceneStrings("proc"), 0, 0.24, false);
+      arrow((CX0 + CX1) / 2, 8.0, (CX0 + CX1) / 2, 7.2);
+      box(CX0, 6.1, CX1, 7.1, sceneStrings("seccomp"), 1, 0.28, true);
+      arrow((CX0 + CX1) / 2, 6.1, (CX0 + CX1) / 2, 5.3);
+      box(CX0, 4.2, CX1, 5.2, sceneStrings("cap"), 1, 0.28, true);
+      arrow((CX0 + CX1) / 2, 4.2, (CX0 + CX1) / 2, 3.4);
+      box(CX0, 2.3, CX1, 3.3, sceneStrings("kernel"), 2, 0.30, true);
+
+      // Denial branches, revealed as steps.
+      step(sceneStrings("denied"), () => {
+        arrow(CX1, 6.6, CX1 + 1.0, 6.6);
+        box(CX1 + 1.0, 6.1, CX1 + 4.2, 7.1, sceneStrings("denied"), 2, 0.16, false);
+      });
+      step(sceneStrings("capdenied"), () => {
+        arrow(CX1, 4.7, CX1 + 1.0, 4.7);
+        box(CX1 + 1.0, 4.2, CX1 + 4.2, 5.2, sceneStrings("capdenied"), 2, 0.16, false);
+      });
+      caption((CX0 + CX1) / 2, 1.5, sceneStrings("note"), 10.5);
+    },
+    {
+      boundingbox: [-0.4, 9.6, 12.4, 0.8],
+      keepAspect: false,
+      title: () => makeStrings("gates")("title"),
+    },
+  );
+
+  registerQuiz("capQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("capQ"), options: [
+      { text: () => sceneStrings("capRight"), correct: true },
+      { text: () => sceneStrings("capWrong1"), correct: false },
+      { text: () => sceneStrings("capWrong2"), correct: false },
+      { text: () => sceneStrings("capWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("seccompQ"), options: [
+      { text: () => sceneStrings("seccompRight"), correct: true },
+      { text: () => sceneStrings("seccompWrong1"), correct: false },
+      { text: () => sceneStrings("seccompWrong2"), correct: false },
+      { text: () => sceneStrings("seccompWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("orthoQ"), options: [
+      { text: () => sceneStrings("orthoRight"), correct: true },
+      { text: () => sceneStrings("orthoWrong1"), correct: false },
+      { text: () => sceneStrings("orthoWrong2"), correct: false },
+      { text: () => sceneStrings("orthoWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("adminQ"), options: [
+      { text: () => sceneStrings("adminRight"), correct: true },
+      { text: () => sceneStrings("adminWrong1"), correct: false },
+      { text: () => sceneStrings("adminWrong2"), correct: false },
+      { text: () => sceneStrings("adminWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("bindQ"), options: [
+      { text: () => sceneStrings("bindRight"), correct: true },
+      { text: () => sceneStrings("bindWrong1"), correct: false },
+      { text: () => sceneStrings("bindWrong2"), correct: false },
+      { text: () => sceneStrings("bindWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("onewayQ"), options: [
+      { text: () => sceneStrings("onewayRight"), correct: true },
+      { text: () => sceneStrings("onewayWrong1"), correct: false },
+      { text: () => sceneStrings("onewayWrong2"), correct: false },
+      { text: () => sceneStrings("onewayWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dockerQ"), options: [
+      { text: () => sceneStrings("dockerRight"), correct: true },
+      { text: () => sceneStrings("dockerWrong1"), correct: false },
+      { text: () => sceneStrings("dockerWrong2"), correct: false },
+      { text: () => sceneStrings("dockerWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("surfaceQ"), options: [
+      { text: () => sceneStrings("surfaceRight"), correct: true },
+      { text: () => sceneStrings("surfaceWrong1"), correct: false },
+      { text: () => sceneStrings("surfaceWrong2"), correct: false },
+      { text: () => sceneStrings("surfaceWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("bestQ"), options: [
+      { text: () => sceneStrings("bestRight"), correct: true },
+      { text: () => sceneStrings("bestWrong1"), correct: false },
+      { text: () => sceneStrings("bestWrong2"), correct: false },
+      { text: () => sceneStrings("bestWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("moduleQ"), options: [
+      { text: () => sceneStrings("moduleRight"), correct: true },
+      { text: () => sceneStrings("moduleWrong1"), correct: false },
+      { text: () => sceneStrings("moduleWrong2"), correct: false },
+      { text: () => sceneStrings("moduleWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("bothQ"), options: [
+      { text: () => sceneStrings("bothRight"), correct: true },
+      { text: () => sceneStrings("bothWrong1"), correct: false },
+      { text: () => sceneStrings("bothWrong2"), correct: false },
+      { text: () => sceneStrings("bothWrong3"), correct: false },
+    ] },
+    {
+      // remaining = caps - drop.
+      prompt: (v) => sceneStrings("dropQ", v),
+      variables: "caps=[38,40,41] drop=[20:30]",
+      answer: (v) => v.caps - v.drop,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // blocked = total - allow.
+      prompt: (v) => sceneStrings("blockQ", v),
+      variables: "allow=[280,300,320] total=[340,360,380]",
+      answer: (v) => v.total - v.allow,
+      constraints: "total > allow",
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

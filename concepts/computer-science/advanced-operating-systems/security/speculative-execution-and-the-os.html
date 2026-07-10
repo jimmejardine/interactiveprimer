@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Speculative Execution and the OS</primer-title>
+
+    <primer-card>
+      <p>
+        In January 2018 the entire industry learned that a performance trick baked into every fast CPU for two
+        decades had quietly broken the most fundamental promise an operating system makes. You already met the
+        hardware mechanism in
+        <primer-ref to="computer-science/computer-architecture/reliability/spectre-and-meltdown">Spectre and
+        Meltdown</primer-ref>: the CPU speculates past a branch or a permission check, executes instructions it
+        may have to throw away, and — crucially — leaves <em>microarchitectural footprints</em> (cache-line
+        residency) that a patient attacker can measure. This lesson is the other half of that story: what the
+        <em>operating system</em> had to do about it, why the fix was so drastic, and what it cost.
+      </p>
+      <p>
+        The reason OS people panicked is specific. <strong>Meltdown</strong> let an ordinary user process read
+        <em>kernel</em> memory — not through a bug in the kernel, but by exploiting the fact that the kernel was
+        <em>mapped into every process's address space</em> for speed. The isolation the OS thought the hardware
+        was enforcing was, under speculation, not enforced at all. The kernel's own defence — never mapping user
+        pages executable, checking every ACL — was irrelevant, because the leak happened <em>below</em> the
+        architectural level the OS controls.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The assumption that broke</h2>
+      <p>
+        For decades, kernels made a deliberate trade. The kernel's pages <em>were</em> mapped into every process's
+        page tables — marked supervisor-only, so a ring-3 access would fault — precisely so that a
+        <primer-ref to="computer-science/advanced-operating-systems/kernel/the-system-call-interface">system
+        call</primer-ref> could enter the kernel <em>without</em> switching page tables. No
+        <primer-math>\texttt{CR3}</primer-math> reload, no TLB flush: the trap just raised privilege and the
+        already-mapped kernel was right there. Fast, and — everyone believed — safe, because the supervisor bit
+        would stop any user read.
+      </p>
+      <p>
+        Meltdown demolished the "safe" half. On the vulnerable cores, a speculative load of a kernel address
+        returned its value into the pipeline <em>before</em> the permission check retired and squashed the
+        instruction. The value never became architecturally visible — but the attacker had already used it to
+        index an array, pulling one cache line into cache. A timing probe afterwards revealed which line, and thus
+        the secret byte. The permission check was <em>too late</em>. The kernel being mapped for speed had become
+        the kernel being readable for free.
+      </p>
+      <primer-theorem name="Why speculative attacks broke OS isolation">
+        <ul>
+          <li>the kernel was mapped into every user address space (supervisor-only) so syscalls stayed fast —
+            <strong>no page-table switch</strong> on entry;</li>
+          <li>speculation read supervisor data <em>before</em> the permission check retired, then leaked it through
+            a <strong>cache side channel</strong>;</li>
+          <li>so isolation was violated <em>below</em> the architectural layer the OS can see — no kernel software
+            bug was involved at all;</li>
+          <li>the only OS-level fix is to <strong>stop mapping the kernel</strong> in user page tables — undoing a
+            twenty-year performance optimisation.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Strings for the KPTI split-page-table figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "kpti": {
+          "title": "KPTI splits one page table into two — the user table barely maps the kernel at all",
+          "before": "BEFORE (fast, unsafe): one page table per process",
+          "after": "AFTER KPTI (safe, costlier): two page tables, switched on every crossing",
+          "userMap": "user pages",
+          "kernFull": "FULL kernel mapped (supervisor-only)",
+          "kernStub": "tiny trampoline only (entry stubs, no secrets)",
+          "kernAll": "FULL kernel + user pages",
+          "userTbl": "USER page table (ring 3)",
+          "kernTbl": "KERNEL page table (ring 0)",
+          "cr3": "syscall/return → reload CR3 → switch tables → TLB cost",
+          "s1": "Before: one table maps user pages AND the whole kernel — Meltdown can read it",
+          "s2": "After: the user table maps only a tiny trampoline; the kernel's secrets are unmapped",
+          "s3": "Entering the kernel now reloads CR3 to the kernel table (and back on return) — the KPTI tax"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The fix: Kernel Page-Table Isolation (KPTI)</h2>
+      <p>
+        If the danger is that the kernel is <em>mapped</em> while user code runs, the fix is blunt: <strong>don't
+        map it</strong>. <strong>KPTI</strong> (Kernel Page-Table Isolation — Linux shipped it as an emergency
+        patch, originally the aptly-named KAISER) gives each process <em>two</em> page tables. The
+        <strong>user</strong> table maps all the user pages but only a bare-minimum <em>trampoline</em> of the
+        kernel — just the entry/exit stubs needed to make the switch, containing no secrets. The
+        <strong>kernel</strong> table maps everything, as before. Now, when Meltdown speculates a read of a kernel
+        address from user mode, there is simply <em>nothing mapped</em> there to leak.
+      </p>
+      <p>
+        The price is paid on every boundary crossing. Where a syscall used to enter the kernel with the same
+        <primer-math>\texttt{CR3}</primer-math> (the register holding the page-table base), it must now
+        <strong>reload <primer-math>\texttt{CR3}</primer-math></strong> to swap to the kernel table on entry, and
+        reload it again to swap back on return. A <primer-math>\texttt{CR3}</primer-math> write historically
+        <em>flushes the TLB</em> — throwing away the cached virtual→physical translations you spent cycles filling
+        — so every syscall now also eats a burst of
+        <primer-ref to="computer-science/advanced-operating-systems/memory/tlb-management-and-shootdowns">TLB
+        misses</primer-ref> as translations are re-walked. Two page tables, switched twice per crossing: that is
+        the KPTI tax.
+      </p>
+      <primer-geometry scene="kpti"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>PCID: taking some of the tax back</h2>
+      <p>
+        The saving grace is a hardware feature that suddenly became essential: <strong>PCID</strong>
+        (Process-Context IDentifiers, ARM calls the equivalent ASIDs). PCID <em>tags</em> each TLB entry with an
+        address-space identifier, so a <primer-math>\texttt{CR3}</primer-math> reload can switch address spaces
+        <em>without</em> flushing the TLB — the stale entries simply become invisible to the new context and are
+        evicted lazily. With PCID, KPTI's forced <primer-math>\texttt{CR3}</primer-math> switches keep the
+        expensive TLB contents alive across the crossing, turning a full flush into a cheap tag change.
+      </p>
+      <p>
+        This is why the measured overhead of KPTI varies so wildly in the literature — anywhere from
+        <primer-math>\sim 1\%</primer-math> to <primer-math>\sim 30\%</primer-math>. It depends almost entirely on
+        two things: <strong>how syscall-heavy</strong> the workload is (a CPU-bound number-cruncher barely
+        crosses the boundary and barely notices; a database or web server doing millions of tiny I/O syscalls per
+        second is hammered), and <strong>whether PCID is available</strong> to blunt the TLB cost. The general
+        shape: overhead grows with the crossing rate.
+      </p>
+      <primer-chart scene="kptiTax"></primer-chart>
+      <primer-chart-sliders name="kpti"></primer-chart-sliders>
+    </primer-card>
+
+    <primer-card>
+      <h2>The other family: Spectre and retpolines</h2>
+      <p>
+        Meltdown was the easy one — KPTI is a clean structural fix, and newer CPUs fixed the root cause in silicon.
+        <strong>Spectre</strong> is the stubborn one, because it abuses <em>legitimate</em> speculation. Spectre
+        variant 2 (branch-target injection) lets an attacker <em>train</em> the CPU's indirect-branch predictor so
+        that a victim's indirect jump speculatively lands on an attacker-chosen gadget, which then leaks data
+        through the same cache channel. There is no single page-table trick to fix this; the mitigations are a
+        grab-bag:
+      </p>
+      <ul>
+        <li><strong>Retpolines</strong> ("return trampolines"): the compiler rewrites every indirect call/jump into
+          a construct built from <primer-math>\texttt{ret}</primer-math> that deliberately steers any speculation
+          into a harmless infinite-loop "capture" spin, denying the attacker a useful speculative target. It trades
+          the vulnerable indirect branch for a safe (if slower) return-based one.</li>
+        <li><strong>IBRS / IBPB / STIBP</strong>: microcode-provided barriers that restrict or flush the
+          branch-predictor state across privilege and context boundaries (the kernel issues an
+          <primer-math>\texttt{IBPB}</primer-math> on context switch so one process cannot poison another's
+          predictions).</li>
+        <li><strong>Speculation barriers</strong> (<primer-math>\texttt{lfence}</primer-math>) inserted after
+          bounds checks to stop variant-1 (bounds-check bypass) speculating past the check.</li>
+      </ul>
+      <p>
+        Each of these adds cycles to the very hottest paths in the machine — branches and boundary crossings —
+        which is why the 2018 mitigations, taken together, are remembered as one of the largest across-the-board
+        performance regressions in computing history.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Counting the tax, in code</h2>
+      <p>
+        The KPTI cost is concrete: extra <primer-math>\texttt{CR3}</primer-math> reloads, and — without PCID — the
+        TLB refills they trigger. This sim counts them for a workload of <primer-math>N</primer-math> syscalls,
+        with and without PCID, and turns the cost into a rough slowdown. Change the numbers and watch a
+        syscall-heavy server suffer while a compute-bound job shrugs.
+      </p>
+      <primer-code run>
+        // KPTI cost model. Each syscall now reloads CR3 twice (enter + return). Without PCID each reload
+        // flushes the TLB, so the working set must be re-walked. PCID tags entries and avoids the flush.
+        interface Load { name: string; syscalls: number; tlbEntries: number; pcid: boolean; }
+
+        const CR3_RELOAD = 250;       // cycles for the extra CR3 write itself
+        const TLB_REFILL = 120;       // cycles to re-walk one TLB entry after a flush
+
+        function kptiTax(w: Load): void {
+          const reloads = 2 * w.syscalls;                       // enter + return per syscall
+          const cr3Cost = reloads * CR3_RELOAD;
+          // Without PCID, every reload flushes the TLB -> refill the working set each time.
+          const tlbCost = w.pcid ? 0 : reloads * w.tlbEntries * TLB_REFILL;
+          const total = cr3Cost + tlbCost;
+          console.log(`${w.name}: ${w.syscalls} syscalls, PCID=${w.pcid}`);
+          console.log(`   extra CR3 reloads = ${reloads}, TLB refills = ${w.pcid ? 0 : reloads * w.tlbEntries}`);
+          console.log(`   KPTI overhead ~ ${total.toLocaleString()} cycles\n`);
+        }
+
+        kptiTax({ name: "database (syscall-heavy, no PCID)", syscalls: 100000, tlbEntries: 40, pcid: false });
+        kptiTax({ name: "database (syscall-heavy, PCID on)", syscalls: 100000, tlbEntries: 40, pcid: true });
+        kptiTax({ name: "number-cruncher (CPU-bound)",       syscalls: 200,    tlbEntries: 40, pcid: false });
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="Why did Linus Torvalds call the CPU vendors' mitigation guidance 'complete and utter garbage'?">
+      <p>
+        The 2018 response was chaotic, and the kernel maintainers were furious — not at the researchers, but at
+        the microcode fixes shipped in a panic. The early IBRS microcode was so slow that using it as intended
+        (set the barrier and leave it on in the kernel) could cost more than the attack it prevented, and the
+        guidance kept changing week to week. Linus's public verdict — that the patches looked designed "for
+        marketing reasons" to be seen doing <em>something</em> rather than to be correct and fast — captured a
+        deeper tension the whole industry felt: these were <em>hardware</em> flaws being patched in
+        <em>software</em>, on hardware already in the field, under embargo, against a clock. The lasting fix was
+        architectural: later CPUs added <primer-math>\texttt{eIBRS}</primer-math> ("enhanced" IBRS that is cheap
+        to leave on) and simply <em>didn't speculate</em> across the privilege boundary. It is a clean case study
+        in why security properties belong in the hardware contract, not bolted on afterward.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! KPTI does not 'fix Spectre' — it only addresses Meltdown-style kernel reads">
+      <p>
+        A common conflation is to treat "the 2018 patches" as one fix for one bug. They are not. KPTI addresses
+        <strong>Meltdown</strong> specifically — the ability of a user process to read <em>kernel</em> memory —
+        by unmapping the kernel from user page tables. It does essentially nothing for <strong>Spectre</strong>,
+        which leaks data <em>within the same privilege domain</em> by mistraining branch prediction; a Spectre
+        gadget in the kernel, or in your own address space, still leaks regardless of how the page tables are
+        split. Spectre needs its own separate defences — retpolines, <primer-math>\texttt{lfence}</primer-math>
+        barriers, IBPB/STIBP — and even those are per-variant, not a blanket cure. So "we enabled KPTI, we're
+        safe from speculation" is wrong twice over: KPTI is one fix for one branch of a large, still-growing
+        family (L1TF, MDS, RIDL, Retbleed…), each of which needed its own mitigation. Speculative-execution
+        security is a category, not a single patch.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: why isolation broke, KPTI mechanics, CR3/TLB cost, PCID, retpolines, KPTI≠Spectre. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "specQuiz@1": {
+          "intro": "Why speculation broke user/kernel isolation, KPTI's split page tables and CR3/TLB cost, PCID, and retpolines.",
+          "meltQ": "Meltdown let a user process do what, that shocked OS designers?",
+          "meltRight": "read kernel memory, exploiting that the kernel was mapped into every address space",
+          "meltWrong1": "overclock the CPU from user mode",
+          "meltWrong2": "delete the kernel from disk",
+          "meltWrong3": "gain root by guessing the password",
+          "whyMapQ": "Before 2018, why was the kernel mapped into every process's page table?",
+          "whyMapRight": "so a syscall could enter the kernel without a page-table switch — for speed",
+          "whyMapWrong1": "because the CPU cannot address more than one table",
+          "whyMapWrong2": "to let users edit kernel code",
+          "whyMapWrong3": "it never was — that is a myth",
+          "leakQ": "The value Meltdown speculatively read became known to the attacker via…",
+          "leakRight": "a cache side channel — timing which array line the speculative load pulled in",
+          "leakWrong1": "printing it to the console",
+          "leakWrong2": "a normal return value in a register",
+          "leakWrong3": "writing it to a file",
+          "kptiQ": "KPTI defends against Meltdown by…",
+          "kptiRight": "giving each process two page tables so the kernel is unmapped while user code runs",
+          "kptiWrong1": "encrypting all kernel memory",
+          "kptiWrong2": "disabling system calls",
+          "kptiWrong3": "running the kernel on a separate CPU",
+          "trampQ": "The user-mode page table under KPTI still maps…",
+          "trampRight": "a tiny trampoline of entry/exit stubs, containing no secrets",
+          "trampWrong1": "the entire kernel, as before",
+          "trampWrong2": "nothing of the kernel at all, not even entry code",
+          "trampWrong3": "a copy of every user's files",
+          "cr3Q": "The main runtime cost KPTI adds to each boundary crossing is…",
+          "cr3Right": "an extra CR3 reload (page-table switch) on entry and again on return",
+          "cr3Wrong1": "recompiling the kernel each time",
+          "cr3Wrong2": "a disk write per syscall",
+          "cr3Wrong3": "a network round trip",
+          "tlbQ": "Why does a CR3 reload historically hurt performance?",
+          "tlbRight": "it flushes the TLB, so cached virtual→physical translations must be re-walked",
+          "tlbWrong1": "it erases the hard disk cache",
+          "tlbWrong2": "it resets the CPU clock",
+          "tlbWrong3": "it reloads the whole program from disk",
+          "pcidQ": "How does PCID reduce KPTI's cost?",
+          "pcidRight": "it tags TLB entries with an address-space id, so a CR3 switch need not flush the TLB",
+          "pcidWrong1": "it removes the second page table entirely",
+          "pcidWrong2": "it disables speculation",
+          "pcidWrong3": "it compresses kernel memory",
+          "varyQ": "KPTI's overhead ranges from ~1% to ~30% mainly depending on…",
+          "varyRight": "how syscall-heavy the workload is (and whether PCID is available)",
+          "varyWrong1": "the colour of the terminal",
+          "varyWrong2": "the number of files on disk",
+          "varyWrong3": "the user's typing speed",
+          "spectreQ": "Spectre variant 2 (branch-target injection) works by…",
+          "spectreRight": "training the branch predictor so a victim's indirect branch speculates into a chosen gadget",
+          "spectreWrong1": "reading kernel memory via an unmapped page",
+          "spectreWrong2": "overflowing a stack buffer",
+          "spectreWrong3": "guessing the ASLR offset",
+          "retpQ": "A retpoline mitigates Spectre v2 by…",
+          "retpRight": "replacing a vulnerable indirect branch with a ret-based construct that traps speculation harmlessly",
+          "retpWrong1": "encrypting the branch predictor",
+          "retpWrong2": "removing all function calls",
+          "retpWrong3": "adding more TLB entries",
+          "notFixQ": "Which statement is TRUE about KPTI and Spectre?",
+          "notFixRight": "KPTI addresses Meltdown-style kernel reads but does essentially nothing for Spectre",
+          "notFixWrong1": "KPTI fixes both Meltdown and Spectre completely",
+          "notFixWrong2": "KPTI only fixes Spectre, not Meltdown",
+          "notFixWrong3": "neither attack needs any OS change",
+          "reloadNumQ": "A workload makes ${n}$ syscalls. Under KPTI, each crossing reloads CR3 twice (enter + return). How many extra CR3 reloads total?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="specQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/reliability/spectre-and-meltdown",
+      "computer-science/advanced-operating-systems/memory/tlb-management-and-shootdowns"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- KPTI split page tables (geometry) + the KPTI-tax chart + the quiz. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerCharts, registerChartSliders, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "kpti",
+    ({ board, colors, step, sceneStrings }) => {
+      const bw = 3.4, bh = 0.85;
+      const box = (cx, cy, key, ci, op = 0.2, bold = false) => {
+        const x0 = cx - bw / 2, x1 = cx + bw / 2, y0 = cy - bh / 2, y1 = cy + bh / 2;
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[ci], fillOpacity: op,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [cx, cy, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: (bold ? "font-weight:700;" : "") + "max-width:150px; text-align:center;",
+        });
+      };
+      const hdr = (cx, cy, key) =>
+        board.create("text", [cx, cy, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "font-weight:700; max-width:180px; text-align:center;",
+        });
+
+      const LX = 2.4;      // "before" column
+      // Step 1: BEFORE — one table with user + full kernel.
+      step(sceneStrings("s1"), () => {
+        hdr(LX, 6.3, "before");
+        box(LX, 5.3, "userTbl", 0, 0.0, true);
+        box(LX, 4.4, "userMap", 0);
+        box(LX, 3.5, "kernFull", 2, 0.28);
+      });
+
+      const AX = 7.6;      // "after" columns centre
+      // Step 2: AFTER — two tables. User table maps user + trampoline only.
+      step(sceneStrings("s2"), () => {
+        hdr(AX, 6.3, "after");
+        box(AX - 2.0, 5.3, "userTbl", 0, 0.0, true);
+        box(AX - 2.0, 4.4, "userMap", 0);
+        box(AX - 2.0, 3.5, "kernStub", 1, 0.28);
+        box(AX + 2.0, 5.3, "kernTbl", 2, 0.0, true);
+        box(AX + 2.0, 4.4, "kernAll", 2, 0.28);
+      });
+
+      // Step 3: the CR3 switch arrow between the two "after" tables.
+      step(sceneStrings("s3"), () => {
+        board.create("arrow", [[AX - 2.0 + bw / 2, 4.9], [AX + 2.0 - bw / 2, 4.9]], {
+          strokeColor: colors.cat[1], strokeWidth: 2.5, firstArrow: { type: 2, size: 6 },
+          lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+        });
+        board.create("text", [AX, 2.4, sceneStrings("cr3")], {
+          strokeColor: colors.cat[1], fontSize: 11, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: "max-width:280px; text-align:center;",
+        });
+      });
+    },
+    {
+      boundingbox: [-0.6, 7.0, 11.8, 1.6],
+      keepAspect: false,
+      title: () => makeStrings("kpti")("title"),
+    },
+  );
+
+  // KPTI tax chart: overhead % vs syscall rate (thousands/sec). Slider = extra ns per crossing (PCID lowers it).
+  const kp = makeStrings("kptiTax");
+  registerChartSliders("kpti", [
+    { name: "cost", label: () => kp("cost"), min: 20, max: 400, step: 10, value: 200, anchors: [20, 100, 200, 400] },
+  ]);
+  registerCharts(
+    [{
+      name: "kptiTax",
+      // x = thousands of syscalls/sec; overhead fraction of a second = x*1000 * cost(ns) / 1e9, as a percentage.
+      f: (x, s) => (x * 1000 * s.cost / 1e9) * 100,
+      line: (colors) => ({ strokeColor: colors.cat[0], strokeWidth: 4 }),
+    }],
+    {
+      id: "kptiTax",
+      title: () => kp("title"),
+      xmin: 0, xmax: 1000, xticks: 200,
+      ymin: 0, ymax: 40, yticks: 10,
+      xaxisname: "syscalls/sec (thousands)", yaxisname: "overhead %",
+    },
+    "kpti",
+  );
+
+  registerQuiz("specQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("meltQ"), options: [
+      { text: () => sceneStrings("meltRight"), correct: true },
+      { text: () => sceneStrings("meltWrong1"), correct: false },
+      { text: () => sceneStrings("meltWrong2"), correct: false },
+      { text: () => sceneStrings("meltWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("whyMapQ"), options: [
+      { text: () => sceneStrings("whyMapRight"), correct: true },
+      { text: () => sceneStrings("whyMapWrong1"), correct: false },
+      { text: () => sceneStrings("whyMapWrong2"), correct: false },
+      { text: () => sceneStrings("whyMapWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("leakQ"), options: [
+      { text: () => sceneStrings("leakRight"), correct: true },
+      { text: () => sceneStrings("leakWrong1"), correct: false },
+      { text: () => sceneStrings("leakWrong2"), correct: false },
+      { text: () => sceneStrings("leakWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("kptiQ"), options: [
+      { text: () => sceneStrings("kptiRight"), correct: true },
+      { text: () => sceneStrings("kptiWrong1"), correct: false },
+      { text: () => sceneStrings("kptiWrong2"), correct: false },
+      { text: () => sceneStrings("kptiWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("trampQ"), options: [
+      { text: () => sceneStrings("trampRight"), correct: true },
+      { text: () => sceneStrings("trampWrong1"), correct: false },
+      { text: () => sceneStrings("trampWrong2"), correct: false },
+      { text: () => sceneStrings("trampWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cr3Q"), options: [
+      { text: () => sceneStrings("cr3Right"), correct: true },
+      { text: () => sceneStrings("cr3Wrong1"), correct: false },
+      { text: () => sceneStrings("cr3Wrong2"), correct: false },
+      { text: () => sceneStrings("cr3Wrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("tlbQ"), options: [
+      { text: () => sceneStrings("tlbRight"), correct: true },
+      { text: () => sceneStrings("tlbWrong1"), correct: false },
+      { text: () => sceneStrings("tlbWrong2"), correct: false },
+      { text: () => sceneStrings("tlbWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("pcidQ"), options: [
+      { text: () => sceneStrings("pcidRight"), correct: true },
+      { text: () => sceneStrings("pcidWrong1"), correct: false },
+      { text: () => sceneStrings("pcidWrong2"), correct: false },
+      { text: () => sceneStrings("pcidWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("varyQ"), options: [
+      { text: () => sceneStrings("varyRight"), correct: true },
+      { text: () => sceneStrings("varyWrong1"), correct: false },
+      { text: () => sceneStrings("varyWrong2"), correct: false },
+      { text: () => sceneStrings("varyWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("spectreQ"), options: [
+      { text: () => sceneStrings("spectreRight"), correct: true },
+      { text: () => sceneStrings("spectreWrong1"), correct: false },
+      { text: () => sceneStrings("spectreWrong2"), correct: false },
+      { text: () => sceneStrings("spectreWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("retpQ"), options: [
+      { text: () => sceneStrings("retpRight"), correct: true },
+      { text: () => sceneStrings("retpWrong1"), correct: false },
+      { text: () => sceneStrings("retpWrong2"), correct: false },
+      { text: () => sceneStrings("retpWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("notFixQ"), options: [
+      { text: () => sceneStrings("notFixRight"), correct: true },
+      { text: () => sceneStrings("notFixWrong1"), correct: false },
+      { text: () => sceneStrings("notFixWrong2"), correct: false },
+      { text: () => sceneStrings("notFixWrong3"), correct: false },
+    ] },
+    {
+      // Two CR3 reloads per syscall.
+      prompt: (v) => sceneStrings("reloadNumQ", v),
+      variables: "n=[100:5000]",
+      answer: (v) => 2 * v.n,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>
