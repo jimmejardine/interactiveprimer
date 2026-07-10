@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Branch Prediction Basics</primer-title>
+
+    <primer-card>
+      <p>
+        A deep, wide, out-of-order pipeline has a terrible enemy: the <strong>branch</strong>. When the machine
+        meets <code>if (x &lt; 10)</code>, it does not yet know whether execution goes down the "then" path or the
+        "else" path — the condition may depend on a value still crawling back from memory. But the front end can't
+        just <em>wait</em>: a modern pipeline is fifteen-plus stages deep and fetches several instructions per
+        cycle, so stalling until the branch resolves would leave dozens of instruction slots empty. That is the
+        <primer-ref todo to="pipelining/control-hazards">control hazard</primer-ref>, and it is expensive.
+      </p>
+      <p>
+        So the processor does something audacious: it <strong>guesses</strong>. It predicts which way the branch
+        will go and charges ahead fetching and executing down the predicted path, speculatively. If the guess is
+        right — and modern predictors are right well over <primer-math>95\%</primer-math> of the time — the branch
+        cost is essentially zero. If it's wrong, the machine must flush the wrongly-fetched instructions and
+        restart, paying the misprediction penalty. Branch prediction is the art of guessing right, and it is one of
+        the highest-leverage ideas in the whole machine.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Static prediction: guess without learning</h2>
+      <p>
+        The simplest predictors don't learn at all. <strong>Static prediction</strong> makes the same guess every
+        time, decided at compile time or by a fixed rule:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Static scheme</th><th>Rule</th><th>Typical accuracy</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Predict not-taken</td><td>always assume the branch falls through</td><td>~50–60%</td></tr>
+            <tr><td>Predict taken</td><td>always assume the branch jumps</td><td>~60–70%</td></tr>
+            <tr><td>BTFN (backward-taken, forward-not)</td><td>loops branch backward and usually repeat, so predict backward branches taken</td><td>~65–80%</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        BTFN is clever — the branch at the bottom of a loop jumps <em>backward</em> and is taken on every iteration
+        but the last, so "backward = taken" is right most of the time. But static schemes can't adapt to a branch
+        that changes its mind. For that we need to <em>remember history</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The 1-bit predictor and its flaw</h2>
+      <p>
+        The simplest <em>dynamic</em> predictor keeps a single bit per branch: "last time, was it taken?" Predict
+        the same as last time; when the branch resolves, update the bit. This is a
+        <strong>branch history table (BHT)</strong> — a small array of counters indexed by the branch's address.
+        A 1-bit predictor tracks a loop beautifully in the steady state… until you notice it
+        <strong>mispredicts twice per loop</strong>. Consider a loop that runs 10 times:
+      </p>
+      <primer-code lang="text">
+        iterations : T T T T T T T T T N   (taken 9 times, then not-taken to exit)
+        1-bit pred : ? T T T T T T T T T    <- wrong on the FINAL N (predicts T)
+        next entry : the exit flips the bit to N...
+        ...so on RE-ENTRY the first iteration is predicted N and is WRONG too.
+      </primer-code>
+      <p>
+        One bit remembers only the single most recent outcome, so a lone exception (the loop-exit) flips it, and
+        then the <em>next</em> entry pays for that flip. Two mispredicts every time the loop runs. We want a
+        predictor with a little <em>inertia</em> — one that ignores a single anomaly.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the 2-bit saturating-counter FSM. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "fsm": {
+          "title": "The 2-bit saturating counter — four states, predict by the top bit",
+          "sn": "00 Strongly Not-taken",
+          "wn": "01 Weakly Not-taken",
+          "wt": "10 Weakly Taken",
+          "st": "11 Strongly Taken",
+          "predN": "predict NOT taken",
+          "predT": "predict TAKEN",
+          "t": "taken",
+          "n": "not taken"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The 2-bit saturating counter</h2>
+      <p>
+        The fix is a <strong>2-bit saturating counter</strong>: a small state machine with four states — Strongly
+        Not-taken (00), Weakly Not-taken (01), Weakly Taken (10), Strongly Taken (11). Each <em>taken</em> outcome
+        nudges the counter up (saturating at 11); each <em>not-taken</em> nudges it down (saturating at 00). The
+        prediction is just the <strong>top bit</strong>: states 10 and 11 predict taken, states 00 and 01 predict
+        not-taken. The word <em>saturating</em> means it never wraps past the ends — 11 stays 11 on another taken.
+      </p>
+      <primer-geometry scene="fsm"></primer-geometry>
+      <p>
+        The genius is the two "weak" middle states acting as a buffer. A branch sitting in Strongly Taken (11) that
+        hits one surprise not-taken drops only to Weakly Taken (10) — <em>still predicting taken</em>. It takes
+        <strong>two</strong> consecutive not-takens to actually flip the prediction. So a single anomaly (like a
+        loop exit) is absorbed without changing the guess for the next iteration.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why two bits tolerate the loop exit</h2>
+      <p>
+        Rerun the 10-iteration loop with a 2-bit counter starting in Strongly Taken (11):
+      </p>
+      <primer-code run>
+        // 2-bit saturating counter. State 0..3; predict TAKEN when state >= 2 (top bit set).
+        function predict(state: number): boolean { return state >= 2; }
+        function update(state: number, taken: boolean): number {
+          return taken ? Math.min(3, state + 1) : Math.max(0, state - 1);
+        }
+
+        const names = ["00 StrongN", "01 WeakN", "10 WeakT", "11 StrongT"];
+        // A loop body: taken 9 times, then not-taken once to exit; run the loop 3 times.
+        const oneRun: boolean[] = [true, true, true, true, true, true, true, true, true, false];
+        const pattern = [...oneRun, ...oneRun, ...oneRun];
+
+        let state = 3;      // start Strongly Taken
+        let hits = 0;
+        for (const actual of pattern) {
+          const guess = predict(state);
+          if (guess === actual) hits++;
+          state = update(state, actual);
+        }
+        const acc = (100 * hits / pattern.length).toFixed(1);
+        console.log(`2-bit counter: ${hits}/${pattern.length} correct = ${acc}%`);
+        console.log("Only the loop-EXIT is mispredicted each run -> ~1 miss per 10, not 2.");
+      </primer-code>
+      <p>
+        The 2-bit counter mispredicts only the <em>exit</em> of each loop pass (one miss per ten), where the 1-bit
+        version missed twice. On a loop that iterates many times, a 2-bit predictor approaches near-perfect
+        accuracy. This tiny FSM, replicated thousands of times in a table, was the workhorse of 1990s branch
+        prediction and is still the building block inside fancier predictors.
+      </p>
+      <primer-theorem name="2-bit saturating counter">
+        <ul>
+          <li>four states; <strong>taken</strong> increments (saturating at 11), <strong>not-taken</strong>
+            decrements (saturating at 00);</li>
+          <li>the prediction is the <strong>high bit</strong>: states 10/11 predict taken, 00/01 predict not-taken;</li>
+          <li>it takes <strong>two</strong> opposite outcomes in a row to flip the prediction, so a single anomaly
+            (e.g. a loop exit) is tolerated;</li>
+          <li>a table of these counters indexed by branch address is a <strong>branch history table (BHT)</strong>.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="If a table is indexed by branch address, what happens when two branches collide?">
+      <p>
+        The BHT is a fixed-size array, so the low bits of the branch's address pick the entry — and two different
+        branches whose addresses share those low bits land on the <em>same</em> counter. This is
+        <strong>aliasing</strong> (or interference): the two branches stomp on each other's history, and if they
+        behave differently, both suffer. Bigger tables reduce it; hashing the address in more cleverly reduces it
+        more. Aliasing is a recurring headache that the <primer-ref todo to="ilp/advanced-branch-prediction">advanced
+        predictors</primer-ref> spend real effort fighting — some, like <em>gshare</em>, even mix in global history
+        to spread colliding branches apart.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The predictor guesses DIRECTION; the target still has to come from somewhere">
+      <p>
+        A branch predictor as described answers only "taken or not-taken?" — a single bit of <em>direction</em>.
+        But to actually fetch down the taken path, the front end also needs the <em>target address</em>, and it
+        needs it in the same cycle, before the branch has even been decoded. That's a separate structure — the
+        <strong>branch target buffer (BTB)</strong>, a cache from branch address to predicted target — covered in
+        the next lesson. Don't conflate them: direction prediction (this lesson) and target prediction (the BTB)
+        are two different jobs the front end must do at once.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Measuring what a predictor is worth</h2>
+      <p>
+        Accuracy isn't a vanity metric — it feeds straight into performance. If a branch is mispredicted with
+        probability <primer-math>m</primer-math> and each misprediction costs <primer-math>c</primer-math> flushed
+        cycles, and branches are a fraction <primer-math>b</primer-math> of all instructions, the added CPI is
+      </p>
+      <primer-math display>\Delta\text{CPI} \;=\; b \times m \times c.</primer-math>
+      <p>
+        With <primer-math>b = 0.2</primer-math> (a fifth of instructions are branches),
+        <primer-math>c = 15</primer-math> cycles, moving from <primer-math>m = 0.10</primer-math> to
+        <primer-math>m = 0.02</primer-math> cuts <primer-math>\Delta\text{CPI}</primer-math> from
+        <primer-math>0.30</primer-math> to <primer-math>0.06</primer-math> — a huge win on a machine whose ideal
+        CPI is well below 1. This is exactly why chip designers pour so much silicon into the predictor, and why
+        the <primer-ref todo to="ilp/advanced-branch-prediction">next lesson</primer-ref> chases the last few
+        percent of accuracy so hard.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: prediction concepts + variable-driven numeric accuracy / counter questions. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "predQuiz@1": {
+          "intro": "Predict direction to avoid stalling on branches. 1-bit misses twice per loop; the 2-bit saturating counter tolerates one anomaly. Predict = high bit; misprediction CPI = b·m·c.",
+          "whyQ": "Why does a deep pipeline predict branches instead of waiting?",
+          "wStall": "waiting would leave many pipeline slots empty every branch",
+          "wLaw": "the ISA requires guessing",
+          "wRam": "to save RAM",
+          "wClock": "to lower the clock speed",
+          "staticQ": "A 'static' branch prediction scheme…",
+          "sFixed": "makes the same fixed guess every time (no run-time learning)",
+          "sLearn": "learns and adapts every execution",
+          "sRand": "guesses randomly each time",
+          "sNever": "never mispredicts",
+          "btfnQ": "The BTFN heuristic predicts…",
+          "bTaken": "backward branches taken, forward branches not-taken (loops repeat)",
+          "bForward": "forward branches taken only",
+          "bAll": "every branch not-taken",
+          "bRand": "based on a coin flip",
+          "oneBitQ": "A 1-bit predictor on a loop mispredicts…",
+          "oTwice": "twice per loop execution (the exit, and the first iteration on re-entry)",
+          "oNever": "never",
+          "oEvery": "on every single iteration",
+          "oOnce": "exactly once, ever",
+          "statesQ": "How many states does a 2-bit saturating counter have?",
+          "st4": "four (StrongN, WeakN, WeakT, StrongT)",
+          "st2": "two",
+          "st8": "eight",
+          "st16": "sixteen",
+          "predBitQ": "A 2-bit counter predicts 'taken' when…",
+          "pHigh": "its high bit is set (states 10 and 11)",
+          "pLow": "its low bit is set",
+          "pZero": "it equals zero",
+          "pAny": "always",
+          "satQ": "'Saturating' means the counter…",
+          "satNo": "stops at the extremes (00 and 11) instead of wrapping around",
+          "satWrap": "wraps from 11 back to 00 on a taken",
+          "satReset": "resets to 00 every cycle",
+          "satGrow": "grows without bound",
+          "tolQ": "Why does the 2-bit counter tolerate a single anomaly (like a loop exit)?",
+          "tTwo": "it needs two opposite outcomes in a row to flip the prediction",
+          "tOne": "one surprise immediately flips it",
+          "tNever": "it never changes state",
+          "tRand": "it randomises after each branch",
+          "bhtQ": "A branch history table (BHT) is…",
+          "bhtArr": "an array of counters indexed by (part of) the branch address",
+          "bhtStack": "a stack of return addresses",
+          "bhtCache": "the instruction cache",
+          "bhtReg": "the register file",
+          "aliasQ": "Two branches mapping to the same BHT entry causes…",
+          "aAlias": "aliasing/interference — their histories corrupt each other",
+          "aFast": "a guaranteed speedup",
+          "aNone": "nothing, ever",
+          "aReset": "the whole CPU to reset",
+          "accNumQ": "A 2-bit predictor mispredicts once per loop of ${it} iterations. What is its accuracy, as a percentage? (2 d.p.)",
+          "cpiNumQ": "Branches are ${bp}% of instructions, misprediction rate ${mp}%, penalty ${c} cycles. What CPI does misprediction add? (b·m·c) (3 d.p.)",
+          "nextQ": "A 2-bit saturating counter is in state ${s} (0=StrongN..3=StrongT). After a TAKEN outcome, what state is it in? (saturates at 3)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="predQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/pipelining/control-hazards-and-branches"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- 2-bit saturating-counter FSM (four states in a row, taken/not-taken transitions) + the randomised quiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "fsm",
+    ({ board, colors, sceneStrings }) => {
+      // Four states left-to-right: 00, 01 (predict N) then 10, 11 (predict T).
+      const xs = [0, 3, 6, 9];
+      const y = 0;
+      const rr = 0.95;
+      const keys = ["sn", "wn", "wt", "st"];
+      const predKey = ["predN", "predN", "predT", "predT"];
+      const ci = [0, 0, 3, 3]; // not-taken states one colour, taken states another
+      const nodes = xs.map((x, i) => {
+        board.create("circle", [[x, y], rr], { fillColor: colors.cat[ci[i]], fillOpacity: 0.22, strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false });
+        board.create("text", [x, y + 0.25, sceneStrings(keys[i])], { strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+        board.create("text", [x, y - 0.4, sceneStrings(predKey[i])], { strokeColor: colors.ink, fontSize: 9, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+        return [x, y];
+      });
+      const arrow = (p, q, txt, above) => {
+        board.create("arrow", [p, q], { strokeColor: colors.line, strokeWidth: 1.5, lastArrow: { type: 2, size: 5 }, highlight: false });
+        const mx = (p[0] + q[0]) / 2;
+        board.create("text", [mx, (above ? 1 : -1) * 1.25, txt], { strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      };
+      // "taken" moves right (increment), drawn above.
+      for (let i = 0; i < 3; i++) arrow([xs[i] + rr, 0.55], [xs[i + 1] - rr, 0.55], sceneStrings("t"), true);
+      // "not taken" moves left (decrement), drawn below.
+      for (let i = 3; i > 0; i--) arrow([xs[i] - rr, -0.55], [xs[i - 1] + rr, -0.55], sceneStrings("n"), false);
+      // Self-loops at the saturating ends.
+      board.create("text", [xs[3] + 1.5, 0.55, "taken ↺"], { strokeColor: colors.cat[3], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      board.create("text", [xs[0] - 1.5, -0.55, "↺ not taken"], { strokeColor: colors.cat[0], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+    },
+    {
+      boundingbox: [-3.2, 2.4, 12.2, -2.4],
+      keepAspect: false,
+      title: () => makeStrings("fsm")("title"),
+    },
+  );
+
+  registerQuiz("predQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("wStall"), correct: true },
+        { text: () => sceneStrings("wLaw"), correct: false },
+        { text: () => sceneStrings("wRam"), correct: false },
+        { text: () => sceneStrings("wClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("staticQ"),
+      options: [
+        { text: () => sceneStrings("sFixed"), correct: true },
+        { text: () => sceneStrings("sLearn"), correct: false },
+        { text: () => sceneStrings("sRand"), correct: false },
+        { text: () => sceneStrings("sNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("btfnQ"),
+      options: [
+        { text: () => sceneStrings("bTaken"), correct: true },
+        { text: () => sceneStrings("bForward"), correct: false },
+        { text: () => sceneStrings("bAll"), correct: false },
+        { text: () => sceneStrings("bRand"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("oneBitQ"),
+      options: [
+        { text: () => sceneStrings("oTwice"), correct: true },
+        { text: () => sceneStrings("oNever"), correct: false },
+        { text: () => sceneStrings("oEvery"), correct: false },
+        { text: () => sceneStrings("oOnce"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("statesQ"),
+      options: [
+        { text: () => sceneStrings("st4"), correct: true },
+        { text: () => sceneStrings("st2"), correct: false },
+        { text: () => sceneStrings("st8"), correct: false },
+        { text: () => sceneStrings("st16"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("predBitQ"),
+      options: [
+        { text: () => sceneStrings("pHigh"), correct: true },
+        { text: () => sceneStrings("pLow"), correct: false },
+        { text: () => sceneStrings("pZero"), correct: false },
+        { text: () => sceneStrings("pAny"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("satQ"),
+      options: [
+        { text: () => sceneStrings("satNo"), correct: true },
+        { text: () => sceneStrings("satWrap"), correct: false },
+        { text: () => sceneStrings("satReset"), correct: false },
+        { text: () => sceneStrings("satGrow"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tolQ"),
+      options: [
+        { text: () => sceneStrings("tTwo"), correct: true },
+        { text: () => sceneStrings("tOne"), correct: false },
+        { text: () => sceneStrings("tNever"), correct: false },
+        { text: () => sceneStrings("tRand"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bhtQ"),
+      options: [
+        { text: () => sceneStrings("bhtArr"), correct: true },
+        { text: () => sceneStrings("bhtStack"), correct: false },
+        { text: () => sceneStrings("bhtCache"), correct: false },
+        { text: () => sceneStrings("bhtReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("aliasQ"),
+      options: [
+        { text: () => sceneStrings("aAlias"), correct: true },
+        { text: () => sceneStrings("aFast"), correct: false },
+        { text: () => sceneStrings("aNone"), correct: false },
+        { text: () => sceneStrings("aReset"), correct: false },
+      ],
+    },
+    {
+      // Accuracy = (it-1)/it as a percentage.
+      prompt: (v) => sceneStrings("accNumQ", v),
+      variables: "it=[8:40]",
+      answer: (v) => Math.round(((v.it - 1) / v.it) * 10000) / 100,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Added CPI = b*m*c, b=bp/100, m=mp/100.
+      prompt: (v) => sceneStrings("cpiNumQ", v),
+      variables: "bp=[10:25] mp=[2:12] c=[10:20]",
+      answer: (v) => Math.round((v.bp / 100) * (v.mp / 100) * v.c * 1000) / 1000,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Next state after taken = min(3, s+1).
+      prompt: (v) => sceneStrings("nextQ", v),
+      variables: "s=[0:3]",
+      answer: (v) => Math.min(3, v.s + 1),
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

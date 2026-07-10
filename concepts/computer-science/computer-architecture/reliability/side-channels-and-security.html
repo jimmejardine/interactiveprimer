@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Side Channels and Architectural Security</primer-title>
+
+    <primer-card>
+      <p>
+        A safe-cracker in an old film presses an ear to the dial and listens for the tumblers. She never reads the
+        combination off a label — she infers it from a <em>physical side effect</em> of the lock doing its job. That
+        is a <strong>side channel</strong>, and modern processors are riddled with them.
+        <primer-ref to="computer-science/computer-architecture/reliability/spectre-and-meltdown">Spectre and
+        Meltdown</primer-ref> were dramatic special cases; this lesson steps back to the general principle. Almost
+        every trick that makes a CPU fast — caches, speculation, shared execution units, shared DRAM — creates a
+        physical signal that leaks information across a boundary that was <em>supposed</em> to be airtight.
+      </p>
+      <p>
+        The unifying idea: <strong>isolation is a software abstraction, but the hardware underneath is shared</strong>,
+        and shared hardware carries whispers between its users. We will look at timing side channels, at Rowhammer
+        (where the leak becomes an active <em>attack</em> on memory), at how to write code that keeps its mouth shut,
+        and at the deep tension this all reveals between speed and secrecy.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Timing side channels: the cache tells tales</h2>
+      <p>
+        The most productive side channel is the <strong>cache</strong>, because a hit and a miss differ by an
+        order of magnitude in latency, and that timing is measurable from another program. If a victim's memory
+        access pattern depends on a secret — say, an AES table lookup indexed by a key byte — then which cache lines
+        it touches <em>is</em> the secret, exposed to anyone who can watch the cache. Three classic techniques
+        harvest it:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Technique</th><th>Attacker's move</th><th>What the timing reveals</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Flush+Reload</strong></td><td>flush a <em>shared</em> line, later time reloading it</td><td>the victim accessed that exact line (fast reload)</td></tr>
+            <tr><td><strong>Prime+Probe</strong></td><td>fill a cache set with your own data, later re-time it</td><td>the victim evicted one of your lines (a slot they used)</td></tr>
+            <tr><td><strong>Evict+Time</strong></td><td>evict a line, then time the victim as a whole</td><td>whether the victim needed that line this run</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Flush+Reload needs <em>shared</em> memory (e.g. a shared library, or deduplicated cloud pages) and is
+        precise; Prime+Probe needs no sharing and works across virtual-machine boundaries, which is what makes it a
+        cloud-tenant's nightmare. Both have been used to lift full cryptographic keys from a co-located victim.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Constant-time programming: don't let secrets steer the machine</h2>
+      <p>
+        The defence at the software layer is a discipline called <strong>constant-time programming</strong>. The
+        name is slightly misleading — it is not about being fast, but about making execution
+        <em>independent of secret data</em>. Two rules: a secret must never decide <strong>which way a branch
+        goes</strong> (branch timing and predictor state leak it), and a secret must never decide
+        <strong>which memory address is touched</strong> (cache state leaks it). Consider the archetypal bug — a
+        password check that bails out at the first wrong byte:
+      </p>
+      <primer-code run>
+        // Why early-exit comparison leaks: the number of iterations depends on the secret.
+        // A constant-time compare always scans the whole buffer, revealing nothing via timing.
+
+        function earlyExitEqual(guess: string, secret: string): boolean {
+          if (guess.length !== secret.length) return false;
+          for (let i = 0; i &lt; secret.length; i++) {
+            if (guess[i] !== secret[i]) return false;  // BAILS as soon as a byte is wrong
+          }
+          return true;
+        }
+
+        // Count how many byte-comparisons run — a proxy for the timing an attacker observes.
+        function iterationsUsed(guess: string, secret: string): number {
+          let n = 0;
+          for (let i = 0; i &lt; secret.length; i++) {
+            n++;
+            if (guess[i] !== secret[i]) break;
+          }
+          return n;
+        }
+
+        const secret = "SWORDFISH";
+        for (const g of ["AAAAAAAAA", "SAAAAAAAA", "SWORAAAAA", "SWORDFISH"]) {
+          console.log(`guess ${g}: ${iterationsUsed(g, secret)} comparisons ->`, earlyExitEqual(g, secret));
+        }
+        console.log("The more prefix bytes are correct, the longer it runs — a timing oracle!");
+
+        // Constant-time compare: fold every byte into an accumulator, no early exit, no secret-indexed access.
+        function constantTimeEqual(a: string, b: string): boolean {
+          if (a.length !== b.length) return false;
+          let diff = 0;
+          for (let i = 0; i &lt; a.length; i++) {
+            diff = diff | (a.charCodeAt(i) ^ b.charCodeAt(i)); // OR of all byte-differences
+          }
+          return diff === 0;                                    // one comparison, timing is flat
+        }
+        console.log("constant-time result:", constantTimeEqual("SAAAAAAAA", secret));
+      </primer-code>
+      <p>
+        The early-exit version leaks the secret one byte at a time: guess the first byte until the check takes a
+        touch longer, lock it in, move to the second. This is exactly how naive
+        <primer-math>\texttt{memcmp}</primer-math>-based token checks have been broken. The constant-time version
+        folds every byte into an accumulator with no branch and no secret-dependent index, so its running time is
+        flat regardless of the secret.
+      </p>
+      <primer-theorem name="Constant-time discipline">
+        <ul>
+          <li><strong>no secret-dependent branches</strong> — control flow must not fork on secret data;</li>
+          <li><strong>no secret-dependent memory addresses</strong> — table indices and pointer offsets must not
+            depend on secrets (or the cache leaks them);</li>
+          <li>prefer <strong>branchless</strong>, data-oblivious code (masks, arithmetic) and validate with a
+            constant-time checker — "looks constant-time" is not enough.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Rowhammer figure: DRAM rows; hammered aggressor rows flip a bit in the victim row between them. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "rowhammer": {
+          "title": "Rowhammer: hammering the neighbours flips a bit in the victim row",
+          "agg": "Aggressor rows: opened & closed thousands of times per refresh",
+          "vic": "Victim row: repeated coupling leaks charge → a bit flips",
+          "flip": "The flipped cell — no memory bug touched the victim directly"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Rowhammer: when reading is writing</h2>
+      <p>
+        Side channels leak information; <strong>Rowhammer</strong> goes further and <em>corrupts</em> it. As DRAM
+        cells shrank, adjacent rows became so tightly coupled that repeatedly activating one row — "hammering" it
+        thousands of times before the memory's periodic refresh — leaks enough charge to flip a bit in a
+        <em>neighbouring</em> row you never had permission to touch. It is a
+        <primer-ref soft to="computer-science/computer-architecture/memory/dram-and-memory-controllers">DRAM</primer-ref>
+        disturbance effect turned into an exploit.
+      </p>
+      <primer-geometry scene="rowhammer"></primer-geometry>
+      <p>
+        The consequences are startling: by hammering carefully chosen rows an attacker can flip a bit in a page-table
+        entry and hand themselves kernel privileges, or flip a bit in another tenant's data — all without any
+        software bug in the victim. Defences include <strong>Target Row Refresh (TRR)</strong>, doubling the refresh
+        rate, and — coming full circle — <primer-ref to="computer-science/computer-architecture/reliability/dependability-and-error-correction">ECC memory</primer-ref>,
+        though researchers have since shown patterns ("many-sided" hammering, TRRespass) that defeat many of these in
+        turn. Rowhammer is the clearest proof that a <em>reliability</em> margin and a <em>security</em> boundary are
+        the same wall seen from two sides.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The fundamental tension: speed versus isolation</h2>
+      <p>
+        Step back and a pattern emerges that will outlive any single vulnerability. <strong>Every performance
+        optimisation in this course is a form of sharing or prediction, and every act of sharing or prediction is a
+        potential side channel.</strong> Caches share fast memory between contexts — cache-timing attacks. Speculation
+        predicts the future and acts early — Spectre. Simultaneous multithreading shares execution ports between two
+        threads — port-contention attacks. Shrinking DRAM shares charge between rows — Rowhammer. Shared page
+        deduplication saves RAM — and enables Flush+Reload.
+      </p>
+      <p>
+        Perfect isolation would mean partitioning every resource so no two security domains ever share state — which
+        throws away most of the speed those shared resources bought. So architects live on a spectrum: partition the
+        most sensitive resources (per-domain cache ways, flushing predictors on context switch, disabling
+        deduplication for secrets) and accept a measured performance cost, rather than chase an unattainable
+        absolute. Security, like reliability, is not a feature you bolt on — it is a budget you spend against
+        performance, deliberately.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="How did anyone first catch a cache leaking an encryption key?">
+      <p>
+        Long before Spectre, in 2005, cryptographer Daniel J. Bernstein demonstrated a full <strong>AES key
+        recovery</strong> from cache timing on a real server, exploiting the fact that AES's software implementation
+        used secret-key-dependent table lookups. Around the same time Osvik, Shamir and Tromer formalised
+        <strong>Prime+Probe</strong>. The response reshaped cryptography: modern ciphers are designed to be
+        implemented <em>constant-time</em>, AES got hardware instructions (<primer-math>\texttt{AES-NI}</primer-math>)
+        that do the mixing in fixed time with no data-dependent table lookups, and "is it constant-time?" became a
+        standard question in any crypto code review. A whole sub-field grew from noticing that a lookup table has a
+        shadow.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Constant-time' means data-oblivious, not fast — and clearing the cache does not save you">
+      <p>
+        Two misconceptions sink beginners. First, <strong>constant-time is not about speed</strong>: a constant-time
+        routine may be slower than a branchy one — the point is that its timing (and memory-access pattern) does not
+        <em>vary with the secret</em>. Making code faster can make it <em>less</em> secure if the speed-up adds a
+        secret-dependent shortcut. Second, you cannot fix a cache side channel by "flushing the cache now and then":
+        the leak is in the <em>difference</em> between a hit and a miss during the sensitive operation, and an
+        attacker sets the timing of their own probes. The real remedies are architectural (partitioning) or
+        algorithmic (data-oblivious code), not a periodic cache wipe.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: side-channel techniques, Rowhammer, constant-time rules, the speed/isolation tension. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "sideQuiz@1": {
+          "intro": "Shared/predictive hardware leaks via timing. Constant-time code = no secret-dependent branches or addresses.",
+          "defQ": "A hardware side channel is…",
+          "dInfer": "inferring secret data from a physical side effect (like timing) of the machine working",
+          "dBug": "a bug in the program's business logic",
+          "dNet": "a firewall misconfiguration",
+          "dVirus": "a virus attached to an email",
+          "primeQ": "Prime+Probe is notable because it…",
+          "pNoShare": "needs no shared memory, so it works across VM boundaries",
+          "pShared": "requires the attacker and victim to share the same page",
+          "pFast": "only works if the victim has no cache",
+          "pNet": "attacks the network stack",
+          "ctBranchQ": "The core rule of constant-time programming is that a secret must never…",
+          "ctRight": "decide a branch direction or a memory address that is accessed",
+          "ctSlow": "be stored in RAM at all",
+          "ctFast": "be processed quickly",
+          "ctPrint": "be printed to the console",
+          "earlyQ": "Why does an early-exit password compare leak the secret?",
+          "eIter": "the number of iterations (hence the time) depends on how many prefix bytes matched",
+          "eRam": "it uses too much memory",
+          "eNet": "it sends the password over the network",
+          "eNone": "it does not leak anything",
+          "hammerQ": "Rowhammer flips bits by…",
+          "hRepeat": "repeatedly activating rows so charge leaks into an adjacent victim row",
+          "hCosmic": "waiting for a cosmic ray",
+          "hOver": "overclocking the memory bus",
+          "hVirus": "installing malware in the DRAM firmware",
+          "hammerWhoQ": "In Rowhammer, the bit that flips is in…",
+          "hVictim": "a victim row the attacker never had permission to write",
+          "hAgg": "the aggressor row the attacker hammered",
+          "hCpu": "a CPU register",
+          "hCache": "the L1 cache",
+          "tensionQ": "The deep tension exposed by side channels is between…",
+          "tSpeed": "performance (shared/predictive hardware) and isolation (security)",
+          "tRam": "RAM size and disk size",
+          "tCost": "chip cost and chip colour",
+          "tClock": "clock speed and screen resolution",
+          "smtQ": "Simultaneous multithreading can leak because two threads share…",
+          "sPorts": "execution ports and caches, whose contention is timeable",
+          "sScreen": "the same monitor",
+          "sDisk": "the same disk file",
+          "sKey": "the same keyboard",
+          "isoQ": "Why can't architects simply eliminate all side channels?",
+          "iShare": "removing all sharing/prediction would discard most of the performance those features provide",
+          "iLazy": "engineers have not tried",
+          "iIll": "it is against the law",
+          "iRam": "there is not enough RAM",
+          "eccQ": "ECC memory helps against Rowhammer by…",
+          "eccCorrect": "correcting a single flipped bit — though multi-bit hammering can still defeat it",
+          "eccStop": "physically preventing rows from ever coupling",
+          "eccSpeed": "making DRAM refresh unnecessary",
+          "eccNone": "it has no relationship to Rowhammer at all"
+        }
+      }
+    </script>
+
+    <primer-quiz name="sideQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/reliability/spectre-and-meltdown"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Rowhammer figure: DRAM rows with two aggressor rows hammering a victim row between them + the quiz.
+     All colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "rowhammer",
+    ({ board, colors, step, sceneStrings }) => {
+      const W = 8;          // row width
+      const rows = [
+        { key: "row0", role: "n" },
+        { key: "agg1", role: "a" },
+        { key: "vic", role: "v" },
+        { key: "agg2", role: "a" },
+        { key: "row4", role: "n" },
+      ];
+      const n = rows.length;
+      const rowY = (i) => (n - 1 - i) * 1.0; // row 0 at top
+
+      // Base content: five DRAM rows, aggressor rows tinted, visible on load.
+      rows.forEach((r, i) => {
+        const y0 = rowY(i), y1 = rowY(i) + 0.85;
+        const fill = r.role === "a" ? colors.cat[3] : (r.role === "v" ? colors.cat[1] : colors.cat[0]);
+        board.create("polygon", [[0, y0], [W, y0], [W, y1], [0, y1]], {
+          fillColor: fill, fillOpacity: r.role === "n" ? 0.1 : 0.28,
+          strokeColor: colors.line, strokeWidth: 1.2, fixed: true, highlight: false,
+          vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+      });
+      board.create("text", [W / 2, rowY(1) + 0.42, "row N-1  (aggressor)"], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+      });
+      board.create("text", [W / 2, rowY(2) + 0.42, "row N    (victim)"], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+      });
+      board.create("text", [W / 2, rowY(3) + 0.42, "row N+1  (aggressor)"], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+      });
+
+      // Step 1: hammer the aggressors — arrows pounding in.
+      step(sceneStrings("agg"), () => {
+        [1, 3].forEach((i) =>
+          board.create("arrow", [[W + 1.2, rowY(i) + 0.42], [W + 0.1, rowY(i) + 0.42]], {
+            strokeColor: colors.cat[3], strokeWidth: 2.5, fixed: true, highlight: false, lastArrow: { size: 5 },
+          }),
+        );
+        board.create("text", [W + 1.4, rowY(2) + 0.42, sceneStrings("agg")], {
+          strokeColor: colors.cat[3], fontSize: 11, anchorX: "left", anchorY: "middle", fixed: true, highlight: false,
+        });
+      });
+      // Step 2: the victim bit flips — a marked cell.
+      step(sceneStrings("flip"), () => {
+        board.create("point", [W * 0.5, rowY(2) + 0.42], {
+          size: 5, face: "x", strokeWidth: 3, fixed: true, highlight: false, withLabel: false,
+          strokeColor: colors.cat[4],
+        });
+        board.create("text", [W / 2, rowY(2) - 0.5, sceneStrings("flip")], {
+          strokeColor: colors.cat[4], fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      });
+    },
+    {
+      boundingbox: [-0.6, 5.4, 13.5, -1.2],
+      keepAspect: false,
+      title: () => makeStrings("rowhammer")("title"),
+    },
+  );
+
+  registerQuiz("sideQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("defQ"),
+      options: [
+        { text: () => sceneStrings("dInfer"), correct: true },
+        { text: () => sceneStrings("dBug"), correct: false },
+        { text: () => sceneStrings("dNet"), correct: false },
+        { text: () => sceneStrings("dVirus"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("primeQ"),
+      options: [
+        { text: () => sceneStrings("pNoShare"), correct: true },
+        { text: () => sceneStrings("pShared"), correct: false },
+        { text: () => sceneStrings("pFast"), correct: false },
+        { text: () => sceneStrings("pNet"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ctBranchQ"),
+      options: [
+        { text: () => sceneStrings("ctRight"), correct: true },
+        { text: () => sceneStrings("ctSlow"), correct: false },
+        { text: () => sceneStrings("ctFast"), correct: false },
+        { text: () => sceneStrings("ctPrint"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("earlyQ"),
+      options: [
+        { text: () => sceneStrings("eIter"), correct: true },
+        { text: () => sceneStrings("eRam"), correct: false },
+        { text: () => sceneStrings("eNet"), correct: false },
+        { text: () => sceneStrings("eNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hammerQ"),
+      options: [
+        { text: () => sceneStrings("hRepeat"), correct: true },
+        { text: () => sceneStrings("hCosmic"), correct: false },
+        { text: () => sceneStrings("hOver"), correct: false },
+        { text: () => sceneStrings("hVirus"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hammerWhoQ"),
+      options: [
+        { text: () => sceneStrings("hVictim"), correct: true },
+        { text: () => sceneStrings("hAgg"), correct: false },
+        { text: () => sceneStrings("hCpu"), correct: false },
+        { text: () => sceneStrings("hCache"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tensionQ"),
+      options: [
+        { text: () => sceneStrings("tSpeed"), correct: true },
+        { text: () => sceneStrings("tRam"), correct: false },
+        { text: () => sceneStrings("tCost"), correct: false },
+        { text: () => sceneStrings("tClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("smtQ"),
+      options: [
+        { text: () => sceneStrings("sPorts"), correct: true },
+        { text: () => sceneStrings("sScreen"), correct: false },
+        { text: () => sceneStrings("sDisk"), correct: false },
+        { text: () => sceneStrings("sKey"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("isoQ"),
+      options: [
+        { text: () => sceneStrings("iShare"), correct: true },
+        { text: () => sceneStrings("iLazy"), correct: false },
+        { text: () => sceneStrings("iIll"), correct: false },
+        { text: () => sceneStrings("iRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("eccQ"),
+      options: [
+        { text: () => sceneStrings("eccCorrect"), correct: true },
+        { text: () => sceneStrings("eccStop"), correct: false },
+        { text: () => sceneStrings("eccSpeed"), correct: false },
+        { text: () => sceneStrings("eccNone"), correct: false },
+      ],
+    },
+  ]);
+</script>

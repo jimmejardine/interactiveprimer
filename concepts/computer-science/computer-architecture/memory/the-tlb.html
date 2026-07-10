@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The TLB</primer-title>
+
+    <primer-card>
+      <p>
+        The last page ended on a threat:
+        <primer-ref to="computer-science/computer-architecture/memory/virtual-memory-and-address-translation">translating an address</primer-ref>
+        can cost a four-access page-table walk, and it happens on <em>every load and store</em>. If we truly paid
+        that each time, virtual memory would make every program several times slower and the idea would have been
+        abandoned decades ago. It wasn't — because of one small, brilliant cache. The <strong>Translation
+        Lookaside Buffer (TLB)</strong> is a cache of <em>recent translations</em>: VPN → PPN, ready in a single
+        cycle. It is the reason virtual memory is essentially free.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A cache — of translations</h2>
+      <p>
+        Everything you learned about caches applies. The TLB is a small (often 64–1536 entry), usually highly- or
+        fully-associative cache. Its "block" is a single page's translation. You look up a VPN; a <strong>TLB
+        hit</strong> returns the PPN in about a cycle, and translation is done. A <strong>TLB miss</strong> triggers
+        the page-table walk — which then <em>fills</em> the TLB with the translation it found, so the next access
+        to that page hits. Locality does the rest: because programs touch the same pages over and over (temporal)
+        and nearby pages (spatial), a tiny TLB captures the overwhelming majority of translations.
+      </p>
+      <primer-theorem name="The three outcomes of a translation">
+        <ul>
+          <li><strong>TLB hit</strong> — translation found in the TLB, ~1 cycle. The common case (often
+            &gt;99%).</li>
+          <li><strong>TLB miss, page-table hit</strong> — walk the page table (a few memory accesses, mostly served
+            by the data caches), fill the TLB, retry. Tens of cycles.</li>
+          <li><strong>Page fault</strong> — the walk finds the page not present in RAM; trap to the OS to fetch it
+            from disk. Millions of cycles.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        On modern chips the walk is done by a <strong>hardware page-table walker</strong> — a dedicated state
+        machine — so a TLB miss doesn't even interrupt the OS; software only gets involved on an actual page fault.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>TLB reach: how much memory the TLB covers</h2>
+      <p>
+        A crucial figure of merit is <strong>TLB reach</strong> — the total memory the TLB can map without a miss:
+      </p>
+      <primer-math display>\text{TLB reach} = (\text{TLB entries}) \times (\text{page size}).</primer-math>
+      <p>
+        A 64-entry TLB with 4&nbsp;KB pages reaches only <primer-math>64 \times 4\ \text{KB} = 256\ \text{KB}</primer-math>
+        — smaller than an L2 cache! A program striding through a 100&nbsp;MB array will <em>miss the TLB</em> on
+        nearly every new page even while the data itself hits in cache. This is why big-data and HPC workloads lean
+        on <strong>huge pages</strong> (2&nbsp;MB or 1&nbsp;GB instead of 4&nbsp;KB): a single huge-page entry
+        multiplies reach by 512× or more, so a handful of entries can map gigabytes.
+      </p>
+      <primer-code run>
+        // TLB reach = entries × page size. Watch huge pages transform it.
+        function reachMB(entries: number, pageKB: number): number {
+          return (entries * pageKB) / 1024;   // MB
+        }
+
+        const entries = 64;
+        console.log(`4 KB pages:  reach = ${reachMB(entries, 4).toFixed(2)} MB`);
+        console.log(`2 MB pages:  reach = ${reachMB(entries, 2048).toFixed(0)} MB`);
+        console.log(`1 GB pages:  reach = ${reachMB(entries, 1024 * 1024).toFixed(0)} MB`);
+      </primer-code>
+    </primer-card>
+
+    <!-- Strings for the VIPT overlap diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "vipt": {
+          "title": "VIPT — the TLB translates the VPN while the L1 indexes on the offset bits, in parallel",
+          "va": "Virtual address:  VPN | offset",
+          "tlb": "TLB: VPN → physical tag",
+          "cache": "L1: index by offset bits → read tags",
+          "cmp": "compare physical tag with cache tags",
+          "vpn": "VPN",
+          "off": "offset (available now!)",
+          "par": "both happen at the SAME time"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The VIPT trick: translate and look up at once</h2>
+      <p>
+        Now the elegant part. A first-level cache faces a chicken-and-egg problem: should it be indexed by
+        <em>virtual</em> or <em>physical</em> addresses? Virtual is fast (no translation first) but causes aliasing
+        headaches; physical is clean but seems to force you to wait for the TLB before you can even start the cache
+        lookup — serialising two slow steps. The resolution is <strong>VIPT — virtually indexed, physically
+        tagged</strong>.
+      </p>
+      <p>
+        The key insight from the last page: the <em>page offset bits are not translated</em>, so they are known
+        <em>immediately</em>. If the cache's <em>index</em> and <em>block offset</em> fit entirely within those
+        untranslated page-offset bits, the L1 can start indexing on them <em>right now</em> — reading out the
+        candidate tags — <em>while</em> the TLB translates the VPN in parallel. When the TLB delivers the physical
+        page number a moment later, its <em>physical</em> tag is compared against the tags the cache already
+        fetched. Translation and cache access <strong>overlap completely</strong>; the TLB latency vanishes into
+        the shadow of the cache read.
+      </p>
+      <primer-geometry scene="vipt"></primer-geometry>
+      <p>
+        There is a price: the trick only works if <primer-math>\text{index bits} + \text{offset bits} \le \log_2(\text{page size})</primer-math>,
+        i.e. the number of <em>sets</em> × <em>block size</em> must not exceed the page size. That caps a VIPT
+        cache at <primer-math>(\text{page size}) \times (\text{associativity})</primer-math>. It is exactly why L1
+        caches are stuck near 32–48&nbsp;KB and grow via <em>associativity</em> (8-way) rather than more sets:
+        raising associativity enlarges the cache without adding index bits, keeping the VIPT constraint satisfied.
+      </p>
+      <primer-code run>
+        // Largest VIPT L1 that still overlaps with translation: page_size × associativity.
+        function maxViptKB(pageKB: number, ways: number): number {
+          return pageKB * ways;   // sets × blockSize ≤ pageSize  =>  capacity ≤ pageSize × ways
+        }
+
+        const pageKB = 4;
+        for (const ways of [1, 2, 4, 8, 16]) {
+          console.log(`${ways}-way, 4 KB pages -> max VIPT L1 = ${maxViptKB(pageKB, ways)} KB`);
+        }
+        console.log("This is why real L1s are ~32-48 KB and go WIDER (more ways), not more sets.");
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="What happens to the TLB on a context switch — do we throw it all away?">
+      <p>
+        Naively, yes: process B's virtual addresses mean different physical pages than process A's, so switching
+        processes would require <em>flushing</em> the whole TLB — and then B stalls through a storm of cold TLB
+        misses rebuilding it. That flush cost made context switches painful for years. The fix is
+        <strong>address-space identifiers (ASIDs)</strong>, sometimes called PCIDs on x86: each TLB entry is tagged
+        with the ID of the process it belongs to, so entries from A and B coexist and only the matching process's
+        translations hit. Now a context switch just changes the current ASID — no flush, and when you switch back to
+        A its translations are often still warm. A few tag bits per entry buy back the whole flush.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A TLB miss and a cache miss are different events">
+      <p>
+        They are easy to conflate because both are "misses", but they concern different things. A <strong>cache
+        miss</strong> means the <em>data</em> isn't in the cache. A <strong>TLB miss</strong> means the
+        <em>translation</em> isn't in the TLB — the data might be sitting right there in L1, but you can't form its
+        physical address to find it. All four combinations occur: TLB-hit + cache-hit (ideal), TLB-hit +
+        cache-miss, TLB-miss + cache-hit (translate first, then the data's already there), and TLB-miss +
+        cache-miss. And a <strong>page fault</strong> is a third, far rarer beast still — the page isn't in
+        <em>physical memory at all</em>. Keep the three levels — translation, cache, physical presence — separate
+        in your head.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Down to the metal</h2>
+      <p>
+        The TLB is the last piece that keeps the fast path fast. Everything above it — caches, translation — has
+        assumed a "main memory" that eventually answers. What that memory <em>actually is</em>, and why its latency
+        has barely improved in twenty years, is the floor of the whole hierarchy:
+        <primer-ref forward to="computer-science/computer-architecture/memory/dram-and-memory-controllers">DRAM and its memory controller</primer-ref>.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: TLB concepts + numeric reach/VIPT/translation-time. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "tlbQuiz@1": {
+          "intro": "TLB = cache of VPN→PPN translations. Reach = entries × page size. VIPT overlaps translation with L1 indexing.",
+          "whatQ": "The TLB is a cache of…",
+          "wXlate": "recent address translations (VPN → PPN)",
+          "wData": "recently used data blocks",
+          "wInstr": "decoded instructions",
+          "wBranch": "branch predictions",
+          "hitQ": "On a TLB HIT, the physical page number is available in about…",
+          "h1": "1 cycle",
+          "h100": "100 cycles",
+          "hWalk": "a full 4-access page-table walk",
+          "hMs": "a millisecond",
+          "missQ": "On a TLB MISS (page present in RAM), the hardware…",
+          "mWalk": "walks the page table, fills the TLB, and retries",
+          "mFault": "immediately raises a page fault to disk",
+          "mStop": "halts the CPU permanently",
+          "mRandom": "returns a random translation",
+          "reachDefQ": "TLB reach is defined as…",
+          "rDef": "TLB entries × page size (the memory it can map without a miss)",
+          "rEntries": "just the number of TLB entries",
+          "rCache": "the L1 cache size",
+          "rPage": "just the page size",
+          "hugeQ": "Huge pages (e.g. 2 MB) help mainly by…",
+          "hgReach": "multiplying TLB reach, so few entries map lots of memory",
+          "hgFast": "making DRAM cells faster",
+          "hgSmall": "shrinking the cache",
+          "hgNone": "they don't help",
+          "viptQ": "VIPT (virtually-indexed, physically-tagged) lets the L1 cache…",
+          "viOverlap": "index on the untranslated offset bits WHILE the TLB translates, in parallel",
+          "viSkip": "skip translation entirely and forever",
+          "viSlow": "run only after the TLB finishes, serially",
+          "viFlush": "flush on every access",
+          "whyOffQ": "VIPT works because the page OFFSET bits are…",
+          "woKnown": "not translated, so they are known immediately (before the TLB responds)",
+          "woZero": "always zero",
+          "woTag": "the physical tag",
+          "woWalk": "produced by the page-table walk",
+          "constraintQ": "The VIPT constraint caps a first-level cache's size at…",
+          "cCap": "page size × associativity",
+          "cPage": "exactly the page size",
+          "cBig": "unbounded — no limit",
+          "cHalf": "half the DRAM size",
+          "asidQ": "Address-space identifiers (ASIDs / PCIDs) avoid…",
+          "asFlush": "flushing the whole TLB on every context switch",
+          "asMiss": "all cache misses",
+          "asFault": "all page faults",
+          "asWalk": "the offset field",
+          "distinctQ": "A TLB miss differs from a cache miss in that a TLB miss means…",
+          "dsXlate": "the TRANSLATION is absent (the data may still be in cache)",
+          "dsData": "the data is definitely gone from every level",
+          "dsSame": "nothing — they are identical",
+          "dsFault": "the page is always on disk",
+          "reachNumQ": "A {n}-entry TLB with 4 KB pages. What is its reach, in KB? (whole number)",
+          "viptNumQ": "4 KB pages, {aw}-way L1. What is the largest VIPT L1 size, in KB? (whole number)",
+          "xtimeNumQ": "TLB miss rate {mr}%, and a miss (walk) costs {pen} cycles; a hit is ~0. Average translation cost, in cycles? (2 d.p.)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="tlbQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/memory/virtual-memory-and-address-translation"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // --- VIPT overlap: VA splits, TLB and L1 work in parallel, tags compared. Static base content. ---
+  registerGeometryScene(
+    "vipt",
+    ({ board, colors, sceneStrings }) => {
+      const box = (x0, x1, y0, y1, fill, txt, fs) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: fill, fillOpacity: 0.24, strokeColor: colors.line, strokeWidth: 1.5,
+          fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, txt], {
+          strokeColor: colors.ink, fontSize: fs || 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      };
+
+      // Virtual address bar on top, split VPN | offset.
+      box(0, 4, 3.4, 4.1, colors.cat[0], sceneStrings("vpn"));
+      box(4, 8, 3.4, 4.1, colors.cat[2], sceneStrings("off"));
+      board.create("text", [4, 4.5, sceneStrings("va")], { strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+
+      // Two parallel paths.
+      box(-0.5, 3.5, 1.4, 2.6, colors.cat[1], sceneStrings("tlb"), 10);     // left: TLB
+      box(4.5, 8.5, 1.4, 2.6, colors.cat[3], sceneStrings("cache"), 10);    // right: L1 index
+      board.create("arrow", [[2.0, 3.35], [1.5, 2.65]], { strokeColor: colors.cat[0], strokeWidth: 2, highlight: false, lastArrow: { size: 6 } });
+      board.create("arrow", [[6.0, 3.35], [6.5, 2.65]], { strokeColor: colors.cat[2], strokeWidth: 2, highlight: false, lastArrow: { size: 6 } });
+      board.create("text", [4, 2.0, sceneStrings("par")], { strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+
+      // Converge to the tag comparison.
+      box(1.5, 6.5, -0.6, 0.4, colors.cat[4], sceneStrings("cmp"), 10);
+      board.create("arrow", [[1.5, 1.35], [3.0, 0.45]], { strokeColor: colors.cat[1], strokeWidth: 2, highlight: false, lastArrow: { size: 6 } });
+      board.create("arrow", [[6.5, 1.35], [5.0, 0.45]], { strokeColor: colors.cat[3], strokeWidth: 2, highlight: false, lastArrow: { size: 6 } });
+    },
+    {
+      boundingbox: [-1.2, 5.0, 9.2, -1.2],
+      keepAspect: false,
+      title: () => makeStrings("vipt")("title"),
+    },
+  );
+
+  registerQuiz("tlbQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("whatQ"),
+      options: [
+        { text: () => sceneStrings("wXlate"), correct: true },
+        { text: () => sceneStrings("wData"), correct: false },
+        { text: () => sceneStrings("wInstr"), correct: false },
+        { text: () => sceneStrings("wBranch"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hitQ"),
+      options: [
+        { text: () => sceneStrings("h1"), correct: true },
+        { text: () => sceneStrings("h100"), correct: false },
+        { text: () => sceneStrings("hWalk"), correct: false },
+        { text: () => sceneStrings("hMs"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("missQ"),
+      options: [
+        { text: () => sceneStrings("mWalk"), correct: true },
+        { text: () => sceneStrings("mFault"), correct: false },
+        { text: () => sceneStrings("mStop"), correct: false },
+        { text: () => sceneStrings("mRandom"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("reachDefQ"),
+      options: [
+        { text: () => sceneStrings("rDef"), correct: true },
+        { text: () => sceneStrings("rEntries"), correct: false },
+        { text: () => sceneStrings("rCache"), correct: false },
+        { text: () => sceneStrings("rPage"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hugeQ"),
+      options: [
+        { text: () => sceneStrings("hgReach"), correct: true },
+        { text: () => sceneStrings("hgFast"), correct: false },
+        { text: () => sceneStrings("hgSmall"), correct: false },
+        { text: () => sceneStrings("hgNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("viptQ"),
+      options: [
+        { text: () => sceneStrings("viOverlap"), correct: true },
+        { text: () => sceneStrings("viSkip"), correct: false },
+        { text: () => sceneStrings("viSlow"), correct: false },
+        { text: () => sceneStrings("viFlush"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyOffQ"),
+      options: [
+        { text: () => sceneStrings("woKnown"), correct: true },
+        { text: () => sceneStrings("woZero"), correct: false },
+        { text: () => sceneStrings("woTag"), correct: false },
+        { text: () => sceneStrings("woWalk"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("constraintQ"),
+      options: [
+        { text: () => sceneStrings("cCap"), correct: true },
+        { text: () => sceneStrings("cPage"), correct: false },
+        { text: () => sceneStrings("cBig"), correct: false },
+        { text: () => sceneStrings("cHalf"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("asidQ"),
+      options: [
+        { text: () => sceneStrings("asFlush"), correct: true },
+        { text: () => sceneStrings("asMiss"), correct: false },
+        { text: () => sceneStrings("asFault"), correct: false },
+        { text: () => sceneStrings("asWalk"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("distinctQ"),
+      options: [
+        { text: () => sceneStrings("dsXlate"), correct: true },
+        { text: () => sceneStrings("dsData"), correct: false },
+        { text: () => sceneStrings("dsSame"), correct: false },
+        { text: () => sceneStrings("dsFault"), correct: false },
+      ],
+    },
+    {
+      // reach KB = entries × 4 KB.
+      prompt: (v) => sceneStrings("reachNumQ", v),
+      variables: "n=[16,32,64,128]",
+      answer: (v) => v.n * 4,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // max VIPT = page(4KB) × ways.
+      prompt: (v) => sceneStrings("viptNumQ", v),
+      variables: "aw=[1,2,4,8,16]",
+      answer: (v) => 4 * v.aw,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // avg translation = (mr/100)×penalty ; hit ~0.
+      prompt: (v) => sceneStrings("xtimeNumQ", v),
+      variables: "mr=[1:10] pen=[20:60]",
+      answer: (v) => Math.round((v.mr / 100) * v.pen * 100) / 100,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

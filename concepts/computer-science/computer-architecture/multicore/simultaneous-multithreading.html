@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Simultaneous Multithreading</primer-title>
+
+    <primer-card>
+      <p>
+        A modern superscalar core is a wide machine: it can <em>issue</em> four, six, even eight instructions every
+        cycle. But it almost never gets to. Real code is full of stalls — a cache miss here, a dependency chain
+        there, a mispredicted branch — and on any given cycle a huge fraction of those issue slots sit
+        <strong>empty</strong>, executing nothing. You paid for eight lanes of highway and most of them are bare
+        tarmac. <strong>Simultaneous multithreading (SMT)</strong> — Intel calls its version
+        <strong>Hyper-Threading</strong> — is the beautifully simple idea that fills them.
+      </p>
+      <p>
+        If one thread cannot keep the wide core busy, run <em>two</em> threads on it at once and let the core issue
+        from whichever one has work ready this cycle. The empty slots left by thread&nbsp;A get filled by
+        thread&nbsp;B. No second set of execution units, no second core — just a second architectural state (a second
+        set of registers and program counter) feeding the <em>same</em> back-end. It is one of the highest-leverage
+        tricks in the whole book: a few percent more silicon for a large throughput gain.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the issue-slot grid. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "smt": {
+          "title": "Issue slots over time: SMT fills thread A's idle slots with a second thread's instructions",
+          "single": "Single thread: ~42% of slots used", "smtLabel": "SMT (2 threads): ~87% of slots used",
+          "legA": "thread A", "legB": "thread B", "legEmpty": "idle slot (wasted)",
+          "iss": "issue width →"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Seeing the wasted slots fill up</h2>
+      <p>
+        Each grid below is one core's issue slots: columns are the issue width (4 wide here), rows are successive
+        clock cycles. A coloured square is an instruction issued; a blank square is a wasted slot. On the left, a
+        <em>single</em> thread leaves most slots empty — the core is starved. On the right, SMT weaves a second
+        thread through the gaps, and utilisation leaps.
+      </p>
+      <primer-geometry scene="smt"></primer-geometry>
+      <p>
+        Crucially, SMT attacks a <em>different</em> kind of waste than a wider issue width would. Building a wider
+        core helps only if one thread has enough independent instructions to fill the extra lanes — and we saw with
+        the <primer-ref to="computer-science/computer-architecture/multicore/the-case-for-multicore">ILP wall</primer-ref>
+        that it usually does not. SMT sidesteps that entirely: it finds parallelism <em>between</em> threads, which
+        is abundant, to fill the slots one thread's ILP cannot.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What is shared, and what is duplicated</h2>
+      <p>
+        The trick works because most of an out-of-order core is expensive and reusable, while the "identity" of a
+        thread is cheap to replicate.
+      </p>
+      <primer-theorem name="SMT: shared vs replicated">
+        <ul>
+          <li><strong>Replicated per thread</strong> (cheap): the architectural registers, the program counter, and
+            other small per-thread state — so the core knows two independent instruction streams;</li>
+          <li><strong>Shared between threads</strong> (expensive, reused): the execution units, caches, the reorder
+            buffer, branch predictors, TLBs — the whole costly back-end runs both threads;</li>
+          <li>the payoff is <strong>throughput</strong>, not single-thread <strong>latency</strong>: two threads
+            finish more total work per second, but each individual thread may run slightly <em>slower</em> than if it
+            had the core to itself.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        That last point is the whole trade. SMT is a <em>throughput</em> optimisation. If you care about one
+        latency-critical thread finishing as fast as possible, a second thread sharing its caches and units is a
+        distraction; if you care about total work per second across many threads, SMT is close to free performance.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Measure the utilisation</h2>
+      <p>
+        Let's count exactly what the picture shows: how full the issue slots are with one thread versus two. The
+        model marks each slot with which thread (if any) issued into it and computes utilisation and throughput:
+      </p>
+      <primer-code run>
+        // Each row = one cycle; each entry = which thread issued into that slot (0 = idle).
+        const WIDTH = 4;
+        const singleThread = [
+          [1, 1, 0, 0], [1, 0, 0, 0], [1, 1, 1, 0],
+          [0, 1, 0, 0], [1, 0, 0, 0], [1, 1, 0, 0],
+        ];
+        const smt = [
+          [1, 1, 2, 2], [1, 2, 2, 0], [1, 1, 1, 2],
+          [2, 1, 2, 0], [1, 2, 2, 0], [1, 1, 2, 2],
+        ];
+
+        function utilisation(grid: number[][]): number {
+          let used = 0, total = 0;
+          for (const row of grid) for (const slot of row) { total++; if (slot !== 0) used++; }
+          return used / total;
+        }
+        function issuedBy(grid: number[][], thread: number): number {
+          let n = 0;
+          for (const row of grid) for (const slot of row) if (slot === thread) n++;
+          return n;
+        }
+
+        const cycles = singleThread.length;
+        const u1 = utilisation(singleThread), u2 = utilisation(smt);
+        console.log(`issue width = ${WIDTH}, cycles = ${cycles}`);
+        console.log(`single thread: ${(u1 * 100).toFixed(0)}% slots used, ${issuedBy(singleThread, 1)} instrs`);
+        console.log(`SMT (2 thr):   ${(u2 * 100).toFixed(0)}% slots used, A=${issuedBy(smt, 1)} B=${issuedBy(smt, 2)} instrs`);
+        console.log(`throughput gain = ${(u2 / u1).toFixed(2)}x more instructions issued`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>SMT vs multicore — not the same thing</h2>
+      <p>
+        SMT and multicore both give you more threads, but they are opposite bargains. Multicore <em>duplicates the
+        whole core</em> — execution units and all — so <primer-math>N</primer-math> cores can, in principle, do
+        <primer-math>N\times</primer-math> the work. SMT duplicates only the tiny per-thread state and
+        <em>shares</em> one back-end, so two SMT threads are nowhere near two cores — they only recover the slots one
+        thread wasted, typically a <primer-math>15\text{–}30\%</primer-math> throughput gain, not
+        <primer-math>100\%</primer-math>.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th></th><th>SMT (2 threads / core)</th><th>2 cores</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Execution units</strong></td><td>shared (one set)</td><td>duplicated (two sets)</td></tr>
+            <tr><td><strong>Caches</strong></td><td>shared</td><td>private per core (usually)</td></tr>
+            <tr><td><strong>Extra silicon</strong></td><td>tiny (~5%)</td><td>a whole extra core (~100%)</td></tr>
+            <tr><td><strong>Typical throughput gain</strong></td><td>~15–30%</td><td>up to ~100%</td></tr>
+            <tr><td><strong>Helps when</strong></td><td>threads stall and leave slots idle</td><td>you have genuinely parallel work</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The two compose: a chip with 8 cores and 2-way SMT presents <primer-math>16</primer-math> logical
+        processors to the operating system. Eight are "real" back-ends; the other eight are the recovered waste.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why does Hyper-Threading sometimes make a program SLOWER?">
+      <p>
+        Because the two threads <em>share</em> the caches. If each thread has a working set that just fits in the L2
+        cache, running them together on one core means they evict each other's data constantly — cache
+        <strong>thrashing</strong> — and both slow down more than the extra issue slots gain. This is why HPC and
+        some database and game workloads famously turn Hyper-Threading <em>off</em>: their carefully tuned threads
+        want the whole cache to themselves. SMT is a bet that stalls (idle slots) cost more than the contention it
+        adds — usually true for mixed server workloads, sometimes false for cache-hungry ones. There was even a
+        period where security (the L1TF / MDS side-channel attacks, which leak data <em>between</em> the two shared
+        threads) led cloud providers to disable it entirely.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A '16-thread' CPU with 8 cores does NOT have 16 cores">
+      <p>
+        Your operating system proudly reports "16 logical processors," and it is tempting to treat them as 16
+        independent cores. They are not. Eight of them are SMT siblings sharing a back-end with the other eight. Pin
+        a compute-bound job to all 16 and you will <em>not</em> get double the throughput of 8 — you will get maybe
+        <primer-math>1.2\text{–}1.3\times</primer-math>, because the siblings fight over the same execution units and
+        caches. "Logical processor" means a schedulable context, not a full core. When you reason about peak
+        performance, count the <em>physical</em> cores; the SMT siblings are a bonus, not a doubling.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: SMT concept, shared/replicated, vs multicore, utilisation numbers. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "smtQuiz@1": {
+          "intro": "SMT fills a wide core's idle issue slots with a second thread. Replicate per-thread state; share the back-end. Gains throughput, not single-thread latency.",
+          "ideaQ": "The core idea of SMT (Hyper-Threading) is to…",
+          "iRight": "run two threads on one core so one thread's instructions fill the other's idle issue slots",
+          "iClone": "duplicate the entire core, execution units and all",
+          "iClock": "raise the clock frequency",
+          "iCache": "make the cache bigger",
+          "wasteQ": "SMT targets which kind of waste?",
+          "wRight": "issue slots left empty when a single thread stalls",
+          "wHeat": "wasted heat only",
+          "wRam": "unused RAM capacity",
+          "wDisk": "idle disk time",
+          "shareQ": "In an SMT core, the execution units and caches are…",
+          "shShared": "shared between the two threads",
+          "shDup": "fully duplicated per thread",
+          "shGone": "removed entirely",
+          "shDisk": "stored on disk",
+          "dupQ": "What is replicated per thread in an SMT core?",
+          "dRight": "the architectural registers and program counter (small per-thread state)",
+          "dUnits": "the execution units",
+          "dCache": "the L2 cache",
+          "dAll": "the entire core",
+          "gainQ": "SMT primarily improves…",
+          "gThru": "throughput (total work per second), not single-thread latency",
+          "gLat": "single-thread latency above all",
+          "gClock": "the clock speed",
+          "gRam": "memory capacity",
+          "latQ": "Compared with having the core to itself, a thread under SMT usually runs…",
+          "lRight": "slightly slower, because it shares units and caches with the other thread",
+          "lFast": "much faster",
+          "lSame": "at exactly the same speed",
+          "lStop": "not at all",
+          "vsQ": "How does SMT differ from adding a second core?",
+          "vRight": "SMT shares one back-end (tiny extra silicon); a second core duplicates the whole back-end",
+          "vSame": "they are identical",
+          "vMore": "SMT uses more silicon than a whole core",
+          "vNone": "SMT adds no threads",
+          "gainSizeQ": "A typical throughput gain from 2-way SMT is about…",
+          "gsRight": "15–30%",
+          "gs100": "exactly 100%",
+          "gs0": "0% — it never helps",
+          "gs500": "500%",
+          "slowQ": "Hyper-Threading can make a workload slower when…",
+          "slRight": "the two threads thrash each other's shared cache",
+          "slNever": "never — it always helps",
+          "slClock": "the clock is too high",
+          "slDisk": "the disk is full",
+          "logicalQ": "An 8-core, 2-way-SMT chip presents how many logical processors to the OS?",
+          "lg16": "16",
+          "lg8": "8",
+          "lg4": "4",
+          "lg32": "32",
+          "utilNumQ": "A 4-wide core over ${cy} cycles issues into ${used} slots total. What is its issue-slot utilisation, as a percent? (0 d.p.)",
+          "logicalNumQ": "A chip has ${pc} physical cores with 2-way SMT. How many logical processors does the OS see? (integer)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="smtQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/multicore/the-case-for-multicore"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Two issue-slot grids (single-thread vs SMT) as static base content. A filled cell = an issued
+     instruction (thread A = cat[0], thread B = cat[1]); a blank cell = a wasted slot.
+     Colours only from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "smt",
+    ({ board, colors, sceneStrings }) => {
+      const single = [
+        [1, 1, 0, 0], [1, 0, 0, 0], [1, 1, 1, 0],
+        [0, 1, 0, 0], [1, 0, 0, 0], [1, 1, 0, 0],
+      ];
+      const smt = [
+        [1, 1, 2, 2], [1, 2, 2, 0], [1, 1, 1, 2],
+        [2, 1, 2, 0], [1, 2, 2, 0], [1, 1, 2, 2],
+      ];
+
+      // Draw one grid at horizontal origin ox, top at y = 6.
+      const drawGrid = (grid, ox, titleKey) => {
+        grid.forEach((row, r) => {
+          row.forEach((owner, c) => {
+            const x0 = ox + c, x1 = ox + c + 0.9;
+            const yTop = 6 - r, yBot = yTop - 0.9;
+            const fill = owner === 1 ? colors.cat[0] : owner === 2 ? colors.cat[1] : colors.bg;
+            board.create("polygon", [[x0, yBot], [x1, yBot], [x1, yTop], [x0, yTop]], {
+              fillColor: fill, fillOpacity: owner === 0 ? 0 : 0.55, strokeColor: colors.line, strokeWidth: 1,
+              fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+            });
+          });
+        });
+        board.create("text", [ox + 2, 6.6, sceneStrings(titleKey)], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600",
+        });
+      };
+
+      drawGrid(single, 0, "single");
+      drawGrid(smt, 6, "smtLabel");
+
+      // Axis hints (issue width along the bottom of each grid).
+      board.create("text", [2, -0.5, sceneStrings("iss")], { strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      board.create("text", [8, -0.5, sceneStrings("iss")], { strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+
+      // Legend.
+      const swatch = (x, ci, key) => {
+        if (ci === null) {
+          board.create("polygon", [[x, -1.4], [x + 0.4, -1.4], [x + 0.4, -1.0], [x, -1.0]], {
+            fillColor: colors.bg, fillOpacity: 0, strokeColor: colors.line, strokeWidth: 1, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+          });
+        } else {
+          board.create("polygon", [[x, -1.4], [x + 0.4, -1.4], [x + 0.4, -1.0], [x, -1.0]], {
+            fillColor: colors.cat[ci], fillOpacity: 0.55, strokeColor: colors.line, strokeWidth: 1, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+          });
+        }
+        board.create("text", [x + 0.55, -1.2, sceneStrings(key)], { strokeColor: colors.ink, fontSize: 10, anchorX: "left", anchorY: "middle", fixed: true, highlight: false });
+      };
+      swatch(0, 0, "legA");
+      swatch(3, 1, "legB");
+      swatch(6, null, "legEmpty");
+    },
+    { boundingbox: [-0.9, 7.1, 10.4, -1.8], keepAspect: true, title: () => makeStrings("smt")("title") },
+  );
+
+  registerQuiz("smtQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("ideaQ"),
+      options: [
+        { text: () => sceneStrings("iRight"), correct: true },
+        { text: () => sceneStrings("iClone"), correct: false },
+        { text: () => sceneStrings("iClock"), correct: false },
+        { text: () => sceneStrings("iCache"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("wasteQ"),
+      options: [
+        { text: () => sceneStrings("wRight"), correct: true },
+        { text: () => sceneStrings("wHeat"), correct: false },
+        { text: () => sceneStrings("wRam"), correct: false },
+        { text: () => sceneStrings("wDisk"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("shareQ"),
+      options: [
+        { text: () => sceneStrings("shShared"), correct: true },
+        { text: () => sceneStrings("shDup"), correct: false },
+        { text: () => sceneStrings("shGone"), correct: false },
+        { text: () => sceneStrings("shDisk"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dupQ"),
+      options: [
+        { text: () => sceneStrings("dRight"), correct: true },
+        { text: () => sceneStrings("dUnits"), correct: false },
+        { text: () => sceneStrings("dCache"), correct: false },
+        { text: () => sceneStrings("dAll"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gainQ"),
+      options: [
+        { text: () => sceneStrings("gThru"), correct: true },
+        { text: () => sceneStrings("gLat"), correct: false },
+        { text: () => sceneStrings("gClock"), correct: false },
+        { text: () => sceneStrings("gRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("latQ"),
+      options: [
+        { text: () => sceneStrings("lRight"), correct: true },
+        { text: () => sceneStrings("lFast"), correct: false },
+        { text: () => sceneStrings("lSame"), correct: false },
+        { text: () => sceneStrings("lStop"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("vsQ"),
+      options: [
+        { text: () => sceneStrings("vRight"), correct: true },
+        { text: () => sceneStrings("vSame"), correct: false },
+        { text: () => sceneStrings("vMore"), correct: false },
+        { text: () => sceneStrings("vNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gainSizeQ"),
+      options: [
+        { text: () => sceneStrings("gsRight"), correct: true },
+        { text: () => sceneStrings("gs100"), correct: false },
+        { text: () => sceneStrings("gs0"), correct: false },
+        { text: () => sceneStrings("gs500"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("slowQ"),
+      options: [
+        { text: () => sceneStrings("slRight"), correct: true },
+        { text: () => sceneStrings("slNever"), correct: false },
+        { text: () => sceneStrings("slClock"), correct: false },
+        { text: () => sceneStrings("slDisk"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("logicalQ"),
+      options: [
+        { text: () => sceneStrings("lg16"), correct: true },
+        { text: () => sceneStrings("lg8"), correct: false },
+        { text: () => sceneStrings("lg4"), correct: false },
+        { text: () => sceneStrings("lg32"), correct: false },
+      ],
+    },
+    {
+      // utilisation = used / (4 * cy) * 100.
+      prompt: (v) => sceneStrings("utilNumQ", v),
+      variables: "cy=[6:12] used=[8:40]",
+      constraints: "used < 4*cy",
+      answer: (v) => Math.round((v.used / (4 * v.cy)) * 100),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // logical = 2 * physical.
+      prompt: (v) => sceneStrings("logicalNumQ", v),
+      variables: "pc=[2:32]",
+      answer: (v) => 2 * v.pc,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Dynamic Scheduling and Scoreboarding</primer-title>
+
+    <primer-card>
+      <p>
+        A simple pipeline is a queue with rigid manners: instructions execute in exactly the order the compiler
+        wrote them, and if one instruction stalls — waiting on a slow multiply, or a value still travelling back
+        from memory — <em>everybody behind it waits too</em>, even the ones that have nothing to do with the
+        stall. That is the tragedy of <strong>in-order execution</strong>: a single traffic jam freezes a whole
+        road of cars that could happily have taken the next exit.
+      </p>
+      <p>
+        <strong>Dynamic scheduling</strong> is the hardware's answer. The processor is allowed to look a little
+        way down the instruction stream, notice which instructions are <em>ready</em> — their inputs are
+        available and a functional unit is free — and run those <em>now</em>, letting them slip past a stalled
+        instruction ahead of them. The program still <em>means</em> the same thing; it just isn't <em>executed</em>
+        in textbook order. This is the seed of every high-performance CPU built since, and it was born in 1964 in
+        Seymour Cray's <strong>CDC 6600</strong> and its <strong>scoreboard</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The motivating stall</h2>
+      <p>
+        Consider four instructions, where <primer-math>F</primer-math> registers hold floating-point values:
+      </p>
+      <primer-code lang="text">
+        DIV.D  F0, F2, F4      ; F0 = F2 / F4   -- a floating divide: SLOW (~20+ cycles)
+        ADD.D  F6, F0, F8      ; F6 = F0 + F8   -- needs F0, so it MUST wait for the divide
+        SUB.D  F10, F12, F14   ; F10 = F12 - F14 -- totally independent!
+        MUL.D  F16, F12, F18   ; F16 = F12 * F18 -- also totally independent!
+      </primer-code>
+      <p>
+        The <primer-math>\texttt{ADD.D}</primer-math> genuinely depends on the divide's result
+        (<primer-math>F0</primer-math>) — a true <strong>read-after-write (RAW)</strong> data hazard, and there is
+        no honest way to run it early. But the <primer-math>\texttt{SUB.D}</primer-math> and
+        <primer-math>\texttt{MUL.D}</primer-math> touch none of the divide's registers. On an in-order machine
+        they are stuck in line behind the <primer-math>\texttt{ADD.D}</primer-math>, idling for twenty cycles for
+        no reason. Dynamic scheduling lets them jump the queue and execute while the divider grinds away.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the scoreboard block diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "board": {
+          "title": "The CDC 6600 scoreboard: in-order issue, out-of-order execute",
+          "iq": "Instruction queue (in-order issue)",
+          "sb": "SCOREBOARD — tracks each instruction & register status; decides when it is safe to issue, read, execute, write",
+          "fpAdd": "FP Add / Sub",
+          "fpMul": "FP Multiply",
+          "fpDiv": "FP Divide (slow)",
+          "ls": "Load / Store",
+          "regs": "Register file",
+          "flow": "operands & results"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>How the scoreboard is wired</h2>
+      <p>
+        The scoreboard is a central bookkeeper. Instructions are <strong>issued in order</strong> from the queue,
+        but once issued each one lives at its own functional unit and proceeds independently. The scoreboard
+        watches every register and every unit, and answers one question over and over: <em>is it safe to let this
+        instruction take its next step yet?</em> Because the divide and the subtract live at <em>different</em>
+        units, they run in parallel and finish in whatever order their latencies dictate.
+      </p>
+      <primer-geometry scene="board"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The four scoreboard stages</h2>
+      <p>
+        Scoreboarding replaces the single "execute" step with four bookkept stages. An instruction may not advance
+        to the next stage until the scoreboard clears it:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Stage</th><th>What happens</th><th>The scoreboard blocks it until…</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>1. Issue</strong></td><td>decode; allocate a functional unit</td><td>the needed unit is free <em>and</em> no other active instruction targets the same destination register (avoids a <strong>WAW</strong> hazard)</td></tr>
+            <tr><td><strong>2. Read operands</strong></td><td>read source registers</td><td>both sources are available (no pending write to them) — this resolves <strong>RAW</strong></td></tr>
+            <tr><td><strong>3. Execute</strong></td><td>the functional unit computes</td><td>— (runs freely; may take many cycles)</td></tr>
+            <tr><td><strong>4. Write result</strong></td><td>write the destination register</td><td>no <em>earlier</em> instruction still needs to read the old value of that register (avoids a <strong>WAR</strong> hazard)</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Notice what has appeared. On a plain in-order pipeline the only data hazard that mattered was
+        <strong>RAW</strong> (a true dependence). The moment we let instructions execute and finish out of order,
+        two <em>new</em> hazards crawl out of the woodwork — and the scoreboard's stall conditions in stages 1 and
+        4 exist precisely to police them.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The three data hazards, named</h2>
+      <p>
+        Every pair of instructions that touch the same register can conflict in one of three ways. Only one is a
+        <em>real</em> dependence; the other two are accidents of reusing register names.
+      </p>
+      <primer-theorem name="RAW, WAR, WAW">
+        <ul>
+          <li><strong>RAW — read after write</strong> (a <em>true</em> dependence): instruction <em>j</em> reads a
+            value that instruction <em>i</em> writes. Real data must flow <em>i</em>→<em>j</em>; this ordering can
+            never be broken.</li>
+          <li><strong>WAR — write after read</strong> (an <em>anti</em>-dependence): <em>j</em> writes a register
+            that an earlier <em>i</em> still has to read. If <em>j</em> writes too soon it clobbers <em>i</em>'s
+            input. A <em>name</em> conflict, not a real one.</li>
+          <li><strong>WAW — write after write</strong> (an <em>output</em> dependence): <em>i</em> and <em>j</em>
+            both write the same register; the <em>later</em> write must win. Again just a name conflict.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        WAR and WAW are <strong>false dependences</strong>: they exist only because the two instructions happened
+        to be assigned the same architectural register name, not because any value truly flows between them. The
+        scoreboard copes by <em>stalling</em> — a blunt but correct tool. The next lesson,
+        <primer-ref todo to="ilp/tomasulos">Tomasulo's algorithm</primer-ref>, will make them vanish entirely by
+        renaming registers.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What we bought, and what we paid</h2>
+      <p>
+        Run the little model below. It walks our four instructions through an in-order machine and then a
+        dynamically-scheduled one, counting the cycles wasted waiting behind the slow divide.
+      </p>
+      <primer-code run>
+        // A toy latency model of the four-instruction sequence.
+        // Each instruction has a latency; DIV is slow. The independent SUB/MUL can
+        // overlap the divide only if the machine is allowed to execute out of order.
+        interface Inst { name: string; latency: number; dependsOnDiv: boolean; }
+
+        const prog: Inst[] = [
+          { name: "DIV.D", latency: 20, dependsOnDiv: false },
+          { name: "ADD.D", latency: 3,  dependsOnDiv: true  }, // needs F0 from DIV
+          { name: "SUB.D", latency: 3,  dependsOnDiv: false }, // independent
+          { name: "MUL.D", latency: 5,  dependsOnDiv: false }, // independent
+        ];
+
+        // In-order: nobody starts until the instruction ahead has finished.
+        let inOrder = 0;
+        for (const i of prog) inOrder += i.latency;
+
+        // Out-of-order: the divide runs; independent ops overlap it; the ADD waits for the divide.
+        const div = prog[0].latency;                 // 20
+        const add = div + prog[1].latency;           // ADD can't start before DIV done
+        // SUB and MUL overlap the divide entirely (they start at cycle 0 on free units)
+        const outOfOrder = Math.max(add, prog[2].latency, prog[3].latency);
+
+        console.log(`in-order total:      ${inOrder} cycles`);
+        console.log(`out-of-order total:  ${outOfOrder} cycles`);
+        console.log(`saved:               ${inOrder - outOfOrder} cycles by not blocking on the divide`);
+      </primer-code>
+      <p>
+        The saving is real, but so is the cost: the scoreboard is a chunk of hardware that must track the status
+        of every instruction, every register, and every functional unit, and check a web of conditions <em>every
+        cycle</em>. Seymour Cray spent that silicon in 1964 and made the fastest computer in the world. The idea
+        never left.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why did the CDC 6600 scoreboard have no bypass network — and why did that hurt?">
+      <p>
+        The 6600's scoreboard resolved a RAW hazard by making the consumer <em>wait until the producer had written
+        the register file</em>, then read it in stage 2. There was no forwarding path to hand the result directly
+        from one unit to the next. So even a ready result sat one extra beat in the register file before its
+        consumer could grab it. Worse, the scoreboard's stall conditions for WAR and WAW meant instructions could
+        <em>block at issue</em> or <em>block at write-back</em> purely over reused register names — throughput lost
+        to bookkeeping, not to real work. Tomasulo's design a few years later fixed both: results are broadcast
+        directly to waiting instructions, and renaming makes the WAR/WAW stalls disappear. Scoreboarding was the
+        brilliant first draft.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Out-of-order execution' does not mean out-of-order results">
+      <p>
+        A scoreboard issues in order but lets instructions <em>execute</em> and <em>write back</em> out of order.
+        Students often conclude the program's <em>meaning</em> can change — it cannot. The hardware only reorders
+        instructions it has <em>proven</em> independent; every true (RAW) dependence is still honoured to the
+        letter, and WAR/WAW are policed by stalls. The visible result is <em>exactly</em> what in-order execution
+        would produce, just sooner. Reordering is an optimisation you are never supposed to be able to observe —
+        until, decades later, speculation makes tiny timing leaks observable, which is a story for the
+        <primer-ref todo to="security/spectre">security</primer-ref> lessons.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Where this leads</h2>
+      <p>
+        Scoreboarding gives us the core bargain of instruction-level parallelism: <strong>issue in order, execute
+        out of order, and let independent work overlap a stall</strong>. Its weaknesses — no result forwarding,
+        and stalls on false (WAR/WAW) dependences — are exactly what the next generation of designs attacks.
+        Tomasulo's algorithm adds a <em>common data bus</em> that broadcasts results the instant they are ready,
+        and <em>register renaming</em> that abolishes false dependences altogether. Everything modern — superscalar
+        issue, the reorder buffer, speculation — is built on the foundation you have just seen.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: scoreboarding concepts + a couple of variable-driven numeric latency questions. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "scoreQuiz@1": {
+          "intro": "Scoreboarding: issue in order, execute & write out of order. RAW is a true dependence; WAR and WAW are false (name) dependences.",
+          "motiveQ": "The main motivation for dynamic scheduling is to…",
+          "mLet": "let an independent instruction execute while an earlier one is stalled",
+          "mClock": "raise the clock frequency directly",
+          "mShrink": "make transistors smaller",
+          "mRam": "add more RAM to the machine",
+          "orderQ": "In a scoreboard, instructions are ISSUED…",
+          "oInorder": "in program order (in-order issue)",
+          "oRandom": "in a random order",
+          "oReverse": "in reverse order",
+          "oParallel": "all at once, ignoring order",
+          "execQ": "In a scoreboard, instructions may EXECUTE and complete…",
+          "eOoo": "out of order, as their operands and units become ready",
+          "eInorder": "strictly in program order",
+          "eNever": "only one per program",
+          "eAlpha": "in alphabetical order of opcode",
+          "rawQ": "A RAW (read-after-write) hazard is…",
+          "rTrue": "a TRUE data dependence — a real value flows from producer to consumer",
+          "rFalse": "a false dependence caused only by reusing a register name",
+          "rStruct": "a shortage of functional units",
+          "rNone": "not a hazard at all",
+          "warQ": "A WAR (write-after-read) hazard is…",
+          "wAnti": "an ANTI-dependence — a false dependence from reusing a register name",
+          "wTrue": "a true dependence that can never be removed",
+          "wCache": "a cache miss",
+          "wBranch": "a mispredicted branch",
+          "wawQ": "A WAW (write-after-write) hazard is…",
+          "wwOut": "an OUTPUT dependence — two writes to the same register must keep their order",
+          "wwTrue": "always a genuine flow of data",
+          "wwStruct": "the same thing as a structural hazard",
+          "wwNever": "impossible in any pipeline",
+          "newQ": "Which hazards NEWLY appear once instructions may complete out of order?",
+          "nWarWaw": "WAR and WAW (they don't matter for a simple in-order pipeline)",
+          "nRawOnly": "only RAW",
+          "nNone": "none — no new hazards appear",
+          "nAll": "a brand-new fourth hazard called RAR",
+          "cdcQ": "The scoreboard was first built in which historic machine?",
+          "cdc": "the CDC 6600 (Seymour Cray, 1964)",
+          "ibm": "the IBM PC (1981)",
+          "apple": "the Apple M1 (2020)",
+          "eniac": "the ENIAC (1945)",
+          "rarQ": "Why is there no 'read-after-read' (RAR) hazard?",
+          "rarNo": "two reads don't conflict — neither changes the register",
+          "rarYes": "there is one; it's the most dangerous hazard",
+          "rarStall": "reads always stall the pipeline",
+          "rarWrite": "reading secretly writes the register",
+          "weakQ": "A weakness of the classic scoreboard (vs Tomasulo) is that it…",
+          "weakStall": "stalls on false WAR/WAW dependences and lacks result forwarding",
+          "weakFast": "is far too fast to build",
+          "weakRAW": "cannot handle RAW dependences at all",
+          "weakOrder": "must execute strictly out of order only",
+          "ooQ": "DIV.D takes ${d} cycles; an independent SUB.D takes 3 cycles and can overlap it. On an out-of-order machine, how many cycles do the two together take (they run in parallel)? ",
+          "ioQ": "DIV.D takes ${d} cycles and SUB.D takes 3 cycles. On a strict in-order machine where SUB waits behind DIV, how many cycles total?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="scoreQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/pipelining/precise-exceptions",
+      "computer-science/computer-architecture/pipelining/data-hazards-and-forwarding"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Scoreboard block diagram (static base content, visible on load) + the randomised quiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "board",
+    ({ board, colors, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, txt, ci, fs = 12) => {
+        board.create(
+          "polygon",
+          [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+          { fillColor: colors.cat[ci], fillOpacity: 0.22, strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false } },
+        );
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, txt], {
+          strokeColor: colors.ink, fontSize: fs, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      };
+      const arrow = (p, q) => board.create("arrow", [p, q], { strokeColor: colors.line, strokeWidth: 1.5, lastArrow: { type: 2, size: 5 }, highlight: false });
+
+      // Instruction queue (left).
+      box(0, 3.2, 3.4, 5.2, sceneStrings("iq"), 0);
+      // Scoreboard (centre control).
+      box(4.4, 2.6, 8.6, 5.8, sceneStrings("sb"), 3, 11);
+      // Functional units (right column).
+      box(9.6, 6.4, 13.4, 7.4, sceneStrings("fpAdd"), 1);
+      box(9.6, 5.0, 13.4, 6.0, sceneStrings("fpMul"), 1);
+      box(9.6, 3.6, 13.4, 4.6, sceneStrings("fpDiv"), 2);
+      box(9.6, 2.2, 13.4, 3.2, sceneStrings("ls"), 1);
+      // Register file (bottom).
+      box(4.4, 0.2, 8.6, 1.5, sceneStrings("regs"), 0);
+
+      // Wiring.
+      arrow([3.4, 4.2], [4.4, 4.2]);            // queue -> scoreboard
+      arrow([8.6, 5.0], [9.6, 6.9]);            // scoreboard -> add
+      arrow([8.6, 4.7], [9.6, 5.5]);            // scoreboard -> mul
+      arrow([8.6, 4.2], [9.6, 4.1]);            // scoreboard -> div
+      arrow([8.6, 3.5], [9.6, 2.7]);            // scoreboard -> ls
+      arrow([6.5, 2.6], [6.5, 1.5]);            // scoreboard <-> regs
+      arrow([6.5, 1.5], [6.5, 2.6]);
+      board.create("text", [7.0, 2.05, sceneStrings("flow")], { strokeColor: colors.ink, fontSize: 10, anchorX: "left", anchorY: "middle", fixed: true, highlight: false });
+    },
+    {
+      boundingbox: [-0.6, 8.2, 14.4, -0.6],
+      keepAspect: false,
+      title: () => makeStrings("board")("title"),
+    },
+  );
+
+  registerQuiz("scoreQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("motiveQ"),
+      options: [
+        { text: () => sceneStrings("mLet"), correct: true },
+        { text: () => sceneStrings("mClock"), correct: false },
+        { text: () => sceneStrings("mShrink"), correct: false },
+        { text: () => sceneStrings("mRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("orderQ"),
+      options: [
+        { text: () => sceneStrings("oInorder"), correct: true },
+        { text: () => sceneStrings("oRandom"), correct: false },
+        { text: () => sceneStrings("oReverse"), correct: false },
+        { text: () => sceneStrings("oParallel"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("execQ"),
+      options: [
+        { text: () => sceneStrings("eOoo"), correct: true },
+        { text: () => sceneStrings("eInorder"), correct: false },
+        { text: () => sceneStrings("eNever"), correct: false },
+        { text: () => sceneStrings("eAlpha"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rawQ"),
+      options: [
+        { text: () => sceneStrings("rTrue"), correct: true },
+        { text: () => sceneStrings("rFalse"), correct: false },
+        { text: () => sceneStrings("rStruct"), correct: false },
+        { text: () => sceneStrings("rNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("warQ"),
+      options: [
+        { text: () => sceneStrings("wAnti"), correct: true },
+        { text: () => sceneStrings("wTrue"), correct: false },
+        { text: () => sceneStrings("wCache"), correct: false },
+        { text: () => sceneStrings("wBranch"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("wawQ"),
+      options: [
+        { text: () => sceneStrings("wwOut"), correct: true },
+        { text: () => sceneStrings("wwTrue"), correct: false },
+        { text: () => sceneStrings("wwStruct"), correct: false },
+        { text: () => sceneStrings("wwNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("newQ"),
+      options: [
+        { text: () => sceneStrings("nWarWaw"), correct: true },
+        { text: () => sceneStrings("nRawOnly"), correct: false },
+        { text: () => sceneStrings("nNone"), correct: false },
+        { text: () => sceneStrings("nAll"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cdcQ"),
+      options: [
+        { text: () => sceneStrings("cdc"), correct: true },
+        { text: () => sceneStrings("ibm"), correct: false },
+        { text: () => sceneStrings("apple"), correct: false },
+        { text: () => sceneStrings("eniac"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rarQ"),
+      options: [
+        { text: () => sceneStrings("rarNo"), correct: true },
+        { text: () => sceneStrings("rarYes"), correct: false },
+        { text: () => sceneStrings("rarStall"), correct: false },
+        { text: () => sceneStrings("rarWrite"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("weakQ"),
+      options: [
+        { text: () => sceneStrings("weakStall"), correct: true },
+        { text: () => sceneStrings("weakFast"), correct: false },
+        { text: () => sceneStrings("weakRAW"), correct: false },
+        { text: () => sceneStrings("weakOrder"), correct: false },
+      ],
+    },
+    {
+      // Out-of-order: DIV and the independent SUB overlap, so total = max(d, 3) = d (d >= 12).
+      prompt: (v) => sceneStrings("ooQ", v),
+      variables: "d=[12:24]",
+      answer: (v) => v.d,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // In-order: SUB waits behind DIV, so total = d + 3.
+      prompt: (v) => sceneStrings("ioQ", v),
+      variables: "d=[12:24]",
+      answer: (v) => v.d + 3,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Prefetching</primer-title>
+
+    <primer-card>
+      <p>
+        Every trick in
+        <primer-ref to="computer-science/computer-architecture/memory/advanced-cache-optimizations">the last lesson</primer-ref>
+        left one enemy standing: the <strong>compulsory miss</strong>. The first time a program touches a block,
+        it <em>must</em> miss — the data has never been in the cache, so no amount of size or associativity can
+        help. Unless… you fetch the block <em>before</em> the program asks for it. That is <strong>prefetching</strong>:
+        predicting future accesses and pulling those blocks in early, so that when the demand finally comes, the
+        data is already sitting in the cache. Done well, a compulsory miss silently becomes a hit.
+      </p>
+      <p>
+        The catch is in that word <em>predicting</em>. Prefetch too late and you still stall; too early and the
+        block gets evicted before use; wrong entirely and you have wasted precious memory bandwidth and maybe
+        <em>polluted</em> the cache, evicting something useful. Prefetching is a bet, and its whole art is being
+        right, and being on time.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Hardware prefetchers: patterns in the address stream</h2>
+      <p>
+        The memory hardware watches the addresses flowing past and guesses what's next, purely from the pattern —
+        no help from the program:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Prefetcher</th><th>What it detects</th><th>What it fetches</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Next-line</strong></td><td>any access</td><td>the sequentially following block (block + 1) — dead simple, great for code &amp; scans</td></tr>
+            <tr><td><strong>Stride</strong></td><td>a constant address stride (e.g. +512 bytes each step)</td><td>the block a few strides ahead — catches array/matrix walks</td></tr>
+            <tr><td><strong>Stream</strong></td><td>several concurrent sequential streams</td><td>runs ahead in each stream, into dedicated stream buffers</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        A <strong>stride prefetcher</strong> is the workhorse. It records, per instruction, the last address and
+        the last stride; when the same stride repeats it grows confident and launches a prefetch several strides
+        ahead of the demand stream. Loops over arrays and matrices — the beating heart of scientific and ML code —
+        are exactly constant-stride, so this pays enormously.
+      </p>
+      <primer-code run>
+        // A minimal stride prefetcher: learn the stride, then prefetch DISTANCE blocks ahead.
+        const DISTANCE = 4;               // how far ahead to run
+        let last = -1, stride = 0, confident = false;
+        const prefetched = new Set&lt;number&gt;();
+        let demandMisses = 0, savedByPrefetch = 0;
+
+        function demand(block: number) {
+          if (prefetched.has(block)) { savedByPrefetch++; prefetched.delete(block); }
+          else demandMisses++;            // a real (compulsory) miss
+
+          if (last !== -1) {
+            const s = block - last;
+            if (s === stride &amp;&amp; s !== 0) confident = true;
+            else confident = false;
+            stride = s;
+          }
+          last = block;
+          if (confident) prefetched.add(block + stride * DISTANCE);  // fetch ahead
+        }
+
+        // Walk an array with stride +2: blocks 0,2,4,6,8,10,12,14.
+        for (let b = 0; b &lt;= 14; b += 2) demand(b);
+        console.log(`demand misses: ${demandMisses}`);
+        console.log(`accesses served by prefetch: ${savedByPrefetch}`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Software prefetching: the compiler asks nicely</h2>
+      <p>
+        Sometimes the program knows its future better than any hardware pattern-matcher — chasing a linked list,
+        or a hash table, where addresses look random to the hardware but the <em>code</em> knows the next node
+        pointer. ISAs expose a <strong>prefetch instruction</strong> (x86 <primer-math>\texttt{PREFETCHT0}</primer-math>,
+        ARM <primer-math>\texttt{PRFM}</primer-math>) — a non-binding <em>hint</em> that says "please start
+        bringing this address toward the cache; I'll need it in about 20 iterations". The compiler (or a careful
+        programmer) inserts it far enough ahead of the use to hide the latency. It faults on nothing and returns no
+        value; a wrong guess just wastes a little bandwidth. The skill is picking the <em>prefetch distance</em>:
+        insert it <primer-math>k</primer-math> iterations early where <primer-math>k \approx</primer-math>
+        (memory latency) ÷ (work per iteration).
+      </p>
+      <primer-code run>
+        // Software prefetch distance: how many iterations ahead to prefetch.
+        // Rule of thumb: k = ceil(memoryLatency / workPerIterationCycles).
+        function prefetchDistance(memLatency: number, workPerIter: number): number {
+          return Math.ceil(memLatency / workPerIter);
+        }
+
+        const memLatency = 200;   // cycles to bring a block from DRAM
+        for (const work of [10, 20, 40, 100]) {
+          const k = prefetchDistance(memLatency, work);
+          console.log(`work/iter = ${work} cyc  ->  prefetch ${k} iterations ahead`);
+        }
+      </primer-code>
+    </primer-card>
+
+    <!-- Strings for the timeliness chart. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "tim": {
+          "title": "Timeliness — benefit peaks at the right prefetch distance (too near = late, too far = evicted)",
+          "lat": "Memory latency (relative)",
+          "legBen": "useful benefit"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Timeliness: the Goldilocks distance</h2>
+      <p>
+        Prefetching has a sweet spot. Fetch <em>too close</em> to the use and the block hasn't arrived yet — you
+        still eat much of the latency (a <em>late</em> prefetch). Fetch <em>too far</em> ahead and the block sits
+        in the cache so long it gets evicted before use (or evicts something you needed — <em>pollution</em>). The
+        benefit curve therefore <strong>rises then falls</strong> with prefetch distance. Slide the memory-latency
+        knob: as memory gets slower, the whole curve's peak shifts to <em>larger</em> distances — you must prefetch
+        earlier to hide a longer latency.
+      </p>
+      <primer-chart scene="tim"></primer-chart>
+      <primer-chart-sliders name="tim"></primer-chart-sliders>
+    </primer-card>
+
+    <primer-card>
+      <h2>Three numbers that judge a prefetcher</h2>
+      <primer-theorem name="Prefetcher metrics">
+        <ul>
+          <li><strong>Coverage</strong> — the fraction of original misses that prefetching eliminated. High
+            coverage = it caught most of the misses.</li>
+          <li><strong>Accuracy</strong> — the fraction of prefetches that were actually used. Low accuracy = wasted
+            bandwidth and cache pollution.</li>
+          <li><strong>Timeliness</strong> — did the block arrive <em>before</em> it was demanded? Early enough to
+            hide latency, late enough to survive eviction.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        A good prefetcher wants all three high at once, and they fight: crank up aggressiveness for coverage and
+        accuracy usually falls (more speculative, more wrong guesses). On a
+        <primer-ref soft to="computer-science/computer-architecture/memory/dram-and-memory-controllers">bandwidth-limited</primer-ref>
+        machine an inaccurate prefetcher is worse than none — it steals the very bandwidth demand misses need.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Can a prefetcher actually make a program SLOWER?">
+      <p>
+        Absolutely, and it's a real hazard. A prefetcher with low accuracy floods the memory system with blocks no
+        one wanted. On a machine already starved for DRAM bandwidth, those useless fetches queue ahead of the
+        <em>demand</em> misses the CPU is truly waiting on, and evict useful lines to make room. Coverage looks
+        fine in isolation, but end-to-end the program slows down. This is why aggressive prefetchers are throttled
+        dynamically — hardware watches accuracy and bandwidth pressure and dials the prefetcher back when it starts
+        doing harm. More speculation is not always better; a prefetch you don't use is pure cost.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Prefetching attacks compulsory misses — it does not shrink the working set">
+      <p>
+        A common overstatement: "prefetching fixes cache misses." It specifically targets <em>compulsory</em> (and
+        some capacity/conflict) misses by moving them earlier in time — the block still occupies the cache, it just
+        arrives before you stall. It does <strong>not</strong> make your working set fit; if your data genuinely
+        exceeds the cache, prefetching can even hurt by accelerating the eviction of things you still need. And a
+        prefetch that arrives and is evicted before use bought you nothing but bandwidth cost. Think of prefetching
+        as <em>latency hiding</em>, not <em>capacity creation</em> — it reshapes <em>when</em> misses happen, not
+        <em>whether</em> the data fits.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: prefetching concepts + numeric stride/accuracy. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "prefQuiz@1": {
+          "intro": "Prefetch = fetch before demand. Judge it by coverage, accuracy, timeliness. It attacks compulsory misses.",
+          "goalQ": "Which type of miss does prefetching uniquely attack that size and associativity cannot?",
+          "gComp": "compulsory (cold) misses",
+          "gCap": "capacity misses only",
+          "gConf": "conflict misses only",
+          "gNone": "none — it removes no misses",
+          "nextQ": "A NEXT-LINE prefetcher, on accessing block b, fetches…",
+          "nB1": "block b + 1 (the sequentially following block)",
+          "nRand": "a random block",
+          "nHalf": "block b / 2",
+          "nNone": "nothing until a miss",
+          "strideQ": "A STRIDE prefetcher is ideal for…",
+          "stArr": "loops walking arrays/matrices at a constant address stride",
+          "stRand": "purely random pointer chasing",
+          "stOne": "programs that touch one address forever",
+          "stNo": "programs with no memory accesses",
+          "swQ": "Software prefetching is most useful when…",
+          "swKnow": "the code knows future addresses the hardware can't infer (e.g. linked lists)",
+          "swSeq": "the access pattern is a trivial sequential scan",
+          "swNever": "never — hardware is always better",
+          "swRand": "addresses are truly random and unknowable",
+          "swInstrQ": "A software prefetch instruction (e.g. PREFETCHT0) is…",
+          "swHint": "a non-binding hint that faults on nothing and returns no value",
+          "swLoad": "an ordinary load that stalls until data arrives",
+          "swStore": "a store to memory",
+          "swBranch": "a conditional branch",
+          "covQ": "A prefetcher's COVERAGE measures…",
+          "cvFrac": "the fraction of original misses it eliminated",
+          "cvAcc": "the fraction of its prefetches that were used",
+          "cvTime": "whether blocks arrived on time",
+          "cvBw": "the total memory bandwidth",
+          "accQ": "A prefetcher's ACCURACY measures…",
+          "acUsed": "the fraction of issued prefetches that were actually used",
+          "acCov": "the fraction of misses eliminated",
+          "acSize": "the cache size",
+          "acLat": "the memory latency",
+          "harmQ": "A low-accuracy prefetcher can make a program SLOWER because…",
+          "hmBw": "useless prefetches waste bandwidth and pollute the cache, delaying demand misses",
+          "hmFast": "it makes memory faster",
+          "hmNever": "it can never slow anything down",
+          "hmClock": "it lowers the clock speed",
+          "timeQ": "As memory latency INCREASES, the ideal prefetch distance should…",
+          "tiFar": "increase — prefetch earlier to hide the longer latency",
+          "tiNear": "decrease to zero",
+          "tiSame": "stay exactly the same always",
+          "tiNone": "become negative",
+          "addrNumQ": "A stride prefetcher sees base block {a}, stride {s}, and runs {d} strides ahead. Which block does it prefetch? (whole number)",
+          "accNumQ": "A prefetcher issues {t} prefetches, {u} of which are used. What is its accuracy, as a percentage? (whole number)",
+          "distNumQ": "Memory latency is {lat} cycles and each loop iteration is {w} cycles of work. How many iterations ahead should you prefetch (round up)? (whole number)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="prefQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/memory/cache-performance-and-the-three-cs"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerChartSliders, registerQuiz, makeStrings } from "primer";
+
+  // --- Timeliness: benefit rises (arrives in time) then falls (pollution/eviction) with distance. ---
+  const tm = makeStrings("tim");
+  registerChartSliders("tim", [
+    { name: "lat", label: () => tm("lat"), min: 1, max: 6, step: 0.5, value: 3, anchors: [1, 3, 6] },
+  ]);
+  registerCharts(
+    [{
+      name: "tim",
+      // rise: (1 - e^{-d/lat}) — needs to be far enough to arrive in time; fall: e^{-d/8} — pollution.
+      f: (d, s) => (1 - Math.exp(-d / s.lat)) * Math.exp(-d / 8),
+      line: (colors) => ({ strokeColor: colors.cat[0], strokeWidth: 4 }),
+      legend: [() => tm("legBen")],
+    }],
+    {
+      id: "tim",
+      title: () => tm("title"),
+      xmin: 0, xmax: 20, xticks: 4,
+      ymin: 0, ymax: 0.6, yticks: 0.1,
+      xaxisname: "prefetch distance", yaxisname: "useful benefit",
+    },
+    "tim",
+  );
+
+  registerQuiz("prefQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("goalQ"),
+      options: [
+        { text: () => sceneStrings("gComp"), correct: true },
+        { text: () => sceneStrings("gCap"), correct: false },
+        { text: () => sceneStrings("gConf"), correct: false },
+        { text: () => sceneStrings("gNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("nextQ"),
+      options: [
+        { text: () => sceneStrings("nB1"), correct: true },
+        { text: () => sceneStrings("nRand"), correct: false },
+        { text: () => sceneStrings("nHalf"), correct: false },
+        { text: () => sceneStrings("nNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("strideQ"),
+      options: [
+        { text: () => sceneStrings("stArr"), correct: true },
+        { text: () => sceneStrings("stRand"), correct: false },
+        { text: () => sceneStrings("stOne"), correct: false },
+        { text: () => sceneStrings("stNo"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("swQ"),
+      options: [
+        { text: () => sceneStrings("swKnow"), correct: true },
+        { text: () => sceneStrings("swSeq"), correct: false },
+        { text: () => sceneStrings("swNever"), correct: false },
+        { text: () => sceneStrings("swRand"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("swInstrQ"),
+      options: [
+        { text: () => sceneStrings("swHint"), correct: true },
+        { text: () => sceneStrings("swLoad"), correct: false },
+        { text: () => sceneStrings("swStore"), correct: false },
+        { text: () => sceneStrings("swBranch"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("covQ"),
+      options: [
+        { text: () => sceneStrings("cvFrac"), correct: true },
+        { text: () => sceneStrings("cvAcc"), correct: false },
+        { text: () => sceneStrings("cvTime"), correct: false },
+        { text: () => sceneStrings("cvBw"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("accQ"),
+      options: [
+        { text: () => sceneStrings("acUsed"), correct: true },
+        { text: () => sceneStrings("acCov"), correct: false },
+        { text: () => sceneStrings("acSize"), correct: false },
+        { text: () => sceneStrings("acLat"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("harmQ"),
+      options: [
+        { text: () => sceneStrings("hmBw"), correct: true },
+        { text: () => sceneStrings("hmFast"), correct: false },
+        { text: () => sceneStrings("hmNever"), correct: false },
+        { text: () => sceneStrings("hmClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("timeQ"),
+      options: [
+        { text: () => sceneStrings("tiFar"), correct: true },
+        { text: () => sceneStrings("tiNear"), correct: false },
+        { text: () => sceneStrings("tiSame"), correct: false },
+        { text: () => sceneStrings("tiNone"), correct: false },
+      ],
+    },
+    {
+      // prefetch block = a + s*d.
+      prompt: (v) => sceneStrings("addrNumQ", v),
+      variables: "a=[0:20] s=[2,4,8] d=[2:6]",
+      answer: (v) => v.a + v.s * v.d,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // accuracy% = u/t*100.
+      prompt: (v) => sceneStrings("accNumQ", v),
+      variables: "t=[10,20,25,50] u=[5:20]",
+      constraints: "u < t",
+      answer: (v) => Math.round((v.u / v.t) * 100),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // distance = ceil(lat / w).
+      prompt: (v) => sceneStrings("distNumQ", v),
+      variables: "lat=[100:300] w=[10,20,40]",
+      answer: (v) => Math.ceil(v.lat / v.w),
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

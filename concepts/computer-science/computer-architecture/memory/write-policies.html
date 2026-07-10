@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Write Policies</primer-title>
+
+    <primer-card>
+      <p>
+        Reading from a cache is easy: if the data is there, hand it over. <em>Writing</em> is where the
+        interesting decisions live. The moment the CPU stores a value, the cache's copy and main memory's copy
+        <strong>disagree</strong> — and the architect must decide when, and whether, to reconcile them. Those
+        decisions are the <strong>write policies</strong>, and they trade memory-bandwidth against simplicity and,
+        eventually, against the correctness of a whole multicore machine.
+      </p>
+      <p>
+        There are really two independent questions. On a write that <em>hits</em>: do we push the new value all
+        the way to memory now, or later? On a write that <em>misses</em>: do we bother pulling the block into the
+        cache at all? Two questions, two-by-two — four combinations, of which two pairings dominate real hardware.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the write-path diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "wp": {
+          "title": "Write-through pushes every write to memory; write-back defers until the dirty block is evicted",
+          "cpu": "CPU",
+          "cache": "Cache (dirty bit)",
+          "mem": "Main memory",
+          "wt": "write-through: every write →",
+          "wb": "write-back: only on eviction (if dirty) ⇢",
+          "store": "store"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Write-through vs write-back</h2>
+      <p>
+        On a write <strong>hit</strong>, the two schools are:
+      </p>
+      <primer-theorem name="Write-hit policies">
+        <ul>
+          <li><strong>Write-through</strong> — update the cache <em>and</em> immediately write the value on to the
+            next level. Memory is always up to date; the cache never holds the only copy. Simple, but every store
+            generates memory traffic.</li>
+          <li><strong>Write-back</strong> — update <em>only</em> the cached copy and set a <strong>dirty
+            bit</strong>. Memory stays stale. The block is written back to memory only later, when it is
+            <em>evicted</em> — and only if its dirty bit is set. Far less traffic, at the cost of complexity.</li>
+        </ul>
+      </primer-theorem>
+      <primer-geometry scene="wp"></primer-geometry>
+      <p>
+        The <strong>dirty bit</strong> is the whole trick of write-back: one bit per line that remembers "this
+        block has been modified since it was loaded". On eviction, a clean block (dirty bit 0) can be silently
+        dropped — memory already has it — while a dirty block must be written back first. If a block is written a
+        hundred times then evicted once, write-through does a hundred memory writes; write-back does <em>one</em>.
+        Temporal locality of writes is exactly what makes write-back a huge win.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Write-allocate vs no-write-allocate</h2>
+      <p>
+        On a write <strong>miss</strong> — you are storing to a block that is not in the cache — there is a second
+        choice:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>On a write miss…</th><th>What happens</th><th>Usually paired with</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Write-allocate</strong></td><td>fetch the block into the cache, then write it (bet: more writes/reads to it are coming)</td><td>write-back</td></tr>
+            <tr><td><strong>No-write-allocate</strong></td><td>write straight to memory, leave the cache untouched</td><td>write-through</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The natural pairings follow the philosophy. <strong>Write-back + write-allocate</strong> keeps everything
+        hot data local and minimises memory traffic — the default in nearly every modern L1/L2. <strong>Write-through
+        + no-write-allocate</strong> keeps things simple and is handy where writes are rarely re-read soon (some
+        streaming or I/O paths). The reasoning: if you are going to keep the block's only fresh copy locally
+        (write-back), you had better allocate it on a write miss too; if you are pushing everything to memory
+        anyway (write-through), why disturb the cache for a write you may never revisit?
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The write buffer: hiding the store latency</h2>
+      <p>
+        Write-through's flaw is obvious — a store to slow memory on <em>every</em> write would stall the pipeline.
+        The fix is a <strong>write buffer</strong>: a small FIFO queue between cache and memory. The store lands in
+        the buffer in one cycle and the CPU races on; the buffer drains to memory in the background. Write-back
+        machines use one too, so an eviction's write-back does not block the incoming block. A write buffer can
+        even satisfy a later <em>read</em> to an address still queued in it (write-to-read forwarding), and lets
+        writes be <em>coalesced</em>. It turns the memory-traffic cost of writing from a stall into (usually) free
+        background work — until the buffer fills, at which point the CPU finally must wait.
+      </p>
+      <primer-code run>
+        // Count memory writes: write-through vs write-back on a bursty write stream.
+        // Stream: (blockAddr, isWrite). One block, written many times, then a different block evicts it.
+        const stream: [number, boolean][] = [
+          [0, true], [0, true], [0, true], [0, true], [0, true], // 5 writes to block 0
+          [4, true],                                             // block 4 evicts block 0 (same set)
+        ];
+
+        // Write-through: every write goes to memory immediately.
+        const wtWrites = stream.filter(([, w]) => w).length;
+
+        // Write-back: writes stay local (dirty), memory is touched only when a dirty block is evicted.
+        // Block 0 is dirtied then evicted once -> exactly 1 write-back; block 4's write dirties it (still resident).
+        const wbWrites = 1;
+
+        console.log(`write-through memory writes: ${wtWrites}`);
+        console.log(`write-back memory writes:    ${wbWrites}`);
+        console.log(`traffic reduction: ${(wtWrites / wbWrites).toFixed(1)}x`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Writes and the coherence storm ahead</h2>
+      <p>
+        On a single core, write-back is a clear win and the story ends. Add a <em>second</em> core with its own
+        cache and write-back becomes a minefield: if core A holds the only fresh (dirty) copy of a block and core B
+        reads that address, B must somehow get A's value, not memory's stale one. This is the
+        <strong>cache-coherence</strong> problem, and the dirty bit you met here grows into the "Modified" state of
+        the
+        <primer-ref todo to="computer-science/computer-architecture/multicore/mesi-protocol">MESI protocol</primer-ref>.
+        Write-through does not escape it either — it just changes which races you must handle. The humble write
+        policy is the seed of the entire multiprocessor-memory chapter.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If write-back is faster, why does anything still use write-through?">
+      <p>
+        Simplicity and safety, in the right place. Write-through means memory (or the next level) is <em>always</em>
+        current, so a crash, a DMA device, or another core reading memory directly never sees stale data — no
+        write-back bookkeeping, no "is this line dirty?" question on eviction. Some GPUs, small embedded caches,
+        and level-1 data caches that back onto an inclusive L2 use write-through precisely because a fast write
+        buffer hides its one real cost (traffic) while keeping the design dead simple and the next level's copy
+        trustworthy. As so often, the "worse" policy wins wherever its weakness is cheap and its simplicity is
+        valuable.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A dirty bit is per cache line, and 'dirty' is not the same as 'valid'">
+      <p>
+        Two independent bits ride on every line and beginners conflate them. <strong>Valid</strong> answers "does
+        this line hold real data at all?" (cleared at reset). <strong>Dirty</strong> answers "has this valid line
+        been written since it was loaded, so memory is now stale?" A line can be valid-and-clean (safe to drop),
+        valid-and-dirty (must be written back before eviction), or invalid (ignore it entirely). A dirty bit on an
+        invalid line is meaningless. And note: only <em>write-back</em> caches even <em>have</em> dirty bits —
+        write-through keeps memory current, so there is never anything to write back.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: write-policy concepts + a little numeric traffic arithmetic. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "writeQuiz@1": {
+          "intro": "Write-through = update memory every write; write-back = defer, using a dirty bit until eviction.",
+          "wtQ": "In a WRITE-THROUGH cache, a write hit…",
+          "wtBoth": "updates the cache and immediately writes to the next level",
+          "wtCache": "updates only the cache, never memory",
+          "wtMem": "updates only memory, never the cache",
+          "wtNone": "does nothing",
+          "wbQ": "In a WRITE-BACK cache, a write hit…",
+          "wbLocal": "updates only the cached copy and sets the dirty bit",
+          "wbMem": "writes straight to memory each time",
+          "wbBoth": "updates cache and memory every time",
+          "wbEvict": "evicts the block immediately",
+          "dirtyQ": "The dirty bit records that…",
+          "dModified": "the line has been modified since loading, so memory is stale",
+          "dValid": "the line contains valid data",
+          "dTag": "the tag matched",
+          "dLru": "the line is least-recently-used",
+          "evictQ": "When a CLEAN (dirty bit = 0) block is evicted from a write-back cache…",
+          "eDrop": "it can be dropped silently — memory already has it",
+          "eWrite": "it must always be written back to memory",
+          "eKeep": "it can never be evicted",
+          "eError": "it raises an error",
+          "allocQ": "WRITE-ALLOCATE means that on a write MISS the cache…",
+          "alFetch": "fetches the block into the cache, then writes it",
+          "alSkip": "writes to memory and leaves the cache unchanged",
+          "alStall": "stalls forever",
+          "alEvict": "evicts a random line without writing",
+          "pairQ": "Which pairing is the standard default for modern L1/L2 data caches?",
+          "pWbWa": "write-back + write-allocate",
+          "pWtWa": "write-through + write-allocate",
+          "pWtNa": "write-through + no-write-allocate",
+          "pNone": "no policy is needed",
+          "bufQ": "The purpose of a write buffer is to…",
+          "bufHide": "let the CPU continue while writes drain to memory in the background",
+          "bufStore": "permanently store all data instead of memory",
+          "bufTag": "compute the tag field",
+          "bufEvict": "choose the LRU victim",
+          "cohQ": "Why do write policies become tricky with multiple cores?",
+          "cohStale": "one core may hold the only fresh (dirty) copy another core needs — coherence",
+          "cohFast": "cores make memory faster",
+          "cohNone": "they don't; multicore removes the issue",
+          "cohClock": "cores share one clock crystal",
+          "trafQ": "A block is written {w} times, then evicted once (dirty). How many memory writes does WRITE-BACK do?",
+          "tw1": "1 (a single write-back at eviction)",
+          "twW": "{w} (one per write)",
+          "tw0": "0",
+          "tw2": "2",
+          "wtNumQ": "A block is written {w} times before eviction. How many memory writes does WRITE-THROUGH perform? (whole number)",
+          "ratioNumQ": "{w} writes to one block, then eviction. Write-through÷write-back memory-write ratio? (whole number)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="writeQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/memory/cache-fundamentals"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // --- CPU | Cache | Memory with a solid write-through arrow and a dashed write-back arrow. Static base. ---
+  registerGeometryScene(
+    "wp",
+    ({ board, colors, sceneStrings }) => {
+      const block = (cx, half, txt, fill) => {
+        board.create("polygon", [[cx - half, -0.9], [cx + half, -0.9], [cx + half, 0.9], [cx - half, 0.9]], {
+          fillColor: fill, fillOpacity: 0.25, strokeColor: colors.line, strokeWidth: 1.5,
+          fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        board.create("text", [cx, 0, txt], {
+          strokeColor: colors.ink, fontSize: 13, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600",
+        });
+      };
+      block(0, 1.0, sceneStrings("cpu"), colors.cat[0]);
+      block(4, 1.6, sceneStrings("cache"), colors.cat[1]);
+      block(9, 1.4, sceneStrings("mem"), colors.cat[2]);
+
+      // CPU -> Cache: the store.
+      board.create("arrow", [[1.0, 0.3], [2.4, 0.3]], { strokeColor: colors.ink, strokeWidth: 2, highlight: false, lastArrow: { size: 6 } });
+      board.create("text", [1.7, 0.7, sceneStrings("store")], { strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+
+      // Cache -> Memory: solid = write-through (every write).
+      board.create("arrow", [[5.6, 0.35], [7.6, 0.35]], { strokeColor: colors.cat[3], strokeWidth: 2.5, highlight: false, lastArrow: { size: 6 } });
+      board.create("text", [6.6, 0.9, sceneStrings("wt")], { strokeColor: colors.cat[3], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+
+      // Cache -> Memory: dashed = write-back (only on eviction).
+      board.create("arrow", [[5.6, -0.35], [7.6, -0.35]], { strokeColor: colors.cat[4], strokeWidth: 2.5, dash: 2, highlight: false, lastArrow: { size: 6 } });
+      board.create("text", [6.6, -0.9, sceneStrings("wb")], { strokeColor: colors.cat[4], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+    },
+    {
+      boundingbox: [-1.6, 1.8, 11.5, -1.8],
+      keepAspect: false,
+      title: () => makeStrings("wp")("title"),
+    },
+  );
+
+  registerQuiz("writeQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("wtQ"),
+      options: [
+        { text: () => sceneStrings("wtBoth"), correct: true },
+        { text: () => sceneStrings("wtCache"), correct: false },
+        { text: () => sceneStrings("wtMem"), correct: false },
+        { text: () => sceneStrings("wtNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("wbQ"),
+      options: [
+        { text: () => sceneStrings("wbLocal"), correct: true },
+        { text: () => sceneStrings("wbMem"), correct: false },
+        { text: () => sceneStrings("wbBoth"), correct: false },
+        { text: () => sceneStrings("wbEvict"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dirtyQ"),
+      options: [
+        { text: () => sceneStrings("dModified"), correct: true },
+        { text: () => sceneStrings("dValid"), correct: false },
+        { text: () => sceneStrings("dTag"), correct: false },
+        { text: () => sceneStrings("dLru"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("evictQ"),
+      options: [
+        { text: () => sceneStrings("eDrop"), correct: true },
+        { text: () => sceneStrings("eWrite"), correct: false },
+        { text: () => sceneStrings("eKeep"), correct: false },
+        { text: () => sceneStrings("eError"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("allocQ"),
+      options: [
+        { text: () => sceneStrings("alFetch"), correct: true },
+        { text: () => sceneStrings("alSkip"), correct: false },
+        { text: () => sceneStrings("alStall"), correct: false },
+        { text: () => sceneStrings("alEvict"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pairQ"),
+      options: [
+        { text: () => sceneStrings("pWbWa"), correct: true },
+        { text: () => sceneStrings("pWtWa"), correct: false },
+        { text: () => sceneStrings("pWtNa"), correct: false },
+        { text: () => sceneStrings("pNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bufQ"),
+      options: [
+        { text: () => sceneStrings("bufHide"), correct: true },
+        { text: () => sceneStrings("bufStore"), correct: false },
+        { text: () => sceneStrings("bufTag"), correct: false },
+        { text: () => sceneStrings("bufEvict"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cohQ"),
+      options: [
+        { text: () => sceneStrings("cohStale"), correct: true },
+        { text: () => sceneStrings("cohFast"), correct: false },
+        { text: () => sceneStrings("cohNone"), correct: false },
+        { text: () => sceneStrings("cohClock"), correct: false },
+      ],
+    },
+    {
+      prompt: (v) => sceneStrings("trafQ", v),
+      variables: "w=[3:20]",
+      options: [
+        { text: () => sceneStrings("tw1"), correct: true },
+        { text: (v) => sceneStrings("twW", v), correct: false },
+        { text: () => sceneStrings("tw0"), correct: false },
+        { text: () => sceneStrings("tw2"), correct: false },
+      ],
+    },
+    {
+      // write-through does one memory write per write.
+      prompt: (v) => sceneStrings("wtNumQ", v),
+      variables: "w=[3:20]",
+      answer: (v) => v.w,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // ratio = w writes / 1 write-back = w.
+      prompt: (v) => sceneStrings("ratioNumQ", v),
+      variables: "w=[3:20]",
+      answer: (v) => v.w,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

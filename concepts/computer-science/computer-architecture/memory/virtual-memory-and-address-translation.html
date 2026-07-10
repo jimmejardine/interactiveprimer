@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Virtual Memory and Address Translation</primer-title>
+
+    <primer-card>
+      <p>
+        You have met
+        <primer-ref to="computer-science/operating-systems/virtual-memory-and-paging">virtual memory from the operating system's side</primer-ref>
+        — the illusion that every process owns a private, contiguous address space far larger than physical RAM.
+        This page looks at the <em>same</em> illusion from underneath, where the <strong>hardware</strong> makes it
+        real: on <em>every single load and store</em>, the processor must translate the program's
+        <strong>virtual address</strong> into the <strong>physical address</strong> of an actual DRAM byte, in a
+        handful of nanoseconds, or the whole machine grinds to a halt. Address translation is the busiest piece of
+        machinery in the entire chip.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Pages: the unit of translation</h2>
+      <p>
+        Translating every byte individually would need a map with billions of entries. Instead memory is carved
+        into fixed-size <strong>pages</strong> — classically <primer-math>4\ \text{KB}</primer-math> — and we
+        translate a page at a time. This splits a virtual address exactly like a cache splits its address: the low
+        <primer-math>\log_2(\text{page size})</primer-math> bits are the <strong>page offset</strong> (which byte
+        within the page, unchanged by translation), and the high bits are the <strong>virtual page number
+        (VPN)</strong>. Translation maps the VPN to a <strong>physical page number (PPN)</strong>, also called a
+        <em>frame</em>; the offset is copied straight through.
+      </p>
+      <primer-math display>\underbrace{\text{VPN}}_{\text{translated}} \;\Big|\; \underbrace{\text{offset}}_{\text{copied}} \;\;\longrightarrow\;\; \underbrace{\text{PPN}}_{\text{from page table}} \;\Big|\; \underbrace{\text{offset}}_{\text{unchanged}}</primer-math>
+    </primer-card>
+
+    <!-- Strings for the translation diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "xlate": {
+          "title": "Address translation — the VPN indexes the page table to a PPN; the offset passes through",
+          "va": "Virtual address",
+          "vpn": "VPN",
+          "off": "offset",
+          "pt": "Page table (in memory)",
+          "ppn": "PPN",
+          "pa": "Physical address",
+          "base": "page-table base register (CR3 / TTBR)",
+          "lookup": "index"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The page table</h2>
+      <p>
+        The map itself is the <strong>page table</strong>, one per process, living in main memory. The VPN indexes
+        into it; the entry it lands on — the <strong>page table entry (PTE)</strong> — holds the PPN plus a bundle
+        of control bits: <em>valid/present</em> (is this page in RAM at all?), <em>protection</em> (read / write /
+        execute permissions), <em>dirty</em> and <em>accessed</em> bits for the OS, and <em>user/supervisor</em>.
+        So translation and <strong>protection</strong> happen in the same step: the hardware checks the PTE's
+        permission bits against the access type and faults if a program writes a read-only page or a user process
+        touches kernel memory.
+      </p>
+      <primer-geometry scene="xlate"></primer-geometry>
+      <p>
+        Where does the hardware find the page table? In an architectural register — the <strong>page-table base
+        register</strong> (<primer-math>\texttt{CR3}</primer-math> on x86, <primer-math>\texttt{TTBR}</primer-math>
+        on ARM). This is the key architectural support for virtual memory: on a context switch the OS simply loads
+        a new base register value, and the very same virtual addresses now translate through a <em>different</em>
+        process's table. Point the register at a new table and you have swapped universes.
+      </p>
+      <primer-code run>
+        // Single-level translation: split the virtual address, look up the frame, form the physical address.
+        const PAGE = 4096;                 // 4 KB pages -> 12 offset bits
+        const offsetBits = Math.log2(PAGE);
+
+        // A tiny page table: VPN -> PPN (frame). Undefined = page fault.
+        const pageTable: Record&lt;number, number&gt; = { 0: 7, 1: 3, 2: 9 };
+
+        function translate(va: number): string {
+          const vpn = Math.floor(va / PAGE);       // high bits
+          const offset = va % PAGE;                // low `offsetBits` bits
+          const ppn = pageTable[vpn];
+          if (ppn === undefined) return `VA 0x${va.toString(16)}: VPN ${vpn} -> PAGE FAULT`;
+          const pa = ppn * PAGE + offset;
+          return `VA 0x${va.toString(16)}: VPN ${vpn}, off ${offset} -> PPN ${ppn} -> PA 0x${pa.toString(16)}`;
+        }
+
+        console.log(`offset bits = ${offsetBits}`);
+        for (const va of [0x0004, 0x1abc, 0x2010, 0x5000]) console.log(translate(va));
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why one flat table won't do: multi-level page tables</h2>
+      <p>
+        A 64-bit address space is astronomically large. A single flat page table covering it would need an
+        impossible number of entries — mostly for pages a process never uses. The fix is a <strong>multi-level
+        (hierarchical) page table</strong>: chop the VPN into several slices, one per level, and walk a
+        <em>tree</em> of small tables. x86-64 uses <em>four</em> levels (PML4 → PDPT → PD → PT); a slice indexes
+        each level's table, whose entry points to the next level's table, until the last gives the PPN. The genius:
+        entire subtrees for unused address ranges simply don't exist — the tree is sparse, so the table's size is
+        proportional to memory <em>used</em>, not memory <em>addressable</em>.
+      </p>
+      <primer-code run>
+        // A 4-level walk (x86-64 style): a 48-bit VA = 4 nine-bit indices + a 12-bit offset.
+        function decodeWalk(va: number) {
+          const offset = va &amp; 0xFFF;                 // low 12 bits
+          const vpn = Math.floor(va / 4096);
+          const idx = [0, 1, 2, 3].map((lvl) =&gt; (vpn &gt;&gt;&gt; (lvl * 9)) &amp; 0x1FF); // 9-bit slices, level 0 = lowest
+          return { l4: idx[3], l3: idx[2], l2: idx[1], l1: idx[0], offset };
+        }
+
+        const va = 0x7f3c_1234 &amp; 0xFFFFFFFF;
+        const d = decodeWalk(va);
+        console.log(`indices: PML4=${d.l4} PDPT=${d.l3} PD=${d.l2} PT=${d.l1}, offset=${d.offset}`);
+        console.log("a 4-level table => up to 4 memory accesses PER translation");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The cost: the page-table walk</h2>
+      <p>
+        Here is the sting. Each level of the tree lives in memory, so a <strong>page-table walk</strong> on a
+        4-level table is up to <strong>four</strong> dependent memory accesses — <em>just to translate one
+        address</em> — <em>before</em> the real load can even begin. On a machine where memory costs hundreds of
+        cycles, paying four such accesses for every load would be catastrophic, easily 4–5× slower. Two structures
+        rescue us: translations get cached in a
+        <primer-ref forward to="computer-science/computer-architecture/memory/the-tlb">TLB</primer-ref>
+        (so a hit skips the walk entirely), and the page-table entries themselves get cached in the ordinary data
+        caches (so a miss's walk mostly hits in L2/L3). The next page is entirely about that first rescue.
+      </p>
+      <primer-theorem name="Address translation, architecturally">
+        <ul>
+          <li>every access splits into a <strong>VPN</strong> (translated) and a page <strong>offset</strong>
+            (copied unchanged);</li>
+          <li>the <strong>page table</strong> maps VPN → PPN and, in the same step, enforces
+            <strong>protection</strong> via permission bits;</li>
+          <li>a <strong>page-table base register</strong> (CR3/TTBR) names the current table, so a context switch
+            is one register write;</li>
+          <li>a <strong>k-level</strong> table costs up to <strong>k dependent memory accesses</strong> per
+            translation — the price a TLB exists to avoid.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="How can a program use more memory than the computer physically has?">
+      <p>
+        Because the page table can point a virtual page not at a DRAM frame but at a slot on <em>disk</em>. When a
+        program touches such a page, its PTE's <em>present</em> bit is clear, the hardware raises a <strong>page
+        fault</strong>, and the OS steps in: it finds the page on disk, evicts some other frame to make room
+        (writing it back if dirty), loads the wanted page into that frame, fixes up the PTE, and restarts the
+        instruction — which now translates and succeeds. The program never knows. This is <em>demand paging</em>,
+        and it is how 8&nbsp;GB of RAM can host processes claiming terabytes: physical memory is just a cache for a
+        much larger virtual world backed by disk. The architecture provides the fault; the OS provides the policy.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The page offset is NOT translated — only the page number changes">
+      <p>
+        A classic slip is to "translate the whole address". Translation replaces only the <em>page number</em>; the
+        <em>offset</em> (the low <primer-math>\log_2(\text{page size})</primer-math> bits) is copied byte-for-byte
+        from virtual to physical. A byte 100 into virtual page 5 is byte 100 into whatever physical frame page 5
+        maps to. This is not a detail — it is the seam that makes the clever
+        <primer-ref forward to="computer-science/computer-architecture/memory/the-tlb">VIPT L1 cache</primer-ref>
+        trick possible, because the offset bits are known <em>immediately</em>, without waiting for translation.
+        Confuse offset with VPN and none of the TLB/cache overlap will make sense.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: translation concepts + numeric page arithmetic. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "vmQuiz@1": {
+          "intro": "VA = VPN | offset. Page table maps VPN→PPN and checks protection. k levels = up to k memory accesses.",
+          "unitQ": "The unit that address translation works on is the…",
+          "uPage": "page (a fixed-size block, classically 4 KB)",
+          "uByte": "single byte",
+          "uWord": "32-bit word",
+          "uCache": "cache line only",
+          "splitQ": "A virtual address splits into…",
+          "sVpn": "a virtual page number (VPN) and a page offset",
+          "sTio": "tag, index, offset",
+          "sRwx": "read, write, execute",
+          "sSign": "sign and magnitude",
+          "offQ": "During translation, the page OFFSET is…",
+          "oCopy": "copied unchanged from virtual to physical address",
+          "oXlate": "translated through the page table like the VPN",
+          "oZero": "always set to zero",
+          "oDrop": "discarded",
+          "pteQ": "Besides the PPN, a page table entry (PTE) holds…",
+          "ptCtrl": "control bits: present, protection (r/w/x), dirty, accessed",
+          "ptTag": "the cache tag",
+          "ptData": "the actual page data",
+          "ptNone": "nothing else",
+          "baseQ": "The page-table base register (CR3 / TTBR) is used to…",
+          "bSwap": "point the hardware at the current process's page table (swapped on context switch)",
+          "bCache": "store the L1 cache",
+          "bClock": "set the clock frequency",
+          "bStack": "hold the stack pointer",
+          "protQ": "Protection (read/write/execute permission) is enforced…",
+          "prSame": "in the same step as translation, by checking the PTE's permission bits",
+          "prSep": "by a separate scan long after the access",
+          "prNever": "it isn't enforced by hardware",
+          "prComp": "only by the compiler",
+          "multiQ": "The point of a MULTI-LEVEL (hierarchical) page table is that…",
+          "mSparse": "unused address ranges need no tables — size scales with memory used, not addressable",
+          "mFast": "it is always faster than one level",
+          "mBig": "it makes pages bigger",
+          "mNone": "it removes the offset",
+          "walkQ": "A 'page-table walk' on a 4-level table costs, before the real access…",
+          "wFour": "up to 4 dependent memory accesses",
+          "wOne": "exactly 1 access always",
+          "wZero": "zero accesses",
+          "wCache": "one cache flush",
+          "faultQ": "A page fault occurs when…",
+          "fPresent": "the accessed page's PTE says it is not present in physical memory",
+          "fHit": "the TLB hits",
+          "fCache": "the L1 cache hits",
+          "fAlways": "on every single access",
+          "offNumQ": "Pages are {ps} bytes. How many OFFSET bits does a virtual address use? (whole number)",
+          "paNumQ": "Page size {ps} bytes. Virtual page maps to physical frame {f}; the offset is {o}. What physical ADDRESS (bytes)? (whole number)",
+          "walkNumQ": "A {k}-level page table, TLB miss. How many memory accesses does the WALK take (before the load)? (whole number)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="vmQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/memory/cache-fundamentals",
+      "computer-science/operating-systems/virtual-memory-and-paging"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // --- Virtual address -> page table -> physical address. Static base content. ---
+  registerGeometryScene(
+    "xlate",
+    ({ board, colors, sceneStrings }) => {
+      const box = (x0, x1, y0, y1, fill, txt) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: fill, fillOpacity: 0.26, strokeColor: colors.line, strokeWidth: 1.5,
+          fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, txt], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600",
+        });
+      };
+
+      // Virtual address bar (top).
+      board.create("text", [2.75, 4.4, sceneStrings("va")], { strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      box(0, 3.5, 3.4, 4.1, colors.cat[0], sceneStrings("vpn"));
+      box(3.5, 5.5, 3.4, 4.1, colors.cat[2], sceneStrings("off"));
+
+      // Page table box (middle).
+      box(1.0, 6.0, 1.0, 2.4, colors.cat[1], sceneStrings("pt"));
+      board.create("text", [3.5, 0.55, sceneStrings("base")], { strokeColor: colors.cat[1], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+
+      // Physical address bar (bottom).
+      board.create("text", [2.75, -1.6, sceneStrings("pa")], { strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      box(0, 3.5, -1.3, -0.7, colors.cat[3], sceneStrings("ppn"));
+      box(3.5, 5.5, -1.3, -0.7, colors.cat[2], sceneStrings("off"));
+
+      // Arrows: VPN -> table (index), table -> PPN.
+      board.create("arrow", [[1.75, 3.4], [1.75, 2.45]], { strokeColor: colors.cat[0], strokeWidth: 2, highlight: false, lastArrow: { size: 6 } });
+      board.create("text", [2.5, 2.9, sceneStrings("lookup")], { strokeColor: colors.cat[0], fontSize: 10, anchorX: "left", anchorY: "middle", fixed: true, highlight: false });
+      board.create("arrow", [[1.75, 0.95], [1.75, -0.65]], { strokeColor: colors.cat[3], strokeWidth: 2, highlight: false, lastArrow: { size: 6 } });
+      // offset passes straight through (right side).
+      board.create("arrow", [[4.5, 3.35], [4.5, -0.65]], { strokeColor: colors.cat[2], strokeWidth: 2, dash: 2, highlight: false, lastArrow: { size: 6 } });
+    },
+    {
+      boundingbox: [-0.6, 4.8, 7.5, -2.0],
+      keepAspect: false,
+      title: () => makeStrings("xlate")("title"),
+    },
+  );
+
+  registerQuiz("vmQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("unitQ"),
+      options: [
+        { text: () => sceneStrings("uPage"), correct: true },
+        { text: () => sceneStrings("uByte"), correct: false },
+        { text: () => sceneStrings("uWord"), correct: false },
+        { text: () => sceneStrings("uCache"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("splitQ"),
+      options: [
+        { text: () => sceneStrings("sVpn"), correct: true },
+        { text: () => sceneStrings("sTio"), correct: false },
+        { text: () => sceneStrings("sRwx"), correct: false },
+        { text: () => sceneStrings("sSign"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("offQ"),
+      options: [
+        { text: () => sceneStrings("oCopy"), correct: true },
+        { text: () => sceneStrings("oXlate"), correct: false },
+        { text: () => sceneStrings("oZero"), correct: false },
+        { text: () => sceneStrings("oDrop"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pteQ"),
+      options: [
+        { text: () => sceneStrings("ptCtrl"), correct: true },
+        { text: () => sceneStrings("ptTag"), correct: false },
+        { text: () => sceneStrings("ptData"), correct: false },
+        { text: () => sceneStrings("ptNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("baseQ"),
+      options: [
+        { text: () => sceneStrings("bSwap"), correct: true },
+        { text: () => sceneStrings("bCache"), correct: false },
+        { text: () => sceneStrings("bClock"), correct: false },
+        { text: () => sceneStrings("bStack"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("protQ"),
+      options: [
+        { text: () => sceneStrings("prSame"), correct: true },
+        { text: () => sceneStrings("prSep"), correct: false },
+        { text: () => sceneStrings("prNever"), correct: false },
+        { text: () => sceneStrings("prComp"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("multiQ"),
+      options: [
+        { text: () => sceneStrings("mSparse"), correct: true },
+        { text: () => sceneStrings("mFast"), correct: false },
+        { text: () => sceneStrings("mBig"), correct: false },
+        { text: () => sceneStrings("mNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("walkQ"),
+      options: [
+        { text: () => sceneStrings("wFour"), correct: true },
+        { text: () => sceneStrings("wOne"), correct: false },
+        { text: () => sceneStrings("wZero"), correct: false },
+        { text: () => sceneStrings("wCache"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("faultQ"),
+      options: [
+        { text: () => sceneStrings("fPresent"), correct: true },
+        { text: () => sceneStrings("fHit"), correct: false },
+        { text: () => sceneStrings("fCache"), correct: false },
+        { text: () => sceneStrings("fAlways"), correct: false },
+      ],
+    },
+    {
+      // offset bits = log2(page bytes).
+      prompt: (v) => sceneStrings("offNumQ", v),
+      variables: "ps=[4096,8192,16384]",
+      answer: (v) => Math.log2(v.ps),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // PA = frame*pagesize + offset.
+      prompt: (v) => sceneStrings("paNumQ", v),
+      variables: "ps=[4096,8192] f=[1:9] o=[0:500]",
+      answer: (v) => v.f * v.ps + v.o,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // walk accesses = k.
+      prompt: (v) => sceneStrings("walkNumQ", v),
+      variables: "k=[2:5]",
+      answer: (v) => v.k,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

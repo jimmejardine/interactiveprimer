@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Hardware Synchronization</primer-title>
+
+    <primer-card>
+      <p>
+        Coherence and consistency let threads <em>see</em> each other's data. But seeing is not enough: two threads
+        that both run <primer-math>\texttt{count = count + 1}</primer-math> can each read the same old value, each
+        add one, and each write back — and one increment simply vanishes. This is the
+        <primer-ref to="computer-science/operating-systems/synchronization-primitives">synchronization</primer-ref>
+        problem, and it cannot be solved by ordinary loads and stores alone. It needs a new kind of instruction the
+        hardware must provide: an <strong>atomic read-modify-write</strong>.
+      </p>
+      <p>
+        An atomic RMW reads a memory location, computes a new value, and writes it back as one
+        <em>indivisible</em> step — no other core can sneak in between the read and the write. Every lock, every
+        mutex, every lock-free data structure in existence is built on a handful of these primitives. This lesson is
+        about what they are, how they are built on the coherence machinery you already know, and why they are so
+        surprisingly <em>expensive</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The three primitives</h2>
+      <p>
+        Almost every ISA offers one or more of these atomic building blocks:
+      </p>
+      <primer-theorem name="Atomic read-modify-write primitives">
+        <ul>
+          <li><strong>Test-and-set (TAS)</strong> — atomically write <primer-math>1</primer-math> to a location and
+            return its <em>old</em> value. If you got <primer-math>0</primer-math>, you just acquired the lock;
+            <primer-math>1</primer-math> means someone else holds it;</li>
+          <li><strong>Compare-and-swap (CAS)</strong> — atomically: <em>if</em> the location equals an expected
+            value, replace it with a new value; return whether it succeeded. The universal primitive — you can build
+            any other from it;</li>
+          <li><strong>Load-linked / store-conditional (LL/SC)</strong> — LL reads and "tags" a location; SC writes
+            back <em>only if</em> nothing touched it since the LL, else it fails and you retry. RISC-style
+            (ARM, RISC-V, POWER) — it builds CAS without a single fused instruction.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        <strong>CAS</strong> is the workhorse. Its power is that it lets you <em>attempt</em> an update and find out
+        whether you were beaten to it — the foundation of every optimistic, lock-free algorithm.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Building a spinlock from CAS</h2>
+      <p>
+        A <strong>spinlock</strong> is the simplest lock there is: to acquire it, keep trying CAS to flip the lock
+        word from "free" (0) to "held" (1) until you win; to release it, store 0. The loop "spins" — burns CPU —
+        until it succeeds. Here it is, with a simulated cell you can CAS. The demo also shows the lost-update bug
+        that CAS <em>prevents</em>:
+      </p>
+      <primer-code run>
+        // An atomic memory cell: compareAndSwap is the one indivisible operation.
+        class AtomicCell {
+          private v: number;
+          constructor(init: number) { this.v = init; }
+          load(): number { return this.v; }
+          store(x: number): void { this.v = x; }
+          // Atomically: if current == expected, set to next and return true.
+          compareAndSwap(expected: number, next: number): boolean {
+            if (this.v === expected) { this.v = next; return true; }
+            return false;
+          }
+        }
+
+        // --- A CAS spinlock ---
+        const lock = new AtomicCell(0); // 0 = free, 1 = held
+        function acquire(): number {
+          let spins = 0;
+          while (!lock.compareAndSwap(0, 1)) { spins++; } // spin until we flip 0 -> 1
+          return spins;
+        }
+        function release(): void { lock.store(0); }
+
+        acquire();
+        console.log(`lock acquired, held = ${lock.load()}`);
+        release();
+        console.log(`lock released, held = ${lock.load()}`);
+
+        // --- Why atomicity matters: a CAS-retry counter never loses an update ---
+        const counter = new AtomicCell(0);
+        function atomicInc(): void {
+          let old: number;
+          do { old = counter.load(); } while (!counter.compareAndSwap(old, old + 1)); // retry on interference
+        }
+        for (let i = 0; i &lt; 5; i++) atomicInc();
+        console.log(`counter after 5 atomic increments = ${counter.load()}`); // exactly 5, never fewer
+      </primer-code>
+    </primer-card>
+
+    <!-- Strings for the cache-line ping-pong figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "pingpong": {
+          "title": "Spinlock contention: the lock's cache line ping-pongs between cores, each grab forcing a coherence transfer",
+          "c0": "Core 0 spinning", "c1": "Core 1 spinning", "c2": "Core 2 spinning",
+          "line": "Lock cache line (Modified — one owner at a time)",
+          "pp": "M state bounces core→core on every CAS"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Why atomics are expensive: the cache-line ping-pong</h2>
+      <p>
+        Here is the sting. A CAS or test-and-set must <em>write</em> the lock word, and by
+        <primer-ref to="computer-science/computer-architecture/multicore/the-mesi-protocol">MESI</primer-ref> a write
+        demands the block in <strong>Modified</strong> state — the only copy. So every core that even <em>attempts</em>
+        the lock must pull that cache line to itself in M, invalidating everyone else. When many cores spin on one
+        lock, its cache line <strong>ping-pongs</strong> between them, and each bounce is a full coherence transaction
+        across the interconnect. The cores spend more time shuttling the lock line than doing useful work.
+      </p>
+      <primer-geometry scene="pingpong"></primer-geometry>
+      <p>
+        The classic fix is <strong>test-and-test-and-set (TTAS)</strong>: before doing the expensive atomic write,
+        spin on an ordinary <em>read</em> of the lock (which lets every core keep the line in cheap
+        <strong>Shared</strong> state), and only attempt the CAS when the read says the lock looks free. That
+        collapses the traffic from "everyone writes constantly" to "everyone reads quietly, one writes when it's
+        worth trying." Beyond that, real systems use back-off, queue locks (MCS), or ticket locks to tame the
+        contention entirely.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>LL/SC: the same idea without a fused instruction</h2>
+      <p>
+        CISC machines like x86 have a single fused atomic (<primer-math>\texttt{LOCK CMPXCHG}</primer-math>). RISC
+        machines dislike fusing a read and a write into one instruction, so they split it:
+        <strong>load-linked</strong> reads the word and quietly records a reservation on that address;
+        <strong>store-conditional</strong> writes back <em>only if</em> the reservation is still intact — that is,
+        if no other core wrote the line since the LL. If someone did, SC fails, returns a flag, and you loop. It is
+        CAS assembled from two half-instructions, and the coherence protocol itself supplies the "did anyone touch
+        it?" signal, since a remote write to the line already had to invalidate your copy.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Primitive</th><th>What it does atomically</th><th>Style / ISA</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Test-and-set</strong></td><td>set to 1, return old value</td><td>simplest; older machines</td></tr>
+            <tr><td><strong>Compare-and-swap</strong></td><td>if == expected, swap in new; report success</td><td>x86 <code>LOCK CMPXCHG</code></td></tr>
+            <tr><td><strong>LL / SC</strong></td><td>read+reserve, then write-only-if-untouched</td><td>ARM, RISC-V, POWER</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-vignette title="What is the 'ABA problem', and why does LL/SC dodge it?">
+      <p>
+        CAS checks a <em>value</em>, not a history. Suppose CAS expects the pointer <primer-math>A</primer-math>.
+        Between your read and your CAS, another thread changes it to <primer-math>B</primer-math> and then back to
+        <primer-math>A</primer-math> — perhaps freeing and reusing that very address. Your CAS sees
+        <primer-math>A</primer-math>, thinks nothing changed, and succeeds — even though the world moved underneath
+        it. This is the notorious <strong>ABA problem</strong> in lock-free code, and it can corrupt a data
+        structure silently. Fixes include tagged pointers (a version counter bumped on every change, so
+        <primer-math>A</primer-math> never looks identical twice) or hazard pointers. <strong>LL/SC</strong> sidesteps
+        ABA entirely: it fails if the line was <em>touched at all</em>, regardless of whether the value ended up the
+        same — it checks history, not equality.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! An atomic instruction is not 'free' just because it is one instruction">
+      <p>
+        Beginners see <primer-math>\texttt{lock.compareAndSwap(...)}</primer-math> as a single, presumably cheap,
+        operation. It is one <em>instruction</em> but potentially <em>hundreds of cycles</em>: it must obtain the
+        cache line in Modified state (invalidating every other copy across the machine), it often acts as a memory
+        <primer-ref to="computer-science/computer-architecture/multicore/memory-consistency-models">fence</primer-ref>
+        that stalls the pipeline, and under contention it triggers the cache-line ping-pong. A single uncontended CAS
+        might cost tens of cycles; a hotly contested one can cost thousands in wasted coherence traffic. This is why
+        "just use a lock-free algorithm" is not automatically faster — the atomics themselves are the bottleneck.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: atomic primitives, spinlocks, ping-pong, LL/SC, ABA. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "syncQuiz@1": {
+          "intro": "Atomic RMW (TAS, CAS, LL/SC) makes read-modify-write indivisible. Writes need the line in Modified, so contended locks ping-pong.",
+          "needQ": "Why can't a shared counter increment be done safely with plain loads and stores?",
+          "nRace": "two cores can read the same old value and both write back, losing one update",
+          "nSlow": "loads and stores are too slow",
+          "nBan": "stores are forbidden on multicore",
+          "nNone": "it actually is safe with plain loads/stores",
+          "atomicQ": "An atomic read-modify-write instruction guarantees that…",
+          "aIndiv": "the read, modify and write happen as one indivisible step",
+          "aFast": "it always finishes in one cycle",
+          "aNever": "no core ever sees the location",
+          "aFree": "it costs nothing",
+          "tasQ": "Test-and-set atomically…",
+          "tRight": "writes 1 to a location and returns its old value",
+          "tRead": "only reads, never writes",
+          "tAdd": "adds two registers",
+          "tNone": "does nothing atomically",
+          "casQ": "Compare-and-swap (CAS) atomically…",
+          "cRight": "sets the location to a new value only if it currently equals an expected value",
+          "cAlways": "always overwrites unconditionally",
+          "cRead": "only reads the location",
+          "cAdd": "increments by one always",
+          "spinQ": "A spinlock acquires the lock by…",
+          "spRight": "repeatedly attempting an atomic swap until it flips the word from free to held",
+          "spSleep": "sleeping until the OS wakes it, never busy-waiting",
+          "spOnce": "trying exactly once and giving up",
+          "spNone": "reading a file",
+          "pingQ": "Why does a heavily contended spinlock cause a cache-line 'ping-pong'?",
+          "pRight": "each atomic write needs the lock line in Modified state, invalidating every other copy",
+          "pSlow": "the line is too big to move",
+          "pRam": "RAM runs out of space",
+          "pNone": "it does not — spinlocks are contention-free",
+          "ttasQ": "Test-and-test-and-set reduces traffic by…",
+          "ttRight": "spinning on a plain read (line stays Shared) and only doing the atomic write when it looks free",
+          "ttWrite": "writing even more often",
+          "ttOne": "using a single core",
+          "ttNone": "disabling coherence",
+          "llscQ": "Load-linked / store-conditional works by…",
+          "llRight": "LL reads and reserves the address; SC writes only if nothing touched it since",
+          "llAlways": "SC always succeeds",
+          "llRead": "both instructions only read",
+          "llFuse": "fusing the read and write into one micro-op",
+          "abaQ": "The ABA problem is that CAS can wrongly succeed because…",
+          "abRight": "the value returned to its expected value after intermediate changes, so CAS sees no difference",
+          "abNever": "CAS can never succeed",
+          "abSlow": "CAS is too slow",
+          "abRam": "memory is too small",
+          "llAbaQ": "LL/SC avoids the ABA problem because it…",
+          "laRight": "fails if the line was touched at all, not just if the value differs",
+          "laSame": "checks only the final value, like CAS",
+          "laNever": "never fails",
+          "laBan": "forbids all writes",
+          "costQ": "A single compare-and-swap can cost hundreds of cycles because it…",
+          "coRight": "must gain the line in Modified state and often acts as a memory fence",
+          "coCheap": "is always one cheap cycle",
+          "coDisk": "reads from disk every time",
+          "coNone": "involves no memory at all"
+        }
+      }
+    </script>
+
+    <primer-quiz name="syncQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/multicore/cache-coherence-and-snooping",
+      "computer-science/operating-systems/synchronization-primitives"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Cache-line ping-pong: three cores spinning on one lock line, double-headed coherence arrows
+     showing the Modified line bouncing between them. Static base content. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "pingpong",
+    ({ board, colors, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, fillIdx, key) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[fillIdx], fillOpacity: 0.20, strokeColor: colors.line, strokeWidth: 1.5,
+          fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      };
+
+      // Three cores across the top.
+      const xs = [0.4, 4.0, 7.6];
+      ["c0", "c1", "c2"].forEach((k, i) => box(xs[i], 4.0, xs[i] + 2.6, 5.2, 0, k));
+
+      // The single contested lock cache line in the middle.
+      box(2.0, 1.4, 8.0, 2.6, 1, "line");
+
+      // Double-headed arrows from each core to the lock line (the ping-pong).
+      xs.forEach((x) => {
+        const cx = x + 1.3;                                   // core centre
+        const tx = Math.min(7.8, Math.max(2.2, cx));          // clamp onto the lock-line top edge
+        board.create("arrow", [[cx, 4.0], [tx, 2.6]], {
+          strokeColor: colors.cat[0], strokeWidth: 2, dash: 2,
+          firstArrow: { type: 2, size: 5 }, lastArrow: { type: 2, size: 5 }, highlight: false, fixed: true,
+        });
+      });
+      board.create("text", [5.0, 0.9, sceneStrings("pp")], { strokeColor: colors.cat[0], fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+    },
+    { boundingbox: [-0.2, 5.6, 10.4, 0.5], keepAspect: false, title: () => makeStrings("pingpong")("title") },
+  );
+
+  registerQuiz("syncQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("needQ"),
+      options: [
+        { text: () => sceneStrings("nRace"), correct: true },
+        { text: () => sceneStrings("nSlow"), correct: false },
+        { text: () => sceneStrings("nBan"), correct: false },
+        { text: () => sceneStrings("nNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("atomicQ"),
+      options: [
+        { text: () => sceneStrings("aIndiv"), correct: true },
+        { text: () => sceneStrings("aFast"), correct: false },
+        { text: () => sceneStrings("aNever"), correct: false },
+        { text: () => sceneStrings("aFree"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tasQ"),
+      options: [
+        { text: () => sceneStrings("tRight"), correct: true },
+        { text: () => sceneStrings("tRead"), correct: false },
+        { text: () => sceneStrings("tAdd"), correct: false },
+        { text: () => sceneStrings("tNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("casQ"),
+      options: [
+        { text: () => sceneStrings("cRight"), correct: true },
+        { text: () => sceneStrings("cAlways"), correct: false },
+        { text: () => sceneStrings("cRead"), correct: false },
+        { text: () => sceneStrings("cAdd"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("spinQ"),
+      options: [
+        { text: () => sceneStrings("spRight"), correct: true },
+        { text: () => sceneStrings("spSleep"), correct: false },
+        { text: () => sceneStrings("spOnce"), correct: false },
+        { text: () => sceneStrings("spNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pingQ"),
+      options: [
+        { text: () => sceneStrings("pRight"), correct: true },
+        { text: () => sceneStrings("pSlow"), correct: false },
+        { text: () => sceneStrings("pRam"), correct: false },
+        { text: () => sceneStrings("pNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ttasQ"),
+      options: [
+        { text: () => sceneStrings("ttRight"), correct: true },
+        { text: () => sceneStrings("ttWrite"), correct: false },
+        { text: () => sceneStrings("ttOne"), correct: false },
+        { text: () => sceneStrings("ttNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("llscQ"),
+      options: [
+        { text: () => sceneStrings("llRight"), correct: true },
+        { text: () => sceneStrings("llAlways"), correct: false },
+        { text: () => sceneStrings("llRead"), correct: false },
+        { text: () => sceneStrings("llFuse"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("abaQ"),
+      options: [
+        { text: () => sceneStrings("abRight"), correct: true },
+        { text: () => sceneStrings("abNever"), correct: false },
+        { text: () => sceneStrings("abSlow"), correct: false },
+        { text: () => sceneStrings("abRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("llAbaQ"),
+      options: [
+        { text: () => sceneStrings("laRight"), correct: true },
+        { text: () => sceneStrings("laSame"), correct: false },
+        { text: () => sceneStrings("laNever"), correct: false },
+        { text: () => sceneStrings("laBan"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("costQ"),
+      options: [
+        { text: () => sceneStrings("coRight"), correct: true },
+        { text: () => sceneStrings("coCheap"), correct: false },
+        { text: () => sceneStrings("coDisk"), correct: false },
+        { text: () => sceneStrings("coNone"), correct: false },
+      ],
+    },
+  ]);
+</script>

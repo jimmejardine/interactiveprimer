@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Cache Coherence and Snooping</primer-title>
+
+    <primer-card>
+      <p>
+        Every core in a <primer-ref to="computer-science/computer-architecture/multicore/shared-memory-uma-and-numa">shared-memory</primer-ref>
+        machine has its own private <primer-ref to="computer-science/computer-architecture/memory/cache-fundamentals">cache</primer-ref>
+        — a small, fast, private copy of the memory it has touched recently. That is wonderful for speed and a
+        disaster for correctness. The moment two cores cache the <em>same</em> memory block, you have two copies of
+        one truth. When one core scribbles on its copy, the other core is holding a <strong>stale</strong> value and
+        does not even know it.
+      </p>
+      <p>
+        This is the <strong>cache-coherence problem</strong>, and it is the central hazard of multicore hardware.
+        The shared-memory abstraction promises that a read returns the last value written — but private caches quietly
+        break that promise. This lesson is about the promise the hardware must restore, and the classic mechanism
+        that restores it: <strong>bus snooping</strong>.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the incoherence figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "incoherent": {
+          "title": "The coherence problem: Core A wrote X=2, but Core B's cache still says X=1 (stale!)",
+          "cpuA": "Core A", "cpuB": "Core B",
+          "cacheA": "Cache A", "cacheB": "Cache B",
+          "valA": "X = 2  (fresh)", "valB": "X = 1  STALE",
+          "bus": "Shared bus", "mem": "Memory:  X = 1",
+          "readB": "B reads X → gets 1 ✗"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Two caches, one truth</h2>
+      <p>
+        Picture the simplest possible failure. Memory holds <primer-math>X = 1</primer-math>. Core&nbsp;A and
+        Core&nbsp;B both read <primer-math>X</primer-math>, so both caches now hold <primer-math>1</primer-math>.
+        Now Core&nbsp;A executes <primer-math>X \leftarrow 2</primer-math> and updates <em>its own</em> cache. If
+        nothing else happens, Core&nbsp;B's cache still holds the old <primer-math>1</primer-math>. When B reads
+        <primer-math>X</primer-math>, it gets <primer-math>1</primer-math> — a value that no longer exists anywhere
+        in the program's logic. Two threads now disagree about a single variable.
+      </p>
+      <primer-geometry scene="incoherent"></primer-geometry>
+      <p>
+        This is not a rare corner case; it is what happens by default the instant two cores share data. A
+        <strong>coherence protocol</strong> is the hardware that makes sure this never leaks up to the software — it
+        keeps the private caches consistent so that, to the programmer, there appears to be just one copy of
+        <primer-math>X</primer-math>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What coherence actually promises</h2>
+      <p>
+        "Coherence" has a precise definition, and it is narrower than people expect. It governs a
+        <strong>single memory location</strong> at a time, and it demands two invariants — together often called
+        <strong>SWMR</strong>, Single-Writer / Multiple-Reader:
+      </p>
+      <primer-theorem name="The coherence invariants (SWMR)">
+        <ul>
+          <li><strong>Single-Writer / Multiple-Reader</strong>: at any moment, for a given block, either
+            <em>one</em> core may write it (and no one else has it), or <em>any number</em> of cores may read it —
+            never both a writer and other holders at once;</li>
+          <li><strong>Write serialisation (data-value invariant)</strong>: all writes to the same location are seen
+            by every core in the <em>same order</em>, and a read returns the value of the most recent write in that
+            order;</li>
+          <li>coherence is <strong>per-location</strong> — it says nothing about the ordering of accesses to
+            <em>different</em> locations. That larger question is
+            <primer-ref forward to="computer-science/computer-architecture/multicore/memory-consistency-models">memory
+            consistency</primer-ref>, a separate lesson.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Enforce SWMR and the two-caches-one-truth disaster cannot happen: before Core&nbsp;A is allowed to write
+        <primer-math>X</primer-math>, every other cache's copy of <primer-math>X</primer-math> must be dealt with.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two ways to keep copies honest</h2>
+      <p>
+        When a core wants to write a block that others may be caching, there are exactly two strategies:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Policy</th><th>On a write, the writer…</th><th>Cost</th><th>Used by</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Write-invalidate</strong></td><td>tells every other cache to <em>discard</em> its copy, then writes freely</td><td>one invalidate message; other cores re-fetch only if they need it again</td><td>almost all real systems (MESI etc.)</td></tr>
+            <tr><td><strong>Write-update</strong></td><td><em>broadcasts the new value</em> to every cache holding the block</td><td>a bus message on <em>every</em> write; wasteful if others never re-read</td><td>rare (some older machines)</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        <strong>Write-invalidate</strong> wins in practice: if Core&nbsp;A writes a variable ten times in a loop,
+        invalidate pays <em>once</em> (the other copies are gone after the first write), whereas update would
+        broadcast all ten new values to cores that may not care. Invalidate is lazy in the good way — it only does
+        work when someone actually re-reads.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Snooping: everyone listens to the bus</h2>
+      <p>
+        How does Core&nbsp;A tell all the other caches to invalidate? In a small system, through a <strong>shared
+        bus</strong>. Every cache controller <em>snoops</em> — it watches every transaction that appears on the bus,
+        not just its own. When A wants to write <primer-math>X</primer-math>, it broadcasts an "invalidate
+        <primer-math>X</primer-math>" on the bus; every other controller sees it, checks its own tags, and drops its
+        copy of <primer-math>X</primer-math> if it has one. No directory, no bookkeeping — just a broadcast that
+        everyone overhears.
+      </p>
+      <p>
+        The bus does something subtle and essential: it <strong>serialises</strong> all coherence traffic. Only one
+        transaction occupies the bus at a time, so all cores observe the same single order of writes — which is
+        exactly the write-serialisation invariant, handed to you for free by the physics of a shared wire. That is
+        why snooping is so simple. It is also why it does not scale: one shared bus becomes a bottleneck once you
+        have many cores, which is the motivation for
+        <primer-ref forward to="computer-science/computer-architecture/multicore/directory-based-coherence">directory-based
+        coherence</primer-ref>.
+      </p>
+      <primer-code run>
+        // A tiny two-core model showing incoherence, then how invalidate fixes it.
+        interface Cache { value: number | null; valid: boolean; }
+        let memory = 1;
+        const A: Cache = { value: null, valid: false };
+        const B: Cache = { value: null, valid: false };
+
+        function read(c: Cache, label: string): number {
+          if (!c.valid) { c.value = memory; c.valid = true; }      // miss: fetch from memory
+          console.log(`  ${label} reads X -> ${c.value}`);
+          return c.value as number;
+        }
+
+        // --- WITHOUT coherence: B keeps a stale copy ---
+        console.log("No coherence:");
+        read(A, "A"); read(B, "B");        // both cache X = 1
+        A.value = 2;                        // A writes 2 into ITS cache only
+        read(B, "B");                        // B still sees the stale 1  <-- BUG
+
+        // --- WITH write-invalidate snooping ---
+        console.log("With write-invalidate:");
+        A.valid = false; B.valid = false; memory = 1;   // reset
+        read(A, "A"); read(B, "B");        // both cache X = 1
+        A.value = 2; memory = 2; B.valid = false;        // A's write INVALIDATES B's copy
+        read(B, "B");                        // B misses, re-fetches -> gets 2  <-- fixed
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="Why is 'false sharing' the coherence bug that hurts even correct code?">
+      <p>
+        Coherence works on whole cache <em>blocks</em> (typically <primer-math>64</primer-math> bytes), not
+        individual variables. So if two cores update two <em>different</em> variables that happen to sit in the same
+        <primer-math>64</primer-math>-byte block, each write invalidates the other core's copy of the <em>whole
+        block</em> — even though the cores never actually share data. The block ping-pongs back and forth across the
+        bus, and a perfectly correct parallel program crawls. This is <strong>false sharing</strong>, and the fix is
+        pure layout: pad or align hot per-thread data so each lands in its own cache line. It is one of the most
+        common and most invisible multicore performance bugs.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Coherence is per-location — it is NOT the same as consistency">
+      <p>
+        Students routinely conflate <strong>coherence</strong> and <strong>consistency</strong>. Coherence is the
+        narrow guarantee about <em>one</em> location: all cores agree on the order of writes to
+        <primer-math>X</primer-math>. It says <em>nothing</em> about how accesses to <primer-math>X</primer-math>
+        and <primer-math>Y</primer-math> interleave. A machine can be perfectly coherent and still let one core see
+        <primer-math>X</primer-math>'s new value before <primer-math>Y</primer-math>'s while another sees the
+        reverse. That cross-location ordering question is <em>consistency</em>, and it is a whole separate lesson.
+        Coherence keeps each variable honest; consistency governs the story across variables.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: coherence concepts + write-invalidate vs update + a couple of numeric/counting items. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "coherenceQuiz@1": {
+          "intro": "Coherence = SWMR + write serialisation, per location. Snooping caches watch a shared bus; write-invalidate is the norm.",
+          "probQ": "The cache-coherence problem arises because…",
+          "prCopies": "two cores can cache the same block, so a write leaves another core's copy stale",
+          "prSlow": "caches are too slow",
+          "prSmall": "caches are too small to hold data",
+          "prNone": "caches never hold shared data",
+          "swmrQ": "The SWMR invariant says that, for one block at any moment, you may have…",
+          "swOne": "one writer with no other holders, OR many readers — never both",
+          "swBoth": "a writer and many other readers at the same time",
+          "swNo": "no cores holding it, ever",
+          "swTwo": "exactly two writers",
+          "serQ": "The write-serialisation invariant guarantees that…",
+          "serOrder": "all cores see writes to the same location in the same order",
+          "serFast": "writes complete in zero time",
+          "serDiff": "different locations are ordered together",
+          "serNone": "reads never see writes",
+          "perQ": "Cache coherence is defined…",
+          "perLoc": "per memory location — it says nothing about ordering across different locations",
+          "perAll": "across all locations at once",
+          "perThread": "per thread, not per location",
+          "perNever": "only for registers",
+          "invQ": "Under write-invalidate, when a core writes a shared block it…",
+          "invKill": "tells other caches to discard their copies, then writes",
+          "invSend": "broadcasts the new value to every cache on every write",
+          "invNone": "does nothing to the other caches",
+          "invLock": "locks the whole memory system permanently",
+          "whyInvQ": "Why is write-invalidate usually preferred over write-update?",
+          "wiLazy": "repeated writes cost one invalidate, not a broadcast per write",
+          "wiFast": "update is impossible to build",
+          "wiSame": "they are identical in cost",
+          "wiSlow": "invalidate never sends any messages",
+          "snoopQ": "In bus snooping, each cache controller…",
+          "snWatch": "watches every transaction on the shared bus, not just its own",
+          "snIgnore": "ignores all bus traffic",
+          "snOwn": "sees only its own core's requests",
+          "snDir": "queries a central directory for every access",
+          "busQ": "A shared bus helps coherence because it…",
+          "buSer": "serialises transactions, so all cores observe one global order of writes",
+          "buFast": "makes memory infinitely fast",
+          "buScale": "scales to unlimited cores with no bottleneck",
+          "buHide": "hides writes from other cores",
+          "scaleQ": "Snooping does not scale to many cores because…",
+          "scBus": "the single shared bus saturates as broadcast traffic grows",
+          "scHot": "buses melt",
+          "scIll": "it violates the ISA",
+          "scNone": "it scales perfectly",
+          "falseQ": "'False sharing' happens when…",
+          "faBlock": "two cores update different variables that share one cache block, so the block ping-pongs",
+          "faSame": "two cores read the same variable",
+          "faNever": "a core shares data with itself",
+          "faDisk": "the disk runs out of space",
+          "reReadNumQ": "A core writes a shared block ${w} times in a loop. Under write-invalidate, how many invalidate messages are needed (others don't re-read in between)? (integer)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="coherenceQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/multicore/shared-memory-uma-and-numa",
+      "computer-science/computer-architecture/memory/cache-fundamentals"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Static incoherence block diagram (base content, shows on load) + the randomised quiz.
+     Colours only from themeColors(); keepAspect:false for the wide layout. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "incoherent",
+    ({ board, colors, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, fillIdx, key, opts = {}) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[fillIdx], fillOpacity: 0.20, strokeColor: colors.line, strokeWidth: 1.5,
+          fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, sceneStrings(key)], {
+          strokeColor: opts.ink || colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      };
+      const seg = (a, b, opts = {}) => board.create("segment", [a, b], { strokeColor: colors.line, strokeWidth: 2, highlight: false, ...opts });
+
+      // Two CPUs on top.
+      box(0.5, 5.0, 3.0, 6.0, 0, "cpuA");
+      box(7.0, 5.0, 9.5, 6.0, 0, "cpuB");
+      // Their caches (A fresh = cat[1], B stale = cat[0]).
+      box(0.5, 3.3, 3.0, 4.6, 1, "cacheA");
+      box(7.0, 3.3, 9.5, 4.6, 0, "cacheB");
+      board.create("text", [1.75, 3.0, sceneStrings("valA")], { strokeColor: colors.cat[1], fontSize: 11, anchorX: "middle", anchorY: "top", fixed: true, highlight: false });
+      board.create("text", [8.25, 3.0, sceneStrings("valB")], { strokeColor: colors.cat[0], fontSize: 11, anchorX: "middle", anchorY: "top", fixed: true, highlight: false, cssStyle: "font-weight:600" });
+      board.create("text", [8.25, 2.5, sceneStrings("readB")], { strokeColor: colors.cat[0], fontSize: 11, anchorX: "middle", anchorY: "top", fixed: true, highlight: false });
+      // Shared bus bar.
+      box(0.5, 1.4, 9.5, 2.1, 3, "bus");
+      // Memory.
+      box(3.4, -0.1, 6.6, 0.9, 1, "mem");
+      // Connectors.
+      seg([1.75, 5.0], [1.75, 4.6]);
+      seg([8.25, 5.0], [8.25, 4.6]);
+      seg([1.75, 3.3], [1.75, 2.1]);
+      seg([8.25, 3.3], [8.25, 2.1]);
+      seg([5.0, 1.4], [5.0, 0.9]);
+    },
+    { boundingbox: [0, 6.4, 10, -0.6], keepAspect: false, title: () => makeStrings("incoherent")("title") },
+  );
+
+  registerQuiz("coherenceQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("probQ"),
+      options: [
+        { text: () => sceneStrings("prCopies"), correct: true },
+        { text: () => sceneStrings("prSlow"), correct: false },
+        { text: () => sceneStrings("prSmall"), correct: false },
+        { text: () => sceneStrings("prNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("swmrQ"),
+      options: [
+        { text: () => sceneStrings("swOne"), correct: true },
+        { text: () => sceneStrings("swBoth"), correct: false },
+        { text: () => sceneStrings("swNo"), correct: false },
+        { text: () => sceneStrings("swTwo"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("serQ"),
+      options: [
+        { text: () => sceneStrings("serOrder"), correct: true },
+        { text: () => sceneStrings("serFast"), correct: false },
+        { text: () => sceneStrings("serDiff"), correct: false },
+        { text: () => sceneStrings("serNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("perQ"),
+      options: [
+        { text: () => sceneStrings("perLoc"), correct: true },
+        { text: () => sceneStrings("perAll"), correct: false },
+        { text: () => sceneStrings("perThread"), correct: false },
+        { text: () => sceneStrings("perNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("invQ"),
+      options: [
+        { text: () => sceneStrings("invKill"), correct: true },
+        { text: () => sceneStrings("invSend"), correct: false },
+        { text: () => sceneStrings("invNone"), correct: false },
+        { text: () => sceneStrings("invLock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyInvQ"),
+      options: [
+        { text: () => sceneStrings("wiLazy"), correct: true },
+        { text: () => sceneStrings("wiFast"), correct: false },
+        { text: () => sceneStrings("wiSame"), correct: false },
+        { text: () => sceneStrings("wiSlow"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("snoopQ"),
+      options: [
+        { text: () => sceneStrings("snWatch"), correct: true },
+        { text: () => sceneStrings("snIgnore"), correct: false },
+        { text: () => sceneStrings("snOwn"), correct: false },
+        { text: () => sceneStrings("snDir"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("busQ"),
+      options: [
+        { text: () => sceneStrings("buSer"), correct: true },
+        { text: () => sceneStrings("buFast"), correct: false },
+        { text: () => sceneStrings("buScale"), correct: false },
+        { text: () => sceneStrings("buHide"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("scaleQ"),
+      options: [
+        { text: () => sceneStrings("scBus"), correct: true },
+        { text: () => sceneStrings("scHot"), correct: false },
+        { text: () => sceneStrings("scIll"), correct: false },
+        { text: () => sceneStrings("scNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("falseQ"),
+      options: [
+        { text: () => sceneStrings("faBlock"), correct: true },
+        { text: () => sceneStrings("faSame"), correct: false },
+        { text: () => sceneStrings("faNever"), correct: false },
+        { text: () => sceneStrings("faDisk"), correct: false },
+      ],
+    },
+    {
+      // First write invalidates others; subsequent writes need none since no one re-reads -> answer is 1.
+      prompt: (v) => sceneStrings("reReadNumQ", v),
+      variables: "w=[2:12]",
+      answer: () => 1,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

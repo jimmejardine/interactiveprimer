@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The MESI Protocol</primer-title>
+
+    <primer-card>
+      <p>
+        <primer-ref to="computer-science/computer-architecture/multicore/cache-coherence-and-snooping">Snooping</primer-ref>
+        told us <em>what</em> caches must do — invalidate stale copies over a shared bus. <strong>MESI</strong> is
+        the classic recipe for <em>how</em>: it tags every cached block with one of four states and lays down
+        precise rules for changing state on each read, write, and overheard bus transaction. Nearly every mainstream
+        processor of the last thirty years — Intel, AMD, and countless others — runs a descendant of MESI. Learn
+        these four letters and you understand the beating heart of multicore coherence.
+      </p>
+      <p>
+        The name is just the four states: <strong>M</strong>odified, <strong>E</strong>xclusive,
+        <strong>S</strong>hared, <strong>I</strong>nvalid. The whole protocol is the answer to one question asked of
+        every block: <em>do I have the only copy, a shared copy, a dirty copy, or no copy at all?</em>
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The four states</h2>
+      <p>
+        Each state records two facts about a block in one cache: whether this cache's copy is <strong>the only
+        one</strong>, and whether it has been <strong>modified</strong> (differs from memory).
+      </p>
+      <primer-theorem name="The MESI states">
+        <ul>
+          <li><strong>Modified (M)</strong> — this cache has the <em>only</em> copy and it is <em>dirty</em> (memory
+            is stale). This cache must write back before anyone else can read;</li>
+          <li><strong>Exclusive (E)</strong> — the only copy, but <em>clean</em> (matches memory). No one else
+            caches it, so this core may write it <em>silently</em> — no bus traffic needed;</li>
+          <li><strong>Shared (S)</strong> — a clean copy that <em>other caches may also hold</em>. Reads are free;
+            a write must first invalidate the other sharers;</li>
+          <li><strong>Invalid (I)</strong> — no valid copy here. A read or write is a miss that must go to the bus.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The quiet star is <strong>E</strong>. Without it, a core that loads a block and then writes it would have to
+        broadcast on the bus <em>twice</em> — once to read, once to claim the write. The E state lets the hardware
+        notice "I'm the only one who has this" on the read, so the later write costs <em>nothing</em> on the bus.
+        For the extremely common read-then-modify pattern, that is a huge saving.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the MESI state machine. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "mesi": {
+          "title": "The MESI state machine — solid = this core's read/write, dashed = a remote core's request",
+          "M": "M", "E": "E", "S": "S", "I": "I",
+          "mFull": "Modified", "eFull": "Exclusive", "sFull": "Shared", "iFull": "Invalid",
+          "states": "The four states of a cached block",
+          "reads": "Local reads: a miss fills E (no sharers) or S (sharers exist)",
+          "writes": "Local writes: get to M (E→M is silent — no bus!)",
+          "remote": "Remote requests downgrade or invalidate your copy"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The state machine</h2>
+      <p>
+        Here is MESI as a diagram — the single most important picture in this module. Watch it build in stages.
+        <strong>Solid</strong> arrows are transitions caused by <em>this</em> core's own reads and writes;
+        <strong>dashed</strong> arrows are forced on you when you <em>snoop a remote core's</em> request on the bus.
+      </p>
+      <primer-geometry scene="mesi"></primer-geometry>
+      <p>
+        Trace the happy path: a block starts <strong>I</strong>. Your core reads it and, finding no other holders,
+        it lands in <strong>E</strong>. Your core writes it — a <em>silent</em> jump to <strong>M</strong>, no bus
+        transaction. Later another core reads the block; you snoop that request, write your dirty data back, and
+        drop to <strong>S</strong>. If instead the other core <em>writes</em>, you snoop the invalidating request
+        and fall to <strong>I</strong>. Every legal move a block can make is one of these arrows.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Reading the transitions</h2>
+      <p>
+        The full rulebook, in words, for the block in <em>your</em> cache:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>From</th><th>Event</th><th>To</th><th>Bus action</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>I</td><td>your read, no other copies</td><td>E</td><td>BusRd</td></tr>
+            <tr><td>I</td><td>your read, others hold it</td><td>S</td><td>BusRd</td></tr>
+            <tr><td>I</td><td>your write</td><td>M</td><td>BusRdX (read-for-ownership)</td></tr>
+            <tr><td>E</td><td>your write</td><td>M</td><td><strong>none — silent!</strong></td></tr>
+            <tr><td>S</td><td>your write</td><td>M</td><td>BusUpgr (invalidate sharers)</td></tr>
+            <tr><td>E</td><td>remote read (snooped)</td><td>S</td><td>—</td></tr>
+            <tr><td>M</td><td>remote read (snooped)</td><td>S</td><td>write back dirty data</td></tr>
+            <tr><td>S or E</td><td>remote write (snooped)</td><td>I</td><td>—</td></tr>
+            <tr><td>M</td><td>remote write (snooped)</td><td>I</td><td>write back dirty data</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-card>
+      <h2>Simulate it: a two-core trace</h2>
+      <p>
+        Let's drive MESI with an actual request trace and watch both caches' states evolve. One block, two cores;
+        each line is "core&nbsp;X reads" or "core&nbsp;X writes". Notice the E→M write on core&nbsp;0 that costs
+        <em>no</em> bus traffic, and how core&nbsp;1's read forces core&nbsp;0 from M down to S with a writeback.
+      </p>
+      <primer-code run>
+        type State = "M" | "E" | "S" | "I";
+        const cache: State[] = ["I", "I"]; // two cores, one block
+
+        function other(c: number): number { return c === 0 ? 1 : 0; }
+
+        function access(core: number, op: "read" | "write"): void {
+          const o = other(core);
+          let bus = "";
+          if (op === "read") {
+            if (cache[core] === "I") {                     // read miss
+              if (cache[o] === "M") { bus = "BusRd + writeback"; cache[o] = "S"; cache[core] = "S"; }
+              else if (cache[o] === "E" || cache[o] === "S") { bus = "BusRd"; cache[o] = "S"; cache[core] = "S"; }
+              else { bus = "BusRd"; cache[core] = "E"; }   // no other copy -> Exclusive
+            } else { bus = "(hit)"; }                       // read hit: state unchanged
+          } else { // write
+            if (cache[core] === "M") { bus = "(hit)"; }
+            else if (cache[core] === "E") { bus = "silent E->M"; cache[core] = "M"; } // no bus!
+            else if (cache[core] === "S") { bus = "BusUpgr (invalidate)"; cache[o] = "I"; cache[core] = "M"; }
+            else {                                          // write miss from Invalid
+              bus = cache[o] === "M" ? "BusRdX + writeback" : "BusRdX";
+              cache[o] = "I"; cache[core] = "M";
+            }
+          }
+          console.log(`core ${core} ${op.padEnd(5)} -> [C0=${cache[0]}, C1=${cache[1]}]  bus: ${bus}`);
+        }
+
+        access(0, "read");   // I -> E   (core 0 alone)
+        access(0, "write");  // E -> M   silent, no bus
+        access(1, "read");   // core 0 M -> S (writeback), core 1 -> S
+        access(1, "write");  // core 1 S -> M, core 0 -> I
+        access(0, "read");   // core 1 M -> S (writeback), core 0 -> S
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="If MESI is so good, why do real chips use MOESI or MESIF?">
+      <p>
+        MESI has one clumsy moment: when a Modified block is shared with another core, MESI forces a
+        <em>writeback to memory</em> to get everyone clean-and-Shared. AMD's <strong>MOESI</strong> adds an
+        <strong>O</strong>wned state so one cache can keep the dirty data and hand it cache-to-cache to others
+        <em>without</em> touching memory — the owner stays responsible for eventually writing back. Intel's
+        <strong>MESIF</strong> adds a <strong>F</strong>orward state so that, when many caches share a block, exactly
+        <em>one</em> is designated to answer new requests (instead of all of them replying at once). Both are MESI
+        with one extra state bolted on to make cache-to-cache sharing cheaper on large, many-core interconnects. The
+        four core ideas never change.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Exclusive (E) is clean; Modified (M) is dirty — don't swap them">
+      <p>
+        Because both E and M mean "I'm the only one with this block," beginners blur them. The difference is
+        <em>dirtiness</em>. <strong>E</strong> is clean — your copy still equals memory, so if you drop it you owe
+        memory nothing. <strong>M</strong> is dirty — you have changed it and memory is stale, so before anyone else
+        may read it you <em>must write it back</em>. That single bit is what decides whether a remote read costs a
+        writeback (from M) or is free (from E). Silent E→M is legal precisely because moving from clean-exclusive to
+        dirty-exclusive tells no other cache anything it doesn't already know: nobody else had the block anyway.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: MESI state semantics + transitions. Bank of 13, draws 5. Mostly concept MCQs (states are categorical). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "mesiQuiz@1": {
+          "intro": "M = only copy, dirty. E = only copy, clean. S = maybe-shared, clean. I = no copy. E→M is silent.",
+          "mQ": "The Modified (M) state means the block is…",
+          "mRight": "the only copy AND dirty (memory is stale)",
+          "mClean": "the only copy but clean",
+          "mShared": "shared with other caches",
+          "mNone": "not present in this cache",
+          "eQ": "The Exclusive (E) state means the block is…",
+          "eRight": "the only copy AND clean (matches memory)",
+          "eDirty": "the only copy but dirty",
+          "eShared": "held by several caches",
+          "eGone": "invalid",
+          "sQ": "The Shared (S) state means…",
+          "sRight": "a clean copy that other caches may also hold",
+          "sDirty": "a dirty copy owned exclusively",
+          "sOnly": "the only copy in the system",
+          "sNone": "no valid data",
+          "iQ": "The Invalid (I) state means…",
+          "iRight": "this cache has no valid copy; an access is a miss",
+          "iDirty": "a dirty exclusive copy",
+          "iShared": "a clean shared copy",
+          "iOnly": "the only copy",
+          "eWhyQ": "Why is the Exclusive state valuable?",
+          "eSilent": "a later write can go E→M silently, with no bus transaction",
+          "eSlow": "it forces two bus messages per write",
+          "eNever": "it is never actually used",
+          "eSame": "it behaves identically to Shared",
+          "emQ": "A core in state E writes the block. The new state and bus action are…",
+          "emRight": "M, and NO bus transaction (silent)",
+          "emBus": "M, after a BusRdX broadcast",
+          "emS": "S, with an invalidate",
+          "emI": "I, with a writeback",
+          "smQ": "A core in state S writes the block. It must…",
+          "smInv": "invalidate the other sharers, then go to M",
+          "smNone": "do nothing and stay in S",
+          "smWb": "write back and stay in S",
+          "smE": "go silently to E",
+          "iwQ": "A core in state I writes the block (write miss). It issues…",
+          "iwRfo": "a read-for-ownership (BusRdX) that invalidates other copies, then goes to M",
+          "iwRead": "a plain read and stays in I",
+          "iwNone": "nothing",
+          "iwS": "a broadcast of the new value to all caches",
+          "remoteReadQ": "Your block is in M and you snoop a remote READ. You must…",
+          "rrWb": "write back your dirty data and drop to S",
+          "rrStay": "stay in M and ignore it",
+          "rrI": "jump straight to E",
+          "rrNo": "invalidate silently",
+          "remoteWriteQ": "Your block is in S and you snoop a remote WRITE. You go to…",
+          "rwI": "I (invalidated)",
+          "rwM": "M",
+          "rwE": "E",
+          "rwStay": "stay in S",
+          "moesiQ": "MOESI's extra 'Owned' state exists mainly to…",
+          "moCache": "share dirty data cache-to-cache without writing back to memory first",
+          "moSlow": "make everything slower",
+          "moDelete": "remove the Modified state",
+          "moNone": "do nothing",
+          "cleanQ": "Which two MESI states both mean 'I hold the only copy'?",
+          "cME": "M and E",
+          "cSI": "S and I",
+          "cMS": "M and S",
+          "cEI": "E and I"
+        }
+      }
+    </script>
+
+    <primer-quiz name="mesiQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/multicore/cache-coherence-and-snooping"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The MESI state machine: four state circles at the corners of a square, transitions revealed in stages.
+     Solid arrows = local processor actions (cat[0]); dashed = remote-snoop actions (cat[1]).
+     Colours only from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "mesi",
+    ({ board, colors, step, sceneStrings }) => {
+      const R = 0.95;
+      const center = { M: [0, 6], E: [6, 6], S: [6, 0], I: [0, 0] };
+
+      // Perpendicular-offset arrow between two state circles, with a short label near its midpoint.
+      const arrow = (a, b, off, ci, label, dashed) => {
+        const A = center[a], B = center[b];
+        const dx = B[0] - A[0], dy = B[1] - A[1];
+        const len = Math.hypot(dx, dy);
+        const ux = dx / len, uy = dy / len;
+        const px = -uy * off, py = ux * off;          // perpendicular shift
+        const p1 = [A[0] + ux * R + px, A[1] + uy * R + py];
+        const p2 = [B[0] - ux * R + px, B[1] - uy * R + py];
+        board.create("arrow", [p1, p2], {
+          strokeColor: colors.cat[ci], strokeWidth: 2, dash: dashed ? 2 : 0,
+          lastArrow: { type: 2, size: 5 }, highlight: false, fixed: true,
+        });
+        const mx = (p1[0] + p2[0]) / 2 + px * 0.55;
+        const my = (p1[1] + p2[1]) / 2 + py * 0.55;
+        board.create("text", [mx, my, label], {
+          strokeColor: colors.cat[ci], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      };
+
+      // Step 1 — the four states as circles with letters + full names.
+      step(sceneStrings("states"), () => {
+        const names = { M: "mFull", E: "eFull", S: "sFull", I: "iFull" };
+        ["M", "E", "S", "I"].forEach((k) => {
+          const [x, y] = center[k];
+          board.create("circle", [[x, y], R], {
+            strokeColor: colors.line, strokeWidth: 2, fillColor: colors.cat[2], fillOpacity: 0.15, fixed: true, highlight: false,
+          });
+          board.create("text", [x, y + 0.15, sceneStrings(k)], {
+            strokeColor: colors.ink, fontSize: 20, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:700",
+          });
+          board.create("text", [x, y - 0.45, sceneStrings(names[k])], {
+            strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+          });
+        });
+      });
+
+      // Step 2 — local reads that fill a block (solid, cat[0]).
+      step(sceneStrings("reads"), () => {
+        arrow("I", "E", 0, 0, "rd (alone)", false);      // I -> E diagonal
+        arrow("I", "S", 0.32, 0, "rd (shared)", false);  // I -> S bottom edge
+      });
+
+      // Step 3 — local writes that reach Modified (solid, cat[0]).
+      step(sceneStrings("writes"), () => {
+        arrow("I", "M", 0.32, 0, "wr miss", false);      // I -> M left edge
+        arrow("E", "M", 0, 0, "wr (silent)", false);     // E -> M top edge
+        arrow("S", "M", 0, 0, "wr (upgr)", false);       // S -> M diagonal
+      });
+
+      // Step 4 — remote requests snooped off the bus (dashed, cat[1]).
+      step(sceneStrings("remote"), () => {
+        arrow("E", "S", 0, 1, "rem rd", true);           // E -> S right edge
+        arrow("M", "S", 0.42, 1, "rem rd (wb)", true);   // M -> S diagonal, offset from S->M
+        arrow("S", "I", 0.32, 1, "rem wr", true);        // S -> I bottom edge, opposite side to I->S
+        arrow("E", "I", 0.45, 1, "rem wr", true);        // E -> I diagonal, offset from I->E
+        arrow("M", "I", 0.32, 1, "rem wr (wb)", true);   // M -> I left edge, opposite side to I->M
+      });
+    },
+    { boundingbox: [-2.2, 7.6, 8.2, -1.8], keepAspect: true, title: () => makeStrings("mesi")("title") },
+  );
+
+  registerQuiz("mesiQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("mQ"),
+      options: [
+        { text: () => sceneStrings("mRight"), correct: true },
+        { text: () => sceneStrings("mClean"), correct: false },
+        { text: () => sceneStrings("mShared"), correct: false },
+        { text: () => sceneStrings("mNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("eQ"),
+      options: [
+        { text: () => sceneStrings("eRight"), correct: true },
+        { text: () => sceneStrings("eDirty"), correct: false },
+        { text: () => sceneStrings("eShared"), correct: false },
+        { text: () => sceneStrings("eGone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sQ"),
+      options: [
+        { text: () => sceneStrings("sRight"), correct: true },
+        { text: () => sceneStrings("sDirty"), correct: false },
+        { text: () => sceneStrings("sOnly"), correct: false },
+        { text: () => sceneStrings("sNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("iQ"),
+      options: [
+        { text: () => sceneStrings("iRight"), correct: true },
+        { text: () => sceneStrings("iDirty"), correct: false },
+        { text: () => sceneStrings("iShared"), correct: false },
+        { text: () => sceneStrings("iOnly"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("eWhyQ"),
+      options: [
+        { text: () => sceneStrings("eSilent"), correct: true },
+        { text: () => sceneStrings("eSlow"), correct: false },
+        { text: () => sceneStrings("eNever"), correct: false },
+        { text: () => sceneStrings("eSame"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("emQ"),
+      options: [
+        { text: () => sceneStrings("emRight"), correct: true },
+        { text: () => sceneStrings("emBus"), correct: false },
+        { text: () => sceneStrings("emS"), correct: false },
+        { text: () => sceneStrings("emI"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("smQ"),
+      options: [
+        { text: () => sceneStrings("smInv"), correct: true },
+        { text: () => sceneStrings("smNone"), correct: false },
+        { text: () => sceneStrings("smWb"), correct: false },
+        { text: () => sceneStrings("smE"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("iwQ"),
+      options: [
+        { text: () => sceneStrings("iwRfo"), correct: true },
+        { text: () => sceneStrings("iwRead"), correct: false },
+        { text: () => sceneStrings("iwNone"), correct: false },
+        { text: () => sceneStrings("iwS"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("remoteReadQ"),
+      options: [
+        { text: () => sceneStrings("rrWb"), correct: true },
+        { text: () => sceneStrings("rrStay"), correct: false },
+        { text: () => sceneStrings("rrI"), correct: false },
+        { text: () => sceneStrings("rrNo"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("remoteWriteQ"),
+      options: [
+        { text: () => sceneStrings("rwI"), correct: true },
+        { text: () => sceneStrings("rwM"), correct: false },
+        { text: () => sceneStrings("rwE"), correct: false },
+        { text: () => sceneStrings("rwStay"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("moesiQ"),
+      options: [
+        { text: () => sceneStrings("moCache"), correct: true },
+        { text: () => sceneStrings("moSlow"), correct: false },
+        { text: () => sceneStrings("moDelete"), correct: false },
+        { text: () => sceneStrings("moNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cleanQ"),
+      options: [
+        { text: () => sceneStrings("cME"), correct: true },
+        { text: () => sceneStrings("cSI"), correct: false },
+        { text: () => sceneStrings("cMS"), correct: false },
+        { text: () => sceneStrings("cEI"), correct: false },
+      ],
+    },
+  ]);
+</script>

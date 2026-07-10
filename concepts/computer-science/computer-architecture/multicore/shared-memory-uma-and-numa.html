@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Shared Memory: UMA and NUMA</primer-title>
+
+    <primer-card>
+      <p>
+        You have <primer-ref to="computer-science/computer-architecture/multicore/the-case-for-multicore">many
+        cores</primer-ref> now. How do they talk to each other? The dominant answer — the one behind almost every
+        multicore laptop, phone and server — is <strong>shared memory</strong>: every core sees one big common
+        address space. Core&nbsp;0 writes to address <primer-math>0x1000</primer-math>, and later core&nbsp;7 reads
+        address <primer-math>0x1000</primer-math> and gets what core&nbsp;0 wrote. Communication is just ordinary
+        loads and stores; there is no explicit "send a message" step.
+      </p>
+      <p>
+        That single shared address space is a wonderful programming abstraction — but the hardware underneath is not
+        uniform. The crucial question of this lesson is: <strong>does every core reach every byte of memory in the
+        same amount of time?</strong> If yes, you have <strong>UMA</strong>; if no, you have <strong>NUMA</strong>,
+        and ignoring the difference can quietly halve your program's speed.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the UMA block diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "uma": {
+          "title": "UMA (SMP): every core is the same distance from one shared memory",
+          "c0": "Core 0", "c1": "Core 1", "c2": "Core 2", "c3": "Core 3",
+          "bus": "Shared bus / interconnect",
+          "mem": "Main memory (one pool)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>UMA: one memory, equidistant from all</h2>
+      <p>
+        In a <strong>Uniform Memory Access</strong> machine — historically called a <strong>symmetric
+        multiprocessor (SMP)</strong> — all cores share a single pool of main memory through a common interconnect,
+        and the latency to any address is the <em>same</em> from every core. It is symmetric: no core is
+        privileged, no address is "closer". This is the mental model most programmers carry, and it is exactly
+        right for a small chip.
+      </p>
+      <primer-geometry scene="uma"></primer-geometry>
+      <p>
+        The beauty of UMA is its simplicity: the operating system can place a thread on any core and any data
+        anywhere, and performance does not care. The catch is that the single shared path to memory is a
+        <strong>bottleneck</strong>. Add enough cores and they all contend for the same bus and the same memory
+        controller; the interconnect saturates and everyone waits. UMA does not scale to dozens of sockets.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the NUMA block diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "numa": {
+          "title": "NUMA: each socket owns local memory; reaching the other socket's memory is slower",
+          "s0": "Socket 0 (cores)", "s1": "Socket 1 (cores)",
+          "m0": "Local memory 0", "m1": "Local memory 1",
+          "link": "Inter-socket link (QPI / UPI / Infinity Fabric)",
+          "fast": "local: ~100 ns", "slow": "remote: ~150–200 ns"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>NUMA: memory has a neighbourhood</h2>
+      <p>
+        To scale past a handful of cores, big systems split memory into pieces and attach each piece directly to a
+        group of cores — a <strong>socket</strong> or <strong>NUMA node</strong>. Now a core's <em>local</em> memory
+        is fast, but reaching another node's memory means a hop across an <strong>inter-socket link</strong>
+        (Intel's UPI, AMD's Infinity Fabric, the old QPI). That remote access is real, physical, and slower —
+        typically <primer-math>1.5\times</primer-math> to <primer-math>2\times</primer-math> the local latency,
+        sometimes worse.
+      </p>
+      <primer-geometry scene="numa"></primer-geometry>
+      <p>
+        The address space is still <em>shared</em> — a core can read any byte on any node with a plain load — but
+        access is now <strong>Non-Uniform</strong>. Two identical loads can take wildly different times depending on
+        <em>where the data physically lives</em> relative to the core running the code. That is the whole idea of
+        NUMA, and it turns memory placement into a first-class performance concern.
+      </p>
+      <primer-theorem name="UMA vs NUMA">
+        <ul>
+          <li><strong>Shared memory</strong>: all cores see one common address space; communication is loads and
+            stores, not messages;</li>
+          <li><strong>UMA / SMP</strong>: memory latency is the same from every core — simple, but the shared path
+            limits how many cores you can add;</li>
+          <li><strong>NUMA</strong>: memory is partitioned into nodes; <em>local</em> access is fast, <em>remote</em>
+            access crosses an interconnect and is slower — scalable, but placement now matters.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: why placement matters</h2>
+      <p>
+        Suppose local memory takes <primer-math>100\ \text{ns}</primer-math> and remote memory takes
+        <primer-math>180\ \text{ns}</primer-math>. If a thread does all its accesses locally, its average access
+        time is <primer-math>100\ \text{ns}</primer-math>. But if the operating system carelessly puts the thread on
+        socket&nbsp;0 while its data sits on socket&nbsp;1, <em>every</em> access is remote —
+        <primer-math>180\ \text{ns}</primer-math>, an <primer-math>80\%</primer-math> slowdown for the exact same
+        code. Even a modest fraction of remote accesses hurts:
+      </p>
+      <primer-math display>t_{\text{avg}} \;=\; (1-r)\,t_{\text{local}} \;+\; r\,t_{\text{remote}},</primer-math>
+      <p>
+        where <primer-math>r</primer-math> is the fraction of accesses that are remote. Run it and watch the
+        average climb as data drifts to the far node:
+      </p>
+      <primer-code run>
+        // NUMA average access time as the fraction of remote accesses grows.
+        const tLocal = 100;  // ns, local memory
+        const tRemote = 180; // ns, across the inter-socket link
+
+        function avgAccess(remoteFraction: number): number {
+          return (1 - remoteFraction) * tLocal + remoteFraction * tRemote;
+        }
+
+        console.log("remote%\tavg (ns)\tslowdown vs all-local");
+        for (const r of [0.0, 0.25, 0.5, 0.75, 1.0]) {
+          const t = avgAccess(r);
+          const slow = (t / tLocal).toFixed(2);
+          console.log(`${(r * 100).toFixed(0)}%\t${t.toFixed(0)}\t\t${slow}x`);
+        }
+        console.log("Lesson: NUMA-aware placement keeps r near 0 and access near local speed.");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>NUMA-aware placement: the first-touch rule</h2>
+      <p>
+        Operating systems fight remote access with two tricks. <strong>Affinity</strong> pins a thread to the cores
+        of one node so it does not wander away from its data. And the <strong>first-touch</strong> policy allocates
+        each memory page on the node of whichever core <em>first writes to it</em> — so if a thread initialises its
+        own data, that data lands next door. The classic NUMA bug is to have one setup thread touch a giant array
+        (parking it all on node&nbsp;0) and then hand slices to worker threads scattered across every node — now
+        most workers read remotely. The fix is to let each worker initialise its own slice.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th></th><th>UMA (SMP)</th><th>NUMA</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Memory latency</strong></td><td>same from every core</td><td>local fast, remote slower</td></tr>
+            <tr><td><strong>Scales to</strong></td><td>a few cores / one socket</td><td>many cores / many sockets</td></tr>
+            <tr><td><strong>Bottleneck</strong></td><td>the one shared path to memory</td><td>the inter-socket links</td></tr>
+            <tr><td><strong>Placement matters?</strong></td><td>no</td><td>yes — affinity &amp; first-touch</td></tr>
+            <tr><td><strong>Typical use</strong></td><td>phones, laptops, small chips</td><td>multi-socket servers, big EPYC/Xeon</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-vignette title="Is a single big AMD chip really one UMA machine — or many NUMA nodes on one die?">
+      <p>
+        You might think NUMA only appears when you bolt two physical CPU sockets together. Not any more. Modern
+        AMD EPYC and Ryzen chips are built from several <strong>chiplets</strong> (CCDs) on one package, each with
+        its own path to memory, stitched together by <strong>Infinity Fabric</strong>. Cross-chiplet accesses are
+        measurably slower than same-chiplet ones, so a <em>single</em> processor can behave like a small NUMA
+        machine — and the OS exposes it as multiple NUMA nodes. Apple's and Intel's big designs have similar
+        internal distance effects. NUMA has quietly moved <em>inside the chip</em>.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Shared memory does NOT mean uniform memory">
+      <p>
+        A tempting mistake: "it's one address space, so every access costs the same." No. The shared address space
+        is a <em>logical</em> abstraction — any core can name any byte. But the <em>physical</em> distance to that
+        byte varies on a NUMA machine, and the hardware will not hide it from you. A load that hits local memory and
+        a load that crosses a socket link both look like plain <primer-math>\texttt{mov}</primer-math> instructions
+        in your code, yet one can take twice as long. "Shared" is about <em>reachability</em>; "uniform" is about
+        <em>latency</em> — and NUMA has the first without the second.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: UMA/NUMA concepts + variable-driven average-access-time numbers. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "numaQuiz@1": {
+          "intro": "Shared memory = one address space. UMA: uniform latency. NUMA: local fast, remote slower; t_avg = (1−r)·local + r·remote.",
+          "sharedQ": "In a shared-memory multiprocessor, cores communicate by…",
+          "shLoads": "ordinary loads and stores to a common address space",
+          "shMsg": "explicitly sending network packets to each other",
+          "shDisk": "writing files to disk",
+          "shNone": "they cannot communicate at all",
+          "umaQ": "In a UMA (SMP) machine, memory access latency is…",
+          "uSame": "the same from every core to every address",
+          "uRandom": "completely random each time",
+          "uZero": "always zero",
+          "uLocal": "fast only for core 0",
+          "numaQ": "In a NUMA machine, a remote memory access is…",
+          "nSlow": "slower than a local access because it crosses an inter-socket link",
+          "nFast": "faster than a local access",
+          "nImposs": "impossible — you can only touch local memory",
+          "nSame": "exactly the same speed as local",
+          "scaleQ": "Why does UMA struggle to scale to many cores?",
+          "scBus": "all cores contend for the one shared path to memory, which saturates",
+          "scHot": "memory gets too hot",
+          "scIll": "it is against the ISA",
+          "scRam": "RAM cannot be manufactured that large",
+          "placeQ": "Why does memory placement matter on NUMA but not UMA?",
+          "plDist": "on NUMA, data physically far from the running core is slower to reach",
+          "plSame": "placement matters equally on both",
+          "plNever": "placement never matters anywhere",
+          "plUma": "it only matters on UMA",
+          "touchQ": "The 'first-touch' policy places a memory page on the node…",
+          "tFirst": "of whichever core first writes to the page",
+          "tZero": "always node 0, regardless of who uses it",
+          "tRandom": "chosen at random",
+          "tLast": "of the last core to read it",
+          "linkQ": "Which of these is a real inter-socket interconnect?",
+          "lUpi": "Intel UPI / AMD Infinity Fabric",
+          "lUsb": "USB",
+          "lHdmi": "HDMI",
+          "lWifi": "Wi-Fi",
+          "abstractQ": "'Shared memory' but 'non-uniform access' means…",
+          "abReach": "any core can reach any byte, but not all in the same time",
+          "abNo": "cores cannot reach remote memory at all",
+          "abUni": "every access takes identical time",
+          "abMsg": "you must send messages for remote data",
+          "avgNumQ": "Local = 100 ns, remote = ${tr} ns, and ${rp}% of accesses are remote. Average access time in ns? (1 d.p.)",
+          "slowNumQ": "Local = 100 ns, remote = ${tr} ns. If ALL accesses are remote, the slowdown factor vs all-local is? (2 d.p.)",
+          "remoteNumQ": "Average access is ${ta} ns; local = 100 ns, remote = 200 ns. What fraction of accesses are remote? (2 d.p.)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="numaQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/multicore/the-case-for-multicore"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Two block diagrams (UMA and NUMA) as static base content, plus the randomised quiz.
+     Colours only from themeColors(). keepAspect:false for wide block layouts. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // Helpers: a labelled box and a connector, coloured from the theme.
+  const drawUMA = ({ board, colors, sceneStrings }) => {
+    const box = (x0, y0, x1, y1, fillIdx, key) => {
+      board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+        fillColor: colors.cat[fillIdx], fillOpacity: 0.22, strokeColor: colors.line, strokeWidth: 1.5,
+        fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+      });
+      board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, sceneStrings(key)], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+      });
+    };
+    const seg = (a, b) => board.create("segment", [a, b], { strokeColor: colors.line, strokeWidth: 2, highlight: false });
+    // Four cores across the top.
+    const cx = [1, 3.5, 6, 8.5];
+    ["c0", "c1", "c2", "c3"].forEach((k, i) => box(cx[i], 4, cx[i] + 2, 5.2, 0, k));
+    // Shared bus bar in the middle.
+    box(0.5, 2.6, 10.5, 3.4, 3, "bus");
+    // One memory pool at the bottom.
+    box(3.5, 0.4, 7.5, 1.6, 1, "mem");
+    // Connectors: each core to the bus, bus to memory.
+    cx.forEach((x) => seg([x + 1, 4], [x + 1, 3.4]));
+    seg([5.5, 2.6], [5.5, 1.6]);
+  };
+
+  const drawNUMA = ({ board, colors, sceneStrings }) => {
+    const box = (x0, y0, x1, y1, fillIdx, key) => {
+      board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+        fillColor: colors.cat[fillIdx], fillOpacity: 0.22, strokeColor: colors.line, strokeWidth: 1.5,
+        fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+      });
+      board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, sceneStrings(key)], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+      });
+    };
+    const seg = (a, b, opts = {}) => board.create("segment", [a, b], { strokeColor: colors.line, strokeWidth: 2, highlight: false, ...opts });
+    // Socket 0 (left) with local memory; socket 1 (right) with local memory.
+    box(0.3, 3.4, 3.3, 4.6, 0, "s0");
+    box(0.3, 1.2, 3.3, 2.4, 1, "m0");
+    box(6.7, 3.4, 9.7, 4.6, 0, "s1");
+    box(6.7, 1.2, 9.7, 2.4, 1, "m1");
+    // Local links (fast) — solid.
+    seg([1.8, 3.4], [1.8, 2.4]);
+    seg([8.2, 3.4], [8.2, 2.4]);
+    board.create("text", [2.15, 2.9, sceneStrings("fast")], { strokeColor: colors.cat[1], fontSize: 11, anchorX: "left", anchorY: "middle", fixed: true, highlight: false });
+    board.create("text", [8.55, 2.9, sceneStrings("fast")], { strokeColor: colors.cat[1], fontSize: 11, anchorX: "left", anchorY: "middle", fixed: true, highlight: false });
+    // Inter-socket link between the two sockets — dashed and marked remote.
+    seg([3.3, 4.0], [6.7, 4.0], { strokeColor: colors.cat[0], strokeWidth: 3, dash: 2 });
+    board.create("text", [5.0, 4.35, sceneStrings("link")], { strokeColor: colors.cat[0], fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+    board.create("text", [5.0, 3.6, sceneStrings("slow")], { strokeColor: colors.cat[0], fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+  };
+
+  registerGeometryScene("uma", (ctx) => drawUMA(ctx), {
+    boundingbox: [-0.3, 5.6, 11, 0], keepAspect: false, title: () => makeStrings("uma")("title"),
+  });
+  registerGeometryScene("numa", (ctx) => drawNUMA(ctx), {
+    boundingbox: [-0.2, 5.2, 10.2, 0.7], keepAspect: false, title: () => makeStrings("numa")("title"),
+  });
+
+  registerQuiz("numaQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("sharedQ"),
+      options: [
+        { text: () => sceneStrings("shLoads"), correct: true },
+        { text: () => sceneStrings("shMsg"), correct: false },
+        { text: () => sceneStrings("shDisk"), correct: false },
+        { text: () => sceneStrings("shNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("umaQ"),
+      options: [
+        { text: () => sceneStrings("uSame"), correct: true },
+        { text: () => sceneStrings("uRandom"), correct: false },
+        { text: () => sceneStrings("uZero"), correct: false },
+        { text: () => sceneStrings("uLocal"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("numaQ"),
+      options: [
+        { text: () => sceneStrings("nSlow"), correct: true },
+        { text: () => sceneStrings("nFast"), correct: false },
+        { text: () => sceneStrings("nImposs"), correct: false },
+        { text: () => sceneStrings("nSame"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("scaleQ"),
+      options: [
+        { text: () => sceneStrings("scBus"), correct: true },
+        { text: () => sceneStrings("scHot"), correct: false },
+        { text: () => sceneStrings("scIll"), correct: false },
+        { text: () => sceneStrings("scRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("placeQ"),
+      options: [
+        { text: () => sceneStrings("plDist"), correct: true },
+        { text: () => sceneStrings("plSame"), correct: false },
+        { text: () => sceneStrings("plNever"), correct: false },
+        { text: () => sceneStrings("plUma"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("touchQ"),
+      options: [
+        { text: () => sceneStrings("tFirst"), correct: true },
+        { text: () => sceneStrings("tZero"), correct: false },
+        { text: () => sceneStrings("tRandom"), correct: false },
+        { text: () => sceneStrings("tLast"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("linkQ"),
+      options: [
+        { text: () => sceneStrings("lUpi"), correct: true },
+        { text: () => sceneStrings("lUsb"), correct: false },
+        { text: () => sceneStrings("lHdmi"), correct: false },
+        { text: () => sceneStrings("lWifi"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("abstractQ"),
+      options: [
+        { text: () => sceneStrings("abReach"), correct: true },
+        { text: () => sceneStrings("abNo"), correct: false },
+        { text: () => sceneStrings("abUni"), correct: false },
+        { text: () => sceneStrings("abMsg"), correct: false },
+      ],
+    },
+    {
+      // avg = (1-r)*100 + r*tr, r = rp/100.
+      prompt: (v) => sceneStrings("avgNumQ", v),
+      variables: "tr=[140:220] rp=[10:90]",
+      answer: (v) => Math.round(((1 - v.rp / 100) * 100 + (v.rp / 100) * v.tr) * 10) / 10,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // slowdown = tr/100.
+      prompt: (v) => sceneStrings("slowNumQ", v),
+      variables: "tr=[130:220]",
+      answer: (v) => Math.round((v.tr / 100) * 100) / 100,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // ta = 100 + 100 r  ->  r = (ta-100)/100.
+      prompt: (v) => sceneStrings("remoteNumQ", v),
+      variables: "ta=[110:190]",
+      answer: (v) => Math.round(((v.ta - 100) / 100) * 100) / 100,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

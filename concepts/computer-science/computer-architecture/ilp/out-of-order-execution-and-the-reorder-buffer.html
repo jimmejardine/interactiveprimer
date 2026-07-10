@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Out-of-Order Execution and the Reorder Buffer</primer-title>
+
+    <primer-card>
+      <p>
+        Tomasulo's algorithm lets instructions <em>execute</em> in whatever order their operands become ready.
+        Wonderful for speed — but it creates a crisis of accountability. Suppose a late instruction has already
+        written its result when an <em>earlier</em> instruction suddenly raises an exception (a page fault, a
+        divide-by-zero). The machine's architectural state is now a mess: a younger instruction's effects are
+        visible, but the older one never finished. How do you deliver a
+        <primer-ref todo to="pipelining/precise-exceptions">precise exception</primer-ref> — one where everything
+        before the faulting instruction is done and everything after it looks untouched — when instructions have
+        been finishing out of order all along?
+      </p>
+      <p>
+        The answer, from the late 1980s, is one of the most important structures in a modern CPU: the
+        <strong>reorder buffer (ROB)</strong>. The slogan is <strong>"execute out of order, but commit in
+        order."</strong> Instructions may compute in any order they like, but their results are held in a waiting
+        room and made <em>architecturally official</em> strictly in program order. The messy, speculative,
+        out-of-order world is hidden inside the machine; the outside sees a tidy in-order sequence.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two kinds of state</h2>
+      <p>
+        The trick is to separate <strong>speculative</strong> results from <strong>committed</strong> ones. When
+        an instruction finishes executing, its result is <em>not</em> written straight into the architectural
+        registers or memory. It goes into that instruction's <strong>ROB entry</strong>, where later instructions
+        may still read it (via the same tag-forwarding as Tomasulo), but where it is officially "not real yet." Only
+        when the instruction reaches the <strong>head</strong> of the ROB — meaning every older instruction has
+        already committed — is its result written into the true architectural state. That final step is called
+        <strong>commit</strong> or <strong>retire</strong>.
+      </p>
+      <primer-theorem name="The reorder buffer">
+        <ul>
+          <li>instructions <strong>execute out of order</strong> but <strong>commit in program order</strong>
+            (the ROB reimposes order at the end);</li>
+          <li>results are held <em>speculatively</em> in the ROB and only written to architectural state at
+            commit;</li>
+          <li>in-order commit gives <strong>precise exceptions</strong>: on a fault, discard all ROB entries
+            younger than the faulting instruction — none of them ever became real;</li>
+          <li>the ROB is a <strong>circular FIFO</strong>: instructions are appended at the tail when issued and
+            removed from the head when committed.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Strings for the ROB circular-buffer diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "rob": {
+          "title": "The reorder buffer: a circular FIFO — issue at the tail, commit at the head",
+          "center": "Reorder Buffer (circular)",
+          "head": "HEAD → commit (in order)",
+          "tail": "TAIL ← issue (in order)",
+          "done": "executed, waiting to commit",
+          "exec": "still executing",
+          "empty": "free slot"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The ROB is a circular buffer</h2>
+      <p>
+        Physically the ROB is a ring of slots with two pointers. Newly issued instructions are appended at the
+        <strong>tail</strong> (in program order); completed instructions are removed from the <strong>head</strong>
+        (also in program order). Between the two pointers sit in-flight instructions in every state: some still
+        executing, some finished-but-not-yet-committed. Because it's a ring, the pointers wrap around modulo the
+        buffer size — no data ever moves, only the pointers advance. Each slot below is coloured by its state.
+      </p>
+      <primer-geometry scene="rob"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>A circular buffer, in code</h2>
+      <p>
+        The ROB's mechanism is exactly the classic <em>ring buffer</em>: a fixed array with a head index, a tail
+        index, and a count, all advancing modulo the capacity. Issue pushes at the tail; commit pops from the
+        head. Run it and watch the indices wrap:
+      </p>
+      <primer-code run>
+        // A reorder buffer is a circular FIFO. Issue = enqueue at tail; commit = dequeue at head.
+        class ReorderBuffer {
+          private slots: (string | null)[];
+          private head = 0;   // next to commit (in order)
+          private tail = 0;   // next free slot to issue into
+          private count = 0;
+          constructor(private capacity: number) {
+            this.slots = new Array(capacity).fill(null);
+          }
+          issue(name: string): boolean {
+            if (this.count === this.capacity) { console.log(`  [stall] ROB full, cannot issue ${name}`); return false; }
+            this.slots[this.tail] = name;
+            this.tail = (this.tail + 1) % this.capacity;
+            this.count++;
+            console.log(`  issue  ${name}  -> tail now ${this.tail}, count ${this.count}`);
+            return true;
+          }
+          commit(): void {
+            if (this.count === 0) { console.log("  [nothing to commit]"); return; }
+            const name = this.slots[this.head];
+            this.slots[this.head] = null;
+            this.head = (this.head + 1) % this.capacity;
+            this.count--;
+            console.log(`  commit ${name}  -> head now ${this.head}, count ${this.count}`);
+          }
+        }
+
+        const rob = new ReorderBuffer(4);
+        rob.issue("I1"); rob.issue("I2"); rob.issue("I3");
+        rob.commit();                 // I1 retires in order
+        rob.issue("I4"); rob.issue("I5"); // I5 wraps the tail around to slot 0
+        rob.commit(); rob.commit();   // I2, I3 retire — always in program order
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>How the ROB delivers precise exceptions</h2>
+      <p>
+        Now the payoff. Say instructions issue in order <primer-math>I_1, I_2, I_3, I_4</primer-math>, and
+        <primer-math>I_4</primer-math> (a fast add) finishes first while <primer-math>I_2</primer-math> (a slow
+        load) is still in flight. <primer-math>I_4</primer-math>'s result sits in its ROB entry — <em>visible to
+        dependents via forwarding, but not committed</em>. If <primer-math>I_2</primer-math> now faults, the
+        machine simply:
+      </p>
+      <ol>
+        <li>lets everything <em>older</em> than <primer-math>I_2</primer-math> (here <primer-math>I_1</primer-math>)
+          commit normally;</li>
+        <li><strong>flushes</strong> every ROB entry from <primer-math>I_2</primer-math> onward —
+          <primer-math>I_3</primer-math> and the already-computed <primer-math>I_4</primer-math> are thrown away,
+          because they never committed and so never touched architectural state;</li>
+        <li>takes the exception at <primer-math>I_2</primer-math> with a perfectly clean architectural state.</li>
+      </ol>
+      <p>
+        The out-of-order execution is completely invisible to the exception handler. This same flush machinery is
+        exactly what makes <primer-ref todo to="ilp/speculation">branch speculation</primer-ref> recoverable: a
+        mispredicted branch is just "discard everything younger than the branch," the identical operation.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Where do a program's registers 'really' live — the ROB, or the register file?">
+      <p>
+        In the original ROB design, an instruction's result lives in its <em>ROB entry</em> while speculative and
+        is copied into the architectural register file at commit — so a value can be read from two places
+        depending on its age, and the commit step does real data movement. Modern high-end cores (Intel P6 onward,
+        and every big core since) merged the two ideas with a <strong>physical register file</strong>: renaming
+        already gave every result a physical register, so commit doesn't copy anything — it just updates a table
+        saying "this physical register is now the <em>architectural</em> one," and frees the register the old
+        value used. The ROB then holds only bookkeeping (which physical reg, is it done, did it fault), not the
+        data itself. Same guarantee — in-order commit, precise state — with less copying.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Commit in order' does not undo out-of-order execution's speed">
+      <p>
+        Students sometimes fear that forcing in-order commit re-serialises everything and throws the speed away.
+        It doesn't. The <em>slow</em> part — executing, waiting on memory and dependences — still happens fully out
+        of order and overlapped. Commit is cheap: it just advances the head pointer and makes already-computed
+        results official, several per cycle. As long as the oldest instruction eventually finishes, the whole
+        train behind it retires in a quick burst. In-order commit costs you almost nothing in throughput and buys
+        you precise exceptions and clean recovery — one of the great bargains in architecture.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Why every big core has one</h2>
+      <p>
+        The reorder buffer is the piece that makes aggressive out-of-order execution <em>safe</em>. It reconciles
+        two things that seem incompatible: run instructions in any order for speed, yet present a strictly ordered,
+        recoverable architectural state to the software. Its size is a headline design number — a big modern core
+        keeps <em>hundreds</em> of instructions in flight in its ROB (Apple's cores famously have very large ROBs),
+        because the more instructions you can hold, the further ahead you can look for independent work. And its
+        flush-younger-entries mechanism is the universal "undo" button behind both exceptions and speculation.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: ROB / OOO commit concepts + a couple of circular-buffer numeric questions. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "robQuiz@1": {
+          "intro": "Execute out of order, commit IN order via the ROB. Results are speculative until commit; in-order commit gives precise exceptions. The ROB is a circular FIFO.",
+          "sloganQ": "The reorder buffer's core principle is…",
+          "sExec": "execute out of order, but commit (retire) in program order",
+          "sBoth": "execute and commit both strictly in order",
+          "sNeither": "execute and commit both out of order",
+          "sRev": "commit in reverse order",
+          "preciseQ": "In-order commit via the ROB primarily provides…",
+          "pPrecise": "precise exceptions and clean misprediction recovery",
+          "pClock": "a higher clock frequency",
+          "pRam": "more memory capacity",
+          "pNone": "no benefit",
+          "specQ": "Before an instruction commits, its result is…",
+          "spHeld": "held speculatively in the ROB, not yet in architectural state",
+          "spArch": "already written to the architectural registers",
+          "spGone": "discarded immediately",
+          "spDisk": "written to disk",
+          "shapeQ": "Structurally, the ROB is a…",
+          "shFifo": "circular FIFO (ring buffer) with a head and a tail pointer",
+          "shStack": "last-in-first-out stack",
+          "shTree": "binary tree",
+          "shHash": "hash table",
+          "issueQ": "New instructions enter the ROB at the… and leave at the…",
+          "iTailHead": "tail (issue); head (commit)",
+          "iHeadTail": "head (issue); tail (commit)",
+          "iSame": "same single slot for both",
+          "iRandom": "a random slot; any slot",
+          "faultQ": "When an older instruction faults, the ROB recovers by…",
+          "fFlush": "flushing (discarding) all entries younger than the faulting one",
+          "fCommit": "committing all younger instructions first",
+          "fClock": "raising the clock speed",
+          "fIgnore": "ignoring the fault",
+          "whyQ": "Why doesn't in-order commit destroy the speedup of out-of-order execution?",
+          "wCheap": "the slow work (execute, memory) still overlaps; commit is cheap pointer work",
+          "wSlow": "it does destroy it entirely",
+          "wSame": "because commit also executes the instruction again",
+          "wNo": "because there is no speedup to begin with",
+          "prfQ": "In a modern physical-register-file design, commit mostly…",
+          "prfMap": "updates a map so the result's physical register becomes architectural — no data copy",
+          "prfCopy": "copies every result byte to disk",
+          "prfNone": "does nothing at all, ever",
+          "prfExec": "re-executes the instruction from scratch",
+          "sizeQ": "A larger reorder buffer generally lets a core…",
+          "szMore": "keep more instructions in flight and find more parallelism",
+          "szSlow": "run strictly slower",
+          "szFewer": "hold fewer instructions",
+          "szClock": "raise its clock automatically",
+          "capNumQ": "A ROB has ${cap} slots; ${n} instructions are currently in flight. How many free slots remain?",
+          "wrapNumQ": "In a ${cap}-slot circular ROB, the tail is at index ${t}. After issuing one instruction, what is the new tail index? (it wraps mod ${cap})"
+        }
+      }
+    </script>
+
+    <primer-quiz name="robQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/ilp/tomasulos-algorithm-and-register-renaming"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- ROB circular-buffer diagram (static base content) + the randomised quiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "rob",
+    ({ board, colors, sceneStrings }) => {
+      // Eight slots arranged in a ring. Colour each by state.
+      const N = 8;
+      const R = 3.2;
+      // state per slot: 2 = executed/waiting, 1 = executing, 0 = free.
+      const states = [2, 2, 1, 1, 0, 0, 0, 2];
+      const ci = { 0: 0, 1: 1, 2: 3 }; // free, executing, waiting-to-commit
+      for (let i = 0; i < N; i++) {
+        const ang = Math.PI / 2 - (i / N) * 2 * Math.PI; // clockwise from top
+        const cx = R * Math.cos(ang);
+        const cy = R * Math.sin(ang);
+        const s = 0.62;
+        board.create(
+          "polygon",
+          [[cx - s, cy - s], [cx + s, cy - s], [cx + s, cy + s], [cx - s, cy + s]],
+          { fillColor: colors.cat[ci[states[i]]], fillOpacity: 0.28, strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false } },
+        );
+        board.create("text", [cx, cy, "I" + (i + 1)], { strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      }
+      board.create("text", [0, 0.4, sceneStrings("center")], { strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600" });
+
+      // Head (top slot, I1) and tail (slot after last filled) labels.
+      board.create("text", [0, R + 1.15, sceneStrings("head")], { strokeColor: colors.cat[3], fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      board.create("text", [0, -R - 1.15, sceneStrings("tail")], { strokeColor: colors.cat[1], fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+
+      // A curved hint of the circular direction (arrow around the top).
+      board.create("arrow", [[R + 0.6, 0.4], [R + 0.6, -0.4]], { strokeColor: colors.line, strokeWidth: 1.5, lastArrow: { type: 2, size: 5 }, highlight: false });
+
+      // Legend.
+      const leg = (y, cidx, txt) => {
+        board.create("polygon", [[4.6, y - 0.22], [4.9, y - 0.22], [4.9, y + 0.22], [4.6, y + 0.22]], { fillColor: colors.cat[cidx], fillOpacity: 0.28, strokeColor: colors.line, strokeWidth: 1, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false } });
+        board.create("text", [5.1, y, txt], { strokeColor: colors.ink, fontSize: 10, anchorX: "left", anchorY: "middle", fixed: true, highlight: false });
+      };
+      leg(1.4, 3, sceneStrings("done"));
+      leg(0.7, 1, sceneStrings("exec"));
+      leg(0.0, 0, sceneStrings("empty"));
+    },
+    {
+      boundingbox: [-5.0, 4.8, 8.6, -4.8],
+      keepAspect: true,
+      title: () => makeStrings("rob")("title"),
+    },
+  );
+
+  registerQuiz("robQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("sloganQ"),
+      options: [
+        { text: () => sceneStrings("sExec"), correct: true },
+        { text: () => sceneStrings("sBoth"), correct: false },
+        { text: () => sceneStrings("sNeither"), correct: false },
+        { text: () => sceneStrings("sRev"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("preciseQ"),
+      options: [
+        { text: () => sceneStrings("pPrecise"), correct: true },
+        { text: () => sceneStrings("pClock"), correct: false },
+        { text: () => sceneStrings("pRam"), correct: false },
+        { text: () => sceneStrings("pNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("specQ"),
+      options: [
+        { text: () => sceneStrings("spHeld"), correct: true },
+        { text: () => sceneStrings("spArch"), correct: false },
+        { text: () => sceneStrings("spGone"), correct: false },
+        { text: () => sceneStrings("spDisk"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("shapeQ"),
+      options: [
+        { text: () => sceneStrings("shFifo"), correct: true },
+        { text: () => sceneStrings("shStack"), correct: false },
+        { text: () => sceneStrings("shTree"), correct: false },
+        { text: () => sceneStrings("shHash"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("issueQ"),
+      options: [
+        { text: () => sceneStrings("iTailHead"), correct: true },
+        { text: () => sceneStrings("iHeadTail"), correct: false },
+        { text: () => sceneStrings("iSame"), correct: false },
+        { text: () => sceneStrings("iRandom"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("faultQ"),
+      options: [
+        { text: () => sceneStrings("fFlush"), correct: true },
+        { text: () => sceneStrings("fCommit"), correct: false },
+        { text: () => sceneStrings("fClock"), correct: false },
+        { text: () => sceneStrings("fIgnore"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("wCheap"), correct: true },
+        { text: () => sceneStrings("wSlow"), correct: false },
+        { text: () => sceneStrings("wSame"), correct: false },
+        { text: () => sceneStrings("wNo"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("prfQ"),
+      options: [
+        { text: () => sceneStrings("prfMap"), correct: true },
+        { text: () => sceneStrings("prfCopy"), correct: false },
+        { text: () => sceneStrings("prfNone"), correct: false },
+        { text: () => sceneStrings("prfExec"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sizeQ"),
+      options: [
+        { text: () => sceneStrings("szMore"), correct: true },
+        { text: () => sceneStrings("szSlow"), correct: false },
+        { text: () => sceneStrings("szFewer"), correct: false },
+        { text: () => sceneStrings("szClock"), correct: false },
+      ],
+    },
+    {
+      // Free slots = capacity - in-flight.
+      prompt: (v) => sceneStrings("capNumQ", v),
+      variables: "cap=[16:64] n=[4:15]",
+      answer: (v) => v.cap - v.n,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // New tail = (t + 1) mod cap.
+      prompt: (v) => sceneStrings("wrapNumQ", v),
+      variables: "cap=[8:16] t=[0:15]",
+      constraints: "t < cap",
+      answer: (v) => (v.t + 1) % v.cap,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

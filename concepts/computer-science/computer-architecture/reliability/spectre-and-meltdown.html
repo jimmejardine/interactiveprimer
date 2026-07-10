@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Spectre and Meltdown</primer-title>
+
+    <primer-card>
+      <p>
+        In January 2018 the whole computing industry had a very bad week. Researchers at Google Project Zero and
+        several universities revealed that essentially <strong>every high-performance CPU built in the previous two
+        decades</strong> — Intel, AMD, ARM, the lot — leaked secrets through the very feature that made them fast:
+        <em>speculative execution</em>. The patches that followed slowed servers worldwide by measurable percentage
+        points, and cloud providers rebooted their entire fleets. Two attacks led the headlines:
+        <strong>Meltdown</strong> and <strong>Spectre</strong>.
+      </p>
+      <p>
+        The lesson is profound and a little unsettling. Everything you have learned about
+        <primer-ref to="computer-science/computer-architecture/ilp/speculation-and-recovery">speculation and
+        recovery</primer-ref> insisted that a mis-speculated instruction is <em>squashed</em> — it never commits, so
+        architecturally it never happened. That is true of the <strong>architectural</strong> state: the registers,
+        the memory. But speculation also leaves <strong>microarchitectural</strong> footprints — chiefly in the
+        <em>cache</em> — and those are <strong>not</strong> rolled back. This lesson shows how a byte the CPU
+        "un-read" can still be reconstructed from the shadow it cast on the cache.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The gap: architectural rollback is not microarchitectural rollback</h2>
+      <p>
+        A modern out-of-order core runs instructions ahead of certain knowledge — past an unresolved branch, or
+        before a permission check has finished. If the guess was wrong, the reorder buffer discards the results and
+        the programmer never sees them. But <em>along the way</em> those transient instructions may have touched
+        memory, and touching memory <strong>loads a line into the cache</strong>. Squashing the instruction does not
+        evict that line. The data value is gone; the <em>fact that a particular address was accessed</em> survives,
+        recorded as a difference in how fast that address responds next time.
+      </p>
+      <primer-theorem name="The speculation side channel">
+        <ul>
+          <li>speculative (transient) instructions that are later squashed still alter
+            <strong>microarchitectural</strong> state — most importantly the cache;</li>
+          <li>this state <strong>is not rolled back</strong>, so it can be measured afterwards through
+            <strong>timing</strong>;</li>
+          <li>therefore secret-dependent transient accesses leak the secret, even though architecturally the access
+            "never happened".</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The trick that turns a value into a measurable cache footprint is the <strong>flush+reload covert
+        channel</strong>, and it is worth seeing on its own before we build the full attacks on top of it.
+      </p>
+    </primer-card>
+
+    <!-- Flush+Reload figure: a 256-entry probe array; one entry ends up cached (fast) = the secret byte. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "flushReload": {
+          "title": "Flush+Reload: the one fast-reloading slot names the secret byte",
+          "flush": "1. Flush the whole probe array from the cache (all slots slow)",
+          "leak": "2. Secret byte s indexes ONE slot → that line is now cached",
+          "probe": "3. Time every slot; the single fast one reveals s"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The covert channel: turning a byte into a timing</h2>
+      <p>
+        Set up a probe array with 256 slots, each on its own cache line, and imagine we want to smuggle out one
+        secret byte <primer-math>s</primer-math> (a value <primer-math>0</primer-math>–<primer-math>255</primer-math>).
+        The channel works in three beats:
+      </p>
+      <primer-geometry scene="flushReload"></primer-geometry>
+      <ol>
+        <li><strong>Flush</strong> every slot out of the cache, so all 256 are equally slow to access.</li>
+        <li><strong>Leak</strong>: perform <primer-math>\texttt{probe}[s \times \text{line}]</primer-math> — a single
+          access indexed by the secret. Now exactly one slot, slot <primer-math>s</primer-math>, sits in the cache.</li>
+        <li><strong>Reload</strong>: time an access to all 256 slots. The one that responds fast is slot
+          <primer-math>s</primer-math> — the secret, read straight out of the timings.</li>
+      </ol>
+      <p>
+        Notice the secret never travels through a register the attacker can read; it travels through the
+        <em>cache-vs-not-cache</em> status of the array. That is the covert channel. Run it below — we simulate
+        access latencies and recover the byte purely from which slot is fast.
+      </p>
+      <primer-code run>
+        // Flush+Reload, simulated: recover a secret byte from cache-timing alone.
+        const LINE = 64;         // one cache line per slot
+        const SLOTS = 256;       // one slot per possible byte value
+        const HIT = 30, MISS = 300; // cycles: cached vs uncached access
+
+        // --- attacker: flush the probe array (every slot uncached) ---
+        const cached: boolean[] = new Array(SLOTS).fill(false);
+
+        // --- victim: a transient access indexed by the secret leaves ONE slot cached ---
+        const secret = 214;                 // the byte we are not "allowed" to read
+        cached[secret] = true;              // probe[secret*LINE] was touched speculatively
+
+        // --- attacker: reload — time every slot, pick the fast one ---
+        function accessTime(slot: number): number {
+          return cached[slot] ? HIT : MISS;
+        }
+        let best = -1, bestTime = Infinity;
+        for (let s = 0; s &lt; SLOTS; s++) {
+          const t = accessTime(s);
+          if (t &lt; bestTime) { bestTime = t; best = s; }
+        }
+        console.log("probe stride =", LINE, "bytes/slot");
+        console.log("fast slot found at index", best, "(", bestTime, "cycles )");
+        console.log("recovered secret byte  =", best, "  correct?", best === secret);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Meltdown: reading kernel memory you were forbidden to touch</h2>
+      <p>
+        On the affected Intel chips, a load from a <em>kernel</em> address you have no right to read still executes
+        speculatively while the permission check runs in parallel. The permission fault will eventually squash the
+        instruction — but out-of-order execution lets a <em>second</em> transient instruction use the forbidden byte
+        <em>first</em>, before the fault retires:
+      </p>
+      <primer-code lang="typescript">
+        // Meltdown gadget (conceptual). The fault on line 1 is delayed;
+        // lines 2-3 run transiently and stamp the secret into the cache.
+        const secret = kernelMemory[addr];        // 1. illegal read — will fault, but LATE
+        const _ = probe[secret * 4096];           // 2. transient access, indexed by the secret
+        // ... fault finally retires here and squashes 1-2 architecturally ...
+        // 3. attacker now runs Flush+Reload on `probe` to recover `secret`
+      </primer-code>
+      <p>
+        Architecturally the illegal read is annulled — the program that ran it just gets a segmentation fault. But
+        the cache footprint of step 2 survives, and flush+reload reads the kernel byte out of it. Repeat byte by
+        byte and you can dump the entire kernel — passwords, keys, anything — from an unprivileged process. Meltdown
+        <em>melts</em> the fundamental isolation between user and kernel that the whole operating-system model
+        depends on.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Spectre: weaponising the branch predictor</h2>
+      <p>
+        Spectre is subtler and, sadly, more durable. Instead of running an illegal instruction, it tricks a
+        <em>victim</em> program into leaking its own secrets by abusing
+        <primer-ref soft to="computer-science/computer-architecture/ilp/branch-prediction-basics">branch
+        prediction</primer-ref>. Consider a perfectly ordinary bounds check:
+      </p>
+      <primer-code lang="typescript">
+        // Spectre v1 — bounds-check bypass. `x` is attacker-supplied.
+        if (x &lt; array1.length) {                 // trained to predict TRUE
+          const y = array2[array1[x] * 4096];      // runs speculatively even when x is out of bounds
+        }
+      </primer-code>
+      <p>
+        The attacker first calls this with many in-bounds <primer-math>x</primer-math> values, <strong>training</strong>
+        the branch predictor to expect "taken". Then they pass a huge out-of-bounds <primer-math>x</primer-math>. The
+        predictor, still confident, <em>speculatively</em> executes the body — reading <em>past</em>
+        <primer-math>\texttt{array1}</primer-math> into the victim's secrets and stamping the result into
+        <primer-math>\texttt{array2}</primer-math>'s cache lines. The bounds check eventually resolves false and
+        squashes everything architecturally, but flush+reload on <primer-math>\texttt{array2}</primer-math> recovers
+        the out-of-bounds byte. The victim's <em>own correct code</em> becomes the leak.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th></th><th>Meltdown</th><th>Spectre (v1)</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Boundary broken</td><td>user ↔ kernel isolation</td><td>within-process bounds / sandboxes</td></tr>
+            <tr><td>Mechanism</td><td>out-of-order use of a faulting load</td><td>mistrained branch prediction</td></tr>
+            <tr><td>Leak channel</td><td>cache (flush+reload)</td><td>cache (flush+reload)</td></tr>
+            <tr><td>Fixable in OS?</td><td>yes — KPTI unmaps the kernel</td><td>no clean fix; per-gadget hardening</td></tr>
+            <tr><td>Root cause</td><td>a specific Intel oversight</td><td>speculation itself</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-card>
+      <h2>Mitigations, and what they cost</h2>
+      <p>
+        There is no single patch, because these are not bugs in the ordinary sense — they are consequences of doing
+        speculation at all. The defences chip away at specific gadgets, and each has a price:
+      </p>
+      <ul>
+        <li><strong>KPTI</strong> (Kernel Page-Table Isolation) — unmap the kernel from the user address space so a
+          Meltdown load has nothing to speculate against. It defeats Meltdown, but every system call now switches
+          page tables and flushes part of the
+          <primer-ref to="computer-science/computer-architecture/memory/the-tlb">TLB</primer-ref>, costing a few
+          percent, more on syscall-heavy workloads.</li>
+        <li><strong>Fences</strong> (<primer-math>\texttt{lfence}</primer-math>) — a serialising barrier placed after
+          a bounds check so speculation cannot run ahead of it. Correct, but it throws away exactly the parallelism
+          the machine was built for, so it is used sparingly on hot gadgets only.</li>
+        <li><strong>Retpoline</strong> — a "return trampoline" that replaces indirect branches with a construct the
+          predictor cannot be steered into, blunting Spectre v2. Clever, and mostly cheap, but it fights the
+          predictor's whole purpose.</li>
+        <li><strong>Silicon fixes</strong> — later chips add hardware that limits cross-domain training and speeds up
+          KPTI, shrinking (but not erasing) the tax.</li>
+      </ul>
+      <p>
+        The uncomfortable summary: Meltdown was largely closed by KPTI and new silicon, but <strong>Spectre is a
+        family, not a bug</strong>. As long as CPUs speculate — and they must, to be fast — new variants keep
+        appearing, and mitigation is a permanent, case-by-case tax on performance.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why is it called KAISER, then KPTI — and how did a performance paper become the cure?">
+      <p>
+        The kernel-unmapping defence was published in 2017 as <strong>KAISER</strong>, by researchers at TU Graz,
+        as a fix for a <em>different</em> problem: they wanted to stop attackers defeating kernel address-space
+        layout randomisation (KASLR) by timing the TLB. Their remedy — don't map the kernel into user space — turned
+        out, months later, to also block Meltdown, which the <em>same</em> group then co-discovered. Linux adopted it
+        under the name <strong>KPTI</strong>, sometimes jokingly expanded as "Forcefully Unmap Complete Kernel With
+        Interrupt Trampolines" (initials left as an exercise). A rare case where a mitigation existed <em>before</em>
+        the world knew it needed one.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Meltdown and Spectre are NOT the same bug, and 'patched' does not mean 'gone'">
+      <p>
+        It is tempting to lump them together — both leak via cache timing after speculation — but they differ where
+        it matters. <strong>Meltdown</strong> exploited a specific implementation flaw (using a faulting load's data
+        before the fault retired) and is genuinely fixed by KPTI and by newer hardware that never forwards
+        privileged data speculatively. <strong>Spectre</strong> attacks the <em>concept</em> of speculation through
+        the branch predictor; it cannot be "patched away" because the predictor is doing its job correctly. Believing
+        one fix covers both, or that a software update makes the class disappear, is exactly the mistake that keeps
+        these vulnerabilities alive. Defence here is ongoing hygiene, not a one-time cure.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: architectural-vs-microarchitectural, the channel, Meltdown vs Spectre, mitigations. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "spectreQuiz@1": {
+          "intro": "Speculation squashes ARCHITECTURAL state but leaves MICROARCHITECTURAL (cache) traces that timing can read.",
+          "coreQ": "Why do Spectre and Meltdown leak secrets despite the CPU squashing the speculative work?",
+          "cCache": "squashing rolls back registers/memory but NOT the cache state it left behind",
+          "cBug": "the squash logic is simply buggy and forgets to run",
+          "cReg": "the secret stays in a register the attacker can read directly",
+          "cDisk": "the secret is written to disk",
+          "chanQ": "The flush+reload covert channel encodes the secret in…",
+          "chTime": "which array slot is fast (cached) vs slow (uncached) to access",
+          "chVolt": "the CPU's supply voltage",
+          "chReg": "a special debug register",
+          "chNet": "network packet timing",
+          "meltQ": "Meltdown fundamentally breaks the isolation between…",
+          "mUser": "an unprivileged user process and kernel memory",
+          "mTwo": "two unrelated network hosts",
+          "mDisk": "a disk and its controller",
+          "mGpu": "the CPU and the GPU",
+          "specMechQ": "Spectre (variant 1) works by…",
+          "sTrain": "mistraining the branch predictor so a bounds check is bypassed speculatively",
+          "sFault": "reading a faulting kernel address out of order",
+          "sOver": "physically overclocking the chip",
+          "sVirus": "installing a virus in firmware",
+          "kptiQ": "KPTI (kernel page-table isolation) defends against Meltdown by…",
+          "kUnmap": "unmapping the kernel from user space so there is nothing to speculate against",
+          "kOff": "turning speculation off entirely",
+          "kEnc": "encrypting every cache line",
+          "kClock": "lowering the clock speed",
+          "costQ": "Why do these mitigations hurt performance?",
+          "coSpec": "they curb speculation / add page-table switches — the very tricks that made the chip fast",
+          "coRam": "they need much more RAM to boot",
+          "coNet": "they slow the network card",
+          "coNone": "they do not — mitigations are always free",
+          "fenceQ": "An lfence instruction is used to…",
+          "fBar": "stop later instructions from executing speculatively past a check",
+          "fFast": "make the following code run faster",
+          "fClear": "clear the entire cache",
+          "fInt": "raise an interrupt",
+          "durQ": "Which statement is true?",
+          "dSpectre": "Meltdown is largely closed by KPTI, but Spectre is a lasting class rooted in speculation itself",
+          "dBoth": "both were permanently fixed by a single 2018 patch",
+          "dNone": "neither was ever exploitable in practice",
+          "dHw": "both are pure software bugs unrelated to hardware",
+          "microQ": "'Architectural state was rolled back but microarchitectural state was not' means…",
+          "uRight": "registers/memory were restored, but cache/predictor residue remained",
+          "uWrong": "the cache was cleared but the registers kept the secret",
+          "uSame": "the two kinds of state are identical",
+          "uNone": "nothing was rolled back at all",
+          "traceQ": "The transient (squashed) instructions leave their most useful trace in the…",
+          "tCache": "cache — as a fast vs slow access-time difference",
+          "tReg": "architectural registers",
+          "tPc": "program counter",
+          "tRom": "boot ROM"
+        }
+      }
+    </script>
+
+    <primer-quiz name="spectreQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/ilp/speculation-and-recovery",
+      "computer-science/computer-architecture/memory/the-tlb"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Flush+Reload figure (probe array of slots; one fast slot = the secret) + the randomised quiz.
+     All colours via themeColors(); nothing hardcoded. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // Probe array: 16 slots drawn (a stand-in for 256), the secret slot highlighted on reveal.
+  registerGeometryScene(
+    "flushReload",
+    ({ board, colors, step, sceneStrings }) => {
+      const N = 16;         // slots shown
+      const secret = 10;    // which slot ends up cached (fast)
+      const W = 0.9;        // slot width
+
+      // Base content: caption line + the row of slots (all "slow" to start), visible on load.
+      const slots = [];
+      for (let i = 0; i < N; i++) {
+        const x0 = i * W, x1 = i * W + W;
+        const poly = board.create("polygon", [[x0, 0], [x1, 0], [x1, 1], [x0, 1]], {
+          fillColor: colors.cat[0], fillOpacity: 0.12,
+          strokeColor: colors.line, strokeWidth: 1, fixed: true, highlight: false,
+          vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        slots.push(poly);
+        board.create("text", [x0 + W / 2, 0.5, String(i)], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      }
+      board.create("text", [0, 1.5, "probe[]  (256 slots — 16 shown)"], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "left", anchorY: "middle", fixed: true, highlight: false,
+      });
+
+      // Step 1: flush caption.
+      step(sceneStrings("flush"), () => {
+        board.create("text", [0, -0.5, sceneStrings("flush")], {
+          strokeColor: colors.cat[2], fontSize: 12, anchorX: "left", anchorY: "middle", fixed: true, highlight: false,
+        });
+      });
+      // Step 2: the secret slot gets cached — highlight it.
+      step(sceneStrings("leak"), () => {
+        const x0 = secret * W, x1 = secret * W + W;
+        board.create("polygon", [[x0, 0], [x1, 0], [x1, 1], [x0, 1]], {
+          fillColor: colors.cat[1], fillOpacity: 0.5,
+          strokeColor: colors.cat[1], strokeWidth: 2, fixed: true, highlight: false,
+          vertices: { visible: false }, borders: { strokeColor: colors.cat[1], highlight: false },
+        });
+        board.create("text", [0, -1.0, sceneStrings("leak")], {
+          strokeColor: colors.cat[1], fontSize: 12, anchorX: "left", anchorY: "middle", fixed: true, highlight: false,
+        });
+      });
+      // Step 3: probe — arrow to the fast slot.
+      step(sceneStrings("probe"), () => {
+        const cx = secret * W + W / 2;
+        board.create("arrow", [[cx, -0.35], [cx, -0.02]], {
+          strokeColor: colors.cat[3], strokeWidth: 2, fixed: true, highlight: false, lastArrow: { size: 5 },
+        });
+        board.create("text", [0, -1.5, sceneStrings("probe")], {
+          strokeColor: colors.cat[3], fontSize: 12, anchorX: "left", anchorY: "middle", fixed: true, highlight: false,
+        });
+      });
+    },
+    {
+      boundingbox: [-0.6, 2.0, 15.0, -1.9],
+      keepAspect: false,
+      title: () => makeStrings("flushReload")("title"),
+    },
+  );
+
+  registerQuiz("spectreQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("coreQ"),
+      options: [
+        { text: () => sceneStrings("cCache"), correct: true },
+        { text: () => sceneStrings("cBug"), correct: false },
+        { text: () => sceneStrings("cReg"), correct: false },
+        { text: () => sceneStrings("cDisk"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("chanQ"),
+      options: [
+        { text: () => sceneStrings("chTime"), correct: true },
+        { text: () => sceneStrings("chVolt"), correct: false },
+        { text: () => sceneStrings("chReg"), correct: false },
+        { text: () => sceneStrings("chNet"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("meltQ"),
+      options: [
+        { text: () => sceneStrings("mUser"), correct: true },
+        { text: () => sceneStrings("mTwo"), correct: false },
+        { text: () => sceneStrings("mDisk"), correct: false },
+        { text: () => sceneStrings("mGpu"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("specMechQ"),
+      options: [
+        { text: () => sceneStrings("sTrain"), correct: true },
+        { text: () => sceneStrings("sFault"), correct: false },
+        { text: () => sceneStrings("sOver"), correct: false },
+        { text: () => sceneStrings("sVirus"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("kptiQ"),
+      options: [
+        { text: () => sceneStrings("kUnmap"), correct: true },
+        { text: () => sceneStrings("kOff"), correct: false },
+        { text: () => sceneStrings("kEnc"), correct: false },
+        { text: () => sceneStrings("kClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("costQ"),
+      options: [
+        { text: () => sceneStrings("coSpec"), correct: true },
+        { text: () => sceneStrings("coRam"), correct: false },
+        { text: () => sceneStrings("coNet"), correct: false },
+        { text: () => sceneStrings("coNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fenceQ"),
+      options: [
+        { text: () => sceneStrings("fBar"), correct: true },
+        { text: () => sceneStrings("fFast"), correct: false },
+        { text: () => sceneStrings("fClear"), correct: false },
+        { text: () => sceneStrings("fInt"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("durQ"),
+      options: [
+        { text: () => sceneStrings("dSpectre"), correct: true },
+        { text: () => sceneStrings("dBoth"), correct: false },
+        { text: () => sceneStrings("dNone"), correct: false },
+        { text: () => sceneStrings("dHw"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("microQ"),
+      options: [
+        { text: () => sceneStrings("uRight"), correct: true },
+        { text: () => sceneStrings("uWrong"), correct: false },
+        { text: () => sceneStrings("uSame"), correct: false },
+        { text: () => sceneStrings("uNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("traceQ"),
+      options: [
+        { text: () => sceneStrings("tCache"), correct: true },
+        { text: () => sceneStrings("tReg"), correct: false },
+        { text: () => sceneStrings("tPc"), correct: false },
+        { text: () => sceneStrings("tRom"), correct: false },
+      ],
+    },
+  ]);
+</script>

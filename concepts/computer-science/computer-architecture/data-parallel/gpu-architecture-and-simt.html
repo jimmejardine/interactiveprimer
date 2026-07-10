@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>GPU Architecture and SIMT</primer-title>
+
+    <primer-card>
+      <p>
+        A CPU core is a sprinter obsessed with <strong>latency</strong>: it will spend a billion transistors on
+        out-of-order execution, branch prediction and giant caches so that <em>one</em> thread finishes as fast
+        as physically possible. A <strong>GPU</strong> makes the opposite bet. It doesn't care how long any single
+        thread takes; it cares about <strong>throughput</strong> — total work per second across <em>thousands</em>
+        of threads. It spends its transistors on arithmetic units, not on making one thread clever, and it hides
+        every stall not by predicting around it but by having so many threads ready that there is always
+        <em>something</em> else to run.
+      </p>
+      <p>
+        This is why a GPU can have tens of thousands of threads in flight and a CPU has a few dozen. It's a
+        different animal for a different job: the CPU wants your email to feel instant; the GPU wants to multiply
+        two enormous matrices, shade a million pixels, or train a network — jobs made of the same operation
+        repeated on mountains of independent data.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>SIMT: threads that secretly march in lock-step</h2>
+      <p>
+        NVIDIA calls the GPU's execution model <strong>SIMT</strong> — <em>Single Instruction, Multiple
+        Threads</em>. To the programmer you write one ordinary-looking function (a "kernel") describing what
+        <em>one</em> thread does, and launch it across a grid of thousands of threads. But underneath, the
+        hardware bundles threads into groups of 32 (NVIDIA calls a group a <strong>warp</strong>; AMD uses 32- or
+        64-wide <strong>wavefronts</strong>) and runs every thread in a warp <em>in lock-step</em>, executing the
+        same instruction on its own data at the same time.
+      </p>
+      <p>
+        So SIMT is really SIMD wearing a friendlier mask. The lanes of a packed-SIMD unit are exposed to you as
+        independent "threads," which is far nicer to program — each thread has its own registers and its own
+        index — but the machine underneath still issues <em>one</em> instruction per warp per cycle and applies
+        it across all 32 lanes. You get SIMD efficiency with a thread's-eye programming model.
+      </p>
+      <primer-theorem name="The SIMT model">
+        <ul>
+          <li>you write a scalar <strong>kernel</strong> for one thread; the GPU runs it over a huge grid of
+            threads;</li>
+          <li>threads are executed in fixed bundles — a <strong>warp</strong> of 32 (or a wavefront) — all
+            running the <strong>same instruction in lock-step</strong> on different data;</li>
+          <li>it is SIMD hardware with a per-thread programming model: one instruction issue drives all lanes of
+            the warp.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Strings for the SM / warp block diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "sm": {
+          "title": "One Streaming Multiprocessor: many resident warps, a scheduler, shared memory",
+          "smlabel": "Streaming Multiprocessor (SM)",
+          "sched": "Warp scheduler — picks a READY warp each cycle",
+          "warp0": "Warp 0  (32 threads, lock-step)",
+          "warp1": "Warp 1  (stalled on memory)",
+          "warp2": "Warp 2  (32 threads, lock-step)",
+          "warp3": "Warp 3  (ready)",
+          "alu": "Arithmetic lanes (32-wide)",
+          "shmem": "Shared memory / L1",
+          "note": "While Warp 1 waits on DRAM, the scheduler runs Warp 0/2/3 — latency hidden by parallelism"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Inside the machine: SMs, schedulers, and a memory hierarchy</h2>
+      <p>
+        A GPU is a grid of <strong>Streaming Multiprocessors</strong> (SMs; AMD calls them Compute Units). Each
+        SM holds many warps <em>resident at once</em> — their registers all live in a huge register file — and a
+        <strong>warp scheduler</strong> that, every cycle, picks a warp that is <em>ready</em> and issues its next
+        instruction. The memory hierarchy is tuned for bandwidth: a small fast <strong>shared memory</strong>
+        (scratchpad) and L1 per SM, an L2 shared across the chip, and high-bandwidth DRAM (GDDR or HBM) feeding
+        the whole thing.
+      </p>
+      <primer-geometry scene="sm"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The killer trick: hide latency with threads, not caches</h2>
+      <p>
+        A DRAM access costs hundreds of cycles. A CPU fights that with big caches and out-of-order execution to
+        find independent work. A GPU does something audacious: when a warp issues a memory load and stalls, the
+        scheduler simply <strong>switches to another ready warp</strong> — instantly, because all warps' state is
+        already sitting in the register file. With enough resident warps, there is always one ready to run, and
+        the memory latency is completely <em>hidden</em> behind other warps' arithmetic. This is why GPUs need so
+        many threads: not for the parallel result, but to have enough spare work to cover the stalls.
+      </p>
+      <p>
+        The fraction of the possible warp slots you actually keep resident is called <strong>occupancy</strong>.
+        Too few warps and a memory stall shows through as idle arithmetic units; enough warps and the latency
+        vanishes. The model below shows the tipping point — how many warps you need before the units stay busy:
+      </p>
+      <primer-code run>
+        // Latency hiding: how many warps must be resident to keep the ALUs busy through a memory stall?
+        // If a load costs `latency` cycles and each warp issues an instruction that takes `issue` cycles,
+        // you need about latency/issue warps to always have one ready.
+        const memLatency = 400; // cycles to reach DRAM
+        const issueCycles = 4;  // cycles between a warp's successive issues while running
+
+        const warpsNeeded = Math.ceil(memLatency / issueCycles);
+        console.log(`DRAM latency: ${memLatency} cycles`);
+        console.log(`warps needed to fully hide it: ~${warpsNeeded}`);
+
+        for (const resident of [8, 32, 64, 128]) {
+          const hidden = Math.min(1, resident / warpsNeeded);
+          const utilisation = (hidden * 100).toFixed(0);
+          console.log(`${resident} resident warps -> ~${utilisation}% ALU utilisation`);
+        }
+        console.log("More threads don't finish faster individually — they keep the machine FULL.");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Warp divergence: the cost of an "if"</h2>
+      <p>
+        Because a warp shares one instruction stream, branches are its Achilles' heel. If some threads in a warp
+        take the <primer-math>\texttt{if}</primer-math> and others the <primer-math>\texttt{else}</primer-math>,
+        the hardware can't run both at once. It runs the <em>then</em>-path with the else-threads masked off,
+        then the <em>else</em>-path with the then-threads masked off — <strong>serializing</strong> the two sides.
+        This is <strong>warp divergence</strong>, and in the worst case (every thread down a different path) a
+        32-wide warp can lose up to <primer-math>32\times</primer-math> of its throughput. Data-dependent
+        branching, so cheap on a CPU with a good branch predictor, is the single thing that most hurts GPU code.
+        The fix is to arrange data so threads in the same warp usually agree on branches.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>CPU vs GPU, side by side</h2>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th></th><th>CPU (latency-oriented)</th><th>GPU (throughput-oriented)</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Goal</td><td>finish one thread ASAP</td><td>maximise total work/second</td></tr>
+            <tr><td>Cores / threads</td><td>a few big cores, dozens of threads</td><td>thousands of tiny threads (warps)</td></tr>
+            <tr><td>Transistor budget spent on</td><td>OoO, branch prediction, big caches</td><td>arithmetic units, huge register file</td></tr>
+            <tr><td>Hides memory latency by</td><td>caches + out-of-order execution</td><td>switching to another ready warp</td></tr>
+            <tr><td>Hates</td><td>cache misses</td><td>warp divergence (branchy code)</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-vignette title="Why did graphics chips end up training neural networks?">
+      <p>
+        GPUs were built to shade pixels: apply the same lighting maths to millions of independent fragments —
+        embarrassingly parallel, arithmetic-heavy, latency-tolerant. It turned out that a neural network's core
+        operation, matrix multiplication, has <em>exactly</em> that shape: the same multiply-accumulate over vast
+        regular arrays with no branching. When NVIDIA exposed the hardware for general computing with CUDA (2007),
+        researchers discovered a graphics card was an astonishingly cheap matrix engine. The modern AI boom rides
+        on a machine designed for video games — and today's data-center GPUs add <strong>tensor cores</strong>,
+        units that do a whole small matrix-multiply per instruction, doubling down on the coincidence.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A GPU 'thread' is not a CPU thread — and more threads don't mean lower latency">
+      <p>
+        Two traps. First, a GPU "thread" is really a <em>SIMD lane</em> dressed up — thousands of them share
+        instruction streams in warps; it is nothing like a heavyweight OS thread with its own program counter and
+        stack switched by the kernel. Second, launching more threads does <em>not</em> make any single thread
+        finish sooner — a GPU is slow per-thread on purpose. More threads raise <strong>throughput</strong> and
+        <strong>occupancy</strong> (so stalls stay hidden), not latency. If you need one answer fast and there's
+        no parallelism to exploit, a CPU will beat a GPU every time.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: SIMT / warp / occupancy concepts + variable-driven warp-count and latency-hiding numbers. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "gpuQuiz@1": {
+          "intro": "GPU = throughput machine. Warps of 32 run in lock-step; switch warps to hide memory latency; branches diverge.",
+          "goalQ": "A GPU is best described as a machine optimised for…",
+          "gThru": "throughput — total work per second across thousands of threads",
+          "gLat": "the lowest possible latency of a single thread",
+          "gClock": "the highest possible clock frequency",
+          "gRam": "the largest possible cache per thread",
+          "simtQ": "SIMT (Single Instruction, Multiple Threads) means…",
+          "sLock": "threads are bundled into warps that execute the same instruction in lock-step on different data",
+          "sIndep": "every thread has a fully independent instruction stream, like separate CPUs",
+          "sOne": "only one thread ever runs at a time",
+          "sNo": "there are no instructions, only data",
+          "warpQ": "A warp (NVIDIA) is…",
+          "wGroup": "a fixed group of 32 threads executed together in lock-step",
+          "wCore": "a single physical core",
+          "wCache": "the L2 cache",
+          "wOne": "one instruction",
+          "hideQ": "How does a GPU hide the hundreds of cycles of a DRAM access?",
+          "hSwitch": "the warp scheduler switches to another ready warp while the stalled one waits",
+          "hCache": "with a huge out-of-order window like a CPU",
+          "hPredict": "by predicting the memory value",
+          "hSlow": "it cannot hide it at all",
+          "divQ": "Warp divergence happens when…",
+          "dBranch": "threads in the same warp take different branch paths, so the paths run serially with masking",
+          "dMem": "two warps access the same memory address",
+          "dClock": "the clock frequency changes",
+          "dFull": "all warps finish at once",
+          "occQ": "Occupancy on a GPU refers to…",
+          "oRes": "how many of the possible warp slots are actually resident and available to hide stalls",
+          "oClock": "the clock frequency",
+          "oTemp": "the chip temperature",
+          "oPixels": "the number of pixels on screen",
+          "cpuQ": "Compared with a GPU, a CPU spends its transistor budget mainly on…",
+          "cBig": "out-of-order execution, branch prediction and large caches to speed one thread",
+          "cMany": "as many tiny arithmetic lanes as possible",
+          "cNone": "nothing; they are identical",
+          "cRam": "only DRAM controllers",
+          "smQ": "A Streaming Multiprocessor (SM) contains…",
+          "smAll": "many resident warps, a warp scheduler, arithmetic lanes and shared memory / L1",
+          "smOne": "exactly one thread and no scheduler",
+          "smDisk": "the hard disk controller",
+          "smNet": "the network card",
+          "warpsQ": "A load costs {lat} cycles; a warp re-issues every {iss} cycles. About how many warps hide the latency? (round up)",
+          "threadsQ": "A grid launches {blocks} blocks of {tpb} threads. With 32-thread warps, how many warps is that? (integer)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="gpuQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/data-parallel/vector-processors"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- SM / warp block diagram (base content, always visible) + randomised quiz. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "sm",
+    ({ board, colors, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, fill, txt, fs = 12, bold = false) => {
+        board.create(
+          "polygon",
+          [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+          { fillColor: fill, fillOpacity: 0.22, strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false } },
+        );
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, txt], {
+          strokeColor: colors.ink, fontSize: fs, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: bold ? "font-weight:600" : "",
+        });
+      };
+
+      // Outer SM boundary label.
+      board.create("text", [5, 6.4, sceneStrings("smlabel")], {
+        strokeColor: colors.ink, fontSize: 13, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600",
+      });
+
+      // Warp scheduler across the top.
+      box(0.3, 5.2, 9.7, 6.0, colors.cat[3], sceneStrings("sched"), 12);
+
+      // Four resident warps in a 2x2 grid.
+      const warps = ["warp0", "warp1", "warp2", "warp3"];
+      warps.forEach((k, i) => {
+        const col = i % 2;
+        const row = Math.floor(i / 2);
+        const x0 = 0.3 + col * 4.85;
+        const x1 = x0 + 4.55;
+        const y1 = 4.7 - row * 1.35;
+        const y0 = y1 - 1.1;
+        box(x0, y0, x1, y1, colors.cat[0], sceneStrings(k), 11);
+      });
+
+      // Arithmetic lanes + shared memory across the bottom.
+      box(0.3, 0.5, 5.0, 1.5, colors.cat[1], sceneStrings("alu"), 12);
+      box(5.15, 0.5, 9.7, 1.5, colors.cat[2], sceneStrings("shmem"), 12);
+
+      board.create("text", [5, -0.3, sceneStrings("note")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "opacity:0.75",
+      });
+    },
+    {
+      boundingbox: [-0.4, 7.0, 10.4, -0.9],
+      keepAspect: false,
+      title: () => makeStrings("sm")("title"),
+    },
+  );
+
+  registerQuiz("gpuQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("goalQ"),
+      options: [
+        { text: () => sceneStrings("gThru"), correct: true },
+        { text: () => sceneStrings("gLat"), correct: false },
+        { text: () => sceneStrings("gClock"), correct: false },
+        { text: () => sceneStrings("gRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("simtQ"),
+      options: [
+        { text: () => sceneStrings("sLock"), correct: true },
+        { text: () => sceneStrings("sIndep"), correct: false },
+        { text: () => sceneStrings("sOne"), correct: false },
+        { text: () => sceneStrings("sNo"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("warpQ"),
+      options: [
+        { text: () => sceneStrings("wGroup"), correct: true },
+        { text: () => sceneStrings("wCore"), correct: false },
+        { text: () => sceneStrings("wCache"), correct: false },
+        { text: () => sceneStrings("wOne"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hideQ"),
+      options: [
+        { text: () => sceneStrings("hSwitch"), correct: true },
+        { text: () => sceneStrings("hCache"), correct: false },
+        { text: () => sceneStrings("hPredict"), correct: false },
+        { text: () => sceneStrings("hSlow"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("divQ"),
+      options: [
+        { text: () => sceneStrings("dBranch"), correct: true },
+        { text: () => sceneStrings("dMem"), correct: false },
+        { text: () => sceneStrings("dClock"), correct: false },
+        { text: () => sceneStrings("dFull"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("occQ"),
+      options: [
+        { text: () => sceneStrings("oRes"), correct: true },
+        { text: () => sceneStrings("oClock"), correct: false },
+        { text: () => sceneStrings("oTemp"), correct: false },
+        { text: () => sceneStrings("oPixels"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cpuQ"),
+      options: [
+        { text: () => sceneStrings("cBig"), correct: true },
+        { text: () => sceneStrings("cMany"), correct: false },
+        { text: () => sceneStrings("cNone"), correct: false },
+        { text: () => sceneStrings("cRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("smQ"),
+      options: [
+        { text: () => sceneStrings("smAll"), correct: true },
+        { text: () => sceneStrings("smOne"), correct: false },
+        { text: () => sceneStrings("smDisk"), correct: false },
+        { text: () => sceneStrings("smNet"), correct: false },
+      ],
+    },
+    {
+      // warps to hide latency = ceil(lat/iss).
+      prompt: (v) => sceneStrings("warpsQ", v),
+      variables: "lat=[200:600] iss=[2,4,8]",
+      answer: (v) => Math.ceil(v.lat / v.iss),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // warps = blocks*tpb/32.
+      prompt: (v) => sceneStrings("threadsQ", v),
+      variables: "blocks=[2:16] tpb=[64,128,256]",
+      answer: (v) => (v.blocks * v.tpb) / 32,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The TPU and Systolic Arrays</primer-title>
+
+    <primer-card>
+      <p>
+        Strip a modern neural network down to its engine and you find one operation doing almost all the work:
+        <strong>matrix multiplication</strong>. A layer takes a batch of activations, multiplies them by a matrix
+        of learned weights, and passes the result on. Training and inference are, to a first approximation, a
+        blizzard of dense matrix multiplies — billions of multiply-then-add operations, all identical in shape.
+        When <em>one</em> operation dominates a whole domain, you have the perfect target for a
+        <primer-ref to="computer-science/computer-architecture/accelerators/the-case-for-domain-specific-architectures">domain-specific architecture</primer-ref>.
+      </p>
+      <p>
+        A general CPU multiplies matrices the slow, expensive way: for every scalar multiply it fetches an
+        instruction, reads the register file, moves data through the cache hierarchy, and writes the result back.
+        The arithmetic is a whisper; the bookkeeping is a roar. In 2015 Google shipped a chip that deleted the
+        roar. The <strong>Tensor Processing Unit (TPU)</strong> is built around an idea from 1978 — the
+        <strong>systolic array</strong> — and on dense matrix multiply it beat the GPUs of its day by an order of
+        magnitude in operations per joule.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the systolic-array figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "systolic": {
+          "title": "A systolic array — weights sit still, activations flow →, partial sums flow ↓",
+          "weights": "Each cell holds one stationary weight wᵢⱼ (a MAC unit)",
+          "acts": "Activations stream in from the left, one column of the array per beat",
+          "actsLabel": "activations →",
+          "sums": "Partial sums accumulate downward; finished results drop out the bottom",
+          "sumsLabel": "↓ partial sums out"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The systolic array: a heartbeat of arithmetic</h2>
+      <p>
+        A systolic array is a <strong>grid of tiny, identical cells</strong>, each one a
+        <strong>multiply-accumulate (MAC)</strong> unit: it multiplies two numbers and adds the product to a
+        running total. There is no instruction fetch, no decode, no register file — just arithmetic wired to its
+        neighbours. Data does not sit in a memory waiting to be fetched; it <em>flows</em> through the grid in
+        lock-step with the clock, like blood pulsing through tissue. Each value that enters is <em>reused</em> by
+        every cell it passes, so a single memory read feeds a whole row of multiplies.
+      </p>
+      <p>
+        The figure shows the <strong>weight-stationary</strong> dataflow the TPU uses. Preload each cell with one
+        weight and leave it there. Then stream the activations in from the left — each moves one cell to the right
+        every clock tick — while partial sums accumulate downward. Reveal the flows one at a time:
+      </p>
+      <primer-geometry scene="systolic"></primer-geometry>
+      <p>
+        Follow one activation: it enters on the left, gets multiplied by the stationary weight in the first cell,
+        and the product is added to a partial sum travelling down that column. The same activation then steps
+        right and is multiplied by the <em>next</em> weight, and so on across the row. One number fetched from
+        memory, <primer-math>n</primer-math> multiplies performed. Multiply that reuse across the whole grid and
+        the memory system barely breaks a sweat.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why it crushes a GPU on ops per joule</h2>
+      <p>
+        The killer feature is <strong>data reuse</strong>. Multiplying two <primer-math>n \times n</primer-math>
+        matrices takes <primer-math>n^3</primer-math> multiply-accumulates but touches only
+        <primer-math>n^2</primer-math> input numbers on each side. A naive machine that re-reads operands from
+        memory for every MAC moves <primer-math>O(n^3)</primer-math> data; the systolic array loads each operand
+        <em>once</em> and lets it ripple through, moving only <primer-math>O(n^2)</primer-math>. That
+        factor-of-<primer-math>n</primer-math> cut in memory traffic is the whole game, because
+        <strong>moving a byte costs far more energy than multiplying two of them.</strong>
+      </p>
+      <primer-theorem name="The systolic array">
+        <ul>
+          <li>a 2-D grid of simple <strong>MAC cells</strong>, each wired only to its neighbours — no fetch, no
+            decode, no register file;</li>
+          <li>data flows <strong>rhythmically</strong> ("systolic", after the heart's pumping beat), and every
+            value entering the array is reused by many cells;</li>
+          <li><strong>weight-stationary</strong> dataflow: weights are preloaded and held fixed; activations
+            stream in and partial sums accumulate as they pass through;</li>
+          <li>memory traffic for an <primer-math>n\times n</primer-math> multiply drops from
+            <primer-math>O(n^3)</primer-math> to <primer-math>O(n^2)</primer-math> — the source of its energy
+            win;</li>
+          <li>at peak, a <primer-math>k \times k</primer-math> array performs <primer-math>k^2</primer-math> MACs
+            <em>every clock cycle</em>.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Google's first TPU put a <primer-math>256 \times 256</primer-math> array of
+        <primer-math>8\text{-bit}</primer-math> MAC units on one chip — <primer-math>65{,}536</primer-math>
+        multipliers firing together, about <primer-math>92</primer-math> tera-operations per second, all fed by
+        one flow of weights and activations. A GPU of the era spread its arithmetic across thousands of
+        general-purpose lanes, each carrying the overhead of a flexible instruction pipeline. For dense matmul,
+        the specialised grid simply wastes less.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Counting the reuse</h2>
+      <p>
+        Let's make the reuse concrete. Multiply two <primer-math>n \times n</primer-math> matrices and count the
+        multiply-accumulates against the number of weights you had to load. The ratio is how many useful MACs you
+        squeeze out of each weight fetched — the systolic array's superpower.
+      </p>
+      <primer-code run>
+        // Dense matrix multiply, counting MACs and weight reuse.
+        function matmulStats(n: number) {
+          const A: number[][] = Array.from({ length: n }, (_, i) =>
+            Array.from({ length: n }, (_, j) => i + j));
+          const B: number[][] = Array.from({ length: n }, (_, i) =>
+            Array.from({ length: n }, (_, j) => (i === j ? 1 : 0))); // identity
+          const C: number[][] = Array.from({ length: n }, () => new Array(n).fill(0));
+
+          let macs = 0;
+          for (let i = 0; i &lt; n; i++)
+            for (let j = 0; j &lt; n; j++)
+              for (let k = 0; k &lt; n; k++) {
+                C[i][j] += A[i][k] * B[k][j];
+                macs++;
+              }
+
+          const weightsLoaded = n * n;      // each weight loaded ONCE into its cell
+          const reuse = macs / weightsLoaded;
+          console.log(`n = ${n}: ${macs} MACs, ${weightsLoaded} weights loaded once`);
+          console.log(`reuse factor = ${reuse} MACs per weight (= n)`);
+          console.log(`A x I equals A? ${JSON.stringify(C) === JSON.stringify(A)}`);
+        }
+
+        matmulStats(4);
+        matmulStats(8);
+      </primer-code>
+      <p>
+        The reuse factor comes out to exactly <primer-math>n</primer-math>: an
+        <primer-math>8 \times 8</primer-math> multiply performs <primer-math>512</primer-math> MACs while loading
+        each weight only once. On a full <primer-math>256\times256</primer-math> array, each weight loaded is
+        reused <primer-math>256</primer-math> times before it retires. That is why the memory bus, so often the
+        bottleneck, gets to relax.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why on earth is it called 'systolic'?">
+      <p>
+        The name comes from H. T. Kung and Charles Leiserson, who described these arrays in 1978. <em>Systole</em>
+        is the contraction phase of a heartbeat — the pulse that pushes blood rhythmically through your body.
+        Kung saw the same picture in his array: a global clock beats, and on every beat data is pumped one step
+        further through a mesh of little processors, each doing a scrap of work and passing the result along.
+        Nothing waits in a memory to be summoned; everything moves in a coordinated pulse. Four decades later that
+        1978 idea is the beating heart of every TPU and the tensor cores inside modern GPUs.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A systolic array is only a monster on DENSE, REGULAR matmul">
+      <p>
+        The efficiency depends on keeping every cell busy every cycle with a predictable flow. Two things spoil
+        that. First, <strong>sparsity and irregularity</strong>: if the matrix is mostly zeros, or the computation
+        branches, the rigid grid can't skip the wasted work — it multiplies by zero at full power. Second,
+        <strong>utilisation</strong>: a giant <primer-math>256\times256</primer-math> array running a tiny
+        <primer-math>3\times3</primer-math> convolution leaves almost every cell idle, and the array also spends
+        cycles <em>filling</em> and <em>draining</em> (roughly <primer-math>2k-1</primer-math> cycles of latency
+        before the first result appears). The systolic array is not a general matrix machine — it is a machine for
+        <em>big, dense, steady</em> matrix multiplies, and it is glorious at exactly that and nothing else.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The takeaway</h2>
+      <p>
+        The TPU is the textbook domain-specific architecture: it identified the one operation that dominates its
+        domain, built silicon that does only that, and won on operations per joule by an order of magnitude — at
+        the cost of doing nothing else. Next we look outward, at the
+        <primer-ref todo to="computer-science/computer-architecture/accelerators/interconnection-networks">networks</primer-ref>
+        that must feed and connect thousands of these accelerators, because a single chip, however fast, is never
+        the whole story at scale.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: systolic/TPU concepts + variable-driven MAC / reuse / peak-throughput numerics. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "tpuQuiz@1": {
+          "intro": "Systolic array: a k×k grid of MAC cells; n×n matmul = n³ MACs; each weight reused n times.",
+          "opQ": "Which single operation dominates neural-network workloads and the TPU is built for?",
+          "oMatmul": "dense matrix multiplication",
+          "oSort": "sorting",
+          "oCompress": "string compression",
+          "oBranch": "branch prediction",
+          "cellQ": "Each cell of a systolic array is essentially…",
+          "cMac": "a multiply-accumulate (MAC) unit wired to its neighbours",
+          "cCore": "a full out-of-order CPU core",
+          "cCache": "a cache line",
+          "cDram": "a DRAM bank",
+          "flowQ": "In the TPU's weight-stationary dataflow…",
+          "fWeights": "weights are preloaded and held; activations flow through and partial sums accumulate",
+          "fActs": "activations are held fixed while weights stream past every cycle",
+          "fRandom": "data is fetched at random from main memory each cycle",
+          "fNone": "nothing moves; the array is combinational",
+          "reuseQ": "Why does a systolic array save so much energy versus a naive machine?",
+          "rReuse": "each value loaded from memory is reused by many cells, cutting memory traffic",
+          "rClock": "it runs at a much higher clock frequency",
+          "rFloat": "it uses 64-bit floating point everywhere",
+          "rOoo": "it has a deeper out-of-order window",
+          "trafficQ": "For an n×n matmul, a systolic array cuts memory traffic from O(n³) down to…",
+          "tN2": "O(n²)",
+          "tN": "O(n)",
+          "tN4": "O(n⁴)",
+          "tConst": "O(1)",
+          "whyGpuQ": "On dense matrix multiply the TPU beats a same-era GPU chiefly because…",
+          "wOverhead": "the GPU carries flexible-pipeline overhead the fixed grid avoids",
+          "wClock": "the GPU has a slower clock",
+          "wRam": "the GPU has no memory",
+          "wBug": "GPUs cannot multiply",
+          "originQ": "The systolic array idea was introduced (1978) by…",
+          "oKung": "H. T. Kung and Charles Leiserson",
+          "oGoogle": "Google's TPU team in 2015",
+          "oVon": "John von Neumann",
+          "oTuring": "Alan Turing",
+          "limitQ": "A systolic array performs POORLY when the workload is…",
+          "lSparse": "sparse or irregular, so many cells multiply zeros or sit idle",
+          "lDense": "a big dense matrix multiply",
+          "lRegular": "perfectly regular and dense",
+          "lLarge": "large enough to fill the array",
+          "macNumQ": "Multiplying two {n}×{n} matrices takes how many multiply-accumulates (MACs)?",
+          "peakNumQ": "At peak, a {k}×{k} systolic array performs how many MACs per clock cycle?",
+          "reuseNumQ": "In a full {n}×{n} matmul, each weight is loaded once. How many MACs is it reused for?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="tpuQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/accelerators/the-case-for-domain-specific-architectures"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Systolic-array figure: a 3x3 grid of MAC cells; steps reveal stationary weights, activation flow (→),
+     and partial-sum flow (↓). Plus the randomised quiz. All colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "systolic",
+    ({ board, colors, step, sceneStrings }) => {
+      const N = 3;
+      const cell = (i, j) => ({ cx: 1 + i, cy: 3 - j }); // i = column, j = row (0 at top)
+
+      // Base content: the grid of cells (always visible on load).
+      for (let j = 0; j < N; j++) {
+        for (let i = 0; i < N; i++) {
+          const { cx, cy } = cell(i, j);
+          board.create(
+            "polygon",
+            [[cx - 0.4, cy - 0.4], [cx + 0.4, cy - 0.4], [cx + 0.4, cy + 0.4], [cx - 0.4, cy + 0.4]],
+            {
+              fillColor: colors.cat[0], fillOpacity: 0.18, strokeColor: colors.line, strokeWidth: 1.5,
+              fixed: true, highlight: false, vertices: { visible: false },
+              borders: { strokeColor: colors.line, highlight: false },
+            },
+          );
+        }
+      }
+
+      // Step 1: stationary weights in every cell.
+      step(sceneStrings("weights"), () => {
+        for (let j = 0; j < N; j++) {
+          for (let i = 0; i < N; i++) {
+            const { cx, cy } = cell(i, j);
+            board.create("text", [cx, cy, `w${j + 1}${i + 1}`], {
+              strokeColor: colors.cat[1], fontSize: 13, anchorX: "middle", anchorY: "middle",
+              fixed: true, highlight: false,
+            });
+          }
+        }
+      });
+
+      // Step 2: activations stream in from the left.
+      step(sceneStrings("acts"), () => {
+        for (let j = 0; j < N; j++) {
+          const { cy } = cell(0, j);
+          board.create("arrow", [[0.1, cy], [0.55, cy]], {
+            strokeColor: colors.cat[2], strokeWidth: 2.5, highlight: false,
+          });
+        }
+        board.create("text", [-0.35, 3.75, sceneStrings("actsLabel")], {
+          strokeColor: colors.cat[2], fontSize: 12, anchorX: "left", anchorY: "middle", fixed: true, highlight: false,
+        });
+      });
+
+      // Step 3: partial sums drop out the bottom.
+      step(sceneStrings("sums"), () => {
+        for (let i = 0; i < N; i++) {
+          const { cx } = cell(i, N - 1);
+          board.create("arrow", [[cx, 0.45], [cx, -0.05]], {
+            strokeColor: colors.cat[3], strokeWidth: 2.5, highlight: false,
+          });
+        }
+        board.create("text", [0.6, -0.3, sceneStrings("sumsLabel")], {
+          strokeColor: colors.cat[3], fontSize: 12, anchorX: "left", anchorY: "middle", fixed: true, highlight: false,
+        });
+      });
+    },
+    {
+      boundingbox: [-0.6, 4.3, 4.4, -0.6],
+      keepAspect: true,
+      title: () => makeStrings("systolic")("title"),
+    },
+  );
+
+  registerQuiz("tpuQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("opQ"),
+      options: [
+        { text: () => sceneStrings("oMatmul"), correct: true },
+        { text: () => sceneStrings("oSort"), correct: false },
+        { text: () => sceneStrings("oCompress"), correct: false },
+        { text: () => sceneStrings("oBranch"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cellQ"),
+      options: [
+        { text: () => sceneStrings("cMac"), correct: true },
+        { text: () => sceneStrings("cCore"), correct: false },
+        { text: () => sceneStrings("cCache"), correct: false },
+        { text: () => sceneStrings("cDram"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("flowQ"),
+      options: [
+        { text: () => sceneStrings("fWeights"), correct: true },
+        { text: () => sceneStrings("fActs"), correct: false },
+        { text: () => sceneStrings("fRandom"), correct: false },
+        { text: () => sceneStrings("fNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("reuseQ"),
+      options: [
+        { text: () => sceneStrings("rReuse"), correct: true },
+        { text: () => sceneStrings("rClock"), correct: false },
+        { text: () => sceneStrings("rFloat"), correct: false },
+        { text: () => sceneStrings("rOoo"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("trafficQ"),
+      options: [
+        { text: () => sceneStrings("tN2"), correct: true },
+        { text: () => sceneStrings("tN"), correct: false },
+        { text: () => sceneStrings("tN4"), correct: false },
+        { text: () => sceneStrings("tConst"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyGpuQ"),
+      options: [
+        { text: () => sceneStrings("wOverhead"), correct: true },
+        { text: () => sceneStrings("wClock"), correct: false },
+        { text: () => sceneStrings("wRam"), correct: false },
+        { text: () => sceneStrings("wBug"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("originQ"),
+      options: [
+        { text: () => sceneStrings("oKung"), correct: true },
+        { text: () => sceneStrings("oGoogle"), correct: false },
+        { text: () => sceneStrings("oVon"), correct: false },
+        { text: () => sceneStrings("oTuring"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("limitQ"),
+      options: [
+        { text: () => sceneStrings("lSparse"), correct: true },
+        { text: () => sceneStrings("lDense"), correct: false },
+        { text: () => sceneStrings("lRegular"), correct: false },
+        { text: () => sceneStrings("lLarge"), correct: false },
+      ],
+    },
+    {
+      // n x n matmul = n^3 MACs.
+      prompt: (v) => sceneStrings("macNumQ", v),
+      variables: "n=[2:8]",
+      answer: (v) => v.n * v.n * v.n,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // k x k array peak = k^2 MACs/cycle.
+      prompt: (v) => sceneStrings("peakNumQ", v),
+      variables: "k=[4,8,16,32,64]",
+      answer: (v) => v.k * v.k,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // reuse factor = n.
+      prompt: (v) => sceneStrings("reuseNumQ", v),
+      variables: "n=[4:64]",
+      answer: (v) => v.n,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Vector and SIMD ISA Extensions</primer-title>
+
+    <primer-card>
+      <p>
+        So far every instruction we have met does <em>one</em> thing to <em>one</em> pair of operands:
+        <code>add x3, x1, x2</code> adds a single number to a single number. But an enormous share of real computing —
+        graphics, audio, machine learning, physics, image filters — does the <em>same</em> operation to a whole
+        <em>array</em> of numbers. Feeding those through one-at-a-time scalar instructions wastes the chip. The answer,
+        baked into the <primer-ref to="computer-science/computer-architecture/isa/the-isa-as-a-contract">ISA contract</primer-ref>
+        itself, is <strong>SIMD</strong>: <em>Single Instruction, Multiple Data</em> — one instruction that operates on
+        many data elements at once.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The scalar loop we want to beat</h2>
+      <p>
+        Consider adding two arrays element by element, <primer-math>c[i] = a[i] + b[i]</primer-math>. Scalar code loops,
+        doing one add per iteration:
+      </p>
+      <primer-code lang="text">
+; Scalar: one add per iteration — N adds, N loop overheads
+loop:
+    lw    t0, 0(a1)      ; t0 = a[i]
+    lw    t1, 0(a2)      ; t1 = b[i]
+    add   t2, t0, t1     ; ONE element added
+    sw    t2, 0(a3)      ; c[i] = t2
+    addi  a1, a1, 4      ; advance the three pointers
+    addi  a2, a2, 4
+    addi  a3, a3, 4
+    addi  a0, a0, -1     ; i--
+    bnez  a0, loop       ; repeat
+      </primer-code>
+      <p>
+        For a million-element array that is a million trips through the loop. Yet each add is completely independent of
+        the others — nothing stops us doing several at once. That untapped independence is called <strong>data-level
+        parallelism</strong>, and SIMD is the ISA's way of exposing it.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the SIMD-lanes figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "lanes": {
+          "title": "One SIMD add processes four lanes at once",
+          "a": "vector a",
+          "b": "vector b",
+          "c": "vector c = a + b",
+          "plus": "+",
+          "eq": "one vadd instruction",
+          "scalarNote": "scalar: 4 separate adds",
+          "simdNote": "SIMD: 1 add, 4 lanes"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Vector registers and lanes</h2>
+      <p>
+        A SIMD ISA adds <strong>wide registers</strong> that hold not one number but a <em>packed vector</em> of several.
+        A 128-bit register can hold four 32-bit floats; the hardware slices it into four independent <strong>lanes</strong>
+        and an add instruction adds all four pairs simultaneously, in the same time a scalar add takes one pair.
+      </p>
+      <primer-geometry scene="lanes"></primer-geometry>
+      <p>
+        This is pure Single-Instruction-Multiple-Data: <em>one</em> opcode, <em>multiple</em> data elements. The width —
+        how many lanes — is a defining property of the extension. Widen the register and you widen the throughput, at
+        least until memory bandwidth or the supply of parallel work runs out.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The zoo of SIMD extensions</h2>
+      <p>
+        Almost every mainstream ISA has bolted SIMD on, growing the vector width over the years:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Extension</th><th>ISA</th><th>Vector width</th><th>Style</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>SSE</strong></td><td>x86</td><td>128-bit (4 floats)</td><td>fixed width</td></tr>
+            <tr><td><strong>AVX / AVX2</strong></td><td>x86</td><td>256-bit (8 floats)</td><td>fixed width</td></tr>
+            <tr><td><strong>AVX-512</strong></td><td>x86</td><td>512-bit (16 floats)</td><td>fixed width</td></tr>
+            <tr><td><strong>NEON</strong></td><td>ARM</td><td>128-bit</td><td>fixed width</td></tr>
+            <tr><td><strong>SVE</strong> / <strong>RVV</strong></td><td>ARM / RISC-V</td><td><em>agnostic</em></td><td>vector-length agnostic</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Note the split. Older SIMD (SSE, AVX, NEON) hard-codes the width into the opcode — an AVX add is <em>always</em>
+        8 floats, so binaries must be recompiled to use a wider machine. The modern <strong>vector</strong> designs
+        (ARM's SVE, RISC-V's RVV) are <strong>vector-length agnostic</strong>: the program asks the hardware "how long is
+        your vector?" at run time and loops in chunks of that length, so the <em>same</em> binary runs on a 128-bit chip
+        or a 1024-bit one and gets faster automatically. That is a genuinely different, and cleaner, ISA contract.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Scalar loop vs a 4-wide SIMD add</h2>
+      <p>
+        Here is the crux, in code. The scalar version adds one element per step; the "SIMD" version processes four lanes
+        per step (unrolled to make the parallelism visible), so it needs a quarter of the iterations. On real hardware
+        those four lane-adds happen in a <em>single</em> vector instruction — here we simulate the lanes with an inner
+        loop and count how many vector operations each approach costs.
+      </p>
+      <primer-code run>
+        // Scalar vs 4-wide SIMD for c[i] = a[i] + b[i]. We COUNT the add-instructions issued.
+        const a = [10, 20, 30, 40, 50, 60, 70, 80];
+        const b = [1, 2, 3, 4, 5, 6, 7, 8];
+        const N = a.length;
+        const WIDTH = 4; // lanes per SIMD register (e.g. 128-bit / 32-bit floats)
+
+        // --- Scalar: one add instruction per element ---
+        const cScalar = new Array(N);
+        let scalarAdds = 0;
+        for (let i = 0; i &lt; N; i++) {
+          cScalar[i] = a[i] + b[i];
+          scalarAdds++;
+        }
+        console.log("scalar result :", cScalar.join(", "));
+        console.log("scalar add-instructions issued:", scalarAdds);
+
+        // --- SIMD: one VECTOR add covers WIDTH lanes at once ---
+        const cSimd = new Array(N);
+        let vectorAdds = 0;
+        for (let base = 0; base &lt; N; base += WIDTH) {
+          // In hardware this whole chunk is ONE vadd; the lanes run in parallel.
+          for (let lane = 0; lane &lt; WIDTH; lane++) {
+            cSimd[base + lane] = a[base + lane] + b[base + lane];
+          }
+          vectorAdds++; // one vector instruction per chunk of WIDTH
+        }
+        console.log("simd result   :", cSimd.join(", "));
+        console.log(`vector add-instructions issued: ${vectorAdds}  (WIDTH=${WIDTH})`);
+        console.log(`instruction-count reduction: ${scalarAdds / vectorAdds}x fewer adds`);
+      </primer-code>
+      <p>
+        Four times fewer add-instructions, and the same fourfold cut in loop overhead. The
+        <primer-ref to="computer-science/computer-architecture/foundations/the-iron-law-of-performance">iron law</primer-ref>
+        reads this straight off: SIMD slashes the <strong>instruction count</strong> (one vector op replaces
+        <primer-math>W</primer-math> scalar ops) while keeping CPI about the same — a rare factor you get to shrink
+        without paying elsewhere, as long as the data really is parallel.
+      </p>
+      <primer-theorem name="SIMD / vector processing">
+        <ul>
+          <li><strong>one instruction</strong> operates on a <strong>vector</strong> of
+            <primer-math>W</primer-math> data elements (the lanes) at once;</li>
+          <li>it cuts the dynamic instruction count for data-parallel loops by up to
+            <primer-math>W\times</primer-math>, the ideal speedup;</li>
+          <li><strong>vector-length-agnostic</strong> ISAs (SVE, RVV) leave <primer-math>W</primer-math> to the hardware,
+            so one binary scales across machines.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Where the vectors come from: auto-vectorisation</h2>
+      <p>
+        You rarely write SIMD by hand. Instead the <strong>compiler auto-vectorises</strong>: it recognises a loop whose
+        iterations are independent — no iteration reads a value a later one writes — and rewrites it to process
+        <primer-math>W</primer-math> elements per pass with vector instructions, plus a small scalar "tail" loop for the
+        leftover elements when <primer-math>N</primer-math> is not a multiple of <primer-math>W</primer-math>. The catch
+        is that the compiler must <em>prove</em> independence. A loop-carried dependence like
+        <code>a[i] = a[i-1] + 1</code>, a function call it can't see into, or possible pointer <em>aliasing</em>
+        (two pointers that might reference overlapping memory) all force it to fall back to safe scalar code. Writing
+        vectorisable loops — simple, independent, alias-free — is a real skill precisely because the ISA can only exploit
+        parallelism the compiler can see.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If wider vectors are faster, why not make them enormous — say 4096-bit?">
+      <p>
+        You hit three walls. First, <strong>memory bandwidth</strong>: a vector unit that can add 64 floats per cycle is
+        useless if memory can only deliver 8 — you starve. Second, <strong>diminishing parallel work</strong>: Amdahl's
+        law bites, since real loops have serial parts and awkward tail elements, and very wide vectors waste lanes on
+        short arrays. Third — the reason AVX-512 was controversial — <strong>power and heat</strong>: firing up a huge
+        512-bit unit drew so much current that some Intel chips <em>lowered their clock speed</em> whenever AVX-512 ran,
+        so code using it could paradoxically slow down neighbouring scalar code. Width is not free; it trades against
+        bandwidth, utilisation and watts. The vector-length-agnostic designs are partly a reaction to this: let the
+        hardware pick a width it can actually sustain.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! SIMD is not the same as multicore or multithreading">
+      <p>
+        Three different kinds of parallelism get muddled. <strong>SIMD</strong> is <em>data</em> parallelism <em>within a
+        single core</em>: one instruction, one thread, many data lanes. <strong>Multicore / multithreading</strong> is
+        <em>task</em> parallelism <em>across</em> cores: many instruction streams running at once. And
+        <strong>pipelining</strong> overlaps <em>stages</em> of consecutive instructions. They are complementary — a
+        modern chip uses all three at once — but they solve different problems and live at different ISA/microarchitecture
+        layers. Saying "I made it parallel with AVX" is not the same as "I made it parallel with threads"; conflating
+        them will send you optimising the wrong bottleneck.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The ISA cost of exposing parallelism</h2>
+      <p>
+        SIMD is a bargain, but not a free one, and the cost lands in the contract. Adding vectors means new architectural
+        state (wide vector registers the OS must save and restore on a context switch), new instructions and encodings,
+        rules for masking and tail handling, and — for fixed-width designs — a versioning headache as each new width
+        (SSE → AVX → AVX-512) fragments the software ecosystem. That is the deep lesson of this whole module: the ISA is a
+        <em>contract</em>, and every capability you expose to software — a register model, an addressing mode, a calling
+        convention, a vector unit — is a promise you must keep forever. Choosing what to put in the contract, and what to
+        leave to the compiler and microarchitecture, <em>is</em> the art of computer architecture. Vector and SIMD ideas
+        carry straight into the data-parallelism and GPU material ahead, where these same lanes reappear by the thousand.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: SIMD/vector concepts + variable-driven lane/instruction-count numerics. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "simdQuiz@1": {
+          "intro": "SIMD = one instruction over W data lanes. It cuts instruction count ~W×. VLA ISAs (SVE, RVV) leave W to the hardware. SIMD ≠ multicore.",
+          "meanQ": "SIMD stands for…",
+          "mSimd": "Single Instruction, Multiple Data",
+          "mMisd": "Multiple Instruction, Single Data",
+          "mSisd": "Single Instruction, Single Data",
+          "mMimd": "Multiple Instruction, Multiple Data",
+          "laneQ": "A 'lane' in a vector unit is…",
+          "lOne": "one of the several data elements a vector instruction processes in parallel",
+          "lCore": "a separate CPU core",
+          "lCache": "a level of cache",
+          "lThread": "an operating-system thread",
+          "regQ": "A 128-bit vector register can hold how many 32-bit floats?",
+          "r4": "4",
+          "r2": "2",
+          "r8": "8",
+          "r16": "16",
+          "benefitQ": "For a data-parallel loop, a width-W SIMD add reduces the dynamic instruction count by up to…",
+          "bW": "a factor of W",
+          "bW2": "a factor of W squared",
+          "bNone": "nothing — it stays the same",
+          "b2": "exactly 2, always",
+          "vlaQ": "A vector-length-agnostic ISA (ARM SVE, RISC-V RVV) is special because…",
+          "vSame": "the same binary uses whatever vector width the hardware provides",
+          "vFixed": "the vector width is fixed forever at 128 bits",
+          "vNoVec": "it has no vector instructions",
+          "vScalar": "it forbids scalar code",
+          "autoQ": "Auto-vectorisation is…",
+          "aComp": "the compiler turning an independent scalar loop into vector instructions",
+          "aHw": "the CPU inventing new registers at run time",
+          "aOs": "the OS scheduling threads",
+          "aUser": "the user typing SIMD by hand",
+          "depQ": "Which loop is HARD to auto-vectorise?",
+          "dCarry": "a[i] = a[i-1] + 1 (a loop-carried dependence)",
+          "dIndep": "c[i] = a[i] + b[i] (independent iterations)",
+          "dScale": "c[i] = 2 * a[i]",
+          "dCopy": "c[i] = a[i]",
+          "notMulticoreQ": "How does SIMD differ from multicore parallelism?",
+          "nmData": "SIMD is data parallelism within one core; multicore runs many streams across cores",
+          "nmSame": "they are exactly the same thing",
+          "nmSlower": "SIMD always uses more cores",
+          "nmNoData": "multicore never processes data",
+          "avxQ": "Why did AVX-512 sometimes SLOW a program down?",
+          "avxClock": "the wide unit drew so much power the core lowered its clock frequency",
+          "avxBug": "it computed wrong answers",
+          "avxCache": "it disabled all caches",
+          "avxNoVec": "it had no vector registers",
+          "costQ": "One real ISA cost of adding vector registers is that…",
+          "cCtx": "the OS must save/restore the wide vector state on a context switch",
+          "cFree": "there is no cost at all",
+          "cSlow": "scalar instructions stop working",
+          "cReg": "the machine loses its integer registers",
+          "chunkQ": "An array of {n} floats is processed {w} lanes per SIMD add. How many vector adds are needed (assume divisible)?",
+          "widthQ": "A {bits}-bit vector register holds how many 32-bit floats?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="simdQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/isa/risc-v-registers-and-encoding"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- SIMD-lanes figure: two rows of 4 cells (vector a, vector b), a plus, and a result row (vector c),
+     showing one vadd covering four lanes. Static base content. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "lanes",
+    ({ board, colors, sceneStrings }) => {
+      const aVals = [10, 20, 30, 40];
+      const bVals = [1, 2, 3, 4];
+      const cw = 1.6, ch = 1.1, x0 = 1.2;
+      const rowY = { a: 4.5, b: 3.0, c: 0.6 };
+      const drawRow = (vals, y, cat, labelKey) => {
+        board.create("text", [x0 - 0.4, y + ch / 2, sceneStrings(labelKey)], { strokeColor: colors.ink, fontSize: 12, anchorX: "right", anchorY: "middle", fixed: true, highlight: false });
+        vals.forEach((val, i) => {
+          const xL = x0 + i * cw;
+          board.create("polygon", [[xL, y], [xL + cw - 0.15, y], [xL + cw - 0.15, y + ch], [xL, y + ch]], {
+            fillColor: colors.cat[cat], fillOpacity: 0.24, strokeColor: colors.line, strokeWidth: 1.4, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+          });
+          board.create("text", [xL + (cw - 0.15) / 2, y + ch / 2, String(val)], { strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+        });
+      };
+      drawRow(aVals, rowY.a, 0, "a");
+      drawRow(bVals, rowY.b, 1, "b");
+      drawRow(aVals.map((v, i) => v + bVals[i]), rowY.c, 3, "c");
+      // Plus sign between a and b rows.
+      board.create("text", [x0 - 0.4, (rowY.a + rowY.b) / 2 + 0.2, sceneStrings("plus")], { strokeColor: colors.ink, fontSize: 18, anchorX: "right", anchorY: "middle", fixed: true, highlight: false });
+      // Down-arrows from each b-lane to the c-lane, labelled as one vadd.
+      for (let i = 0; i < 4; i++) {
+        const xc = x0 + i * cw + (cw - 0.15) / 2;
+        board.create("arrow", [[xc, rowY.b - 0.1], [xc, rowY.c + ch + 0.1]], { strokeColor: colors.line, strokeWidth: 1.6, dash: 2, highlight: false });
+      }
+      board.create("text", [x0 + 2 * cw, rowY.c - 0.5, sceneStrings("eq")], { strokeColor: colors.cat[3], fontSize: 13, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600" });
+    },
+    {
+      boundingbox: [-0.4, 6.2, 9.4, -0.6],
+      keepAspect: false,
+      title: () => makeStrings("lanes")("title"),
+    },
+  );
+
+  registerQuiz("simdQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("meanQ"),
+      options: [
+        { text: () => sceneStrings("mSimd"), correct: true },
+        { text: () => sceneStrings("mMisd"), correct: false },
+        { text: () => sceneStrings("mSisd"), correct: false },
+        { text: () => sceneStrings("mMimd"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("laneQ"),
+      options: [
+        { text: () => sceneStrings("lOne"), correct: true },
+        { text: () => sceneStrings("lCore"), correct: false },
+        { text: () => sceneStrings("lCache"), correct: false },
+        { text: () => sceneStrings("lThread"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("regQ"),
+      options: [
+        { text: () => sceneStrings("r4"), correct: true },
+        { text: () => sceneStrings("r2"), correct: false },
+        { text: () => sceneStrings("r8"), correct: false },
+        { text: () => sceneStrings("r16"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("benefitQ"),
+      options: [
+        { text: () => sceneStrings("bW"), correct: true },
+        { text: () => sceneStrings("bW2"), correct: false },
+        { text: () => sceneStrings("bNone"), correct: false },
+        { text: () => sceneStrings("b2"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("vlaQ"),
+      options: [
+        { text: () => sceneStrings("vSame"), correct: true },
+        { text: () => sceneStrings("vFixed"), correct: false },
+        { text: () => sceneStrings("vNoVec"), correct: false },
+        { text: () => sceneStrings("vScalar"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("autoQ"),
+      options: [
+        { text: () => sceneStrings("aComp"), correct: true },
+        { text: () => sceneStrings("aHw"), correct: false },
+        { text: () => sceneStrings("aOs"), correct: false },
+        { text: () => sceneStrings("aUser"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("depQ"),
+      options: [
+        { text: () => sceneStrings("dCarry"), correct: true },
+        { text: () => sceneStrings("dIndep"), correct: false },
+        { text: () => sceneStrings("dScale"), correct: false },
+        { text: () => sceneStrings("dCopy"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("notMulticoreQ"),
+      options: [
+        { text: () => sceneStrings("nmData"), correct: true },
+        { text: () => sceneStrings("nmSame"), correct: false },
+        { text: () => sceneStrings("nmSlower"), correct: false },
+        { text: () => sceneStrings("nmNoData"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("avxQ"),
+      options: [
+        { text: () => sceneStrings("avxClock"), correct: true },
+        { text: () => sceneStrings("avxBug"), correct: false },
+        { text: () => sceneStrings("avxCache"), correct: false },
+        { text: () => sceneStrings("avxNoVec"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("costQ"),
+      options: [
+        { text: () => sceneStrings("cCtx"), correct: true },
+        { text: () => sceneStrings("cFree"), correct: false },
+        { text: () => sceneStrings("cSlow"), correct: false },
+        { text: () => sceneStrings("cReg"), correct: false },
+      ],
+    },
+    {
+      // vector adds = n / w; all n choices divisible by all w choices.
+      prompt: (v) => sceneStrings("chunkQ", v),
+      variables: "n=[16,32,64,128,256] w=[2,4,8,16]",
+      answer: (v) => v.n / v.w,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // floats = bits / 32.
+      prompt: (v) => sceneStrings("widthQ", v),
+      variables: "bits=[128,256,512,1024]",
+      answer: (v) => v.bits / 32,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

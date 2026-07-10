@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The Hardware/Software Interface and Performance Engineering</primer-title>
+
+    <primer-card>
+      <p>
+        Here is a fact that offends most programmers the first time they meet it: <strong>two programs that compute
+        exactly the same answer, in the same language, with the same big-O complexity, can differ in speed by more
+        than <primer-math>10\times</primer-math></strong> — decided entirely by how they touch memory and how they
+        branch. The algorithm is identical; the <em>mechanical sympathy</em> with the machine is not. This closing
+        lesson is about that gap: how a programmer, compiler, or operating system that <em>understands the
+        microarchitecture</em> extracts speed that is simply invisible from the source code.
+      </p>
+      <p>
+        Everything you have learned in this course — the
+        <primer-ref to="computer-science/computer-architecture/memory/cache-fundamentals">cache hierarchy</primer-ref>,
+        pipelines, branch prediction, the
+        <primer-ref to="computer-science/computer-architecture/ilp/the-limits-of-ilp">limits of ILP</primer-ref> —
+        now flips from the architect's side of the seam to the programmer's. The machine is a given; your job is to
+        <em>feed it well</em>. Racing driver Jackie Stewart called this "mechanical sympathy": you do not need to be
+        an engineer to drive fast, but you drive faster if you understand what the car wants.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The memory wall makes layout king</h2>
+      <p>
+        A cache miss to DRAM costs on the order of a couple of hundred cycles — enough to retire hundreds of
+        arithmetic instructions. So on modern hardware performance is dominated not by how many operations you do but
+        by whether the data is <em>already in cache when you need it</em>. And caches reward two behaviours baked into
+        the <primer-ref soft to="computer-science/computer-architecture/memory/locality-and-the-memory-wall">principle
+        of locality</primer-ref>: <strong>spatial</strong> (touch bytes near ones you just touched — they arrive
+        together in a 64-byte line) and <strong>temporal</strong> (reuse data while it is still cached). Cache-friendly
+        code is code that respects these two, and the single biggest lever is <strong>data layout</strong>.
+      </p>
+      <p>
+        The canonical example is <strong>Array-of-Structures (AoS)</strong> versus <strong>Structure-of-Arrays
+        (SoA)</strong>. Store particles as <primer-math>[\{x,y,z,\text{mass}\}, \dots]</primer-math> (AoS) and a loop
+        that only sums the <primer-math>x</primer-math> coordinates drags <primer-math>y, z, \text{mass}</primer-math>
+        into cache on every line — three-quarters of the bandwidth wasted. Store them as separate arrays
+        <primer-math>[x_0, x_1, \dots], [y_0, y_1, \dots], \dots</primer-math> (SoA) and the
+        <primer-math>x</primer-math>-loop reads a dense, contiguous stream — every byte fetched is a byte used, and
+        the hardware prefetcher and the vector units both love it.
+      </p>
+      <primer-geometry scene="layout"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Watch a cache eat rows and choke on columns</h2>
+      <p>
+        The most vivid demonstration is traversing a 2-D array. C-style arrays are <strong>row-major</strong>:
+        <primer-math>A[i][j]</primer-math> and <primer-math>A[i][j+1]</primer-math> are neighbours in memory, but
+        <primer-math>A[i][j]</primer-math> and <primer-math>A[i+1][j]</primer-math> are a whole row apart. Sum the
+        array row-by-row and each cache line, once fetched, is fully used before you move on. Sum it
+        <em>column-by-column</em> and — if the array is bigger than the cache — every single access misses, because
+        the line you fetched is evicted long before you come back to it. Same operations, same result, wildly
+        different miss counts. Let's count them on a tiny simulated cache:
+      </p>
+      <primer-code run>
+        // A tiny direct-mapped cache; count misses for row-major vs column-major traversal of an N×N array.
+        const N = 64;                 // 64×64 ints
+        const LINE = 16;              // 16 ints per cache line
+        const LINES = 64;             // cache holds 64 lines (smaller than the array → conflicts)
+
+        function countMisses(rowMajor: boolean): number {
+          const tags: number[] = new Array(LINES).fill(-1); // tag currently in each cache line
+          let misses = 0;
+          const touch = (addr: number) => {
+            const block = Math.floor(addr / LINE);
+            const set = block % LINES;
+            if (tags[set] !== block) { misses++; tags[set] = block; } // miss + fill
+          };
+          for (let a = 0; a &lt; N; a++) {
+            for (let b = 0; b &lt; N; b++) {
+              // row-major visits A[a][b]; column-major visits A[b][a]
+              const i = rowMajor ? a : b;
+              const j = rowMajor ? b : a;
+              touch(i * N + j);       // linear address of A[i][j], row-major storage
+            }
+          }
+          return misses;
+        }
+
+        const rm = countMisses(true);
+        const cm = countMisses(false);
+        console.log(`row-major   misses: ${rm}`);
+        console.log(`column-major misses: ${cm}`);
+        console.log(`column-major is ${(cm / rm).toFixed(1)}x worse — identical math, hostile layout`);
+      </primer-code>
+      <p>
+        Row-major touches each 16-int line once and reuses it 16 times; column-major strides across memory and
+        thrashes. For big matrices the remedy is <strong>blocking</strong> (tiling): process the array in small
+        sub-blocks that fit in cache so every block is fully reused before eviction — the standard trick that makes a
+        tiled matrix-multiply many times faster than the textbook triple loop.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>False sharing: the cost your source code cannot see</h2>
+      <p>
+        Multithreading adds a subtler trap. Coherence works on <em>whole cache lines</em>, not individual variables.
+        If two threads update two <em>different</em> counters that happen to sit in the <strong>same 64-byte
+        line</strong>, every write invalidates the other core's copy — the line "ping-pongs" between caches over the
+        coherence fabric even though the threads never touch the same variable. This is <strong>false
+        sharing</strong>, and it can turn a parallel loop <em>slower</em> than the serial one. The fix is invisible in
+        the algorithm and pure mechanical sympathy: pad or align per-thread data so each lands on its own cache line.
+      </p>
+      <primer-theorem name="Rules of mechanical sympathy">
+        <ul>
+          <li><strong>Respect locality</strong>: lay data out so a loop marches contiguously (SoA for hot fields;
+            row-major traversal; block/tile big loops);</li>
+          <li><strong>Avoid false sharing</strong>: give each thread its own cache line for data it writes;</li>
+          <li><strong>Be predictable to the branch predictor</strong>: prefer regular, biased branches (or branchless
+            code) over data-dependent, near-random ones;</li>
+          <li><strong>Measure, don't guess</strong>: a profiler (cache-miss and branch-miss counters) tells you where
+            the machine actually stalls.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Branch-predictor-friendly code</h2>
+      <p>
+        The pipeline's other appetite is <em>predictable control flow</em>. A
+        <primer-ref soft to="computer-science/computer-architecture/ilp/branch-prediction-basics">branch
+        predictor</primer-ref> guesses which way an <primer-math>\texttt{if}</primer-math> goes; a wrong guess flushes
+        the pipeline and costs a dozen-odd cycles. A branch that is almost always taken (or almost always not) is
+        predicted essentially for free; a branch that goes 50/50 at random is a stall machine. This is the secret
+        behind the most famous performance question on the internet — "why is processing a <em>sorted</em> array
+        faster than an unsorted one?" (see the vignette). The lesson: where you can, make branches boringly
+        predictable, or remove them with masks and arithmetic.
+      </p>
+      <p>
+        Compilers and operating systems play this game too: the compiler reorders code and lays out basic blocks so
+        the common path falls through; the OS packs hot pages together and uses huge pages to cut
+        <primer-ref soft to="computer-science/computer-architecture/memory/the-tlb">TLB</primer-ref> misses. Every
+        layer that understands the machine underneath can feed it better — which is exactly why this course was worth
+        taking even if you never design a chip.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why is processing a sorted array faster than an unsorted one — with identical code?">
+      <p>
+        A legendary 2012 Stack Overflow question showed a loop that sums the large values in an array running
+        <strong>several times faster</strong> when the array was sorted first — same instructions, same data, same
+        count. The culprit was a single data-dependent branch,
+        <primer-math>\texttt{if (a[i] &gt; threshold)}</primer-math>. On a <em>sorted</em> array the branch is false,
+        false, false, … then true, true, true — trivially predictable, so the predictor is right almost every time.
+        On a <em>shuffled</em> array it flips unpredictably, the predictor is wrong about half the time, and each
+        miss flushes the pipeline. The sort's <primer-math>O(n\log n)</primer-math> cost is repaid many times over by
+        the branch predictor's happiness. It is the perfect one-line proof that the microarchitecture, not just the
+        algorithm, sets your speed.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Measure before you optimise — intuition about performance is usually wrong">
+      <p>
+        The classic blunder is to <em>guess</em> where time goes and hand-optimise the wrong loop, adding complexity
+        and bugs for no gain. Modern machines are far too intricate to model in your head — out-of-order execution,
+        prefetchers, three cache levels, speculative branches all interact. Always <strong>profile first</strong>
+        (hardware performance counters expose cache misses, branch mispredictions, stalls), fix the actual hotspot,
+        and <strong>measure again</strong>. And beware micro-benchmarks: a smart compiler will happily delete code
+        whose result you never use, "proving" your slow function is infinitely fast. Mechanical sympathy without
+        measurement is just superstition with extra steps.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: locality, AoS/SoA, row/column-major, false sharing, branch prediction, profiling. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "hwswQuiz@1": {
+          "intro": "Same algorithm, 10x speed: it's decided by cache locality, data layout, false sharing and branch predictability.",
+          "whyQ": "Why can two programs with identical big-O run 10x apart in speed?",
+          "wLoc": "memory-access locality and branch predictability differ, so cache/pipeline behaviour differs",
+          "wLuck": "pure random luck each run",
+          "wLang": "one secretly uses a faster programming language",
+          "wClock": "one runs at a higher clock automatically",
+          "soaQ": "For a loop that reads only the x field of many particles, which layout is cache-friendlier?",
+          "soaRight": "Structure-of-Arrays (a dense contiguous array of x values)",
+          "soaAos": "Array-of-Structures (x,y,z,mass interleaved per particle)",
+          "soaSame": "they are identical for the cache",
+          "soaNeither": "layout never affects the cache",
+          "rmQ": "Summing a large row-major 2-D array column-by-column is slow because…",
+          "rmStride": "consecutive accesses stride a whole row apart, so nearly every access misses",
+          "rmMore": "it performs more additions",
+          "rmBranch": "it has more branches",
+          "rmRam": "it needs more total RAM",
+          "blockQ": "Blocking (tiling) a big matrix loop helps by…",
+          "blReuse": "processing cache-sized sub-blocks so data is fully reused before eviction",
+          "blFewer": "reducing the number of arithmetic operations",
+          "blRam": "using less memory overall",
+          "blBranch": "removing all branches",
+          "fsQ": "False sharing occurs when…",
+          "fsLine": "two threads write different variables that share one cache line, ping-ponging it between cores",
+          "fsSame": "two threads read the same constant",
+          "fsDisk": "two threads write the same disk file",
+          "fsNone": "a thread shares nothing at all",
+          "fsFixQ": "The fix for false sharing is to…",
+          "fxPad": "pad/align per-thread data so each sits on its own cache line",
+          "fxLock": "add a global lock around everything",
+          "fxSleep": "make the threads sleep between writes",
+          "fxRam": "buy more RAM",
+          "sortQ": "Why can summing a SORTED array beat summing the same shuffled array?",
+          "srtPred": "the data-dependent branch becomes predictable, so the branch predictor rarely misses",
+          "srtFewer": "sorting removes elements",
+          "srtRam": "sorting frees memory",
+          "srtClock": "sorting raises the clock speed",
+          "profQ": "The right first step in performance engineering is to…",
+          "prMeasure": "profile with hardware counters to find the real hotspot, then measure again after changes",
+          "prGuess": "guess the slow part and rewrite it",
+          "prAll": "rewrite the whole program in assembly",
+          "prNothing": "do nothing and hope",
+          "symQ": "'Mechanical sympathy' means…",
+          "symUnd": "writing code that works with how the hardware actually behaves",
+          "symFeel": "feeling sorry for old computers",
+          "symLang": "using only low-level languages",
+          "symGui": "designing a nicer user interface",
+          "missNumQ": "A DRAM miss costs about {mc} cycles while an add costs 1. Missing on 1-in-{sk} accesses adds how many average cycles per access? (2 d.p.)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="hwswQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/ilp/the-limits-of-ilp",
+      "computer-science/computer-architecture/memory/cache-fundamentals"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- AoS vs SoA layout figure: one cache line over interleaved fields (AoS, mostly wasted) vs a dense x-array
+     (SoA, fully used) + the quiz. All colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "layout",
+    ({ board, colors, step, sceneStrings }) => {
+      const W = 0.9;  // cell width
+      // Fields cycle x,y,z,m; we only want x. cat[0] = x (wanted), cat[3] = other (wasted).
+      const fields = ["x", "y", "z", "m"];
+      const cell = (col, y, label, wanted) => {
+        const x0 = col * W, x1 = col * W + W;
+        board.create("polygon", [[x0, y], [x1, y], [x1, y + 0.85], [x0, y + 0.85]], {
+          fillColor: wanted ? colors.cat[0] : colors.cat[3],
+          fillOpacity: wanted ? 0.35 : 0.12,
+          strokeColor: colors.line, strokeWidth: 1, fixed: true, highlight: false,
+          vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        board.create("text", [x0 + W / 2, y + 0.42, label], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      };
+
+      // AoS row (top): interleaved x y z m x y z m ...  — only the x cells are wanted.
+      board.create("text", [-0.3, 2.3 + 0.42, "AoS"], {
+        strokeColor: colors.ink, fontSize: 13, anchorX: "right", anchorY: "middle", fixed: true, highlight: false,
+        cssStyle: "font-weight:600",
+      });
+      for (let c = 0; c < 8; c++) cell(c, 2.3, fields[c % 4], c % 4 === 0);
+
+      // SoA row (bottom): a dense run of x's — every cell wanted.
+      board.create("text", [-0.3, 0.3 + 0.42, "SoA"], {
+        strokeColor: colors.ink, fontSize: 13, anchorX: "right", anchorY: "middle", fixed: true, highlight: false,
+        cssStyle: "font-weight:600",
+      });
+      for (let c = 0; c < 8; c++) cell(c, 0.3, "x", true);
+
+      // Step: overlay a 4-wide "cache line" bracket over each layout and label the waste.
+      step(sceneStrings("aos"), () => {
+        board.create("segment", [[0, 2.3 - 0.15], [4 * W, 2.3 - 0.15]], {
+          strokeColor: colors.cat[1], strokeWidth: 3, fixed: true, highlight: false,
+        });
+        board.create("text", [4 * W + 0.2, 2.3 + 0.42, sceneStrings("aos")], {
+          strokeColor: colors.cat[1], fontSize: 11, anchorX: "left", anchorY: "middle", fixed: true, highlight: false,
+        });
+      });
+      step(sceneStrings("soa"), () => {
+        board.create("segment", [[0, 0.3 - 0.15], [4 * W, 0.3 - 0.15]], {
+          strokeColor: colors.cat[1], strokeWidth: 3, fixed: true, highlight: false,
+        });
+        board.create("text", [4 * W + 0.2, 0.3 + 0.42, sceneStrings("soa")], {
+          strokeColor: colors.cat[1], fontSize: 11, anchorX: "left", anchorY: "middle", fixed: true, highlight: false,
+        });
+      });
+    },
+    {
+      boundingbox: [-1.4, 3.6, 12.5, -0.4],
+      keepAspect: false,
+      title: () => makeStrings("layout")("title"),
+    },
+  );
+
+  registerQuiz("hwswQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("wLoc"), correct: true },
+        { text: () => sceneStrings("wLuck"), correct: false },
+        { text: () => sceneStrings("wLang"), correct: false },
+        { text: () => sceneStrings("wClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("soaQ"),
+      options: [
+        { text: () => sceneStrings("soaRight"), correct: true },
+        { text: () => sceneStrings("soaAos"), correct: false },
+        { text: () => sceneStrings("soaSame"), correct: false },
+        { text: () => sceneStrings("soaNeither"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rmQ"),
+      options: [
+        { text: () => sceneStrings("rmStride"), correct: true },
+        { text: () => sceneStrings("rmMore"), correct: false },
+        { text: () => sceneStrings("rmBranch"), correct: false },
+        { text: () => sceneStrings("rmRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("blockQ"),
+      options: [
+        { text: () => sceneStrings("blReuse"), correct: true },
+        { text: () => sceneStrings("blFewer"), correct: false },
+        { text: () => sceneStrings("blRam"), correct: false },
+        { text: () => sceneStrings("blBranch"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fsQ"),
+      options: [
+        { text: () => sceneStrings("fsLine"), correct: true },
+        { text: () => sceneStrings("fsSame"), correct: false },
+        { text: () => sceneStrings("fsDisk"), correct: false },
+        { text: () => sceneStrings("fsNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fsFixQ"),
+      options: [
+        { text: () => sceneStrings("fxPad"), correct: true },
+        { text: () => sceneStrings("fxLock"), correct: false },
+        { text: () => sceneStrings("fxSleep"), correct: false },
+        { text: () => sceneStrings("fxRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sortQ"),
+      options: [
+        { text: () => sceneStrings("srtPred"), correct: true },
+        { text: () => sceneStrings("srtFewer"), correct: false },
+        { text: () => sceneStrings("srtRam"), correct: false },
+        { text: () => sceneStrings("srtClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("profQ"),
+      options: [
+        { text: () => sceneStrings("prMeasure"), correct: true },
+        { text: () => sceneStrings("prGuess"), correct: false },
+        { text: () => sceneStrings("prAll"), correct: false },
+        { text: () => sceneStrings("prNothing"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("symQ"),
+      options: [
+        { text: () => sceneStrings("symUnd"), correct: true },
+        { text: () => sceneStrings("symFeel"), correct: false },
+        { text: () => sceneStrings("symLang"), correct: false },
+        { text: () => sceneStrings("symGui"), correct: false },
+      ],
+    },
+    {
+      // Average added cycles per access = miss_cost / stride (a miss every `sk` accesses).
+      prompt: (v) => sceneStrings("missNumQ", v),
+      variables: "mc=[100,150,200,300] sk=[4,8,10,16]",
+      answer: (v) => Math.round((v.mc / v.sk) * 100) / 100,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

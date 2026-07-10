@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Advanced Branch Prediction</primer-title>
+
+    <primer-card>
+      <p>
+        The
+        <primer-ref to="computer-science/computer-architecture/ilp/branch-prediction-basics">2-bit saturating counter</primer-ref>
+        looks at one branch in isolation: "how has <em>this</em> branch behaved lately?" That's enough for a loop,
+        but it is blind to a huge source of predictability — branches <strong>correlate</strong> with each other.
+        How one branch resolves often tells you how the next will. Consider:
+      </p>
+      <primer-code lang="text">
+        if (x &lt; 5)  a = ...      // branch B1
+        if (y &lt; 5)  b = ...      // branch B2
+        if (x == y) ...           // branch B3  -- its outcome is CORRELATED with B1 and B2!
+      </primer-code>
+      <p>
+        A per-branch 2-bit counter for B3 can't see B1 and B2 at all. The leap in the 1990s — and the reason
+        today's predictors exceed <primer-math>99\%</primer-math> accuracy — was to predict a branch using the
+        <strong>history of recent branches</strong>, not just its own. These are <strong>correlating</strong> or
+        <strong>two-level</strong> predictors, and they are some of the most elegant machine-learning-in-hardware
+        ever built.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two levels: history, then a counter</h2>
+      <p>
+        A two-level predictor has, unsurprisingly, two levels. The <strong>first level</strong> is a
+        <strong>history register</strong> — a shift register recording the taken/not-taken outcomes of the last
+        <primer-math>k</primer-math> branches (a 1 for taken, 0 for not-taken, shifted in each time). The
+        <strong>second level</strong> is a table of 2-bit counters, the <strong>pattern history table (PHT)</strong>,
+        indexed <em>by that history pattern</em>. In effect the predictor learns "when the recent history looks
+        like <primer-math>1011</primer-math>, this branch is usually taken."
+      </p>
+      <p>
+        The history can be <strong>global</strong> (one shared register of the last <primer-math>k</primer-math>
+        branches anywhere — captures correlation <em>between</em> branches) or <strong>local</strong> (a separate
+        history per branch address — captures a single branch's own repeating pattern, like an alternating
+        <primer-math>T,N,T,N</primer-math>). Global history nails the B1/B2/B3 correlation above; local history
+        nails a branch with its own rhythm. Neither wins everywhere — which sets up the tournament idea.
+      </p>
+      <primer-theorem name="Two-level (correlating) prediction">
+        <ul>
+          <li><strong>level 1</strong>: a branch-history register (shift in each outcome) — <strong>global</strong>
+            (shared) or <strong>local</strong> (per-branch);</li>
+          <li><strong>level 2</strong>: a pattern history table (PHT) of 2-bit counters, indexed by the history
+            pattern;</li>
+          <li>this captures <strong>correlation</strong> between branches that a per-branch counter cannot see;</li>
+          <li><strong>gshare</strong> indexes the PHT with <em>global history XOR branch address</em> to spread
+            branches out and cut aliasing.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Strings for the gshare index diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "gshare": {
+          "title": "gshare: XOR the global history with the branch PC to index the PHT",
+          "pc": "Branch address (PC bits)",
+          "ghr": "Global history register (last k outcomes)",
+          "xor": "XOR",
+          "pht": "Pattern History Table (2-bit counters)",
+          "pred": "prediction = high bit of the selected counter"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>gshare: mixing history and address</h2>
+      <p>
+        A pure global-history index wastes the table — many branches share the same recent history and pile onto
+        the same counters (aliasing again). Scott McFarling's <strong>gshare</strong> (1993) fixes this with one
+        cheap trick: <strong>XOR the global history register with the branch's address</strong> and use the result
+        to index the PHT. Now two branches with identical history but different addresses hash to
+        <em>different</em> counters, dramatically reducing interference — for almost no extra hardware. It became
+        the standard baseline for a decade.
+      </p>
+      <primer-geometry scene="gshare"></primer-geometry>
+      <primer-code run>
+        // gshare index = (branch PC bits) XOR (global history), masked to the table size.
+        function gshareIndex(pc: number, history: number, indexBits: number): number {
+          const mask = (1 &lt;&lt; indexBits) - 1;         // e.g. 10 bits -> 1024 entries
+          return (pc ^ history) &amp; mask;
+        }
+
+        const indexBits = 10; // 1024-entry PHT
+        // Two different branches that happen to share the same recent global history:
+        const historyAB = 0b0110110101;
+        console.log(`branch A @0x40  -> PHT index ${gshareIndex(0x40, historyAB, indexBits)}`);
+        console.log(`branch B @0x7C  -> PHT index ${gshareIndex(0x7C, historyAB, indexBits)}`);
+        console.log("Same history, different PC -> different counters -> no aliasing.");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Tournaments: let predictors compete</h2>
+      <p>
+        Since global-history and local-history predictors each win on different branches, why choose? A
+        <strong>tournament predictor</strong> (pioneered in the Alpha 21264, 1998) runs <em>two</em> predictors in
+        parallel and adds a third small table — the <strong>chooser</strong> — that learns, per branch,
+        <em>which predictor to trust</em>. The chooser is itself a table of 2-bit counters, updated toward
+        whichever component was right. You get the best of both, dynamically, per branch. This "predict which
+        predictor" idea is the direct ancestor of everything modern.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Predictor</th><th>Idea</th><th>Typical accuracy</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Static (BTFN)</td><td>fixed rule, no learning</td><td>~65–80%</td></tr>
+            <tr><td>2-bit bimodal</td><td>one counter per branch address</td><td>~85–93%</td></tr>
+            <tr><td>gshare</td><td>global history XOR PC → PHT</td><td>~93–96%</td></tr>
+            <tr><td>Tournament</td><td>chooser picks global vs local per branch</td><td>~96–98%</td></tr>
+            <tr><td>TAGE (state of the art)</td><td>many tables, many history lengths, tagged</td><td>&gt;99%</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-card>
+      <h2>TAGE: the modern champion</h2>
+      <p>
+        Today's best predictors are variants of <strong>TAGE</strong> (TAgged GEometric history length, ~2006).
+        The insight: different branches need different amounts of history — some correlate with the last 2
+        branches, some with the last 80. TAGE keeps <em>several</em> tables indexed with
+        <strong>geometrically increasing</strong> history lengths (say 4, 8, 16, 32, 64…), each entry
+        <strong>tagged</strong> so it only answers for the branch it actually learned. For each prediction it uses
+        the match from the table with the <em>longest</em> history that has a confident, tagged hit. TAGE-family
+        predictors reach well past <primer-math>99\%</primer-math> and dominate every branch-prediction
+        championship — they are what's inside current Intel, AMD, and Apple cores in spirit.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The other half: predicting the target (BTB)</h2>
+      <p>
+        Everything so far predicts <em>direction</em> (taken/not-taken). But the front end also needs the
+        <strong>target address</strong> to know <em>where</em> to fetch next — and it needs it in the fetch cycle,
+        before the branch is even decoded. The <strong>branch target buffer (BTB)</strong> is a small cache from
+        branch address → last-seen target address, queried every fetch. For a plain conditional branch the target
+        is fixed, so the BTB nails it. Indirect branches (virtual calls, jump tables, <code>switch</code>) are
+        harder — their target <em>varies</em> — so cores add a specialised <strong>indirect predictor</strong> and
+        a <strong>return address stack (RAS)</strong> that pushes on <code>call</code> and pops on
+        <code>return</code> to predict function returns almost perfectly.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="How can a predictor be right 99% of the time — isn't a branch just a coin flip?">
+      <p>
+        Real program branches are wildly <em>non-random</em>. Loop branches are taken hundreds of times then exit
+        once. Error checks (<code>if (ptr == null)</code>) are almost never taken. A branch guarding a rarely-hit
+        case is predictable precisely because it's rare. And correlation means even "data-dependent" branches leak
+        their outcome through the branches before them. A modern TAGE predictor exploiting dozens of history
+        lengths finds structure a human would never spot — which is why "just a coin flip" branches (genuinely
+        random data) are the one case that still defeats prediction, and the reason branchless code and
+        <em>predication</em> exist for those.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Correlation is about OTHER branches, not just repetition of this one">
+      <p>
+        A common muddle: thinking a correlating predictor is just "a longer memory of this branch." Local-history
+        prediction is that — a branch's own repeating pattern. But the powerful idea is <strong>global</strong>
+        correlation: using the outcomes of <em>different, recent</em> branches to predict this one, because
+        control flow ties them together (<code>if (x&lt;5)</code> and <code>if (x==y)</code> share the variable
+        <code>x</code>). If you only ever think about one branch's own history, you miss the entire reason
+        two-level predictors beat the bimodal counter. Global history is the star of the show.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Why the last few percent are worth a fortune</h2>
+      <p>
+        On a wide, deep, speculative core the misprediction penalty is 15–20+ cycles, and a fifth of instructions
+        are branches. Going from <primer-math>95\%</primer-math> to <primer-math>99\%</primer-math> accuracy cuts
+        the misprediction rate <em>fivefold</em> (from 1-in-20 to 1-in-100), and the wasted-cycle bill falls with
+        it. That is why a state-of-the-art predictor — TAGE plus a BTB, an indirect predictor, and a return stack —
+        is one of the most valuable square millimetres on a modern chip. It is also what makes deep
+        <primer-ref todo to="ilp/speculation">speculation</primer-ref> pay off, and, uncomfortably, what later
+        made speculative side-channel attacks like Spectre possible.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: advanced-predictor concepts + a gshare-index numeric question. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "advPredQuiz@1": {
+          "intro": "Correlating/two-level predictors use branch history (global or local) to index a PHT. gshare = global-history XOR PC. Tournament chooses per branch; TAGE (>99%) uses many history lengths. The BTB predicts the TARGET.",
+          "corrQ": "A correlating (two-level) predictor improves accuracy by using…",
+          "cHist": "the history of recent branch outcomes to index a table of counters",
+          "cClock": "a faster clock",
+          "cRam": "more main memory",
+          "cRand": "a random number generator",
+          "levelsQ": "In a two-level predictor, the two levels are…",
+          "lTwo": "a branch-history register, then a pattern history table of counters",
+          "lCache": "the L1 and L2 caches",
+          "lReg": "two register files",
+          "lCore": "two CPU cores",
+          "globalQ": "GLOBAL history captures…",
+          "gCorr": "correlation between different recent branches",
+          "gOne": "only one branch's own repeating pattern",
+          "gNone": "nothing useful",
+          "gClock": "the clock frequency",
+          "localQ": "LOCAL history keeps…",
+          "loPer": "a separate history per branch address (its own pattern)",
+          "loShared": "one shared history for all branches",
+          "loNone": "no history at all",
+          "loRam": "a copy of RAM",
+          "gshareQ": "gshare indexes the PHT using…",
+          "gsXor": "the global history XORed with the branch address",
+          "gsPc": "only the branch address",
+          "gsRand": "a random index",
+          "gsClock": "the clock counter",
+          "gsWhyQ": "The point of XORing history with the PC in gshare is to…",
+          "gwAlias": "reduce aliasing — spread branches with the same history to different counters",
+          "gwSlow": "slow the predictor down",
+          "gwClock": "raise the clock",
+          "gwRam": "save RAM",
+          "tourQ": "A tournament predictor works by…",
+          "tCh": "running two predictors and using a chooser to pick the better one per branch",
+          "tOne": "using exactly one predictor always",
+          "tRand": "flipping a coin",
+          "tStatic": "never learning",
+          "tageQ": "TAGE achieves its accuracy by…",
+          "tgGeo": "using several tagged tables with geometrically increasing history lengths",
+          "tgOne": "using a single 2-bit counter",
+          "tgStatic": "predicting statically",
+          "tgClock": "overclocking",
+          "btbQ": "The branch target buffer (BTB) predicts…",
+          "btTarget": "the target ADDRESS to fetch next, in the fetch cycle",
+          "btDir": "only taken vs not-taken",
+          "btData": "the data the branch loads",
+          "btClock": "the clock speed",
+          "rasQ": "A return address stack (RAS) predicts…",
+          "rasRet": "the target of function returns (push on call, pop on return)",
+          "rasLoop": "the number of loop iterations",
+          "rasData": "cache misses",
+          "rasNone": "nothing",
+          "gsNumQ": "gshare with PC bits = ${pc} and global history = ${h}: what is the raw index PC XOR history (before masking)?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="advPredQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/ilp/branch-prediction-basics"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- gshare index diagram (static base content) + the randomised quiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "gshare",
+    ({ board, colors, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, txt, ci, fs = 11) => {
+        board.create(
+          "polygon",
+          [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+          { fillColor: colors.cat[ci], fillOpacity: 0.22, strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false } },
+        );
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, txt], { strokeColor: colors.ink, fontSize: fs, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      };
+      const arrow = (p, q) => board.create("arrow", [p, q], { strokeColor: colors.line, strokeWidth: 1.5, lastArrow: { type: 2, size: 5 }, highlight: false });
+
+      // PC and GHR feeding an XOR.
+      box(0, 5.4, 4.4, 6.4, sceneStrings("pc"), 0);
+      box(0, 3.4, 4.4, 4.4, sceneStrings("ghr"), 1);
+      // XOR node (circle).
+      board.create("circle", [[6.2, 4.9], 0.55], { fillColor: colors.cat[2], fillOpacity: 0.25, strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false });
+      board.create("text", [6.2, 4.9, sceneStrings("xor")], { strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      // PHT.
+      box(8.0, 3.6, 12.4, 6.2, sceneStrings("pht"), 3);
+      // Prediction output.
+      box(8.0, 1.4, 12.4, 2.4, sceneStrings("pred"), 1, 10);
+
+      arrow([4.4, 5.9], [5.75, 5.15]);   // PC -> XOR
+      arrow([4.4, 3.9], [5.75, 4.65]);   // GHR -> XOR
+      arrow([6.75, 4.9], [8.0, 4.9]);    // XOR -> PHT (index)
+      arrow([10.2, 3.6], [10.2, 2.4]);   // PHT -> prediction
+    },
+    {
+      boundingbox: [-0.6, 7.0, 13.2, 0.8],
+      keepAspect: false,
+      title: () => makeStrings("gshare")("title"),
+    },
+  );
+
+  registerQuiz("advPredQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("corrQ"),
+      options: [
+        { text: () => sceneStrings("cHist"), correct: true },
+        { text: () => sceneStrings("cClock"), correct: false },
+        { text: () => sceneStrings("cRam"), correct: false },
+        { text: () => sceneStrings("cRand"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("levelsQ"),
+      options: [
+        { text: () => sceneStrings("lTwo"), correct: true },
+        { text: () => sceneStrings("lCache"), correct: false },
+        { text: () => sceneStrings("lReg"), correct: false },
+        { text: () => sceneStrings("lCore"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("globalQ"),
+      options: [
+        { text: () => sceneStrings("gCorr"), correct: true },
+        { text: () => sceneStrings("gOne"), correct: false },
+        { text: () => sceneStrings("gNone"), correct: false },
+        { text: () => sceneStrings("gClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("localQ"),
+      options: [
+        { text: () => sceneStrings("loPer"), correct: true },
+        { text: () => sceneStrings("loShared"), correct: false },
+        { text: () => sceneStrings("loNone"), correct: false },
+        { text: () => sceneStrings("loRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gshareQ"),
+      options: [
+        { text: () => sceneStrings("gsXor"), correct: true },
+        { text: () => sceneStrings("gsPc"), correct: false },
+        { text: () => sceneStrings("gsRand"), correct: false },
+        { text: () => sceneStrings("gsClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gsWhyQ"),
+      options: [
+        { text: () => sceneStrings("gwAlias"), correct: true },
+        { text: () => sceneStrings("gwSlow"), correct: false },
+        { text: () => sceneStrings("gwClock"), correct: false },
+        { text: () => sceneStrings("gwRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tourQ"),
+      options: [
+        { text: () => sceneStrings("tCh"), correct: true },
+        { text: () => sceneStrings("tOne"), correct: false },
+        { text: () => sceneStrings("tRand"), correct: false },
+        { text: () => sceneStrings("tStatic"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tageQ"),
+      options: [
+        { text: () => sceneStrings("tgGeo"), correct: true },
+        { text: () => sceneStrings("tgOne"), correct: false },
+        { text: () => sceneStrings("tgStatic"), correct: false },
+        { text: () => sceneStrings("tgClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("btbQ"),
+      options: [
+        { text: () => sceneStrings("btTarget"), correct: true },
+        { text: () => sceneStrings("btDir"), correct: false },
+        { text: () => sceneStrings("btData"), correct: false },
+        { text: () => sceneStrings("btClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rasQ"),
+      options: [
+        { text: () => sceneStrings("rasRet"), correct: true },
+        { text: () => sceneStrings("rasLoop"), correct: false },
+        { text: () => sceneStrings("rasData"), correct: false },
+        { text: () => sceneStrings("rasNone"), correct: false },
+      ],
+    },
+    {
+      // Raw gshare index before masking = pc XOR h.
+      prompt: (v) => sceneStrings("gsNumQ", v),
+      variables: "pc=[0:63] h=[0:63]",
+      answer: (v) => v.pc ^ v.h,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

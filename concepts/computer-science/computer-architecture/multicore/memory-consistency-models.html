@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Memory Consistency Models</primer-title>
+
+    <primer-card>
+      <p>
+        <primer-ref to="computer-science/computer-architecture/multicore/the-mesi-protocol">Coherence</primer-ref>
+        keeps a <em>single</em> location honest: everyone agrees on the order of writes to
+        <primer-math>X</primer-math>. But real programs touch <em>many</em> locations, and the moment two threads
+        read and write <primer-math>X</primer-math> <em>and</em> <primer-math>Y</primer-math>, a new and much harder
+        question appears: in what order does each thread <em>see</em> the other's operations across
+        <em>different</em> variables? That question is <strong>memory consistency</strong>, and it is where computer
+        architecture reaches up and grabs the programmer by the collar.
+      </p>
+      <p>
+        This is the most software-facing lesson in the module. Get it wrong and your lock-free code has a bug that
+        appears once a week on one customer's machine and never in your tests. The rules that decide what
+        reorderings the hardware may perform — and how you, the programmer, can forbid them — are the
+        <strong>memory consistency model</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Coherence vs consistency — the crucial distinction</h2>
+      <primer-theorem name="Coherence vs consistency">
+        <ul>
+          <li><strong>Coherence</strong> is <em>per location</em>: all cores see the writes to any one address in a
+            single agreed order;</li>
+          <li><strong>Consistency</strong> is <em>across locations</em>: it governs the order in which one core's
+            reads and writes to <em>different</em> addresses become visible to other cores;</li>
+          <li>coherence is necessary but <strong>not sufficient</strong> — a perfectly coherent machine can still
+            let threads disagree about the relative order of accesses to different variables.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Keep the slogan: <em>coherence is about one variable; consistency is about the story across variables.</em>
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Sequential consistency: the intuitive ideal</h2>
+      <p>
+        The model every programmer <em>wishes</em> the hardware provided is <strong>sequential consistency (SC)</strong>,
+        defined by Leslie Lamport: the result of any execution is the same as if all cores' operations were executed
+        in <em>some single interleaved order</em>, and within each core the operations appear in <em>program
+        order</em>. In plain words: pretend the machine has one memory and one clock, and the threads simply take
+        turns, never reordering their own instructions. It is exactly the mental model you use when you reason about
+        threads on a whiteboard.
+      </p>
+      <p>
+        SC is beautifully simple to think about — and painfully expensive to build. It forbids the processor from
+        letting a later load overtake an earlier store, even to a different address, even when doing so would be
+        completely safe for a single thread. That reordering is one of the biggest sources of performance in a
+        modern core (it hides store latency behind independent loads). Enforcing SC means giving that up, so
+        essentially <em>no</em> mainstream processor implements it.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The reordering that breaks intuition</h2>
+      <p>
+        Here is the canonical example. Both <primer-math>x</primer-math> and <primer-math>y</primer-math> start at
+        <primer-math>0</primer-math>. Two threads run:
+      </p>
+      <primer-math display>\text{T1: } x \leftarrow 1;\ r_1 \leftarrow y \qquad\qquad \text{T2: } y \leftarrow 1;\ r_2 \leftarrow x</primer-math>
+      <p>
+        Under sequential consistency, can both threads end with <primer-math>r_1 = 0</primer-math> and
+        <primer-math>r_2 = 0</primer-math>? Think it through: for <primer-math>r_1 = 0</primer-math>, T1's read of
+        <primer-math>y</primer-math> happened before T2 wrote <primer-math>y</primer-math>; for
+        <primer-math>r_2 = 0</primer-math>, T2's read of <primer-math>x</primer-math> happened before T1 wrote
+        <primer-math>x</primer-math>. Those two demands contradict each other — impossible under SC. The code below
+        enumerates <em>every</em> SC interleaving to prove <primer-math>(0,0)</primer-math> never appears:
+      </p>
+      <primer-code run>
+        // Enumerate every sequentially-consistent interleaving of:
+        //   T1: (a) x=1  (b) r1=y      T2: (c) y=1  (d) r2=x
+        // Program order must hold within each thread: a before b, c before d.
+        function interleavings(): string[][] {
+          const out: string[][] = [];
+          function go(a: number, c: number, acc: string[]): void {
+            if (a === 2 && c === 2) { out.push(acc.slice()); return; }
+            if (a < 2) go(a + 1, c, acc.concat(a === 0 ? "x=1" : "r1=y"));
+            if (c < 2) go(a, c + 1, acc.concat(c === 0 ? "y=1" : "r2=x"));
+          }
+          go(0, 0, []);
+          return out;
+        }
+
+        const seen = new Set&lt;string&gt;();
+        for (const order of interleavings()) {
+          let x = 0, y = 0, r1 = 0, r2 = 0;
+          for (const step of order) {
+            if (step === "x=1") x = 1;
+            else if (step === "y=1") y = 1;
+            else if (step === "r1=y") r1 = y;
+            else if (step === "r2=x") r2 = x;
+          }
+          seen.add(`(r1=${r1}, r2=${r2})`);
+        }
+        console.log("SC-reachable outcomes:", [...seen].sort().join("  "));
+        console.log("Is (r1=0, r2=0) possible under SC? ", seen.has("(r1=0, r2=0)"));
+      </primer-code>
+      <p>
+        Yet on real x86, ARM and POWER hardware, <primer-math>(0,0)</primer-math> <em>does</em> happen. Why?
+      </p>
+    </primer-card>
+
+    <!-- Strings for the store-buffer figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "storeBuffer": {
+          "title": "The store buffer: a store waits in the FIFO while a later load overtakes it, reading memory directly",
+          "core": "Core (issues x=1, then reads y)",
+          "sb": "Store buffer (FIFO): x=1 waiting…",
+          "mem": "Shared memory / cache",
+          "store": "store x=1 (delayed here)",
+          "load": "load y bypasses to memory — overtakes the store!"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Why: the store buffer</h2>
+      <p>
+        The culprit is the <strong>store buffer</strong>. When a core executes <primer-math>x \leftarrow 1</primer-math>,
+        it does not wait for the write to reach cache — that could take dozens of cycles. It drops the store into a
+        small FIFO buffer and moves on <em>immediately</em> to the next instruction, the read of
+        <primer-math>y</primer-math>. So the load of <primer-math>y</primer-math> can complete <em>before</em> the
+        store of <primer-math>x</primer-math> is visible to anyone else. The load has effectively overtaken the
+        store. Do this in both threads and you get <primer-math>(0,0)</primer-math> — a result no interleaving of
+        the original program allows.
+      </p>
+      <primer-geometry scene="storeBuffer"></primer-geometry>
+      <p>
+        This specific relaxation — <em>a load may bypass an earlier store to a different address</em> — is called
+        <strong>Total Store Order (TSO)</strong>, and it is what x86 actually implements. TSO keeps almost all of
+        SC's guarantees (stores from one core still reach others in order) but permits exactly this store→load
+        reorder, because the store buffer is too valuable to give up.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A spectrum of models — and the fence</h2>
+      <p>
+        Architectures sit on a spectrum from strict to relaxed. The more reorderings a model allows, the faster the
+        hardware and the more careful the programmer must be.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Model</th><th>Reorderings allowed</th><th>Programmer burden</th><th>Real example</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Sequential (SC)</strong></td><td>none</td><td>trivial to reason about</td><td>(essentially none in HW)</td></tr>
+            <tr><td><strong>TSO</strong></td><td>store→later-load only</td><td>low — need a fence for that one case</td><td>x86-64, SPARC TSO</td></tr>
+            <tr><td><strong>Weak / release</strong></td><td>almost any, unless a fence forbids it</td><td>high — fences/acquire-release everywhere shared</td><td>ARM, POWER, RISC-V</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The programmer's tool for clawing back order is the <strong>memory fence</strong> (a barrier — x86's
+        <primer-math>\texttt{MFENCE}</primer-math>, ARM's <primer-math>\texttt{DMB}</primer-math>). A fence forbids
+        the hardware from moving accesses across it: put an <primer-math>\texttt{MFENCE}</primer-math> between the
+        store and the load in the example, and it drains the store buffer first, killing the
+        <primer-math>(0,0)</primer-math> outcome. In modern code you rarely write fences by hand — you use
+        <strong>acquire/release</strong> atomics (a lock's release "publishes" everything before it; an acquire
+        "sees" it), and the compiler emits the right fences for you. Every mutex, every lock-free queue is built on
+        exactly this.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If relaxed hardware is so treacherous, why doesn't everyone just build x86-style TSO?">
+      <p>
+        Because relaxation is <em>performance</em>, and it is worth the most where power matters most. ARM and
+        RISC-V chose weak models precisely to let the hardware reorder aggressively and skip the bookkeeping TSO
+        needs — cheaper, cooler, simpler cores, which is gold in a phone. The bet is that <em>ordinary</em> code is
+        already race-free (protected by locks), and only the tiny amount of lock-free and synchronisation code needs
+        explicit fences. The C++11 and Java memory models exist to make this bearable: you write to the
+        <em>language's</em> model with <primer-math>\texttt{atomic}</primer-math> and acquire/release, and the
+        compiler translates to whatever fences the target ISA needs. Write the fences right and weak hardware is
+        both correct and fast; write them wrong and you get the bug that only reproduces in production.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A data race is not fixed by coherence — you need consistency and fences">
+      <p>
+        The most dangerous misconception here: "the caches are coherent, so my threads will see consistent values."
+        <strong>No.</strong> Coherence guarantees nothing about the ordering across different variables. The flag-based
+        handoff <primer-math>\texttt{data = 42; ready = true;}</primer-math> in one thread and
+        <primer-math>\texttt{while(!ready){} use(data);}</primer-math> in another can <em>still</em> break on relaxed
+        hardware: the reader may see <primer-math>\texttt{ready}</primer-math> become true while
+        <primer-math>\texttt{data}</primer-math> still reads its old value, because the two stores were reordered.
+        Coherence keeps each variable honest; only a <em>fence</em> or a release/acquire pair orders them relative to
+        each other. Never rely on coherence to order different locations.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: consistency vs coherence, SC, TSO, fences. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "consistencyQuiz@1": {
+          "intro": "Coherence = one location. Consistency = ordering across locations. SC forbids reordering; TSO allows store→load; fences restore order.",
+          "distQ": "The difference between coherence and consistency is that…",
+          "dRight": "coherence orders accesses to one location; consistency orders accesses across different locations",
+          "dSame": "they are two words for the same thing",
+          "dSwap": "consistency is per-location and coherence is across locations",
+          "dNone": "neither concerns ordering",
+          "scQ": "Sequential consistency (SC) requires that…",
+          "sRight": "the result equals some single interleaving that respects each core's program order",
+          "sReorder": "each core may freely reorder its own instructions",
+          "sNo": "reads never return written values",
+          "sOne": "only one core may ever run",
+          "scCostQ": "Why do almost no processors implement strict SC?",
+          "cReorder": "it forbids valuable reorderings like a load bypassing an earlier store",
+          "cImposs": "it is mathematically impossible",
+          "cSlowRam": "RAM cannot be built for it",
+          "cFree": "it is actually free, they just don't bother",
+          "tsoQ": "Total Store Order (TSO), used by x86, permits which reordering?",
+          "tRight": "a later load may bypass an earlier store to a different address",
+          "tAll": "any access may move past any other",
+          "tNone": "no reordering at all",
+          "tStore": "stores may be reordered among themselves",
+          "sbQ": "The hardware feature that causes TSO's store→load reordering is…",
+          "sbBuf": "the store buffer, which lets a core continue before its store reaches cache",
+          "sbCache": "the L1 cache being too small",
+          "sbClock": "a slow clock",
+          "sbBus": "the coherence bus",
+          "exQ": "In the classic test (x=1;r1=y ‖ y=1;r2=x), the outcome r1=r2=0 is…",
+          "eRight": "impossible under SC, but possible under TSO/weak hardware",
+          "eAlways": "impossible on any real machine",
+          "eSc": "possible under SC",
+          "eNever": "the only possible outcome",
+          "fenceQ": "A memory fence (barrier) does what?",
+          "fRight": "forbids the hardware from reordering accesses across it",
+          "fSpeed": "speeds every access up",
+          "fDelete": "deletes the store buffer permanently",
+          "fNone": "has no effect on ordering",
+          "weakQ": "On a weak model (ARM, POWER, RISC-V), the programmer must…",
+          "wRight": "insert fences or use acquire/release to order shared accesses",
+          "wNothing": "do nothing; it behaves like SC automatically",
+          "wOne": "use only one thread",
+          "wDisable": "disable all caches",
+          "relQ": "Release/acquire synchronisation means that…",
+          "rRight": "a release publishes prior writes; a matching acquire sees them",
+          "rNone": "nothing is ordered",
+          "rReverse": "an acquire hides prior writes from everyone",
+          "rSame": "it is identical to a plain load",
+          "cohEnoughQ": "For the handoff 'data=42; ready=true' then 'while(!ready){} use(data)', coherence alone…",
+          "ceRight": "is NOT enough — the two stores can be seen out of order without a fence",
+          "ceEnough": "guarantees data is 42 when ready is seen true",
+          "ceNever": "makes ready never become true",
+          "ceOne": "forces single-threaded execution",
+          "modelOrderQ": "Order these from STRICTEST to most RELAXED:",
+          "moRight": "SC, then TSO, then weak/release",
+          "moRev": "weak, then TSO, then SC",
+          "moTso": "TSO, then SC, then weak",
+          "moFlat": "they are all equally strict"
+        }
+      }
+    </script>
+
+    <primer-quiz name="consistencyQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/multicore/the-mesi-protocol"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Store-buffer block diagram (static base content): core -> store buffer -> memory, with a load
+     bypassing the buffered store straight to memory. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "storeBuffer",
+    ({ board, colors, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, fillIdx, key) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[fillIdx], fillOpacity: 0.20, strokeColor: colors.line, strokeWidth: 1.5,
+          fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      };
+
+      // Core (left), store buffer (middle), memory (right).
+      box(0.3, 2.2, 3.3, 3.6, 0, "core");
+      box(4.2, 2.2, 7.2, 3.6, 3, "sb");
+      box(8.1, 2.2, 11.1, 3.6, 1, "mem");
+
+      // Store: core -> store buffer (delayed).
+      board.create("arrow", [[3.3, 3.1], [4.2, 3.1]], { strokeColor: colors.cat[0], strokeWidth: 2.5, lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true });
+      board.create("text", [3.75, 3.9, sceneStrings("store")], { strokeColor: colors.cat[0], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+
+      // Store buffer -> memory (eventually).
+      board.create("arrow", [[7.2, 3.1], [8.1, 3.1]], { strokeColor: colors.line, strokeWidth: 2, dash: 2, lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true });
+
+      // Load bypass: core -> memory directly, overtaking the buffered store (curved lower path).
+      board.create("arrow", [[1.8, 2.2], [9.6, 1.2]], { strokeColor: colors.cat[1], strokeWidth: 2.5, lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true });
+      board.create("text", [5.7, 0.7, sceneStrings("load")], { strokeColor: colors.cat[1], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+    },
+    { boundingbox: [-0.2, 4.3, 11.4, 0.3], keepAspect: false, title: () => makeStrings("storeBuffer")("title") },
+  );
+
+  registerQuiz("consistencyQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("distQ"),
+      options: [
+        { text: () => sceneStrings("dRight"), correct: true },
+        { text: () => sceneStrings("dSame"), correct: false },
+        { text: () => sceneStrings("dSwap"), correct: false },
+        { text: () => sceneStrings("dNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("scQ"),
+      options: [
+        { text: () => sceneStrings("sRight"), correct: true },
+        { text: () => sceneStrings("sReorder"), correct: false },
+        { text: () => sceneStrings("sNo"), correct: false },
+        { text: () => sceneStrings("sOne"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("scCostQ"),
+      options: [
+        { text: () => sceneStrings("cReorder"), correct: true },
+        { text: () => sceneStrings("cImposs"), correct: false },
+        { text: () => sceneStrings("cSlowRam"), correct: false },
+        { text: () => sceneStrings("cFree"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tsoQ"),
+      options: [
+        { text: () => sceneStrings("tRight"), correct: true },
+        { text: () => sceneStrings("tAll"), correct: false },
+        { text: () => sceneStrings("tNone"), correct: false },
+        { text: () => sceneStrings("tStore"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sbQ"),
+      options: [
+        { text: () => sceneStrings("sbBuf"), correct: true },
+        { text: () => sceneStrings("sbCache"), correct: false },
+        { text: () => sceneStrings("sbClock"), correct: false },
+        { text: () => sceneStrings("sbBus"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("exQ"),
+      options: [
+        { text: () => sceneStrings("eRight"), correct: true },
+        { text: () => sceneStrings("eAlways"), correct: false },
+        { text: () => sceneStrings("eSc"), correct: false },
+        { text: () => sceneStrings("eNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fenceQ"),
+      options: [
+        { text: () => sceneStrings("fRight"), correct: true },
+        { text: () => sceneStrings("fSpeed"), correct: false },
+        { text: () => sceneStrings("fDelete"), correct: false },
+        { text: () => sceneStrings("fNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("weakQ"),
+      options: [
+        { text: () => sceneStrings("wRight"), correct: true },
+        { text: () => sceneStrings("wNothing"), correct: false },
+        { text: () => sceneStrings("wOne"), correct: false },
+        { text: () => sceneStrings("wDisable"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("relQ"),
+      options: [
+        { text: () => sceneStrings("rRight"), correct: true },
+        { text: () => sceneStrings("rNone"), correct: false },
+        { text: () => sceneStrings("rReverse"), correct: false },
+        { text: () => sceneStrings("rSame"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cohEnoughQ"),
+      options: [
+        { text: () => sceneStrings("ceRight"), correct: true },
+        { text: () => sceneStrings("ceEnough"), correct: false },
+        { text: () => sceneStrings("ceNever"), correct: false },
+        { text: () => sceneStrings("ceOne"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("modelOrderQ"),
+      options: [
+        { text: () => sceneStrings("moRight"), correct: true },
+        { text: () => sceneStrings("moRev"), correct: false },
+        { text: () => sceneStrings("moTso"), correct: false },
+        { text: () => sceneStrings("moFlat"), correct: false },
+      ],
+    },
+  ]);
+</script>

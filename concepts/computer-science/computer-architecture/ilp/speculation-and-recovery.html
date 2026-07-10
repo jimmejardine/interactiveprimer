@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Speculation and Recovery</primer-title>
+
+    <primer-card>
+      <p>
+        A branch predictor is only useful if the processor <em>acts</em> on its guess. <strong>Speculative
+        execution</strong> is exactly that leap of faith: rather than wait for a branch to resolve, the machine
+        <em>believes the prediction</em> and charges ahead — fetching, renaming, and even <em>executing</em>
+        instructions from the predicted path, cycles or tens of cycles before it knows whether the guess was
+        right. On a modern deep pipeline the processor may have <em>hundreds</em> of in-flight instructions, most
+        of them past one or more unresolved branches. It is running on faith, continuously.
+      </p>
+      <p>
+        Faith needs a safety net. The whole scheme works only because the machine can <strong>undo</strong> a bad
+        guess perfectly. Every speculative instruction's effects are held provisionally in the
+        <primer-ref to="computer-science/computer-architecture/ilp/out-of-order-execution-and-the-reorder-buffer">reorder buffer</primer-ref>,
+        never committed to real architectural state until the branch it depends on is confirmed correct. If the
+        <primer-ref to="computer-science/computer-architecture/ilp/advanced-branch-prediction">prediction</primer-ref>
+        turns out wrong, the machine <strong>squashes</strong> everything down the wrong path as if it never
+        happened. Speculation is aggressive optimism made safe by a flawless undo button.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the speculation/flush timeline. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "spec": {
+          "title": "Correct prediction (top) vs misprediction and flush (bottom)",
+          "fetch": "fetch branch",
+          "guess": "predict TAKEN → speculatively fetch & execute down that path",
+          "resolveOk": "branch resolves: prediction CORRECT → speculative work commits, cost ≈ 0",
+          "resolveBad": "branch resolves: WRONG → squash speculative work",
+          "flush": "flush pipeline, restart down correct path (lost cycles = penalty)",
+          "good": "useful work",
+          "waste": "wasted (squashed) work"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The two outcomes: commit or squash</h2>
+      <p>
+        When a branch finally resolves, one of two things happens. If the prediction was <strong>right</strong>,
+        the speculative instructions were real work all along — they simply commit in order like everything else,
+        and the branch cost essentially nothing. If it was <strong>wrong</strong>, every instruction fetched after
+        the branch is on the wrong path and must be <strong>squashed</strong>: the ROB entries younger than the
+        branch are flushed, the rename map is rolled back, and the front end restarts fetching from the correct
+        target. The two timelines below show the difference — the same start, wildly different endings.
+      </p>
+      <primer-geometry scene="spec"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The misprediction penalty</h2>
+      <p>
+        Squashing isn't free — it is the single largest cost a branch can inflict. Every wrongly-fetched
+        instruction is thrown away, and the pipeline must refill from the correct path. The number of lost cycles
+        is roughly the <strong>pipeline depth from fetch to branch-resolution</strong>: the deeper the pipeline,
+        the taller the tower of speculative work that collapses. On a 15–20-stage core the
+        <strong>misprediction penalty</strong> is commonly 15–20 cycles.
+      </p>
+      <primer-math display>\Delta\text{CPI}_{\text{branch}} \;=\; f_{\text{branch}} \times m \times \text{penalty},</primer-math>
+      <p>
+        where <primer-math>f_{\text{branch}}</primer-math> is the fraction of instructions that are branches and
+        <primer-math>m</primer-math> the misprediction rate. This is precisely why the previous lesson chased
+        <primer-math>99\%</primer-math> accuracy so hard, and why deeper pipelines (higher clock) fight a losing
+        battle against branches unless prediction keeps up. Run the model:
+      </p>
+      <primer-code run>
+        // Branch misprediction's contribution to CPI, and the wasted work per second.
+        function branchCpi(branchFrac: number, mispredictRate: number, penalty: number): number {
+          return branchFrac * mispredictRate * penalty;
+        }
+
+        const branchFrac = 0.20;   // 1 in 5 instructions is a branch
+        const penalty = 18;        // cycles lost per misprediction (deep pipeline)
+        console.log("accuracy  mispredict  added-CPI");
+        for (const acc of [0.90, 0.95, 0.98, 0.99, 0.995]) {
+          const m = 1 - acc;
+          const dcpi = branchCpi(branchFrac, m, penalty);
+          console.log(`  ${(acc * 100).toFixed(1)}%     ${(m * 100).toFixed(1)}%       ${dcpi.toFixed(3)}`);
+        }
+        console.log("From 90% -> 99.5% accuracy, the branch CPI tax falls ~20x.");
+      </primer-code>
+      <primer-theorem name="Speculation and recovery">
+        <ul>
+          <li><strong>speculative execution</strong> runs instructions past an unresolved branch, on the
+            predictor's guess, before the branch is known;</li>
+          <li>speculative results are held in the ROB and <strong>never committed</strong> until the branch is
+            confirmed;</li>
+          <li>on a <strong>misprediction</strong> the wrong-path instructions are <strong>squashed</strong> (ROB
+            flushed, rename map rolled back) and the pipeline refills — the <strong>misprediction penalty</strong>;</li>
+          <li>the penalty grows with pipeline depth, so accurate prediction is what makes deep, fast pipelines
+            worthwhile.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Speculating on memory, too</h2>
+      <p>
+        Branches aren't the only thing worth guessing. Loads and stores create a subtler problem called
+        <strong>load–store disambiguation</strong>. Suppose a load's address isn't yet known, and there's an
+        earlier store whose address is also unknown — does the load read from that store, or from memory? Waiting
+        for every earlier store's address to be computed would serialise memory badly. So the machine
+        <strong>speculates</strong>: it guesses the load does <em>not</em> alias any pending store and lets it go
+        early (<strong>memory dependence speculation</strong>). A <strong>memory disambiguation unit</strong>
+        watches, and if a store later turns out to write the same address the load already (wrongly) read, that's
+        a <strong>memory-order violation</strong> — the load and its dependents are squashed and replayed, just
+        like a branch misprediction.
+      </p>
+      <p>
+        Store data also gets forwarded speculatively to matching later loads (<strong>store-to-load
+        forwarding</strong>) before the store commits. The pattern is universal: guess to avoid a stall, hold the
+        result provisionally, verify, and squash-and-replay if wrong. Speculation is not one feature — it's a
+        design <em>philosophy</em> woven through the whole out-of-order engine.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If squashed instructions 'never happened', how did Spectre steal secrets from them?">
+      <p>
+        Here is the twist that shook the industry in 2018. Squashing perfectly undoes an instruction's effect on
+        <em>architectural</em> state — registers and memory. But speculative instructions still ran on real
+        hardware, and they left footprints in <em>microarchitectural</em> state that squashing does <em>not</em>
+        clean up — most damningly, the <strong>cache</strong>. A speculatively-executed load can pull secret data
+        and use it to index an array, evicting a specific cache line; even after the work is squashed, an attacker
+        can <em>time</em> which line is now fast and read the secret back out. That is <strong>Spectre</strong>:
+        the architectural undo is flawless, but the timing side-effects leak. Fixing it meant rethinking the
+        boundary between "never happened" and "left no trace" — a story told in full in the
+        <primer-ref todo to="security/spectre-and-meltdown">security</primer-ref> lessons.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Speculation never makes a WRONG answer visible — it only wastes work">
+      <p>
+        A frequent worry: "if the CPU runs wrong-path instructions, can't they corrupt my program?" No — that is
+        the entire point of holding results in the ROB until commit. A squashed instruction's writes never reach
+        the architectural registers or memory, so the program's <em>result</em> is always exactly what non-speculative
+        execution would produce. The only thing a misprediction costs is <em>time</em> (the flushed cycles) and
+        <em>energy</em> (work done and thrown away). Correctness is never at stake — until you count
+        microarchitectural side-channels, which are about <em>timing</em>, not <em>results</em>. Keep those two
+        notions of "effect" separate and Spectre stops being paradoxical.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The bargain of running on faith</h2>
+      <p>
+        Speculation is what turns a good branch predictor into real speed: it lets a machine keep its wide,
+        out-of-order engine <em>full</em> across dozens of branches, extracting parallelism that would otherwise be
+        locked behind unresolved conditions. The costs are wasted energy on mispredicted paths and the flush
+        penalty — both kept small by accurate prediction — plus, as we now know, a security surface nobody
+        anticipated for thirty years. Every high-performance core is a machine that spends most of its life
+        executing instructions it isn't yet certain it should, trusting a predictor and a flawless undo. It is one
+        of the boldest ideas in engineering, and it runs in your pocket right now.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: speculation/recovery concepts + numeric misprediction-penalty questions. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "specQuiz@1": {
+          "intro": "Speculate past unresolved branches on the prediction; hold results in the ROB; squash & flush on a misprediction. Penalty grows with pipeline depth. Branch CPI = f·m·penalty. Squashing undoes architectural, not microarchitectural, state (Spectre).",
+          "defQ": "Speculative execution means the processor…",
+          "dRun": "executes instructions past an unresolved branch, based on the prediction",
+          "dWait": "always waits for every branch to resolve first",
+          "dSkip": "skips all branches entirely",
+          "dClock": "raises its clock frequency",
+          "safeQ": "What makes speculation safe?",
+          "sRob": "results are held in the ROB and not committed until the branch is confirmed",
+          "sLuck": "the predictor is never wrong",
+          "sClock": "a faster clock",
+          "sNone": "nothing — it is unsafe",
+          "wrongQ": "On a misprediction, the wrong-path instructions are…",
+          "wSquash": "squashed (flushed) and the pipeline restarts on the correct path",
+          "wCommit": "committed to architectural state anyway",
+          "wSaved": "saved to disk for later",
+          "wIgnored": "left running forever",
+          "penDepthQ": "The misprediction penalty is roughly proportional to…",
+          "pDepth": "the pipeline depth from fetch to branch resolution",
+          "pRam": "the amount of RAM",
+          "pClock": "nothing; it is always one cycle",
+          "pCache": "the L2 cache size",
+          "costQ": "A misprediction costs the program…",
+          "cTime": "time and energy (flushed cycles and wasted work) — but never a wrong result",
+          "cWrong": "a permanently wrong architectural result",
+          "cNothing": "absolutely nothing",
+          "cCrash": "a guaranteed crash",
+          "memSpecQ": "Memory dependence speculation lets a load…",
+          "mLoad": "execute early by guessing it doesn't alias an earlier unknown-address store",
+          "mNever": "never execute until the program ends",
+          "mClock": "set the clock speed",
+          "mReset": "reset the pipeline",
+          "violQ": "A memory-order violation happens when…",
+          "vAlias": "a store turns out to write an address a speculative load already read — replay needed",
+          "vNever": "loads and stores can never conflict",
+          "vClock": "the clock is too fast",
+          "vRam": "RAM runs out",
+          "sltfQ": "Store-to-load forwarding passes a store's value to a later load…",
+          "slSpec": "speculatively, before the store commits, when their addresses match",
+          "slNever": "only after the program finishes",
+          "slDisk": "via the hard disk",
+          "slClock": "using the clock signal",
+          "spectreQ": "Spectre exploits the fact that squashing does NOT undo…",
+          "spMicro": "microarchitectural side-effects like cache state (which leak via timing)",
+          "spArch": "architectural register values",
+          "spRam": "the contents of RAM",
+          "spClock": "the clock frequency",
+          "penNumQ": "Branches are ${bp}% of instructions, misprediction rate ${mp}%, penalty ${c} cycles. Added CPI from mispredictions? (f·m·penalty) (3 d.p.)",
+          "flushNumQ": "A pipeline resolves branches at stage ${st}. Roughly how many cycles are lost to a flush (stages 1..${st} refilled)?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="specQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/ilp/out-of-order-execution-and-the-reorder-buffer",
+      "computer-science/computer-architecture/ilp/advanced-branch-prediction"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Speculation vs misprediction timeline (two rows of blocks) + the randomised quiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "spec",
+    ({ board, colors, sceneStrings }) => {
+      const seg = (x0, x1, y, ci, txt, fs = 10) => {
+        const h = 0.55;
+        board.create(
+          "polygon",
+          [[x0, y - h], [x1, y - h], [x1, y + h], [x0, y + h]],
+          { fillColor: colors.cat[ci], fillOpacity: 0.25, strokeColor: colors.line, strokeWidth: 1.2, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false } },
+        );
+        board.create("text", [(x0 + x1) / 2, y, txt], { strokeColor: colors.ink, fontSize: fs, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      };
+      const caption = (x, y, txt) => board.create("text", [x, y, txt], { strokeColor: colors.ink, fontSize: 10, anchorX: "left", anchorY: "middle", fixed: true, highlight: false });
+
+      // Top row: correct prediction.
+      const yTop = 2.4;
+      seg(0, 2.2, yTop, 0, sceneStrings("fetch"));
+      seg(2.2, 8.0, yTop, 1, sceneStrings("guess"), 9);
+      seg(8.0, 12.5, yTop, 3, sceneStrings("resolveOk"), 9);
+      caption(0, 3.6, sceneStrings("good"));
+
+      // Bottom row: misprediction and flush.
+      const yBot = -1.2;
+      seg(0, 2.2, yBot, 0, sceneStrings("fetch"));
+      seg(2.2, 8.0, yBot, 2, sceneStrings("guess"), 9);      // wasted work (cat[2])
+      seg(8.0, 10.2, yBot, 2, sceneStrings("resolveBad"), 8);
+      seg(10.2, 12.5, yBot, 1, sceneStrings("flush"), 8);
+      caption(0, -2.4, sceneStrings("waste"));
+
+      // Vertical "branch resolves" marker.
+      board.create("segment", [[8.0, 3.6], [8.0, -2.6]], { strokeColor: colors.line, strokeWidth: 1, dash: 2, highlight: false });
+    },
+    {
+      boundingbox: [-0.6, 4.2, 13.2, -3.0],
+      keepAspect: false,
+      title: () => makeStrings("spec")("title"),
+    },
+  );
+
+  registerQuiz("specQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("defQ"),
+      options: [
+        { text: () => sceneStrings("dRun"), correct: true },
+        { text: () => sceneStrings("dWait"), correct: false },
+        { text: () => sceneStrings("dSkip"), correct: false },
+        { text: () => sceneStrings("dClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("safeQ"),
+      options: [
+        { text: () => sceneStrings("sRob"), correct: true },
+        { text: () => sceneStrings("sLuck"), correct: false },
+        { text: () => sceneStrings("sClock"), correct: false },
+        { text: () => sceneStrings("sNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("wrongQ"),
+      options: [
+        { text: () => sceneStrings("wSquash"), correct: true },
+        { text: () => sceneStrings("wCommit"), correct: false },
+        { text: () => sceneStrings("wSaved"), correct: false },
+        { text: () => sceneStrings("wIgnored"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("penDepthQ"),
+      options: [
+        { text: () => sceneStrings("pDepth"), correct: true },
+        { text: () => sceneStrings("pRam"), correct: false },
+        { text: () => sceneStrings("pClock"), correct: false },
+        { text: () => sceneStrings("pCache"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("costQ"),
+      options: [
+        { text: () => sceneStrings("cTime"), correct: true },
+        { text: () => sceneStrings("cWrong"), correct: false },
+        { text: () => sceneStrings("cNothing"), correct: false },
+        { text: () => sceneStrings("cCrash"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("memSpecQ"),
+      options: [
+        { text: () => sceneStrings("mLoad"), correct: true },
+        { text: () => sceneStrings("mNever"), correct: false },
+        { text: () => sceneStrings("mClock"), correct: false },
+        { text: () => sceneStrings("mReset"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("violQ"),
+      options: [
+        { text: () => sceneStrings("vAlias"), correct: true },
+        { text: () => sceneStrings("vNever"), correct: false },
+        { text: () => sceneStrings("vClock"), correct: false },
+        { text: () => sceneStrings("vRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sltfQ"),
+      options: [
+        { text: () => sceneStrings("slSpec"), correct: true },
+        { text: () => sceneStrings("slNever"), correct: false },
+        { text: () => sceneStrings("slDisk"), correct: false },
+        { text: () => sceneStrings("slClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("spectreQ"),
+      options: [
+        { text: () => sceneStrings("spMicro"), correct: true },
+        { text: () => sceneStrings("spArch"), correct: false },
+        { text: () => sceneStrings("spRam"), correct: false },
+        { text: () => sceneStrings("spClock"), correct: false },
+      ],
+    },
+    {
+      // Added CPI = (bp/100)*(mp/100)*c.
+      prompt: (v) => sceneStrings("penNumQ", v),
+      variables: "bp=[10:25] mp=[1:10] c=[12:22]",
+      answer: (v) => Math.round((v.bp / 100) * (v.mp / 100) * v.c * 1000) / 1000,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Flush penalty ~ stages before resolution = st - 1.
+      prompt: (v) => sceneStrings("flushNumQ", v),
+      variables: "st=[8:20]",
+      answer: (v) => v.st - 1,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

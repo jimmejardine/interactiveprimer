@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Procedure Calls and the ABI</primer-title>
+
+    <primer-card>
+      <p>
+        A CPU instruction set gives you arithmetic, loads, stores and branches — but nowhere in the
+        <primer-ref to="computer-science/computer-architecture/isa/risc-v-registers-and-encoding">RISC-V hardware</primer-ref>
+        is there a built-in notion of a "function". Functions, arguments, return values, local variables, recursion — all
+        of it is a <strong>convention</strong> layered on top of a few simple instructions. That convention is the
+        <strong>ABI</strong> (Application Binary Interface): the agreement about how code calls code. It is the ISA
+        contract's social contract — the reason a function your compiler emits can call a function from a library
+        compiled years earlier by a different compiler, and they cooperate perfectly.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The link register: how to come back</h2>
+      <p>
+        The heart of a call is a question: after the function finishes, <em>where do we resume?</em> RISC-V answers with
+        the <strong>jump-and-link</strong> instruction, <code>jal</code>. It does two things at once: it jumps to the
+        function, and it saves the address of the following instruction — the <strong>return address</strong> — into a
+        register, by convention <code>ra</code> (which is <code>x1</code>). To return, the callee just jumps back to
+        whatever is in <code>ra</code>, using <code>jalr x0, 0(ra)</code> (aliased <code>ret</code>).
+      </p>
+      <primer-code lang="text">
+; Caller wants to invoke  square(), then keep going.
+    li    a0, 7          ; put argument 7 in a0
+    jal   ra, square     ; jump to square; ra <- address of the NEXT line
+    ; ...execution resumes HERE when square returns, result in a0...
+
+square:
+    mul   a0, a0, a0     ; a0 = a0 * a0   (result goes in the return register)
+    ret                  ; == jalr x0, 0(ra): jump back to the saved return address
+      </primer-code>
+      <p>
+        For a <em>leaf</em> function like <code>square</code> — one that calls nothing else — that is the entire story:
+        no memory needed. The trouble starts when a function must call another function, because the <em>second</em>
+        <code>jal</code> would overwrite <code>ra</code>, erasing the way home. The fix is the stack.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the stack-frame figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "frame": {
+          "title": "One stack frame, and the stack growing downward",
+          "high": "high addresses",
+          "low": "low addresses",
+          "caller": "caller's frame",
+          "args": "saved args / spilled",
+          "ra": "saved return address (ra)",
+          "fp": "saved frame pointer",
+          "saved": "callee-saved registers (s0–s11)",
+          "locals": "local variables",
+          "sp": "sp  →  (top of stack)",
+          "grow": "stack grows down ↓"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The stack frame</h2>
+      <p>
+        Each active function call gets a slab of memory called a <strong>stack frame</strong> (or activation record).
+        The stack pointer <code>sp</code> marks the current top; a call <em>pushes</em> a new frame by moving
+        <code>sp</code> <em>down</em> (stacks grow toward lower addresses), and a return <em>pops</em> it by moving
+        <code>sp</code> back up. Inside a frame the function keeps everything it must remember across an inner call: the
+        saved return address, saved registers, and its local variables — each at a fixed
+        <primer-ref soft to="computer-science/computer-architecture/isa/addressing-modes-revisited">displacement from <code>sp</code></primer-ref>.
+      </p>
+      <primer-geometry scene="frame"></primer-geometry>
+      <p>
+        A non-leaf function's job at entry (its <strong>prologue</strong>) is to carve out this frame and stash anything
+        precious; at exit (its <strong>epilogue</strong>) it restores those values and gives the space back:
+      </p>
+      <primer-code lang="text">
+sumTo:                    ; int sumTo(n): returns n + sumTo(n-1), recursively
+    addi  sp, sp, -16     ; PROLOGUE: push a 16-byte frame
+    sw    ra, 8(sp)       ; save return address (we will make an inner call)
+    sw    s0, 0(sp)       ; save callee-saved s0 so we can use it
+    ; ... body uses s0, recurses with jal ra, sumTo ...
+    lw    s0, 0(sp)       ; EPILOGUE: restore s0
+    lw    ra, 8(sp)       ; restore return address
+    addi  sp, sp, 16      ; pop the frame
+    ret                   ; return to caller
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Caller-saved vs callee-saved: dividing the labour</h2>
+      <p>
+        Here is the ABI's cleverest idea. Registers are shared by everyone, so when A calls B, some register B clobbers
+        might hold a value A still needs. Who is responsible for saving it? Saving <em>every</em> register on every call
+        would be wasteful. So the ABI splits the 32 registers into two camps by <strong>convention</strong>:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Class</th><th>RISC-V names</th><th>Rule</th><th>Preserved across a call?</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Caller-saved</strong> (temporaries)</td><td><code>t0</code>–<code>t6</code>, <code>a0</code>–<code>a7</code></td><td>callee may freely clobber; caller must save if it cares</td><td><strong>No</strong></td></tr>
+            <tr><td><strong>Callee-saved</strong> (saved)</td><td><code>s0</code>–<code>s11</code>, <code>sp</code></td><td>callee must restore before returning</td><td><strong>Yes</strong></td></tr>
+            <tr><td><strong>Arguments / return</strong></td><td><code>a0</code>–<code>a7</code> (a0/a1 also return)</td><td>first 8 args here; results in a0/a1</td><td>No (they carry the payload)</td></tr>
+            <tr><td><strong>Return address</strong></td><td><code>ra</code></td><td>set by <code>jal</code>; save it before an inner call</td><td>caller-saved by convention</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The names encode the deal. If you keep a value in a <strong>t</strong>emporary and then make a call, expect it to
+        be gone — save it yourself (you are the caller). If you keep it in a <strong>s</strong>aved register, you may
+        trust it survives — but if <em>you</em> want to use an <code>s</code> register you must save the previous owner's
+        copy first (you are now the callee). Every register is somebody's responsibility, and no value is ever silently
+        lost.
+      </p>
+      <primer-theorem name="The calling convention (RISC-V ABI)">
+        <ul>
+          <li><strong>arguments</strong> go in <code>a0</code>–<code>a7</code>; <strong>return values</strong> come back
+            in <code>a0</code>/<code>a1</code>;</li>
+          <li><strong>caller-saved</strong> registers (<code>t*</code>, <code>a*</code>) may be clobbered by the callee —
+            the caller saves them if needed;</li>
+          <li><strong>callee-saved</strong> registers (<code>s*</code>, <code>sp</code>) must be restored by the callee
+            before it returns;</li>
+          <li>the <strong>return address</strong> lives in <code>ra</code>, set by <code>jal</code> and spilled to the
+            stack before any nested call.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Recursion is just stacked frames</h2>
+      <p>
+        Recursion needs no special hardware — it falls out for free. Each recursive call pushes its <em>own</em> frame,
+        with its <em>own</em> saved <code>ra</code> and its <em>own</em> locals, so a hundred nested calls simply means a
+        hundred frames stacked in memory. When each returns, it pops its frame and restores the caller's state exactly.
+        The simulation below models the stack explicitly for <primer-math>\text{fact}(n) = n \times \text{fact}(n-1)</primer-math>,
+        pushing a frame on the way down and popping on the way up, so you can watch the stack pointer dive and climb back.
+      </p>
+      <primer-code run>
+        // Model the call stack for fact(n) = n * fact(n-1), fact(0) = 1.
+        // Each frame records n and the saved return address; sp moves in 16-byte steps.
+        interface Frame { n: number; ra: string; }
+
+        const stack: Frame[] = [];
+        let sp = 1000; // stack pointer, grows DOWN
+        const FRAME = 16;
+
+        function callFact(n: number, ra: string): number {
+          sp -= FRAME;                       // prologue: push frame
+          stack.push({ n, ra });
+          console.log(`push fact(${n})   sp=${sp}  depth=${stack.length}`);
+          let result: number;
+          if (n &lt;= 1) {
+            result = 1;                      // base case
+          } else {
+            result = n * callFact(n - 1, "fact+8"); // recurse: inner call
+          }
+          stack.pop();                       // epilogue: pop frame
+          sp += FRAME;
+          console.log(`pop  fact(${n})=${result}  sp=${sp}`);
+          return result;
+        }
+
+        console.log("fact(4) =", callFact(4, "main"));
+        console.log("stack is empty again:", stack.length === 0);
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="What actually happens in a stack overflow?">
+      <p>
+        Every recursive call pushes a frame and moves <code>sp</code> down; nothing pushes it back up until a call
+        returns. Infinite (or just too-deep) recursion therefore marches <code>sp</code> relentlessly downward until it
+        runs off the end of the region the OS reserved for the stack — often bumping into a deliberately unmapped
+        <em>guard page</em>. The load or store into that forbidden page faults, the OS sees it, and your program dies with
+        "stack overflow" (the website was named after the error). It is the physical shadow of an unbounded recursion:
+        each missing base case is another 16 bytes closer to the cliff. This is also why deep recursion is dangerous in
+        systems code and why compilers prize <em>tail-call optimisation</em>, which reuses one frame instead of pushing a
+        new one.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A leaf function that forgets it's a leaf wastes cycles — and a non-leaf that forgets ra corrupts">
+      <p>
+        Two symmetric mistakes. A <strong>leaf</strong> function (calls nobody) does <em>not</em> need to save
+        <code>ra</code> or build a frame at all — doing so is pure overhead, and good compilers skip it. But a
+        <strong>non-leaf</strong> function that forgets to save <code>ra</code> before its inner <code>jal</code> is a
+        disaster: the inner call overwrites <code>ra</code>, so when the outer function runs <code>ret</code> it jumps to
+        the wrong place and the program derails. The rule is crisp: <em>save <code>ra</code> to the stack if and only if
+        you make a call.</em> Mixing this up is the single most common bug in hand-written assembly.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Why the ABI matters beyond one program</h2>
+      <p>
+        The calling convention is not a law of physics — the hardware would happily let you pass arguments in any
+        registers you liked. Its value is that <em>everyone agrees</em> on the same one. That agreement is what lets
+        separately compiled objects link together, lets your code call the C standard library, lets a debugger unwind the
+        stack to show you a backtrace, and lets one language call another. The ABI is the ISA contract extended into a
+        <em>society</em> of cooperating code. With calls in hand, the final lesson of this module widens the ISA in a
+        different direction — exposing data parallelism through vector and SIMD instructions.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: ABI/calling-convention concepts + a couple of stack-arithmetic numerics. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "abiQuiz@1": {
+          "intro": "jal saves ra; args in a0–a7, returns in a0/a1; caller-saved t*/a*, callee-saved s*/sp; the stack grows DOWN; recursion = stacked frames.",
+          "raQ": "The register ra (x1) holds…",
+          "raRet": "the return address — where execution resumes after the call",
+          "raArg": "the first argument",
+          "raSp": "the stack pointer",
+          "raZero": "the constant zero",
+          "jalQ": "The jal (jump-and-link) instruction does what?",
+          "jalTwo": "jumps to the target AND saves the address of the next instruction into ra",
+          "jalOnly": "only jumps; it saves nothing",
+          "jalPush": "pushes all 32 registers to the stack",
+          "jalRet": "returns from the current function",
+          "argQ": "In the RISC-V ABI, the first function arguments are passed in…",
+          "argA": "registers a0–a7",
+          "argStack": "always on the stack, never registers",
+          "argS": "registers s0–s11",
+          "argT": "register ra",
+          "retQ": "A function's return value comes back in…",
+          "retA0": "a0 (and a1 for a second word)",
+          "retRa": "ra",
+          "retSp": "sp",
+          "retT0": "t0 only",
+          "growQ": "On a typical machine, pushing a stack frame moves the stack pointer…",
+          "grDown": "toward lower addresses (the stack grows down)",
+          "grUp": "toward higher addresses",
+          "grNone": "not at all",
+          "grRand": "to a random address",
+          "callerQ": "A caller-saved (temporary) register is one that…",
+          "csClobber": "the callee may freely overwrite; the caller must save it if still needed",
+          "csKeep": "the callee must preserve and restore",
+          "csNever": "no function may ever use",
+          "csZero": "is hardwired to zero",
+          "calleeQ": "A callee-saved register (s0–s11) must be…",
+          "clRestore": "restored to its original value before the callee returns",
+          "clClobber": "left clobbered for the caller to fix",
+          "clArg": "used only for arguments",
+          "clRa": "the return address",
+          "leafQ": "A leaf function (which calls no other function) generally need not…",
+          "lfSave": "save ra or build a stack frame",
+          "lfRun": "execute any instructions",
+          "lfReturn": "ever return",
+          "lfArg": "read its arguments",
+          "recurQ": "How does recursion work at the ISA level?",
+          "rcFrame": "each call pushes its own stack frame with its own saved ra and locals",
+          "rcHw": "a special 'recurse' instruction in the hardware",
+          "rcOne": "all calls share a single frame and set of registers",
+          "rcNo": "recursion is impossible without CISC",
+          "overflowQ": "A 'stack overflow' from infinite recursion happens because…",
+          "ovGuard": "sp keeps moving down until it hits unmapped memory and faults",
+          "ovHeat": "the CPU overheats from too many adds",
+          "ovReg": "the machine runs out of registers",
+          "ovClock": "the clock speed drops to zero",
+          "spPushQ": "If sp = {sp} and a function pushes a 16-byte frame, what is the new sp?",
+          "framesQ": "Each frame is {fsz} bytes. After {d} nested recursive calls, how many bytes has the stack grown?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="abiQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/isa/risc-v-registers-and-encoding"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Stack-frame figure: a vertical stack of labelled slots (high addr at top, low at bottom),
+     with the caller's frame above and the current frame's slots below, sp arrow at the bottom.
+     Static base content. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "frame",
+    ({ board, colors, sceneStrings }) => {
+      // Slots from high address (top) to low address (bottom).
+      const slots = [
+        { key: "caller", cat: 0 },
+        { key: "args", cat: 1 },
+        { key: "ra", cat: 3 },
+        { key: "fp", cat: 1 },
+        { key: "saved", cat: 1 },
+        { key: "locals", cat: 2 },
+      ];
+      const W = 8, H = 1.1, gap = 0.12;
+      slots.forEach((s, i) => {
+        const yTop = -i * (H + gap);
+        const yBot = yTop - H;
+        board.create("polygon", [[0, yBot], [W, yBot], [W, yTop], [0, yTop]], {
+          fillColor: colors.cat[s.cat], fillOpacity: s.key === "caller" ? 0.12 : 0.24, strokeColor: colors.line, strokeWidth: 1.4, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        board.create("text", [W / 2, yTop - H / 2, sceneStrings(s.key)], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      });
+      const bottomY = -slots.length * (H + gap);
+      // High/low address labels on the right.
+      board.create("text", [W + 0.3, -0.2, sceneStrings("high")], { strokeColor: colors.ink, fontSize: 11, anchorX: "left", anchorY: "middle", fixed: true, highlight: false });
+      board.create("text", [W + 0.3, bottomY + 0.4, sceneStrings("low")], { strokeColor: colors.ink, fontSize: 11, anchorX: "left", anchorY: "middle", fixed: true, highlight: false });
+      // sp arrow pointing at the bottom (top of stack).
+      board.create("text", [-0.3, bottomY + H / 2 + gap, sceneStrings("sp")], { strokeColor: colors.cat[3], fontSize: 12, anchorX: "right", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600" });
+      // Downward "grows" arrow on the left.
+      board.create("arrow", [[-2.2, -0.4], [-2.2, bottomY + 0.3]], { strokeColor: colors.line, strokeWidth: 2, highlight: false });
+      board.create("text", [-2.5, (bottomY - 0.2) / 2, sceneStrings("grow")], { strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "transform:rotate(-90deg)" });
+    },
+    {
+      boundingbox: [-4.2, 0.6, 11.5, -8.2],
+      keepAspect: false,
+      title: () => makeStrings("frame")("title"),
+    },
+  );
+
+  registerQuiz("abiQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("raQ"),
+      options: [
+        { text: () => sceneStrings("raRet"), correct: true },
+        { text: () => sceneStrings("raArg"), correct: false },
+        { text: () => sceneStrings("raSp"), correct: false },
+        { text: () => sceneStrings("raZero"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("jalQ"),
+      options: [
+        { text: () => sceneStrings("jalTwo"), correct: true },
+        { text: () => sceneStrings("jalOnly"), correct: false },
+        { text: () => sceneStrings("jalPush"), correct: false },
+        { text: () => sceneStrings("jalRet"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("argQ"),
+      options: [
+        { text: () => sceneStrings("argA"), correct: true },
+        { text: () => sceneStrings("argStack"), correct: false },
+        { text: () => sceneStrings("argS"), correct: false },
+        { text: () => sceneStrings("argT"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("retQ"),
+      options: [
+        { text: () => sceneStrings("retA0"), correct: true },
+        { text: () => sceneStrings("retRa"), correct: false },
+        { text: () => sceneStrings("retSp"), correct: false },
+        { text: () => sceneStrings("retT0"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("growQ"),
+      options: [
+        { text: () => sceneStrings("grDown"), correct: true },
+        { text: () => sceneStrings("grUp"), correct: false },
+        { text: () => sceneStrings("grNone"), correct: false },
+        { text: () => sceneStrings("grRand"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("callerQ"),
+      options: [
+        { text: () => sceneStrings("csClobber"), correct: true },
+        { text: () => sceneStrings("csKeep"), correct: false },
+        { text: () => sceneStrings("csNever"), correct: false },
+        { text: () => sceneStrings("csZero"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("calleeQ"),
+      options: [
+        { text: () => sceneStrings("clRestore"), correct: true },
+        { text: () => sceneStrings("clClobber"), correct: false },
+        { text: () => sceneStrings("clArg"), correct: false },
+        { text: () => sceneStrings("clRa"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("leafQ"),
+      options: [
+        { text: () => sceneStrings("lfSave"), correct: true },
+        { text: () => sceneStrings("lfRun"), correct: false },
+        { text: () => sceneStrings("lfReturn"), correct: false },
+        { text: () => sceneStrings("lfArg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("recurQ"),
+      options: [
+        { text: () => sceneStrings("rcFrame"), correct: true },
+        { text: () => sceneStrings("rcHw"), correct: false },
+        { text: () => sceneStrings("rcOne"), correct: false },
+        { text: () => sceneStrings("rcNo"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("overflowQ"),
+      options: [
+        { text: () => sceneStrings("ovGuard"), correct: true },
+        { text: () => sceneStrings("ovHeat"), correct: false },
+        { text: () => sceneStrings("ovReg"), correct: false },
+        { text: () => sceneStrings("ovClock"), correct: false },
+      ],
+    },
+    {
+      // new sp = sp - 16.
+      prompt: (v) => sceneStrings("spPushQ", v),
+      variables: "sp=[2000,4096,8192,1024,600]",
+      answer: (v) => v.sp - 16,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // total growth = fsz * d.
+      prompt: (v) => sceneStrings("framesQ", v),
+      variables: "fsz=[16,32,48] d=[2:12]",
+      answer: (v) => v.fsz * v.d,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

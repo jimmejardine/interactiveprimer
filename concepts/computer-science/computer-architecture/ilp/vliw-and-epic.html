@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>VLIW and EPIC</primer-title>
+
+    <primer-card>
+      <p>
+        A
+        <primer-ref to="computer-science/computer-architecture/ilp/superscalar-execution">superscalar</primer-ref>
+        processor spends a fortune in transistors — reorder buffers, register renaming, wakeup logic whose cost
+        grows as the square of issue width — all to <em>discover, at run time,</em> which instructions can run in
+        parallel. In the 1980s a bold alternative asked: why make the hardware rediscover the parallelism every
+        time the code runs, when the <strong>compiler already knows the whole program</strong>? Let the compiler
+        find the independent instructions <em>once</em>, pack them into one wide instruction word, and let the
+        hardware be dumb and fast. That is <strong>VLIW — Very Long Instruction Word</strong>.
+      </p>
+      <p>
+        The trade is stark. Superscalar puts the scheduling brain in <em>hardware</em>, paying in silicon and
+        power every cycle forever. VLIW puts it in the <em>compiler</em>, paying once at compile time and shipping
+        a simple chip. On paper VLIW is the more elegant deal. In practice, as we'll see, the real world had other
+        plans — and the story of Intel's <strong>Itanium</strong> is one of the great cautionary tales of computer
+        architecture.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the VLIW bundle diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "bundle": {
+          "title": "One VLIW instruction word = several fixed operation slots, one per unit",
+          "word": "One VLIW instruction word",
+          "s0": "ALU slot",
+          "s1": "ALU slot",
+          "s2": "Mem slot",
+          "s3": "FP slot",
+          "s4": "Branch slot",
+          "nop": "NOP",
+          "compiler": "the COMPILER decides which operation fills each slot, ahead of time",
+          "note": "an empty slot must hold a NOP — wasted space"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>One wide word, fixed slots</h2>
+      <p>
+        A VLIW instruction is a bundle of several operations — one per functional unit — issued together every
+        cycle. Each <strong>slot</strong> corresponds to a specific execution unit: maybe two ALU slots, a memory
+        slot, a floating-point slot, a branch slot. The compiler's job is to fill each slot with an operation it
+        has <em>proven</em> independent of the others in the same word. The hardware issues all slots blindly, in
+        lock-step, with <em>no dependency checking at all</em> — it simply trusts the compiler.
+      </p>
+      <primer-geometry scene="bundle"></primer-geometry>
+      <p>
+        Notice the catch already lurking: if the compiler can't find an independent operation for a slot, it must
+        insert a <strong>NOP</strong> (no-operation). Those NOPs are dead weight — they bloat the code and waste
+        fetch bandwidth. A VLIW binary with many half-empty words can be considerably larger than the equivalent
+        superscalar code, a problem called <strong>code bloat</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The compiler does the scheduling</h2>
+      <p>
+        In VLIW, the heavy lifting moves into the compiler, which uses techniques like <em>trace scheduling</em>,
+        <em>software pipelining</em>, and <em>loop unrolling</em> to expose enough parallelism to fill the slots.
+        Here's a tiny scheduler packing independent operations into 3-slot words:
+      </p>
+      <primer-code run>
+        // A toy VLIW scheduler: greedily pack independent ops into fixed-width words.
+        // Each op lists the ops it depends on (by index). Independent ops may share a word.
+        interface Op { id: string; deps: number[]; }
+        const ops: Op[] = [
+          { id: "a=x+y", deps: [] },
+          { id: "b=z+w", deps: [] },       // independent of a
+          { id: "c=a*b", deps: [0, 1] },   // needs a and b
+          { id: "d=p-q", deps: [] },       // independent
+          { id: "e=c+d", deps: [2, 3] },   // needs c and d
+        ];
+
+        const WIDTH = 3;               // 3 slots per VLIW word
+        const done = new Set&lt;number&gt;();
+        const words: string[][] = [];
+        while (done.size &lt; ops.length) {
+          const word: string[] = [];
+          for (let i = 0; i &lt; ops.length; i++) {
+            if (done.has(i)) continue;
+            if (word.length &gt;= WIDTH) break;
+            if (ops[i].deps.every((d) =&gt; done.has(d))) word.push(ops[i].id);
+          }
+          // mark scheduled (must resolve indices before committing the word)
+          for (const id of word) done.add(ops.findIndex((o) =&gt; o.id === id));
+          while (word.length &lt; WIDTH) word.push("NOP"); // pad empty slots
+          words.push(word);
+        }
+        words.forEach((w, i) =&gt; console.log(`word ${i}: [ ${w.join(" | ")} ]`));
+        console.log("Dependent ops fall into LATER words; independent ones share a word.");
+      </primer-code>
+      <p>
+        The compiler produces a fixed schedule baked into the binary. The hardware never reconsiders it — which is
+        exactly the source of both VLIW's efficiency and its fragility.
+      </p>
+      <primer-theorem name="VLIW / EPIC">
+        <ul>
+          <li>the <strong>compiler</strong> statically schedules independent operations into one wide instruction
+            word of fixed <strong>slots</strong>, one per functional unit;</li>
+          <li>the hardware issues all slots in lock-step with <strong>no dynamic scheduling</strong> — no
+            renaming, no reorder buffer, no dependency checking;</li>
+          <li>empty slots need <strong>NOPs</strong>, causing <strong>code bloat</strong>;</li>
+          <li>a static schedule can't react to run-time surprises — above all, <strong>variable memory
+            latency</strong> (a cache miss the compiler couldn't predict).</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Itanium and EPIC: the billion-dollar bet</h2>
+      <p>
+        Intel and HP's <strong>Itanium</strong> (2001) was VLIW's most ambitious outing, dressed up as
+        <strong>EPIC — Explicitly Parallel Instruction Computing</strong>. EPIC added clever features to soften
+        pure VLIW: bundles carried <em>stop bits</em> marking dependence groups (so the schedule wasn't rigidly
+        tied to one exact chip), plus <strong>predication</strong> (turning branches into conditional operations to
+        avoid mispredictions) and <strong>speculative loads</strong> (hoisting loads early, with a check). Intel
+        bet the company's 64-bit future on it. It failed commercially. Why?
+      </p>
+      <ul>
+        <li><strong>Unpredictable memory latency.</strong> The compiler must schedule assuming <em>some</em> load
+          latency, but a cache miss can cost 200+ cycles — a number no compiler can know statically. When the
+          guess is wrong the whole rigid schedule stalls, and there's no out-of-order engine to hide it.
+          Superscalar hardware, scheduling dynamically, simply works around a stalled load; VLIW can't.</li>
+        <li><strong>Code bloat.</strong> All those NOP-padded bundles made binaries large, straining the
+          instruction cache — a second-order penalty that hurt real performance.</li>
+        <li><strong>Compiler difficulty.</strong> Extracting enough parallelism to fill wide words on general,
+          branchy, pointer-chasing code proved fantastically hard. The compilers never delivered what the
+          architecture promised.</li>
+        <li><strong>Binary compatibility.</strong> A schedule tuned for one chip's exact unit mix and latencies
+          didn't transfer cleanly to the next generation — the opposite of x86's "recompile nothing, just get
+          faster."</li>
+      </ul>
+      <p>
+        Meanwhile plain out-of-order <primer-math>\text{x86}</primer-math> kept getting faster under a stable ISA.
+        Itanium was quietly discontinued; "Itanic" became an industry joke. The lesson: <em>dynamic</em> scheduling
+        wins on general-purpose code because only the hardware knows what actually happens at run time.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>VLIW vs superscalar, side by side</h2>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Aspect</th><th>Superscalar (dynamic)</th><th>VLIW / EPIC (static)</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Who schedules?</td><td>hardware, at run time</td><td>compiler, ahead of time</td></tr>
+            <tr><td>Dependency checking</td><td>in hardware, cost grows as <primer-math>w^2</primer-math></td><td>none — compiler guarantees independence</td></tr>
+            <tr><td>Register renaming / ROB</td><td>yes</td><td>no</td></tr>
+            <tr><td>Reacts to cache misses</td><td>yes — reorders around them</td><td>no — the static schedule stalls</td></tr>
+            <tr><td>Code size</td><td>compact</td><td>larger (NOP padding, bloat)</td></tr>
+            <tr><td>Binary compatibility</td><td>strong (same ISA, faster chips)</td><td>weak (schedule tied to the chip)</td></tr>
+            <tr><td>Hardware complexity / power</td><td>high</td><td>low</td></tr>
+            <tr><td>Best fit</td><td>general-purpose, branchy code</td><td>regular, predictable loops (DSPs, GPUs)</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-vignette title="If VLIW failed for CPUs, why is it alive and well in DSPs and GPUs?">
+      <p>
+        VLIW didn't die — it moved to where its assumptions <em>hold</em>. Digital signal processors (audio/radio
+        filters), some GPU shader cores, and AI accelerators run <strong>regular, loop-heavy, predictable</strong>
+        code over data that mostly lives in fast local memory — so the compiler <em>can</em> know the latencies and
+        pack the slots tightly, and the code runs the same way every time. There, VLIW's simple, low-power hardware
+        is a huge win: no ROB, no renaming, just wide lanes the compiler fills. VLIW was never a bad idea; it was
+        the wrong idea for <em>general-purpose, unpredictable</em> workloads. Match the tool to the code and it
+        shines.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'No dynamic scheduling' is VLIW's whole point — and its Achilles' heel">
+      <p>
+        It's tempting to think a VLIW chip could just <em>add</em> a little out-of-order help to cover a cache
+        miss. But the moment you add renaming, a reorder buffer, and dynamic scheduling, you've rebuilt the
+        expensive superscalar hardware VLIW existed to avoid — and you may as well have shipped a superscalar chip.
+        VLIW's simplicity is <em>load-bearing</em>: it only pays off if the hardware stays dumb. That is exactly
+        why an unpredictable cache miss is fatal to it — there is deliberately no mechanism to hide the stall. The
+        elegance and the fragility are the same design decision.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The verdict</h2>
+      <p>
+        VLIW is a beautiful answer to the wrong question for mainstream CPUs: it assumes the compiler can predict
+        run-time behaviour that is, for general code, fundamentally unpredictable — above all memory latency. Its
+        legacy is twofold. It reminds us that <em>where</em> you place the scheduling intelligence (compiler vs
+        hardware) is a first-order architectural choice with billion-dollar consequences; and it lives on wherever
+        code is regular enough for the compiler to win — DSPs, some GPUs, and accelerators. For the branchy,
+        cache-missing programs most of us run, dynamic superscalar scheduling won, and the next lesson asks the
+        sobering follow-up: how much parallelism is even <em>left</em> to extract before we hit
+        <primer-ref todo to="ilp/limits">the limits of ILP</primer-ref>?
+      </p>
+    </primer-card>
+
+    <!-- Quiz: VLIW/EPIC concepts. Bank of 11, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "vliwQuiz@1": {
+          "intro": "VLIW: the COMPILER packs independent operations into fixed slots; the hardware has no dynamic scheduling. Empty slots need NOPs (code bloat). Itanium/EPIC struggled on unpredictable memory latency.",
+          "whoQ": "In a VLIW machine, who schedules instructions for parallel execution?",
+          "wCompiler": "the compiler, ahead of time (statically)",
+          "wHardware": "the hardware, at run time",
+          "wUser": "the end user",
+          "wOs": "the operating system each cycle",
+          "slotQ": "A VLIW instruction word consists of…",
+          "sSlots": "several fixed operation slots, one per functional unit",
+          "sOne": "exactly one operation, like a RISC instruction",
+          "sData": "only data, no operations",
+          "sBranch": "only branch targets",
+          "depQ": "How much dependency-checking hardware does a pure VLIW core need?",
+          "dNone": "essentially none — the compiler guarantees the slots are independent",
+          "dQuad": "the same quadratic checkers as a wide superscalar",
+          "dMore": "far more than superscalar",
+          "dRob": "a large reorder buffer",
+          "nopQ": "When the compiler can't fill a VLIW slot, it inserts a…",
+          "nNop": "NOP, which wastes space and causes code bloat",
+          "nBranch": "branch to skip the word",
+          "nStall": "hardware stall it schedules dynamically",
+          "nReg": "spare register",
+          "epicQ": "Itanium's EPIC added features like…",
+          "ePred": "predication and speculative loads to soften pure VLIW",
+          "eRob": "a large out-of-order reorder buffer",
+          "eRename": "aggressive hardware register renaming",
+          "eNone": "nothing beyond plain VLIW",
+          "failQ": "The biggest reason Itanium/EPIC struggled was…",
+          "fMem": "unpredictable memory latency that a static schedule can't hide",
+          "fSlow": "its clock was far too slow to build",
+          "fIllegal": "VLIW is illegal",
+          "fRam": "it needed no memory at all",
+          "vsQ": "Compared with superscalar, VLIW hardware is…",
+          "vSimple": "simpler and lower-power, but can't react to run-time surprises",
+          "vComplex": "far more complex and power-hungry",
+          "vSame": "identical in every way",
+          "vSlow": "always slower on every workload",
+          "aliveQ": "VLIW remains successful today in…",
+          "aDsp": "DSPs, some GPU/accelerator cores — regular, predictable code",
+          "aServer": "general-purpose branchy server code",
+          "aNone": "no domain at all",
+          "aBrowser": "web browsers specifically",
+          "bloatQ": "'Code bloat' in VLIW comes from…",
+          "bNop": "NOP-padded words making binaries larger and straining the I-cache",
+          "bClock": "a faster clock",
+          "bRam": "too little RAM",
+          "bReg": "too few registers",
+          "addQ": "Bolting a reorder buffer and renaming onto a VLIW chip would…",
+          "adReb": "rebuild the very superscalar hardware VLIW exists to avoid",
+          "adFree": "cost nothing and fix everything",
+          "adFaster": "make the clock faster automatically",
+          "adNone": "have no effect"
+        }
+      }
+    </script>
+
+    <primer-quiz name="vliwQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/ilp/superscalar-execution"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- VLIW bundle diagram (static base content) + the randomised quiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "bundle",
+    ({ board, colors, sceneStrings }) => {
+      // One long word split into 5 slots; last slot shows a NOP.
+      const slots = [
+        { key: "s0", ci: 1, fill: "add r1,r2,r3" },
+        { key: "s1", ci: 1, fill: "sub r4,r5,r6" },
+        { key: "s2", ci: 3, fill: "ld r7,(r8)" },
+        { key: "s3", ci: 3, fill: "mul.f f1,f2" },
+        { key: "s4", ci: 2, fill: "NOP" },
+      ];
+      const x0 = 0, w = 2.7, y = 1.6, h = 0.85;
+      slots.forEach((s, i) => {
+        const sx = x0 + i * w;
+        board.create("polygon", [[sx, y - h], [sx + w - 0.15, y - h], [sx + w - 0.15, y + h], [sx, y + h]], { fillColor: colors.cat[s.ci], fillOpacity: 0.22, strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false } });
+        board.create("text", [sx + (w - 0.15) / 2, y + 0.4, sceneStrings(s.key)], { strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+        board.create("text", [sx + (w - 0.15) / 2, y - 0.35, s.fill], { strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      });
+      // Bracket / label for the whole word.
+      board.create("text", [(x0 + slots.length * w) / 2 - 0.1, y + 1.4, sceneStrings("word")], { strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600" });
+      board.create("text", [(x0 + slots.length * w) / 2 - 0.1, -0.2, sceneStrings("compiler")], { strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      board.create("text", [x0 + 4 * w + (w - 0.15) / 2, -1.0, sceneStrings("note")], { strokeColor: colors.cat[2], fontSize: 9, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+    },
+    {
+      boundingbox: [-0.6, 3.4, 13.8, -1.6],
+      keepAspect: false,
+      title: () => makeStrings("bundle")("title"),
+    },
+  );
+
+  registerQuiz("vliwQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("whoQ"),
+      options: [
+        { text: () => sceneStrings("wCompiler"), correct: true },
+        { text: () => sceneStrings("wHardware"), correct: false },
+        { text: () => sceneStrings("wUser"), correct: false },
+        { text: () => sceneStrings("wOs"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("slotQ"),
+      options: [
+        { text: () => sceneStrings("sSlots"), correct: true },
+        { text: () => sceneStrings("sOne"), correct: false },
+        { text: () => sceneStrings("sData"), correct: false },
+        { text: () => sceneStrings("sBranch"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("depQ"),
+      options: [
+        { text: () => sceneStrings("dNone"), correct: true },
+        { text: () => sceneStrings("dQuad"), correct: false },
+        { text: () => sceneStrings("dMore"), correct: false },
+        { text: () => sceneStrings("dRob"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("nopQ"),
+      options: [
+        { text: () => sceneStrings("nNop"), correct: true },
+        { text: () => sceneStrings("nBranch"), correct: false },
+        { text: () => sceneStrings("nStall"), correct: false },
+        { text: () => sceneStrings("nReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("epicQ"),
+      options: [
+        { text: () => sceneStrings("ePred"), correct: true },
+        { text: () => sceneStrings("eRob"), correct: false },
+        { text: () => sceneStrings("eRename"), correct: false },
+        { text: () => sceneStrings("eNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("failQ"),
+      options: [
+        { text: () => sceneStrings("fMem"), correct: true },
+        { text: () => sceneStrings("fSlow"), correct: false },
+        { text: () => sceneStrings("fIllegal"), correct: false },
+        { text: () => sceneStrings("fRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("vsQ"),
+      options: [
+        { text: () => sceneStrings("vSimple"), correct: true },
+        { text: () => sceneStrings("vComplex"), correct: false },
+        { text: () => sceneStrings("vSame"), correct: false },
+        { text: () => sceneStrings("vSlow"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("aliveQ"),
+      options: [
+        { text: () => sceneStrings("aDsp"), correct: true },
+        { text: () => sceneStrings("aServer"), correct: false },
+        { text: () => sceneStrings("aNone"), correct: false },
+        { text: () => sceneStrings("aBrowser"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bloatQ"),
+      options: [
+        { text: () => sceneStrings("bNop"), correct: true },
+        { text: () => sceneStrings("bClock"), correct: false },
+        { text: () => sceneStrings("bRam"), correct: false },
+        { text: () => sceneStrings("bReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("addQ"),
+      options: [
+        { text: () => sceneStrings("adReb"), correct: true },
+        { text: () => sceneStrings("adFree"), correct: false },
+        { text: () => sceneStrings("adFaster"), correct: false },
+        { text: () => sceneStrings("adNone"), correct: false },
+      ],
+    },
+  ]);
+</script>

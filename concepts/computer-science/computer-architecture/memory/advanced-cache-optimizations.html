@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Advanced Cache Optimizations</primer-title>
+
+    <primer-card>
+      <p>
+        By now you know the master equation,
+        <primer-math>\text{AMAT} = t_{\text{hit}} + (\text{miss rate}) \times t_{\text{penalty}}</primer-math>,
+        and the
+        <primer-ref to="computer-science/computer-architecture/memory/cache-performance-and-the-three-cs">three C's</primer-ref>
+        that populate the miss rate. There are exactly <strong>three terms to shrink</strong>, and every advanced
+        cache trick ever invented is an attack on one of them: reduce the <em>hit time</em>, reduce the <em>miss
+        rate</em>, or reduce the <em>miss penalty</em>. Keep that lens and the zoo of optimizations organises
+        itself.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The optimization menu, sorted by target</h2>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Optimization</th><th>Idea in one line</th><th>AMAT term it cuts</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Way prediction</strong></td><td>guess the matching way early so a set-associative cache acts like a direct-mapped one on a hit</td><td>hit time</td></tr>
+            <tr><td><strong>Banking / multiported</strong></td><td>split the cache into independent banks so several accesses proceed in parallel</td><td>hit time (bandwidth)</td></tr>
+            <tr><td><strong>Victim cache</strong></td><td>a tiny fully-associative buffer holds just-evicted lines, catching conflict misses</td><td>miss rate</td></tr>
+            <tr><td><strong>Larger / more-associative</strong></td><td>attack capacity and conflict misses directly</td><td>miss rate</td></tr>
+            <tr><td><strong>Multi-level (L2/L3)</strong></td><td>a mid-speed level catches L1 misses before DRAM</td><td>miss penalty</td></tr>
+            <tr><td><strong>Critical-word-first / early restart</strong></td><td>fetch the exact word the CPU stalled on first, restart, stream the rest behind it</td><td>miss penalty</td></tr>
+            <tr><td><strong>Non-blocking (lockup-free)</strong></td><td>keep serving hits (and other misses) while a miss is outstanding — <em>hit-under-miss</em></td><td>miss penalty (overlaps it away)</td></tr>
+            <tr><td><strong>Prefetching</strong></td><td>fetch blocks before they are demanded, hiding compulsory misses</td><td>miss rate / penalty</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Notice how the table splits neatly into three groups — that grouping <em>is</em> the mental model. Below we
+        zoom in on the three most conceptually rich ones.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Victim caches — recycling the just-evicted</h2>
+      <p>
+        A direct-mapped cache is fast but suffers <em>conflict</em> misses: two hot blocks fighting over one set
+        evict each other endlessly (ping-pong thrashing). A <strong>victim cache</strong> is a small
+        fully-associative buffer (just 4–16 lines) that catches every block the main cache throws out. On a main
+        miss, you check the victim cache first; a hit there swaps the block back in a cycle or two instead of a
+        trip to L2. For a handful of lines it can eliminate a large share of a direct-mapped cache's conflict
+        misses — the cheap fix that lets a fast simple cache pretend to be more associative.
+      </p>
+      <primer-code run>
+        // Victim cache killing conflict misses. Direct-mapped cache of 1 line (worst case),
+        // plus a 2-entry fully-associative victim buffer. Two blocks (0 and 1) map to the same slot.
+        let mainTag = -1;                 // the one direct-mapped line
+        const victim: number[] = [];      // recently evicted blocks (FA, size 2)
+
+        function access(block: number): string {
+          if (mainTag === block) return `block ${block}: HIT (main)`;
+          const vi = victim.indexOf(block);
+          if (vi !== -1) {                // found in victim cache: swap it back, no L2 trip
+            victim.splice(vi, 1);
+            if (mainTag !== -1) victim.unshift(mainTag);
+            mainTag = block;
+            return `block ${block}: hit (victim) - conflict miss saved!`;
+          }
+          if (mainTag !== -1) { victim.unshift(mainTag); victim.length = Math.min(victim.length, 2); }
+          mainTag = block;
+          return `block ${block}: MISS (go to L2)`;
+        }
+
+        // Classic ping-pong: 0,1,0,1,0,1 — a direct-mapped cache misses EVERY time.
+        for (const b of [0, 1, 0, 1, 0, 1]) console.log(access(b));
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Non-blocking caches — don't freeze on a miss</h2>
+      <p>
+        A naive cache <em>blocks</em>: on a miss the whole cache stalls until the block returns, hundreds of cycles
+        wasted. A <strong>non-blocking</strong> (lockup-free) cache instead keeps going — it serves later
+        <em>hits</em> while the miss is in flight (<strong>hit-under-miss</strong>), and even launches
+        <em>further</em> misses (<strong>miss-under-miss</strong>). Each outstanding miss is tracked by a
+        <strong>Miss Status Handling Register (MSHR)</strong>; with <primer-math>N</primer-math> MSHRs the cache
+        can have <primer-math>N</primer-math> misses in flight at once, overlapping their latencies. This is what
+        makes a cache worthy of an
+        <primer-ref todo to="computer-science/computer-architecture/ilp/out-of-order-execution">out-of-order</primer-ref>
+        core: the core generates many independent loads, and the cache pursues them all in parallel, folding
+        hundreds of cycles of memory latency into each other rather than paying them end to end.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Critical-word-first — deliver the byte they're waiting for</h2>
+      <p>
+        A miss fetches a whole 64-byte block, but the CPU stalled on <em>one</em> word inside it. Why wait for all
+        64 bytes? <strong>Critical-word-first</strong> asks memory for the needed word first and forwards it to the
+        CPU the instant it arrives (<strong>early restart</strong>); the rest of the block streams in behind while
+        the pipeline is already running again. The effective miss penalty drops from "time for the whole block" to
+        "time for the first word" — most of the block-transfer time is hidden. The trick is nearly free and appears
+        in essentially every real cache.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the inclusion diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "incl": {
+          "title": "Inclusive hierarchy — every block in L1 is also in L2, which is also in L3",
+          "l1": "L1",
+          "l2": "L2",
+          "l3": "L3",
+          "note": "inclusive: inner ⊆ outer"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Multi-level: inclusion vs exclusion</h2>
+      <p>
+        With three cache levels, a policy question appears: must a block in L1 <em>also</em> sit in L2 and L3?
+      </p>
+      <primer-theorem name="Inclusion policies">
+        <ul>
+          <li><strong>Inclusive</strong> — every block in an inner level is guaranteed present in the outer level.
+            Simplifies coherence (snoop only the outer level to know if any inner cache holds a block), but
+            <em>wastes</em> capacity duplicating data, and an eviction from L3 must <em>back-invalidate</em> the
+            copies in L1/L2.</li>
+          <li><strong>Exclusive</strong> — a block lives in <em>exactly one</em> level; the levels partition the
+            data, giving the most effective total capacity. AMD chips have long favoured this. Costs more traffic
+            (blocks shuffle between levels on hits/misses).</li>
+          <li><strong>Non-inclusive/NINE</strong> — neither guaranteed; the pragmatic middle ground many Intel
+            chips use.</li>
+        </ul>
+      </primer-theorem>
+      <primer-geometry scene="incl"></primer-geometry>
+      <p>
+        And <strong>banking</strong> ties it together at the bottom: dividing each cache (and DRAM) into
+        independent banks lets multiple accesses proceed at once — more bandwidth for the many outstanding misses a
+        non-blocking cache and an out-of-order core throw at it.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why is 'way prediction' a hit-time trick when the cache is still associative?">
+      <p>
+        An n-way set-associative cache normally reads all n tags <em>and</em> all n data ways in parallel, then a
+        late multiplexer picks the matching one — safe, but the data can't leave until the (slow) tag comparison
+        finishes. Way prediction adds a tiny table that <em>guesses</em> which way will hit and reads only that
+        one, speculatively, forwarding its data immediately. Guess right (usually &gt;90% of the time thanks to
+        locality) and you got direct-mapped hit speed with set-associative miss rates — the best of both. Guess
+        wrong and you pay an extra cycle to check the others. It is speculation applied to the cache, the same
+        gamble the branch predictor makes in the pipeline, and it pays for the same reason: programs are
+        predictable.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Reducing miss RATE and reducing miss PENALTY are different goals">
+      <p>
+        A frequent muddle: "L2 caches reduce the miss rate." An L2 does <em>not</em> lower L1's miss rate at all —
+        L1 misses exactly as often as before. What the L2 lowers is the <em>penalty</em> of each of those misses
+        (62 cycles instead of 200, say). Victim caches and higher associativity attack the miss <em>rate</em>;
+        extra levels, critical-word-first, and non-blocking attack the miss <em>penalty</em>; way prediction and
+        banking attack the <em>hit time</em>. Naming the term a trick targets is the whole point of the taxonomy —
+        conflate rate and penalty and you will "optimise" the wrong number and wonder why AMAT didn't move.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The next assault: prefetching</h2>
+      <p>
+        One row of the table deserves its own page. <strong>Prefetching</strong> is unique because it attacks the
+        one C the others cannot touch — the <em>compulsory</em> miss — by fetching a block <em>before</em> the CPU
+        ever asks. That is
+        <primer-ref forward to="computer-science/computer-architecture/memory/prefetching">where we go next</primer-ref>.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: which optimization cuts which AMAT term. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "advQuiz@1": {
+          "intro": "Every trick cuts one of three terms: hit time, miss rate, or miss penalty. Name the term.",
+          "victimQ": "A victim cache primarily reduces…",
+          "vRate": "the miss rate (it catches conflict misses)",
+          "vHit": "the hit time",
+          "vPen": "the miss penalty only",
+          "vNone": "nothing",
+          "victimWhatQ": "A victim cache holds…",
+          "vwEvicted": "recently EVICTED lines, in a small fully-associative buffer",
+          "vwFuture": "blocks predicted for the future",
+          "vwDirty": "only dirty blocks bound for memory",
+          "vwTags": "just the tag bits of every line",
+          "nbQ": "A non-blocking (lockup-free) cache lets the CPU…",
+          "nbHit": "keep serving hits (and other misses) while a miss is outstanding",
+          "nbStop": "stall completely until the miss returns",
+          "nbFlush": "flush the whole cache on every miss",
+          "nbSlow": "run at half clock speed during a miss",
+          "mshrQ": "What does an MSHR (Miss Status Handling Register) track?",
+          "mOut": "an outstanding miss in flight (so more can overlap)",
+          "mTag": "the LRU order of a set",
+          "mDirty": "the dirty bits of the cache",
+          "mWay": "the predicted way",
+          "cwfQ": "Critical-word-first / early restart reduces the miss penalty by…",
+          "cwFirst": "delivering the exact word the CPU needs first, then streaming the rest",
+          "cwSkip": "skipping the rest of the block forever",
+          "cwBig": "using bigger blocks",
+          "cwNone": "adding a victim cache",
+          "wayQ": "Way prediction is a HIT-TIME optimization because it…",
+          "wyGuess": "guesses the matching way so data is forwarded without waiting for all tag compares",
+          "wyRate": "removes capacity misses",
+          "wyPen": "adds a second cache level",
+          "wyBank": "splits the cache into banks",
+          "inclQ": "In an INCLUSIVE hierarchy…",
+          "inYes": "every block in an inner level is also present in the outer level",
+          "inNo": "each block lives in exactly one level",
+          "inNever": "L1 and L2 never share any data",
+          "inRandom": "blocks are placed at random",
+          "exclQ": "The main advantage of an EXCLUSIVE hierarchy is…",
+          "exCap": "more effective total capacity (no duplication across levels)",
+          "exSimple": "simpler coherence than inclusive",
+          "exFast": "a faster L1 hit time guaranteed",
+          "exNone": "there is no advantage",
+          "bankQ": "Banking a cache mainly improves…",
+          "bkBw": "bandwidth / hit throughput (parallel accesses to independent banks)",
+          "bkRate": "the compulsory miss rate",
+          "bkTag": "the tag width",
+          "bkNone": "nothing measurable",
+          "termQ": "Adding an L2 cache reduces which AMAT term for L1 misses?",
+          "tPen": "the miss penalty (not L1's miss rate)",
+          "tRate": "L1's miss rate",
+          "tHit": "L1's hit time",
+          "tAll": "none of them"
+        }
+      }
+    </script>
+
+    <primer-quiz name="advQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/memory/cache-performance-and-the-three-cs"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // --- Nested inclusion diagram: L1 inside L2 inside L3. Static base content. ---
+  registerGeometryScene(
+    "incl",
+    ({ board, colors, sceneStrings }) => {
+      const nest = (half, hgt, fill, txt, ty) => {
+        board.create("polygon", [[-half, -hgt], [half, -hgt], [half, hgt], [-half, hgt]], {
+          fillColor: fill, fillOpacity: 0.16, strokeColor: colors.line, strokeWidth: 1.5,
+          fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        board.create("text", [0, ty, txt], {
+          strokeColor: colors.ink, fontSize: 13, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600",
+        });
+      };
+      nest(5.0, 2.6, colors.cat[2], sceneStrings("l3"), 2.1);   // outermost
+      nest(3.2, 1.7, colors.cat[1], sceneStrings("l2"), 1.25);
+      nest(1.5, 0.8, colors.cat[0], sceneStrings("l1"), 0.0);
+      board.create("text", [0, -3.1, sceneStrings("note")], {
+        strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+      });
+    },
+    {
+      boundingbox: [-6, 3.2, 6, -3.6],
+      keepAspect: false,
+      title: () => makeStrings("incl")("title"),
+    },
+  );
+
+  registerQuiz("advQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("victimQ"),
+      options: [
+        { text: () => sceneStrings("vRate"), correct: true },
+        { text: () => sceneStrings("vHit"), correct: false },
+        { text: () => sceneStrings("vPen"), correct: false },
+        { text: () => sceneStrings("vNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("victimWhatQ"),
+      options: [
+        { text: () => sceneStrings("vwEvicted"), correct: true },
+        { text: () => sceneStrings("vwFuture"), correct: false },
+        { text: () => sceneStrings("vwDirty"), correct: false },
+        { text: () => sceneStrings("vwTags"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("nbQ"),
+      options: [
+        { text: () => sceneStrings("nbHit"), correct: true },
+        { text: () => sceneStrings("nbStop"), correct: false },
+        { text: () => sceneStrings("nbFlush"), correct: false },
+        { text: () => sceneStrings("nbSlow"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("mshrQ"),
+      options: [
+        { text: () => sceneStrings("mOut"), correct: true },
+        { text: () => sceneStrings("mTag"), correct: false },
+        { text: () => sceneStrings("mDirty"), correct: false },
+        { text: () => sceneStrings("mWay"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cwfQ"),
+      options: [
+        { text: () => sceneStrings("cwFirst"), correct: true },
+        { text: () => sceneStrings("cwSkip"), correct: false },
+        { text: () => sceneStrings("cwBig"), correct: false },
+        { text: () => sceneStrings("cwNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("wayQ"),
+      options: [
+        { text: () => sceneStrings("wyGuess"), correct: true },
+        { text: () => sceneStrings("wyRate"), correct: false },
+        { text: () => sceneStrings("wyPen"), correct: false },
+        { text: () => sceneStrings("wyBank"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("inclQ"),
+      options: [
+        { text: () => sceneStrings("inYes"), correct: true },
+        { text: () => sceneStrings("inNo"), correct: false },
+        { text: () => sceneStrings("inNever"), correct: false },
+        { text: () => sceneStrings("inRandom"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("exclQ"),
+      options: [
+        { text: () => sceneStrings("exCap"), correct: true },
+        { text: () => sceneStrings("exSimple"), correct: false },
+        { text: () => sceneStrings("exFast"), correct: false },
+        { text: () => sceneStrings("exNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bankQ"),
+      options: [
+        { text: () => sceneStrings("bkBw"), correct: true },
+        { text: () => sceneStrings("bkRate"), correct: false },
+        { text: () => sceneStrings("bkTag"), correct: false },
+        { text: () => sceneStrings("bkNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("termQ"),
+      options: [
+        { text: () => sceneStrings("tPen"), correct: true },
+        { text: () => sceneStrings("tRate"), correct: false },
+        { text: () => sceneStrings("tHit"), correct: false },
+        { text: () => sceneStrings("tAll"), correct: false },
+      ],
+    },
+  ]);
+</script>

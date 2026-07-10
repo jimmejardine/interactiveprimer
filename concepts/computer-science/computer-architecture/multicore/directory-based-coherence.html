@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Directory-Based Coherence</primer-title>
+
+    <primer-card>
+      <p>
+        <primer-ref to="computer-science/computer-architecture/multicore/the-mesi-protocol">MESI</primer-ref> over a
+        <primer-ref to="computer-science/computer-architecture/multicore/cache-coherence-and-snooping">snooping bus</primer-ref>
+        is elegant because the bus does the hard part for free: every core overhears every transaction. But that is
+        also its doom. A broadcast bus is a <em>single shared wire</em>, and once you have 16, 32, 64 cores all
+        shouting invalidations on it, the bus saturates. Snooping asks every cache to look at every transaction —
+        <primer-math>O(n)</primer-math> work per access on an <primer-math>n</primer-math>-core machine, over a
+        medium whose bandwidth does not grow. It simply does not scale.
+      </p>
+      <p>
+        Big machines — the 64-core-and-up servers, the historical NUMA supercomputers — replace the shouting with
+        <strong>directories</strong>. Instead of broadcasting "who has this block?" to everyone, a directory
+        <em>already knows</em> exactly which caches hold each block, and sends coherence messages
+        <strong>point-to-point</strong> only to those caches. No broadcast, no shared bus, no
+        everyone-listens-to-everything. That is how coherence reaches hundreds of cores.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The directory: a phone book for cache blocks</h2>
+      <p>
+        For every block of memory, the directory keeps a small record: <strong>what state is it in</strong>, and
+        <strong>which caches currently hold it</strong>. The classic encoding of "which caches" is a
+        <strong>sharer bit-vector</strong> — one bit per core. If bit <primer-math>i</primer-math> is set, core
+        <primer-math>i</primer-math> has a copy. A block shared by cores 0 and 2 on a 4-core machine has the vector
+        <primer-math>1010</primer-math>.
+      </p>
+      <p>
+        The directory lives with memory — either one central table or, on a NUMA machine, <em>distributed</em> so
+        that each memory node owns the directory entries for its own addresses (the block's <strong>home
+        node</strong>). When a core misses on a block, it sends its request to that block's home directory, which
+        looks up the entry and does exactly the right thing to exactly the right caches.
+      </p>
+      <primer-theorem name="Directory-based coherence">
+        <ul>
+          <li>the <strong>directory</strong> tracks, per block, its coherence state plus the set of caches holding
+            it (a <strong>sharer bit-vector</strong>, one bit per core);</li>
+          <li>coherence actions are <strong>point-to-point messages</strong> from the home directory to the specific
+            sharers — <em>no broadcast</em>;</li>
+          <li>this trades the bus's free broadcast for <em>storage and message latency</em>, but scales to
+            <strong>hundreds of cores</strong> where snooping chokes.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Strings for the directory figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "directory": {
+          "title": "A directory sends invalidations point-to-point — only to the actual sharers (cores 0 and 2)",
+          "n0": "Core 0", "n1": "Core 1", "n2": "Core 2", "n3": "Core 3",
+          "have": "has block B", "nohave": "no copy",
+          "dir": "Directory (home of block B)",
+          "entry": "B:  state = Shared   sharers = 1 0 1 0",
+          "msg": "invalidate"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Point-to-point, not broadcast</h2>
+      <p>
+        Here core&nbsp;1 wants to <em>write</em> block&nbsp;B. It sends one request to B's home directory. The
+        directory reads the sharer vector — <primer-math>1010</primer-math>, so cores 0 and 2 hold copies — and
+        fires an invalidate to <strong>just those two</strong>, then grants core&nbsp;1 exclusive ownership. Core&nbsp;3,
+        which never had the block, is never bothered. A snooping bus would have blasted the invalidate at all four
+        (and every other core in the machine); the directory touches only who matters.
+      </p>
+      <primer-geometry scene="directory"></primer-geometry>
+      <p>
+        This is the whole win. The number of messages scales with the number of <em>actual sharers</em> of a block
+        — usually one or two — not with the total core count. Traffic that snooping made everyone's problem becomes
+        a private conversation between the directory and the handful of caches that care.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Snooping vs directories, side by side</h2>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th></th><th>Snooping</th><th>Directory</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>How others learn of a write</strong></td><td>broadcast on a shared bus</td><td>point-to-point messages from the home directory</td></tr>
+            <tr><td><strong>Who is contacted</strong></td><td>everyone (all caches snoop)</td><td>only the actual sharers</td></tr>
+            <tr><td><strong>Extra storage</strong></td><td>none (just the bus)</td><td>the directory: ~1 bit per core per block</td></tr>
+            <tr><td><strong>Scales to</strong></td><td>a handful of cores</td><td>hundreds of cores</td></tr>
+            <tr><td><strong>Latency for a simple miss</strong></td><td>low (one bus round-trip)</td><td>higher (indirection through the directory)</td></tr>
+            <tr><td><strong>Typical use</strong></td><td>desktop / small multicore</td><td>big NUMA servers, many-core</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Directories are not free — they add memory overhead and an extra network hop of latency (a miss may go
+        core → directory → owner → back). The bet is that saving bus bandwidth is worth the indirection once the
+        core count is high. For small chips, snooping still wins on simplicity and latency; the crossover is why
+        real systems often use <strong>both</strong> — snooping within a socket, a directory between sockets.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Simulate a directory with a sharer bit-vector</h2>
+      <p>
+        Let's model a directory for one block on a 4-core machine and count the messages it sends, comparing them to
+        the broadcast a snooping bus would have used. Watch invalidations go only to the set bits:
+      </p>
+      <primer-code run>
+        const CORES = 4;
+        let sharers = 0b0000; // bit i set => core i caches the block
+        let state = "Invalid"; // Invalid | Shared | Modified
+        let broadcastCount = 0, directoryCount = 0;
+
+        function bits(v: number): string {
+          return v.toString(2).padStart(CORES, "0");
+        }
+
+        function read(core: number): void {
+          sharers |= (1 << core);
+          state = "Shared";
+          console.log(`core ${core} READ  -> state=${state}, sharers=${bits(sharers)}`);
+        }
+
+        function write(core: number): void {
+          // Invalidate every OTHER core that currently holds the block.
+          let sent = 0;
+          for (let i = 0; i < CORES; i++) {
+            if (i !== core && (sharers & (1 << i))) { sent++; }
+          }
+          directoryCount += sent;           // directory: one message per real sharer
+          broadcastCount += (CORES - 1);    // snooping: one broadcast reaches all others
+          sharers = (1 << core);            // only the writer holds it now
+          state = "Modified";
+          console.log(`core ${core} WRITE -> invalidated ${sent} sharer(s); state=${state}, sharers=${bits(sharers)}`);
+        }
+
+        read(0); read(2);   // cores 0 and 2 share the block -> sharers = 1010
+        write(1);           // directory invalidates ONLY cores 0 and 2 (2 messages)
+        read(3);            // core 1 (M) + core 3 now share
+        write(0);
+
+        console.log(`directory messages: ${directoryCount}   vs broadcast messages: ${broadcastCount}`);
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="A full bit-vector costs a bit per core — what do 1000-core machines do instead?">
+      <p>
+        A sharer bit-vector needs one bit per core <em>per block</em>. At 4 cores that is trivial; at 1024 cores it
+        is 1024 bits (128 bytes) of directory for <em>every</em> 64-byte block — the directory would be twice the
+        size of memory it describes. Real large systems use <strong>limited-pointer</strong> schemes (store only the
+        first few sharer IDs, since most blocks are shared by very few caches) or <strong>coarse-vector</strong>
+        schemes (one bit per <em>group</em> of cores, invalidating a whole group at once) or <strong>hierarchical</strong>
+        directories. All are attacks on the same enemy: the directory's storage growing with core count. It is a
+        classic space-vs-precision trade — spend fewer bits, occasionally invalidate a few extra caches.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A directory does not make coherence 'free' — it moves the cost">
+      <p>
+        It is tempting to think directories are strictly better than snooping. They are not — they trade one cost
+        for another. Snooping spends <em>bus bandwidth</em>; a directory spends <em>storage</em> (the bit-vectors)
+        and <em>latency</em> (an extra hop through the home node, and sometimes a three-way core→directory→owner
+        dance for a single miss). On a 4-core laptop a directory would be pure overhead — the bus is nowhere near
+        saturated, so snooping's lower latency wins. Directories only pay off once broadcast traffic becomes the
+        bottleneck. The right question is never "which is better?" but "how many cores?"
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: directory concepts + bit-vector counting. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "directoryQuiz@1": {
+          "intro": "A directory tracks per-block state + a sharer bit-vector, and sends point-to-point messages only to real sharers. Scales past snooping.",
+          "whyQ": "Snooping is replaced by directories at high core counts because…",
+          "wBus": "the shared broadcast bus saturates as core count grows",
+          "wStore": "directories use no memory at all",
+          "wLaw": "snooping is illegal on big machines",
+          "wFast": "broadcasting scales perfectly forever",
+          "trackQ": "For each block, a directory records…",
+          "tState": "its coherence state and which caches hold it",
+          "tOnly": "only its numeric value",
+          "tNone": "nothing — it is just a bus",
+          "tClock": "the clock speed of each core",
+          "vecQ": "A 'sharer bit-vector' encodes…",
+          "vBit": "one bit per core; bit i set means core i caches the block",
+          "vVal": "the block's data value in binary",
+          "vAddr": "the block's memory address",
+          "vClock": "each core's frequency",
+          "p2pQ": "Directory coherence sends invalidations…",
+          "pOnly": "point-to-point, only to the caches that actually hold the block",
+          "pAll": "by broadcasting to every core",
+          "pNone": "never — it cannot invalidate",
+          "pDisk": "to disk",
+          "homeQ": "On a distributed NUMA directory, a block's directory entry lives at…",
+          "hHome": "its home node — the memory node that owns that address",
+          "hCore0": "always core 0",
+          "hRandom": "a random node each access",
+          "hDisk": "the disk controller",
+          "costQ": "Compared with snooping, a directory trades bus bandwidth for…",
+          "cStore": "directory storage and extra message latency (an indirection hop)",
+          "cNone": "nothing — it is free",
+          "cClock": "a higher clock speed",
+          "cPower": "less correctness",
+          "scaleQ": "Directory coherence scales because the number of coherence messages grows with…",
+          "sSharers": "the number of actual sharers of a block (usually one or two)",
+          "sCores": "the total core count, always",
+          "sBlocks": "the total number of memory blocks",
+          "sClock": "the clock frequency",
+          "bigQ": "Why do 1000-core machines avoid a full per-core bit-vector?",
+          "bBig": "the directory storage would rival or exceed the size of memory itself",
+          "bSlow": "bit-vectors cannot be read",
+          "bBan": "they are patented",
+          "bNone": "they do use full vectors with no problem",
+          "hybridQ": "Many real systems use…",
+          "hyBoth": "snooping within a socket and a directory between sockets",
+          "hyNeither": "neither mechanism",
+          "hyDisk": "the disk for coherence",
+          "hyOne": "only ever one core",
+          "invNumQ": "On an 8-core machine, a block's sharer vector has ${k} cores set (none of them the writer). A directory write invalidates how many caches? (integer)",
+          "bcNumQ": "On a ${nc}-core machine, how many caches would a SNOOPING broadcast reach on one write (all others)? (integer)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="directoryQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/multicore/the-mesi-protocol"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Directory block diagram: 4 cores (2 holding the block), a directory entry with a sharer vector,
+     point-to-point invalidate arrows only to the sharers. Static base content. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "directory",
+    ({ board, colors, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, fillIdx, key, sub) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[fillIdx], fillOpacity: 0.20, strokeColor: colors.line, strokeWidth: 1.5,
+          fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2 + (sub ? 0.18 : 0), sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+        if (sub) {
+          board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2 - 0.28, sceneStrings(sub)], {
+            strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+          });
+        }
+      };
+
+      // Four cores across the top. Cores 0 and 2 hold the block (cat[1]); cores 1 and 3 do not (cat[0]).
+      const xs = [0.4, 3.0, 5.6, 8.2];
+      const holds = ["have", "nohave", "have", "nohave"];
+      const fill = [1, 0, 1, 0];
+      ["n0", "n1", "n2", "n3"].forEach((k, i) => box(xs[i], 4.2, xs[i] + 2.2, 5.6, fill[i], k, holds[i]));
+
+      // Directory + memory box at the bottom.
+      box(1.8, 0.3, 7.0, 2.0, 3, "dir", "entry");
+
+      // Point-to-point invalidate arrows: directory -> core 0 and core 2 only.
+      const arrow = (fromX, toX) => {
+        board.create("arrow", [[fromX, 2.0], [toX, 4.2]], {
+          strokeColor: colors.cat[0], strokeWidth: 2.5, lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+        });
+      };
+      arrow(3.2, 1.5);   // to core 0
+      arrow(5.6, 6.7);   // to core 2
+      board.create("text", [2.1, 3.1, sceneStrings("msg")], { strokeColor: colors.cat[0], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      board.create("text", [6.6, 3.1, sceneStrings("msg")], { strokeColor: colors.cat[0], fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+    },
+    { boundingbox: [-0.2, 6.0, 10.6, -0.2], keepAspect: false, title: () => makeStrings("directory")("title") },
+  );
+
+  registerQuiz("directoryQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("wBus"), correct: true },
+        { text: () => sceneStrings("wStore"), correct: false },
+        { text: () => sceneStrings("wLaw"), correct: false },
+        { text: () => sceneStrings("wFast"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("trackQ"),
+      options: [
+        { text: () => sceneStrings("tState"), correct: true },
+        { text: () => sceneStrings("tOnly"), correct: false },
+        { text: () => sceneStrings("tNone"), correct: false },
+        { text: () => sceneStrings("tClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("vecQ"),
+      options: [
+        { text: () => sceneStrings("vBit"), correct: true },
+        { text: () => sceneStrings("vVal"), correct: false },
+        { text: () => sceneStrings("vAddr"), correct: false },
+        { text: () => sceneStrings("vClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("p2pQ"),
+      options: [
+        { text: () => sceneStrings("pOnly"), correct: true },
+        { text: () => sceneStrings("pAll"), correct: false },
+        { text: () => sceneStrings("pNone"), correct: false },
+        { text: () => sceneStrings("pDisk"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("homeQ"),
+      options: [
+        { text: () => sceneStrings("hHome"), correct: true },
+        { text: () => sceneStrings("hCore0"), correct: false },
+        { text: () => sceneStrings("hRandom"), correct: false },
+        { text: () => sceneStrings("hDisk"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("costQ"),
+      options: [
+        { text: () => sceneStrings("cStore"), correct: true },
+        { text: () => sceneStrings("cNone"), correct: false },
+        { text: () => sceneStrings("cClock"), correct: false },
+        { text: () => sceneStrings("cPower"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("scaleQ"),
+      options: [
+        { text: () => sceneStrings("sSharers"), correct: true },
+        { text: () => sceneStrings("sCores"), correct: false },
+        { text: () => sceneStrings("sBlocks"), correct: false },
+        { text: () => sceneStrings("sClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bigQ"),
+      options: [
+        { text: () => sceneStrings("bBig"), correct: true },
+        { text: () => sceneStrings("bSlow"), correct: false },
+        { text: () => sceneStrings("bBan"), correct: false },
+        { text: () => sceneStrings("bNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hybridQ"),
+      options: [
+        { text: () => sceneStrings("hyBoth"), correct: true },
+        { text: () => sceneStrings("hyNeither"), correct: false },
+        { text: () => sceneStrings("hyDisk"), correct: false },
+        { text: () => sceneStrings("hyOne"), correct: false },
+      ],
+    },
+    {
+      // Directory invalidates exactly the k sharers.
+      prompt: (v) => sceneStrings("invNumQ", v),
+      variables: "k=[1:7]",
+      answer: (v) => v.k,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Broadcast reaches all other nc-1 caches.
+      prompt: (v) => sceneStrings("bcNumQ", v),
+      variables: "nc=[4:16]",
+      answer: (v) => v.nc - 1,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Tomasulo's Algorithm and Register Renaming</primer-title>
+
+    <primer-card>
+      <p>
+        In 1967, an IBM engineer named <strong>Robert Tomasulo</strong> designed the floating-point unit of the
+        IBM System/360 Model 91 and, almost as a side effect, invented the algorithm that every high-performance
+        processor on Earth still uses today. It takes
+        <primer-ref to="computer-science/computer-architecture/ilp/dynamic-scheduling-and-scoreboarding">scoreboarding</primer-ref>
+        and fixes its two great weaknesses: it <strong>forwards results directly</strong> to whoever is waiting for
+        them (no detour through the register file), and it makes the false <strong>WAR and WAW</strong> hazards
+        <em>disappear entirely</em> through a trick called <strong>register renaming</strong>.
+      </p>
+      <p>
+        The magic is that Tomasulo stopped thinking about instructions as waiting on <em>registers</em>, and made
+        them wait on <em>values-in-transit</em> instead. Each pending result gets a unique <strong>tag</strong>;
+        an instruction that needs it simply parks with that tag and springs to life the moment a value carrying
+        that tag appears on a shared broadcast wire. Registers, it turns out, were never the real dependency —
+        they were just names.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The two false dependences, and why names cause them</h2>
+      <p>
+        A machine has only a handful of architectural register names — <primer-math>F0, F2, F4, \dots</primer-math>
+        The compiler reuses them constantly. Watch what reuse does:
+      </p>
+      <primer-code lang="text">
+        DIV.D  F0, F2, F4     ; (i)   writes F0  -- slow
+        ADD.D  F6, F0, F8     ; (j)   reads  F0  -- RAW on F0 (a TRUE dependence)
+        S.D    F6, 0(R1)      ; (k)   reads  F6
+        SUB.D  F8, F10, F12   ; (l)   writes F8  -- but (j) still needs the OLD F8!  => WAR
+        MUL.D  F6, F13, F14   ; (m)   writes F6  -- but (j) also writes F6           => WAW
+      </primer-code>
+      <p>
+        Instruction <em>(l)</em> wants to overwrite <primer-math>F8</primer-math> before <em>(j)</em> has read it
+        — a <strong>WAR</strong> hazard. Instruction <em>(m)</em> writes <primer-math>F6</primer-math>, which
+        <em>(j)</em> also writes — a <strong>WAW</strong> hazard. Neither is a <em>real</em> flow of data. They
+        exist only because the compiler ran out of register names and recycled <primer-math>F6</primer-math> and
+        <primer-math>F8</primer-math>. If every write got a <em>fresh</em> name, both hazards would evaporate.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Register renaming: give every result a fresh home</h2>
+      <p>
+        <strong>Register renaming</strong> separates the <em>architectural</em> register a program names from the
+        <em>physical</em> storage that actually holds the value. Every time an instruction writes a register, the
+        hardware allocates it a brand-new physical location (in Tomasulo's design, the tag of a reservation
+        station; in modern chips, a physical register from a large pool). Subsequent readers are pointed at the
+        <em>specific</em> physical location that holds the value they want.
+      </p>
+      <primer-theorem name="Register renaming">
+        <ul>
+          <li>maps each architectural-register <em>write</em> to a <strong>fresh physical location</strong>, so no
+            two live values ever share a name;</li>
+          <li>with unique names, <strong>WAR and WAW hazards cannot occur</strong> — they were only ever conflicts
+            over reused names;</li>
+          <li><strong>RAW (true) dependences remain</strong> and are honoured: a reader waits for the exact
+            physical value it needs;</li>
+          <li>it exposes far more instruction-level parallelism than the compiler's limited register names allowed.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Below, a tiny renamer maps architectural names to a growing pool of physical names. Watch a reused name
+        like <primer-math>F6</primer-math> get two <em>different</em> physical homes — that is the WAW hazard
+        being dissolved, not stalled.
+      </p>
+      <primer-code run>
+        // Minimal register renamer: architectural regs -> physical regs via a map table.
+        // Every WRITE allocates a fresh physical register; reads look up the current mapping.
+        type Prog = { op: string; dst: string; src: string[] }[];
+
+        const prog: Prog = [
+          { op: "DIV.D", dst: "F0", src: ["F2", "F4"] },
+          { op: "ADD.D", dst: "F6", src: ["F0", "F8"] },
+          { op: "SUB.D", dst: "F8", src: ["F10", "F12"] }, // was a WAR on F8
+          { op: "MUL.D", dst: "F6", src: ["F13", "F14"] }, // was a WAW on F6
+        ];
+
+        const map: Record&lt;string, string&gt; = {}; // arch -> current physical name
+        let next = 0;
+        const phys = (arch: string) => map[arch] ?? arch; // unmapped = its initial value
+
+        for (const ins of prog) {
+          const srcs = ins.src.map(phys);          // read: resolve to physical names
+          const p = `p${next++}`;                  // write: allocate a FRESH physical reg
+          map[ins.dst] = p;
+          console.log(`${ins.op}  ${ins.dst}->${p}  =  f(${srcs.join(", ")})`);
+        }
+        console.log("Note: F6 got two different physical homes -> the WAW dependence is GONE.");
+      </primer-code>
+    </primer-card>
+
+    <!-- Strings for the reservation-stations + CDB diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "rs": {
+          "title": "Reservation stations broadcast results on the common data bus",
+          "iq": "Instruction queue (issue in order)",
+          "addRS": "Add/Sub reservation stations",
+          "mulRS": "Mul/Div reservation stations",
+          "addFU": "FP adder",
+          "mulFU": "FP multiplier",
+          "regs": "Register file",
+          "cdb": "COMMON DATA BUS (CDB) — a result + its tag, broadcast to everyone at once",
+          "wake": "waiting stations wake on a matching tag"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Reservation stations and the common data bus</h2>
+      <p>
+        Tomasulo's hardware has two new pieces. In front of each functional unit sit several
+        <strong>reservation stations</strong> — little buffers that hold an instruction plus its operands (or, if
+        an operand isn't ready, the <em>tag</em> it is waiting for). Threading through the whole machine is the
+        <strong>common data bus (CDB)</strong>: when any unit finishes, it broadcasts <em>(tag, value)</em> on the
+        CDB, and <em>every</em> reservation station and register listening for that tag grabs the value in the
+        same cycle. This is <strong>tag-based wakeup</strong>, and it is why results forward instantly.
+      </p>
+      <primer-geometry scene="rs"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The life of an instruction, Tomasulo-style</h2>
+      <p>
+        Each instruction moves through three steps:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Step</th><th>What happens</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>1. Issue</strong></td><td>Take the next instruction (in order). If a reservation
+              station is free, allocate it. For each source operand: if its value is ready, copy it in; otherwise
+              record the <em>tag</em> of the station that will produce it. Rename the destination by making the
+              register point at this station's tag. (No free station ⇒ stall — a structural hazard.)</td></tr>
+            <tr><td><strong>2. Execute</strong></td><td>When both operands have arrived (all tags resolved), and
+              the functional unit is free, compute. Waiting on a tag <em>is</em> the RAW dependence — enforced
+              naturally, with no separate hazard check.</td></tr>
+            <tr><td><strong>3. Write result</strong></td><td>Broadcast <em>(tag, value)</em> on the CDB. Every
+              waiting station and every register whose tag matches captures it simultaneously, and the station
+              frees up.</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        There is no separate "read operands" stall and no WAR/WAW checking anywhere — renaming has made those
+        hazards impossible, so the hardware never has to look for them. The only stalls left are the honest ones:
+        a true RAW dependence (wait for the tag) or a structural one (no free station or unit).
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If the CDB is one shared wire, what happens when two units finish in the same cycle?">
+      <p>
+        They fight — and the <strong>CDB is a genuine bottleneck</strong>. In Tomasulo's original design there is a
+        single common data bus, so if two functional units complete simultaneously, only one may broadcast; the
+        other waits a cycle. This is why modern superscalar processors have <em>multiple</em> result buses (and
+        multiple CDBs), and why the tag-match logic — every station comparing its stored tag against the broadcast
+        tag every cycle — is one of the most timing-critical, power-hungry circuits on the chip. The elegant idea
+        of "broadcast to everyone" gets expensive fast as you widen the machine, a theme that returns when we count
+        the quadratic cost of wide
+        <primer-ref todo to="ilp/superscalar">superscalar</primer-ref> issue.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Renaming removes false dependences — it does NOT remove true ones">
+      <p>
+        A tempting overstatement: "renaming makes all dependences go away, so everything runs in parallel." No.
+        Renaming abolishes <strong>WAR</strong> and <strong>WAW</strong>, which were never real — they were name
+        collisions. A <strong>RAW</strong> dependence is a genuine flow of a value from producer to consumer, and
+        no amount of renaming can let the consumer run before the value exists. In Tomasulo the RAW dependence is
+        simply re-expressed as "wait for this tag on the CDB." If a chain of instructions each depends on the last
+        (<primer-math>a \to b \to c \to d</primer-math>), renaming buys you nothing — the chain is inherently
+        serial. That hard floor is the subject of the final lesson,
+        <primer-ref todo to="ilp/limits">the limits of ILP</primer-ref>.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Why it still matters</h2>
+      <p>
+        Tomasulo's 1967 design is the direct ancestor of the out-of-order engine in your phone and laptop. Modern
+        chips rename onto a pool of a few hundred <em>physical</em> registers (an Apple or AMD core has far more
+        physical than architectural registers precisely to expose more parallelism), forward results over several
+        buses, and add a
+        <primer-ref todo to="ilp/rob">reorder buffer</primer-ref> to keep exceptions precise. But the two core
+        ideas — <em>rename to kill false dependences</em>, and <em>broadcast results by tag</em> — are pure
+        Tomasulo. It is one of the most durable ideas in all of computer engineering.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: Tomasulo & renaming concepts. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "tomasuloQuiz@1": {
+          "intro": "Tomasulo: reservation stations hold operands-or-tags; the CDB broadcasts (tag, value); renaming kills WAR & WAW; RAW remains as a tag wait.",
+          "twoQ": "Tomasulo's algorithm improves on the classic scoreboard chiefly by adding…",
+          "tRename": "register renaming (kills WAR/WAW) plus result forwarding on a common data bus",
+          "tClock": "a faster clock and nothing else",
+          "tCache": "a bigger cache",
+          "tRam": "more main memory",
+          "renQ": "Register renaming eliminates which hazards?",
+          "rWarWaw": "WAR and WAW (the false, name-based dependences)",
+          "rRaw": "RAW (true) dependences",
+          "rAll": "all hazards including RAW",
+          "rNone": "none of them",
+          "rawStayQ": "After renaming, a RAW (true) dependence is…",
+          "rsStill": "still present — the consumer waits for the producer's tag on the CDB",
+          "rsGone": "completely removed",
+          "rsFalse": "converted into a WAR hazard",
+          "rsStruct": "converted into a structural hazard",
+          "cdbQ": "The common data bus (CDB) is used to…",
+          "cBroad": "broadcast a completed result and its tag to all waiting stations and registers at once",
+          "cFetch": "fetch instructions from memory",
+          "cClock": "distribute the clock signal",
+          "cReset": "reset the pipeline on every branch",
+          "rsQ": "A reservation station holds…",
+          "rsHold": "an instruction plus its operand values, or the tags of operands not yet ready",
+          "rsClk": "the CPU clock crystal",
+          "rsPc": "the program counter only",
+          "rsCache": "a copy of the L1 cache",
+          "wakeQ": "'Tag-based wakeup' means an instruction becomes ready when…",
+          "wkTag": "a value with a matching tag appears on the CDB",
+          "wkTime": "a fixed timer expires",
+          "wkOrder": "all earlier instructions have retired in order",
+          "wkRand": "a random number generator selects it",
+          "mapQ": "Renaming maps architectural registers to…",
+          "mPhys": "a larger pool of physical registers / station tags",
+          "mSame": "exactly the same registers, one-to-one, forever",
+          "mMem": "main-memory addresses",
+          "mNone": "nothing; it deletes registers",
+          "botQ": "A single common data bus becomes a bottleneck when…",
+          "bTwo": "two functional units finish in the same cycle and both want to broadcast",
+          "bIdle": "the machine is completely idle",
+          "bOne": "only one instruction is in flight",
+          "bReset": "the machine is powered off",
+          "whyPhysQ": "Why do modern cores have many more physical than architectural registers?",
+          "wpMore": "to rename aggressively and expose more instruction-level parallelism",
+          "wpLaw": "because the ISA manual requires exactly that count",
+          "wpSlow": "to deliberately slow the machine down",
+          "wpNo": "they actually have fewer",
+          "inventQ": "Tomasulo's algorithm was first built in…",
+          "iIbm": "the IBM System/360 Model 91 (1967)",
+          "iCdc": "the CDC 6600",
+          "iM1": "the Apple M1",
+          "iRiscv": "the first RISC-V chip",
+          "chainQ": "For a strictly dependent chain a→b→c→d, register renaming…",
+          "chNo": "does not help — a true RAW chain is inherently serial",
+          "chYes": "makes it fully parallel",
+          "chHalf": "always exactly halves the time",
+          "chDel": "deletes two of the instructions"
+        }
+      }
+    </script>
+
+    <primer-quiz name="tomasuloQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/ilp/dynamic-scheduling-and-scoreboarding"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Reservation-stations + CDB block diagram (static base content) + the randomised quiz. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "rs",
+    ({ board, colors, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, txt, ci, fs = 12) => {
+        board.create(
+          "polygon",
+          [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+          { fillColor: colors.cat[ci], fillOpacity: 0.22, strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false } },
+        );
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, txt], {
+          strokeColor: colors.ink, fontSize: fs, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      };
+      const arrow = (p, q, ci) => board.create("arrow", [p, q], { strokeColor: ci == null ? colors.line : colors.cat[ci], strokeWidth: ci == null ? 1.5 : 3, lastArrow: { type: 2, size: 5 }, highlight: false });
+
+      // Queue and register file on the left.
+      box(0, 6.0, 3.2, 7.2, sceneStrings("iq"), 0);
+      box(0, 0.4, 3.2, 1.6, sceneStrings("regs"), 0);
+
+      // Reservation stations.
+      box(4.2, 6.0, 8.0, 7.2, sceneStrings("addRS"), 1);
+      box(4.2, 3.6, 8.0, 4.8, sceneStrings("mulRS"), 1);
+      // Functional units.
+      box(9.0, 6.0, 12.4, 7.2, sceneStrings("addFU"), 3);
+      box(9.0, 3.6, 12.4, 4.8, sceneStrings("mulFU"), 3);
+
+      arrow([3.2, 6.6], [4.2, 6.6]);           // queue -> add RS
+      arrow([3.2, 6.2], [4.2, 4.2]);           // queue -> mul RS
+      arrow([8.0, 6.6], [9.0, 6.6]);           // add RS -> add FU
+      arrow([8.0, 4.2], [9.0, 4.2]);           // mul RS -> mul FU
+
+      // The common data bus: a bold horizontal wire near the bottom, fed by both FUs.
+      const cdbY = 2.2;
+      board.create("segment", [[0.2, cdbY], [12.4, cdbY]], { strokeColor: colors.cat[2], strokeWidth: 4, highlight: false });
+      board.create("text", [6.3, cdbY - 0.45, sceneStrings("cdb")], { strokeColor: colors.cat[2], fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600" });
+      arrow([10.7, 6.0], [10.7, cdbY], 2);     // add FU result -> CDB
+      arrow([10.7, 3.6], [10.7, cdbY], 2);     // mul FU result -> CDB
+      // CDB feeds back to register file and to the reservation stations (tag wakeup).
+      arrow([1.6, cdbY], [1.6, 1.6], 2);       // CDB -> regs
+      arrow([5.0, cdbY], [5.0, 3.6], 2);       // CDB -> mul RS
+      arrow([5.4, cdbY], [5.4, 6.0], 2);       // CDB -> add RS
+      board.create("text", [7.2, 3.0, sceneStrings("wake")], { strokeColor: colors.ink, fontSize: 10, anchorX: "left", anchorY: "middle", fixed: true, highlight: false });
+    },
+    {
+      boundingbox: [-0.6, 8.0, 13.2, -0.4],
+      keepAspect: false,
+      title: () => makeStrings("rs")("title"),
+    },
+  );
+
+  registerQuiz("tomasuloQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("twoQ"),
+      options: [
+        { text: () => sceneStrings("tRename"), correct: true },
+        { text: () => sceneStrings("tClock"), correct: false },
+        { text: () => sceneStrings("tCache"), correct: false },
+        { text: () => sceneStrings("tRam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("renQ"),
+      options: [
+        { text: () => sceneStrings("rWarWaw"), correct: true },
+        { text: () => sceneStrings("rRaw"), correct: false },
+        { text: () => sceneStrings("rAll"), correct: false },
+        { text: () => sceneStrings("rNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rawStayQ"),
+      options: [
+        { text: () => sceneStrings("rsStill"), correct: true },
+        { text: () => sceneStrings("rsGone"), correct: false },
+        { text: () => sceneStrings("rsFalse"), correct: false },
+        { text: () => sceneStrings("rsStruct"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cdbQ"),
+      options: [
+        { text: () => sceneStrings("cBroad"), correct: true },
+        { text: () => sceneStrings("cFetch"), correct: false },
+        { text: () => sceneStrings("cClock"), correct: false },
+        { text: () => sceneStrings("cReset"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rsQ"),
+      options: [
+        { text: () => sceneStrings("rsHold"), correct: true },
+        { text: () => sceneStrings("rsClk"), correct: false },
+        { text: () => sceneStrings("rsPc"), correct: false },
+        { text: () => sceneStrings("rsCache"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("wakeQ"),
+      options: [
+        { text: () => sceneStrings("wkTag"), correct: true },
+        { text: () => sceneStrings("wkTime"), correct: false },
+        { text: () => sceneStrings("wkOrder"), correct: false },
+        { text: () => sceneStrings("wkRand"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("mapQ"),
+      options: [
+        { text: () => sceneStrings("mPhys"), correct: true },
+        { text: () => sceneStrings("mSame"), correct: false },
+        { text: () => sceneStrings("mMem"), correct: false },
+        { text: () => sceneStrings("mNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("botQ"),
+      options: [
+        { text: () => sceneStrings("bTwo"), correct: true },
+        { text: () => sceneStrings("bIdle"), correct: false },
+        { text: () => sceneStrings("bOne"), correct: false },
+        { text: () => sceneStrings("bReset"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyPhysQ"),
+      options: [
+        { text: () => sceneStrings("wpMore"), correct: true },
+        { text: () => sceneStrings("wpLaw"), correct: false },
+        { text: () => sceneStrings("wpSlow"), correct: false },
+        { text: () => sceneStrings("wpNo"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("inventQ"),
+      options: [
+        { text: () => sceneStrings("iIbm"), correct: true },
+        { text: () => sceneStrings("iCdc"), correct: false },
+        { text: () => sceneStrings("iM1"), correct: false },
+        { text: () => sceneStrings("iRiscv"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("chainQ"),
+      options: [
+        { text: () => sceneStrings("chNo"), correct: true },
+        { text: () => sceneStrings("chYes"), correct: false },
+        { text: () => sceneStrings("chHalf"), correct: false },
+        { text: () => sceneStrings("chDel"), correct: false },
+      ],
+    },
+  ]);
+</script>

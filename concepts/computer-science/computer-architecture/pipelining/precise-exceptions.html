@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Precise Exceptions</primer-title>
+
+    <primer-card>
+      <p>
+        Something goes wrong. An instruction divides by zero, touches a page that isn't in memory, or hits an
+        illegal opcode. The processor must stop what it's doing, jump to an operating-system <strong>handler</strong>,
+        and — crucially — be able to <em>come back</em> and carry on as if nothing happened. For that to work, the
+        machine has to hand the handler a clean, believable snapshot of itself: <em>this</em> instruction faulted,
+        everything before it finished, nothing after it has begun. That clean snapshot is a
+        <strong>precise exception</strong>, and delivering one from a pipeline with five instructions in flight is
+        surprisingly hard.
+      </p>
+      <p>
+        A single-instruction-at-a-time machine gets this for free — there's only ever one instruction to point at.
+        But our
+        <primer-ref to="computer-science/computer-architecture/pipelining/the-classic-five-stage-pipeline">pipelined machine</primer-ref>
+        has five instructions at five different stages when the fault strikes. Which of them "already happened"?
+        The answer must match the <em>program order</em>, not the physical order in the pipe — and making that true
+        is the seed of one of the most important structures in modern CPUs.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What "precise" actually means</h2>
+      <p>
+        An exception is <strong>precise</strong> when the saved architectural state is exactly as if instructions
+        had executed one at a time and stopped cleanly at the faulting one:
+      </p>
+      <primer-theorem name="A precise exception">
+        <ul>
+          <li>every instruction <strong>before</strong> the faulting one has <em>completed</em> and updated
+            registers and memory;</li>
+          <li>the faulting instruction and <strong>every instruction after</strong> it appear <em>not to have
+            executed at all</em> — no partial effects;</li>
+          <li>the saved program counter points at the faulting instruction, so after the handler the program can
+            <strong>resume</strong> (or restart it) seamlessly.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Without this guarantee the operating system couldn't reliably page in memory and retry, debuggers
+        couldn't single-step, and <primer-ref soft to="computer-science/operating-systems/virtual-memory-and-paging">virtual memory</primer-ref>
+        would be impossible. Precision is not a luxury — it is what makes exceptions <em>usable</em>.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the precise-exception pipeline diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "exceptScene": {
+          "title": "A precise exception: older instructions complete, the fault and all younger are squashed",
+          "i1": "I1", "i2": "I2", "i3": "I3", "i4": "I4", "i5": "I5",
+          "handler": "handler",
+          "fault": "I3 faults during EX (cycle 5) — say a page fault or a divide-by-zero.",
+          "commit": "Precise rule: every instruction BEFORE the fault (I1, I2) completes and updates state.",
+          "squash": "The faulting instruction and every one AFTER it (I3, I4, I5) are squashed — zero state change.",
+          "trap": "I3's PC is saved and control jumps to the handler; afterwards I3 can be retried. State is PRECISE."
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The hard part: instructions in flight</h2>
+      <p>
+        Here is the mess. When <code>I3</code> faults in EX, older instructions <code>I1</code> and <code>I2</code>
+        are further down the pipe (in MEM and WB) and are <em>about to</em> — or already have — changed the
+        machine's state. Younger instructions <code>I4</code> and <code>I5</code> are in ID and IF, harmless so far
+        but not for long. To be precise, the hardware must let the older ones finish, wipe out the faulting one and
+        the younger ones, and only <em>then</em> take the trap.
+      </p>
+      <primer-geometry scene="exceptScene"></primer-geometry>
+      <p>
+        The trick that makes this clean: <strong>don't act on an exception the instant it's detected.</strong>
+        Instead, tag the faulting instruction with its exception and let that tag ride down the pipeline to the
+        <strong>commit point</strong> (WB). Because instructions reach WB <em>in program order</em>, by the time
+        the tagged instruction gets there, every older instruction has already committed and every younger one can
+        be squashed. The exception is taken in order, and the state is automatically precise.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Interrupts vs. traps</h2>
+      <p>
+        Two flavours of "stop and handle this" get lumped together, but they differ in <em>where they come from</em>:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th></th><th>Trap / exception</th><th>Interrupt</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Source</td><td>the instruction itself (synchronous)</td><td>external device — timer, disk, network (asynchronous)</td></tr>
+            <tr><td>Timing</td><td>at a specific instruction, reproducibly</td><td>between instructions, whenever it arrives</td></tr>
+            <tr><td>Examples</td><td>page fault, divide-by-zero, illegal opcode</td><td>keypress, packet arrived, clock tick</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Both must be <strong>precise</strong>: whether the cause is inside the code or outside the chip, the
+        handler needs the same clean, resumable snapshot. An interrupt is simply taken at the next convenient
+        commit boundary; a trap is pinned to its instruction. The pipeline machinery — tag, carry, act at commit,
+        squash the rest — is identical.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Resolving a fault, in code</h2>
+      <p>
+        The whole policy is one rule applied at the commit point: commit everything older than the fault, squash
+        the fault and everything younger. Here it is in miniature — feed it a stream of in-flight instructions and
+        the index that faults, and it prints the precise outcome.
+      </p>
+      <primer-code run>
+        // Precise-exception policy, applied at the in-order commit point.
+        // Instructions are numbered 1..n in program order; `faultIdx` raises an exception.
+        function resolve(n: number, faultIdx: number): void {
+          let committed = 0, squashed = 0;
+          for (let i = 1; i &lt;= n; i++) {
+            if (i &lt; faultIdx) {
+              committed++;
+              console.log(`I${i}: commit  (older than the fault -> keeps its effects)`);
+            } else if (i === faultIdx) {
+              squashed++;
+              console.log(`I${i}: FAULT   (save PC, squash, jump to handler)`);
+            } else {
+              squashed++;
+              console.log(`I${i}: squash  (younger than the fault -> no effect)`);
+            }
+          }
+          console.log(`--> ${committed} committed, ${squashed} squashed. State is precise.`);
+        }
+
+        resolve(5, 3); // 5 instructions in flight; the 3rd faults
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="How does an out-of-order CPU stay precise when it finishes instructions in the wrong order?">
+      <p>
+        This is the punchline the whole lesson is building toward. A modern
+        <primer-ref todo to="computer-science/computer-architecture/ilp/out-of-order-execution">out-of-order</primer-ref>
+        core executes instructions <em>whenever their inputs are ready</em> — wildly out of program order — which
+        would seem to make precise exceptions impossible. The fix is a <strong>reorder buffer (ROB)</strong>:
+        instructions may <em>execute</em> out of order, but their results are held aside and <em>committed</em>
+        strictly in program order, one entry retiring at a time. If an instruction at the head of the ROB carries
+        an exception, everything behind it in the buffer is simply thrown away. The ROB is exactly the
+        commit-in-order idea from this lesson, scaled up — which is why precise exceptions in the simple pipeline
+        are the seed of the ILP module.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! An exception is detected early but must not be ACTED on early">
+      <p>
+        The instinct is to handle a fault the moment you spot it — but in a pipeline that would be a disaster. If
+        <code>I3</code> faults in EX and you jumped to the handler immediately, you'd abandon <code>I1</code> and
+        <code>I2</code> mid-flight (state now half-updated and <em>imprecise</em>) and you'd have to somehow undo
+        <code>I4</code> and <code>I5</code>. The discipline is: <strong>detect early, act at commit</strong>. Carry
+        the exception flag quietly down to WB and only pull the trigger there, in program order. Detection and
+        action happen at different places in the pipe — conflating them is how you get an imprecise, unrecoverable
+        machine.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: precise-exception concepts + a couple of variable-driven squash/commit counts. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "exceptQuiz@1": {
+          "intro": "Precise = all older instructions commit, the faulting one and all younger are squashed. Act at commit, in order.",
+          "meanQ": "An exception is 'precise' when the saved state is as if…",
+          "meanR": "every instruction before the fault completed, and the fault plus all after it did nothing",
+          "meanA": "all five pipeline stages ran to completion regardless",
+          "meanB": "the whole program restarts from the beginning",
+          "meanC": "half of each instruction executed",
+          "hardQ": "Why are precise exceptions hard in a pipeline?",
+          "hardR": "several instructions are in flight at different stages when the fault occurs",
+          "hardA": "the ALU is too slow",
+          "hardB": "memory is read-only",
+          "hardC": "branches are never taken",
+          "whenQ": "How does the simple pipeline take an exception precisely?",
+          "whenR": "it tags the instruction and acts at the in-order commit point (WB), squashing younger instructions",
+          "whenA": "it jumps to the handler the instant the fault is detected",
+          "whenB": "it ignores the fault until the program ends",
+          "whenC": "it restarts every instruction twice",
+          "afterQ": "What happens to instructions AFTER the faulting one?",
+          "afterR": "they are squashed — they leave no architectural effect",
+          "afterA": "they commit their results normally",
+          "afterB": "they run on a second core",
+          "afterC": "they are written to disk",
+          "beforeQ": "What happens to instructions BEFORE the faulting one?",
+          "beforeR": "they complete normally and keep their effects",
+          "beforeA": "they are all squashed",
+          "beforeB": "they are re-executed after the handler",
+          "beforeC": "they are ignored",
+          "pcQ": "Why must the faulting instruction's PC be saved?",
+          "pcR": "so the program can resume or restart that instruction after the handler runs",
+          "pcA": "to make the clock faster",
+          "pcB": "to free up a register",
+          "pcC": "there is no reason to save it",
+          "interQ": "How does an interrupt differ from a trap (exception)?",
+          "interR": "an interrupt is external and asynchronous; a trap is caused synchronously by an instruction",
+          "interA": "they are identical",
+          "interB": "an interrupt can never be precise",
+          "interC": "a trap comes from a network card",
+          "exQ": "Which of these is a synchronous exception (a trap)?",
+          "exR": "a page fault or divide-by-zero",
+          "exA": "a network packet arriving",
+          "exB": "a timer tick",
+          "exC": "a key being pressed",
+          "robQ": "How does an out-of-order CPU keep exceptions precise despite finishing work out of order?",
+          "robR": "a reorder buffer commits results in program order and discards everything past a faulting entry",
+          "robA": "it never has exceptions",
+          "robB": "it executes strictly in order after all",
+          "robC": "it lowers the clock speed",
+          "imprecQ": "An imprecise exception is a problem because…",
+          "imprecR": "the saved state is inconsistent, so the program cannot cleanly resume",
+          "imprecA": "it is always faster",
+          "imprecB": "it uses less memory",
+          "imprecC": "there is no problem at all",
+          "squashNumQ": "$ {n} $ instructions are in flight; the $ {f} $-th (program order) raises an exception. How many instructions — it plus all younger — are squashed?",
+          "commitNumQ": "$ {n} $ instructions are in flight; the $ {f} $-th raises an exception. How many older instructions must first commit?"
+        }
+      }
+    </script>
+
+    <primer-quiz name="exceptQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/pipelining/control-hazards-and-branches"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Precise-exception figure: 5 instructions in flight; I3 faults in EX. Older (I1,I2) commit; the fault and the
+     younger (I4,I5) are squashed; control jumps to a handler. Stepped. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "exceptScene",
+    ({ board, colors, step, sceneStrings }) => {
+      const stages = ["IF", "ID", "EX", "MEM", "WB"];
+      const nInstr = 5;
+
+      // Cycle numbers across the top.
+      for (let c = 1; c <= 9; c++) {
+        board.create("text", [c - 0.5, 0.95, String(c)], {
+          strokeColor: colors.line, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      }
+
+      // Base grid: 5 instructions, staircase.
+      const cellCentre = (i, s) => ({ x: (i + s) + 0.5, y: -i });
+      for (let i = 0; i < nInstr; i++) {
+        board.create("text", [-0.5, -i, sceneStrings("i" + (i + 1))], {
+          strokeColor: colors.ink, fontSize: 13, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600",
+        });
+        for (let s = 0; s < stages.length; s++) {
+          const c = i + s + 1, yc = -i;
+          board.create(
+            "polygon",
+            [[c - 0.93, yc - 0.42], [c - 0.07, yc - 0.42], [c - 0.07, yc + 0.42], [c - 0.93, yc + 0.42]],
+            { fillColor: colors.cat[s], fillOpacity: 0.3, strokeColor: colors.line, strokeWidth: 1.2, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false } },
+          );
+          board.create("text", [c - 0.5, yc, stages[s]], {
+            strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+          });
+        }
+      }
+
+      // Step 1: I3 (row 2) faults in its EX stage (cycle 5).
+      step(sceneStrings("fault"), () => {
+        const c = cellCentre(2, 2); // I3 EX
+        board.create(
+          "polygon",
+          [[c.x - 0.47, c.y - 0.46], [c.x + 0.47, c.y - 0.46], [c.x + 0.47, c.y + 0.46], [c.x - 0.47, c.y + 0.46]],
+          { fillOpacity: 0, strokeColor: colors.cat[6], strokeWidth: 3, borders: { strokeColor: colors.cat[6], strokeWidth: 3, highlight: false }, vertices: { visible: false }, fixed: true, highlight: false },
+        );
+        board.create("text", [c.x, c.y - 0.75, "⚡"], { strokeColor: colors.cat[6], fontSize: 15, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      });
+
+      // Step 2: older instructions I1, I2 commit (mark their WB cells).
+      step(sceneStrings("commit"), () => {
+        [0, 1].forEach((i) => {
+          const c = cellCentre(i, 4); // WB cell
+          board.create("point", [c.x, c.y], { size: 3, name: "", fixed: true, strokeColor: colors.cat[2], fillColor: colors.cat[2], highlight: false });
+        });
+      });
+
+      // Step 3: squash the faulting instruction and all younger (I3, I4, I5).
+      step(sceneStrings("squash"), () => {
+        [2, 3, 4].forEach((i) => {
+          for (let s = 0; s < stages.length; s++) {
+            const c = cellCentre(i, s);
+            board.create("segment", [[c.x - 0.34, c.y - 0.34], [c.x + 0.34, c.y + 0.34]], { strokeColor: colors.cat[6], strokeWidth: 2.2, highlight: false });
+            board.create("segment", [[c.x - 0.34, c.y + 0.34], [c.x + 0.34, c.y - 0.34]], { strokeColor: colors.cat[6], strokeWidth: 2.2, highlight: false });
+          }
+        });
+      });
+
+      // Step 4: jump to the handler (a box), with the saved PC of I3.
+      step(sceneStrings("trap"), () => {
+        board.create(
+          "polygon",
+          [[5.1, -5.3], [7.9, -5.3], [7.9, -4.5], [5.1, -4.5]],
+          { fillColor: colors.cat[1], fillOpacity: 0.25, strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false } },
+        );
+        board.create("text", [6.5, -4.9, sceneStrings("handler")], { strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600" });
+        const c = cellCentre(2, 2);
+        board.create("arrow", [[c.x, c.y - 0.5], [6.0, -4.45]], { strokeColor: colors.cat[6], strokeWidth: 2.5, lastArrow: { type: 2, size: 6 }, highlight: false });
+      });
+    },
+    {
+      boundingbox: [-0.9, 1.5, 9.4, -5.7],
+      keepAspect: false,
+      title: () => makeStrings("exceptScene")("title"),
+    },
+  );
+
+  registerQuiz("exceptQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("meanQ"),
+      options: [
+        { text: () => sceneStrings("meanR"), correct: true },
+        { text: () => sceneStrings("meanA"), correct: false },
+        { text: () => sceneStrings("meanB"), correct: false },
+        { text: () => sceneStrings("meanC"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hardQ"),
+      options: [
+        { text: () => sceneStrings("hardR"), correct: true },
+        { text: () => sceneStrings("hardA"), correct: false },
+        { text: () => sceneStrings("hardB"), correct: false },
+        { text: () => sceneStrings("hardC"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whenQ"),
+      options: [
+        { text: () => sceneStrings("whenR"), correct: true },
+        { text: () => sceneStrings("whenA"), correct: false },
+        { text: () => sceneStrings("whenB"), correct: false },
+        { text: () => sceneStrings("whenC"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("afterQ"),
+      options: [
+        { text: () => sceneStrings("afterR"), correct: true },
+        { text: () => sceneStrings("afterA"), correct: false },
+        { text: () => sceneStrings("afterB"), correct: false },
+        { text: () => sceneStrings("afterC"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("beforeQ"),
+      options: [
+        { text: () => sceneStrings("beforeR"), correct: true },
+        { text: () => sceneStrings("beforeA"), correct: false },
+        { text: () => sceneStrings("beforeB"), correct: false },
+        { text: () => sceneStrings("beforeC"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pcQ"),
+      options: [
+        { text: () => sceneStrings("pcR"), correct: true },
+        { text: () => sceneStrings("pcA"), correct: false },
+        { text: () => sceneStrings("pcB"), correct: false },
+        { text: () => sceneStrings("pcC"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("interQ"),
+      options: [
+        { text: () => sceneStrings("interR"), correct: true },
+        { text: () => sceneStrings("interA"), correct: false },
+        { text: () => sceneStrings("interB"), correct: false },
+        { text: () => sceneStrings("interC"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("exQ"),
+      options: [
+        { text: () => sceneStrings("exR"), correct: true },
+        { text: () => sceneStrings("exA"), correct: false },
+        { text: () => sceneStrings("exB"), correct: false },
+        { text: () => sceneStrings("exC"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("robQ"),
+      options: [
+        { text: () => sceneStrings("robR"), correct: true },
+        { text: () => sceneStrings("robA"), correct: false },
+        { text: () => sceneStrings("robB"), correct: false },
+        { text: () => sceneStrings("robC"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("imprecQ"),
+      options: [
+        { text: () => sceneStrings("imprecR"), correct: true },
+        { text: () => sceneStrings("imprecA"), correct: false },
+        { text: () => sceneStrings("imprecB"), correct: false },
+        { text: () => sceneStrings("imprecC"), correct: false },
+      ],
+    },
+    {
+      // Squashed = the fault plus all younger = n - f + 1.
+      prompt: (v) => sceneStrings("squashNumQ", v),
+      variables: "n=[4:8] f=[1:3]",
+      constraints: "f < n",
+      answer: (v) => v.n - v.f + 1,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Older that must commit = f - 1.
+      prompt: (v) => sceneStrings("commitNumQ", v),
+      variables: "n=[4:8] f=[2:4]",
+      constraints: "f < n",
+      answer: (v) => v.f - 1,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>
