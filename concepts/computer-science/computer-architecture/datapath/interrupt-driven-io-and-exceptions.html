@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Interrupt-Driven I/O and Exceptions</primer-title>
+
+    <primer-card>
+      <p>
+        <primer-ref to="computer-science/computer-architecture/datapath/memory-mapped-io-and-polling">Polling</primer-ref>
+        left us with a machine that spends its life asking "ready yet? ready yet?" — a Ferrari idling in a car park.
+        The fix is one of the most beautiful ideas in computer architecture: stop asking, and let the
+        <em>device</em> tap the CPU on the shoulder when it actually has something to say. That tap is an
+        <strong>interrupt</strong>, and it turns the processor from a nagging pollster into a busy worker who only
+        looks up when the doorbell rings.
+      </p>
+      <p>
+        The gorgeous part is <em>where</em> the doorbell is wired. Remember the
+        <primer-ref to="computer-science/computer-architecture/datapath/the-instruction-cycle-as-a-state-machine">instruction-cycle
+        FSM</primer-ref> that loops forever? At the very end of each instruction — just before looping back to FETCH
+        — the control unit adds one extra check: <em>is an interrupt pending and enabled?</em> If not, carry on. If
+        so, the machine detours. And once you have that mechanism, the same hardware handles device interrupts,
+        program errors (<strong>exceptions</strong>), and deliberate system calls (<strong>traps</strong>) — three
+        things that turn out to be one thing.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the interrupt-flow figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "intflow": {
+          "title": "The interrupt mechanism — checked at the end of each instruction, vectored through the IVT, returned by RTI",
+          "main": "MAIN PROGRAM — instruction cycle running",
+          "test": "END OF INSTRUCTION: interrupt pending AND enabled?",
+          "save": "1. SAVE state: push PC + PSR to the supervisor stack",
+          "look": "2. VECTOR: index the IVT to get the handler address",
+          "isr": "3. RUN the service routine (ISR / handler)",
+          "rti": "4. RTI: pop PSR + PC, resume the main program",
+          "ivtTitle": "Interrupt / exception vector table",
+          "v0": "x00  exception: privilege violation",
+          "v1": "x01  exception: illegal opcode",
+          "v2": "x80  interrupt: keyboard",
+          "v3": "…    vector → handler address",
+          "resume": "resume where it left off"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The mechanism, step by step</h2>
+      <p>
+        When the end-of-instruction check finds a pending, enabled interrupt, the hardware performs a tightly
+        choreographed detour. Follow the diagram as it builds:
+      </p>
+      <primer-geometry scene="intflow"></primer-geometry>
+      <ol>
+        <li><strong>Save state.</strong> The current <primer-math>\text{PC}</primer-math> (where to come back to) and
+          the processor status register <primer-math>\text{PSR}</primer-math> (condition flags, privilege,
+          priority) are pushed onto the supervisor stack. This is the snapshot the machine will restore.</li>
+        <li><strong>Vector through the table.</strong> The interrupting device supplies a small
+          <em>vector number</em>. The hardware uses it to index the <strong>interrupt vector table (IVT)</strong> —
+          a table of handler addresses — and loads the matching address into the
+          <primer-math>\text{PC}</primer-math>. The machine now begins fetching the handler.</li>
+        <li><strong>Run the handler (ISR).</strong> The interrupt service routine does the real work — reads the
+          keystroke from <primer-math>\text{KBDR}</primer-math>, buffers it, acknowledges the device.</li>
+        <li><strong>Return.</strong> A special <strong>RTI</strong> (return-from-interrupt) instruction pops the
+          saved <primer-math>\text{PSR}</primer-math> and <primer-math>\text{PC}</primer-math>, and the main program
+          resumes <em>exactly</em> where it was — usually never even knowing it was paused.</li>
+      </ol>
+      <primer-theorem name="The interrupt mechanism">
+        <ul>
+          <li>the control-unit FSM tests for a pending, enabled interrupt at the <strong>end of each instruction
+            cycle</strong>;</li>
+          <li>on acceptance it <strong>saves PC + PSR</strong>, then <strong>vectors</strong> through the interrupt
+            vector table to the handler's address;</li>
+          <li>the <strong>ISR</strong> runs; <strong>RTI</strong> restores PC + PSR and resumes the interrupted
+            program transparently;</li>
+          <li>the CPU does useful work between events instead of busy-waiting — no wasted polling cycles.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Priority and masking: not all interrupts are equal</h2>
+      <p>
+        A disk finishing a transfer and a "the power supply is failing" alert should not be treated the same. So
+        interrupts carry a <strong>priority level</strong>, and the PSR records the priority the CPU is currently
+        running at. Two rules follow:
+      </p>
+      <ul>
+        <li><strong>Masking.</strong> An incoming interrupt is accepted only if its priority is <em>higher</em> than
+          the CPU's current level; otherwise it waits (is "masked"). Software can also explicitly disable interrupts
+          for a critical section.</li>
+        <li><strong>Nesting.</strong> Because the handler saved the old state on a stack, a higher-priority interrupt
+          can interrupt a <em>running handler</em>, and its RTI returns to the first handler. Stacks make interrupts
+          naturally nest, many deep.</li>
+      </ul>
+      <p>
+        This is why the state is saved on a <em>stack</em> rather than a single fixed register: the stack is exactly
+        the data structure that lets interrupts nest and unwind in the right order.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Interrupts, exceptions, and traps: one mechanism, three triggers</h2>
+      <p>
+        Here is the unification. All three bend the instruction stream through the same save-vector-handle-return
+        machinery; they differ only in <em>what sets them off</em>:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Kind</th><th>Trigger</th><th>Timing</th><th>Example</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Interrupt</strong></td><td>an external device</td><td>asynchronous — any time</td><td>keyboard key ready, timer tick</td></tr>
+            <tr><td><strong>Exception / fault</strong></td><td>an error in the running instruction</td><td>synchronous — caused by an instruction</td><td>divide by zero, illegal opcode, page fault</td></tr>
+            <tr><td><strong>Trap / syscall</strong></td><td>the program asks on purpose</td><td>synchronous — deliberate</td><td>LC-3 <primer-math>\text{TRAP}</primer-math>, x86 <primer-math>\text{syscall}</primer-math></td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        A <strong>trap</strong> is best understood as a <em>software interrupt</em>: the LC-3
+        <primer-math>\text{TRAP x23}</primer-math> instruction deliberately vectors through a table to an OS routine,
+        exactly like a device interrupt but requested by the program itself. This is how user code safely asks the
+        operating system for a privileged favour (read a key, print a string, halt) without being trusted to do it
+        directly — the trap is the guarded doorway between user and kernel.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Simulate it: the detour, then the payoff</h2>
+      <p>
+        First, watch a single interrupt play out — save, vector through the table, run the handler, RTI. Then compare
+        the cycles polling wastes against the cycles interrupts save on a slow device.
+      </p>
+      <primer-code run>
+        // Part 1: one interrupt, start to finish.
+        const IVT: Record&lt;number, string&gt; = { 0x01: "illegalOpcodeHandler", 0x80: "keyboardISR" };
+        let PC = 0x3005, PSR = 0x0302;  // main program was here, at priority level 3
+
+        function deliver(vector: number): void {
+          console.log(`END OF INSTRUCTION: interrupt vector 0x${vector.toString(16)} pending`);
+          console.log(`  1. SAVE   push PC=0x${PC.toString(16)}, PSR=0x${PSR.toString(16)} onto supervisor stack`);
+          const handler = IVT[vector];
+          console.log(`  2. VECTOR IVT[0x${vector.toString(16)}] -> ${handler}; load it into PC`);
+          console.log(`  3. ISR    ${handler} runs, services the device`);
+          console.log(`  4. RTI    pop PSR, pop PC=0x${PC.toString(16)}; main resumes transparently`);
+        }
+        deliver(0x80);
+
+        // Part 2: polling vs interrupts on a slow device (bigger gap = slower device).
+        const items = 5;        // characters to receive
+        const gap = 1000;       // CPU cycles between characters
+        const handler = 25;     // cycles to save/vector/run-ISR/RTI per character
+
+        const pollingIO = items * gap;      // CPU spins through every gap: all wasted
+        const interruptIO = items * handler; // CPU only pays the handler per character
+        const total = items * gap;
+
+        console.log("");
+        console.log(`Polling:    ${pollingIO} cycles on I/O = ${Math.round(100 * pollingIO / total)}% of the time (busy-wait).`);
+        console.log(`Interrupts: ${interruptIO} cycles on I/O = ${(100 * interruptIO / total).toFixed(1)}% of the time.`);
+        console.log(`Interrupts free ${pollingIO - interruptIO} cycles for real work -- a ${Math.round(pollingIO / interruptIO)}x reduction in I/O overhead.`);
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="How does a single keystroke reach your program while the CPU runs a game at 4 GHz?">
+      <p>
+        Through this exact dance, millions of times a day. You press a key; the keyboard controller raises an
+        interrupt line; at the end of the <em>current</em> instruction the CPU finishes the frame it was rendering,
+        vectors to the OS keyboard handler, which stashes the character in a buffer and returns — all in well under a
+        microsecond. The game never notices the pause. Multiply by every device — network packets, disk completions,
+        the timer that drives multitasking itself — and you see that a modern computer is not really "running your
+        program". It is running a storm of tiny interrupt handlers, with your program stitched into the gaps between
+        them. Interrupts are what make one CPU feel like it is doing a thousand things at once.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! An interrupt is taken BETWEEN instructions, not in the middle of one">
+      <p>
+        On our simple machine the FSM checks for interrupts only at the <em>end</em> of the instruction cycle, so an
+        instruction is never torn in half — the handler always sees a clean, consistent machine state, and RTI can
+        resume perfectly. That "clean boundary" is doing enormous work. On a
+        <primer-ref soft to="computer-science/computer-architecture/pipelining/the-classic-five-stage-pipeline">pipelined</primer-ref>
+        machine, though, several instructions are in flight at once, so "where exactly do we stop?" becomes genuinely
+        hard — the machine must retire the right instructions and squash the rest so the handler still sees a tidy
+        boundary. That is the whole problem of
+        <primer-ref forward to="computer-science/computer-architecture/pipelining/precise-exceptions">precise
+        exceptions</primer-ref>, and it is the direct descendant of this humble end-of-cycle check.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: interrupt mechanism, IVT, priority/nesting, traps/exceptions unification. Bank of 13, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "intQuiz@1": {
+          "intro": "At the END of each instruction the FSM checks for a pending, enabled interrupt: save PC+PSR, vector through the IVT to the handler, run the ISR, RTI to resume. Traps = software interrupts; exceptions = synchronous errors.",
+          "whyQ": "The main advantage of interrupts over polling is that…",
+          "whRight": "the CPU does useful work between events instead of busy-waiting",
+          "whWrong1": "interrupts need no handler code",
+          "whWrong2": "devices become faster physically",
+          "whWrong3": "the clock frequency doubles",
+          "whenQ": "When does the control-unit FSM check for a pending interrupt?",
+          "wnRight": "at the end of each instruction cycle, before looping back to FETCH",
+          "wnWrong1": "in the middle of the ALU operation",
+          "wnWrong2": "only at power-on",
+          "wnWrong3": "never — polling is the only option",
+          "saveQ": "When an interrupt is accepted, the hardware first saves…",
+          "saRight": "the PC and PSR (so the main program can resume exactly)",
+          "saWrong1": "the entire contents of memory",
+          "saWrong2": "the display's pixels",
+          "saWrong3": "nothing at all",
+          "ivtQ": "The interrupt vector table (IVT) maps…",
+          "ivRight": "a vector number to the address of the corresponding handler",
+          "ivWrong1": "a register number to a data value",
+          "ivWrong2": "an opcode to its microcode",
+          "ivWrong3": "a virtual address to a physical page",
+          "rtiQ": "The RTI instruction does what?",
+          "rtRight": "pops the saved PSR and PC and resumes the interrupted program",
+          "rtWrong1": "disables all future interrupts permanently",
+          "rtWrong2": "starts polling the keyboard",
+          "rtWrong3": "clears the register file",
+          "prioQ": "Interrupt priority levels are used to…",
+          "prRight": "let a higher-priority interrupt be taken while lower ones are masked or deferred",
+          "prWrong1": "make every interrupt identical",
+          "prWrong2": "decide the clock speed",
+          "prWrong3": "choose which register to use",
+          "nestQ": "Interrupts can NEST (a handler being interrupted) because…",
+          "neRight": "saved state is pushed on a stack, which unwinds in the right order",
+          "neWrong1": "there is only ever one interrupt at a time",
+          "neWrong2": "handlers cannot be interrupted at all",
+          "neWrong3": "the PC is never saved",
+          "trapQ": "A trap (e.g. LC-3 TRAP, x86 syscall) is best described as…",
+          "trRight": "a software interrupt: the program deliberately vectors into an OS routine",
+          "trWrong1": "a hardware fault caused by bad memory",
+          "trWrong2": "an external device signal",
+          "trWrong3": "a way to disable the CPU",
+          "excQ": "An exception (fault) differs from a device interrupt in that it is…",
+          "exRight": "synchronous — caused by the currently executing instruction",
+          "exWrong1": "always caused by an external device",
+          "exWrong2": "never handled by any routine",
+          "exWrong3": "impossible on real machines",
+          "unifyQ": "Interrupts, exceptions and traps share…",
+          "unRight": "the same save-vector-handle-return mechanism; only the trigger differs",
+          "unWrong1": "nothing — they use three unrelated mechanisms",
+          "unWrong2": "the same exact cause",
+          "unWrong3": "the property that none can be handled",
+          "asyncQ": "Which of these is ASYNCHRONOUS (can occur between any two instructions)?",
+          "asRight": "a keyboard device interrupt",
+          "asWrong1": "a divide-by-zero exception",
+          "asWrong2": "an illegal-opcode fault",
+          "asWrong3": "a deliberate TRAP instruction",
+          "syscallQ": "Why do operating systems make user programs use a trap to request services?",
+          "syRight": "it is a guarded doorway into privileged kernel code, entered only via the vector table",
+          "syWrong1": "traps are slower, which the OS prefers",
+          "syWrong2": "user code is trusted to run kernel code directly",
+          "syWrong3": "there is no other way to add two numbers",
+          "preciseQ": "On a pipelined machine, interrupts are harder because…",
+          "peRight": "several instructions are in flight, so defining a clean stopping boundary is difficult",
+          "peWrong1": "pipelines have no interrupts",
+          "peWrong2": "the IVT disappears",
+          "peWrong3": "RTI is no longer needed"
+        }
+      }
+    </script>
+
+    <primer-quiz name="intQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/datapath/memory-mapped-io-and-polling"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The interrupt flow: a vertical save-vector-ISR-RTI column on the left with a return loop back to MAIN,
+     and the interrupt vector table on the right. Revealed in stages. Colours only from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "intflow",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (cx, cy, w, h, txt, ci) => {
+        board.create(
+          "polygon",
+          [[cx - w / 2, cy - h / 2], [cx + w / 2, cy - h / 2], [cx + w / 2, cy + h / 2], [cx - w / 2, cy + h / 2]],
+          { fillColor: colors.cat[ci], fillOpacity: 0.22, strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false } },
+        );
+        board.create("text", [cx, cy, txt], { strokeColor: colors.ink, fontSize: 9, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      };
+      const down = (fromY, toY, ci) => board.create("arrow", [[-3.8, fromY], [-3.8, toY]], { strokeColor: colors.cat[ci], strokeWidth: 2.2, lastArrow: { type: 2, size: 5 }, highlight: false, fixed: true });
+
+      const W = 5.2, H = 0.95;
+      // Left flow column.
+      step(sceneStrings("main"), () => box(-3.8, 4.0, W, H, sceneStrings("main"), 0));
+      step(sceneStrings("test"), () => { box(-3.8, 2.3, W, H, sceneStrings("test"), 1); down(3.52, 2.78, 0); });
+      step(sceneStrings("save"), () => { box(-3.8, 0.6, W, H, sceneStrings("save"), 3); down(1.82, 1.08, 3); });
+      step(sceneStrings("look"), () => {
+        box(-3.8, -1.1, W, H, sceneStrings("look"), 3); down(0.12, -0.62, 3);
+        // The IVT on the right + the lookup / handler-address arrows.
+        board.create("text", [4.6, 1.7, sceneStrings("ivtTitle")], { strokeColor: colors.ink, fontSize: 9, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600" });
+        const rows = ["v0", "v1", "v2", "v3"];
+        rows.forEach((r, i) => {
+          const cy = 1.1 - i * 0.7;
+          board.create("polygon", [[2.4, cy - 0.3], [6.8, cy - 0.3], [6.8, cy + 0.3], [2.4, cy + 0.3]], { fillColor: colors.cat[2], fillOpacity: 0.18, strokeColor: colors.line, strokeWidth: 1.1, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false } });
+          board.create("text", [4.6, cy, sceneStrings(r)], { strokeColor: colors.ink, fontSize: 8, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+        });
+        board.create("arrow", [[-1.2, -1.1], [2.3, -0.6]], { strokeColor: colors.cat[3], strokeWidth: 2, dash: 2, lastArrow: { type: 2, size: 4 }, highlight: false, fixed: true }); // lookup
+        board.create("arrow", [[2.3, -1.0], [-1.2, -1.5]], { strokeColor: colors.cat[0], strokeWidth: 2, lastArrow: { type: 2, size: 4 }, highlight: false, fixed: true }); // handler addr back
+      });
+      step(sceneStrings("isr"), () => { box(-3.8, -2.8, W, H, sceneStrings("isr"), 2); down(-1.58, -2.32, 3); });
+      step(sceneStrings("rti"), () => {
+        box(-3.8, -4.5, W, H, sceneStrings("rti"), 0); down(-3.28, -4.02, 3);
+        // Return loop from RTI back up to MAIN, drawn on the far left.
+        board.create("segment", [[-6.4, -4.5], [-6.4, 4.0]], { strokeColor: colors.cat[0], strokeWidth: 2, dash: 2, highlight: false, fixed: true });
+        board.create("segment", [[-3.8, -4.5], [-6.4, -4.5]], { strokeColor: colors.cat[0], strokeWidth: 2, dash: 2, highlight: false, fixed: true });
+        board.create("arrow", [[-6.4, 4.0], [-6.4 + 2.55, 4.0]], { strokeColor: colors.cat[0], strokeWidth: 2, dash: 2, lastArrow: { type: 2, size: 5 }, highlight: false, fixed: true });
+        board.create("text", [-6.15, -0.2, sceneStrings("resume")], { strokeColor: colors.cat[0], fontSize: 8, anchorX: "left", anchorY: "middle", fixed: true, highlight: false });
+      });
+    },
+    { boundingbox: [-7.4, 5.2, 7.4, -5.4], keepAspect: false, title: () => makeStrings("intflow")("title") },
+  );
+
+  registerQuiz("intQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("whyQ"), options: [
+      { text: () => sceneStrings("whRight"), correct: true },
+      { text: () => sceneStrings("whWrong1"), correct: false },
+      { text: () => sceneStrings("whWrong2"), correct: false },
+      { text: () => sceneStrings("whWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("whenQ"), options: [
+      { text: () => sceneStrings("wnRight"), correct: true },
+      { text: () => sceneStrings("wnWrong1"), correct: false },
+      { text: () => sceneStrings("wnWrong2"), correct: false },
+      { text: () => sceneStrings("wnWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("saveQ"), options: [
+      { text: () => sceneStrings("saRight"), correct: true },
+      { text: () => sceneStrings("saWrong1"), correct: false },
+      { text: () => sceneStrings("saWrong2"), correct: false },
+      { text: () => sceneStrings("saWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("ivtQ"), options: [
+      { text: () => sceneStrings("ivRight"), correct: true },
+      { text: () => sceneStrings("ivWrong1"), correct: false },
+      { text: () => sceneStrings("ivWrong2"), correct: false },
+      { text: () => sceneStrings("ivWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("rtiQ"), options: [
+      { text: () => sceneStrings("rtRight"), correct: true },
+      { text: () => sceneStrings("rtWrong1"), correct: false },
+      { text: () => sceneStrings("rtWrong2"), correct: false },
+      { text: () => sceneStrings("rtWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("prioQ"), options: [
+      { text: () => sceneStrings("prRight"), correct: true },
+      { text: () => sceneStrings("prWrong1"), correct: false },
+      { text: () => sceneStrings("prWrong2"), correct: false },
+      { text: () => sceneStrings("prWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("nestQ"), options: [
+      { text: () => sceneStrings("neRight"), correct: true },
+      { text: () => sceneStrings("neWrong1"), correct: false },
+      { text: () => sceneStrings("neWrong2"), correct: false },
+      { text: () => sceneStrings("neWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("trapQ"), options: [
+      { text: () => sceneStrings("trRight"), correct: true },
+      { text: () => sceneStrings("trWrong1"), correct: false },
+      { text: () => sceneStrings("trWrong2"), correct: false },
+      { text: () => sceneStrings("trWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("excQ"), options: [
+      { text: () => sceneStrings("exRight"), correct: true },
+      { text: () => sceneStrings("exWrong1"), correct: false },
+      { text: () => sceneStrings("exWrong2"), correct: false },
+      { text: () => sceneStrings("exWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("unifyQ"), options: [
+      { text: () => sceneStrings("unRight"), correct: true },
+      { text: () => sceneStrings("unWrong1"), correct: false },
+      { text: () => sceneStrings("unWrong2"), correct: false },
+      { text: () => sceneStrings("unWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("asyncQ"), options: [
+      { text: () => sceneStrings("asRight"), correct: true },
+      { text: () => sceneStrings("asWrong1"), correct: false },
+      { text: () => sceneStrings("asWrong2"), correct: false },
+      { text: () => sceneStrings("asWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("syscallQ"), options: [
+      { text: () => sceneStrings("syRight"), correct: true },
+      { text: () => sceneStrings("syWrong1"), correct: false },
+      { text: () => sceneStrings("syWrong2"), correct: false },
+      { text: () => sceneStrings("syWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("preciseQ"), options: [
+      { text: () => sceneStrings("peRight"), correct: true },
+      { text: () => sceneStrings("peWrong1"), correct: false },
+      { text: () => sceneStrings("peWrong2"), correct: false },
+      { text: () => sceneStrings("peWrong3"), correct: false },
+    ] },
+  ]);
+</script>

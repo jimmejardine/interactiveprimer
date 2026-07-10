@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Memory-Mapped I/O and Polling</primer-title>
+
+    <primer-card>
+      <p>
+        A processor that can only add numbers in its own registers is a very expensive paperweight. To be useful it
+        must <strong>talk to the outside world</strong> — read a keyboard, paint a screen, poke a network card. But
+        the <primer-ref to="computer-science/computer-architecture/datapath/the-instruction-cycle-as-a-state-machine">instruction
+        cycle</primer-ref> we built knows how to do exactly two things with the world beyond the CPU: <em>read a
+        memory address</em> and <em>write a memory address</em>. So here is the elegant trick that lets that tiny
+        vocabulary control any device ever made: <strong>make the devices look like memory</strong>.
+      </p>
+      <p>
+        This is <strong>memory-mapped I/O</strong>. Each device exposes a couple of registers, and those registers
+        are wired to appear at special <em>addresses</em> in the memory map. Loading from that address reads the
+        device; storing to it commands the device. We use the LC-3's keyboard and display — <strong>KBSR/KBDR</strong>
+        and <strong>DSR/DDR</strong> — and meet the simplest way to use them: <strong>polling</strong>, the humble,
+        wasteful busy-wait loop.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two ways to reach a device</h2>
+      <p>
+        There are two schools for connecting device registers to a CPU:
+      </p>
+      <ul>
+        <li><strong>Memory-mapped I/O</strong> — device registers live in the ordinary address space. No new
+          instructions: the same <primer-math>\text{LD}</primer-math>/<primer-math>\text{ST}</primer-math> that touch
+          RAM also touch devices. The LC-3, ARM and RISC-V all do this.</li>
+        <li><strong>Port-mapped (isolated) I/O</strong> — devices live in a <em>separate</em> I/O address space
+          reached by <em>special</em> instructions. x86 has this: dedicated <primer-math>\text{IN}</primer-math> and
+          <primer-math>\text{OUT}</primer-math> instructions and a distinct set of 65,536 "port" addresses, kept
+          apart from the memory the same program uses.</li>
+      </ul>
+      <p>
+        Memory-mapped I/O has largely won because it keeps the ISA small — every addressing mode, every load/store
+        optimisation, works on devices for free. Its cost is that it <em>spends address space</em>: a chunk of the
+        map is reserved for devices and can't hold RAM. On a machine with a huge 64-bit address space, that is a
+        trade worth making a thousand times over.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Status and data: two registers per device</h2>
+      <p>
+        A device typically exposes (at least) two registers, and the pattern is worth memorising because it repeats
+        everywhere:
+      </p>
+      <ul>
+        <li>a <strong>status register</strong> with a <strong>ready bit</strong> — "do I have a character for you?"
+          (input) or "am I free to accept one?" (output);</li>
+        <li>a <strong>data register</strong> — the actual byte going in or out.</li>
+      </ul>
+      <p>
+        On the LC-3 the keyboard and display each get a pair:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Address</th><th>Register</th><th>Meaning</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><primer-math>\text{xFE00}</primer-math></td><td><strong>KBSR</strong></td><td>keyboard status — bit[15] set when a new key is waiting</td></tr>
+            <tr><td><primer-math>\text{xFE02}</primer-math></td><td><strong>KBDR</strong></td><td>keyboard data — the ASCII code of the key</td></tr>
+            <tr><td><primer-math>\text{xFE04}</primer-math></td><td><strong>DSR</strong></td><td>display status — bit[15] set when the screen is ready for a character</td></tr>
+            <tr><td><primer-math>\text{xFE06}</primer-math></td><td><strong>DDR</strong></td><td>display data — write a character here to print it</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <!-- Strings for the memory-map figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "memmap": {
+          "title": "The LC-3 memory map — the top slice (xFE00–xFFFF) is device registers, not RAM",
+          "trap": "x0000–x00FF  Trap vector table",
+          "ivt": "x0100–x01FF  Interrupt vector table",
+          "os": "x0200–x2FFF  Operating system & supervisor stack",
+          "user": "x3000–xFDFF  User program & data (RAM)",
+          "io": "xFE00–xFFFF  DEVICE REGISTERS (memory-mapped I/O)",
+          "kbsr": "xFE00  KBSR — keyboard status (ready bit)",
+          "kbdr": "xFE02  KBDR — keyboard data",
+          "dsr": "xFE04  DSR — display status (ready bit)",
+          "ddr": "xFE06  DDR — display data",
+          "zoom": "inside the I/O region"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The memory map: where the devices hide</h2>
+      <p>
+        Here is the LC-3 address space as a tower, low addresses at the top. Almost all of it is ordinary memory —
+        vectors, the OS, and your program. The thin slice at the very bottom,
+        <primer-math>\text{xFE00–xFFFF}</primer-math>, is <em>not memory at all</em>: those addresses are wired
+        straight to device registers. The zoom shows the four keyboard/display registers living there.
+      </p>
+      <primer-geometry scene="memmap"></primer-geometry>
+      <p>
+        This is the whole magic of memory-mapped I/O in one picture. A <primer-math>\text{LD}</primer-math> from
+        <primer-math>\text{xFE00}</primer-math> doesn't read RAM — it reads the keyboard's status bit. A
+        <primer-math>\text{ST}</primer-math> to <primer-math>\text{xFE06}</primer-math> doesn't write RAM — it makes
+        a letter appear on screen. Same instructions, different corner of the map.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Polling: the busy-wait loop</h2>
+      <p>
+        Devices are glacially slow compared to a CPU — a person types a few keys a second while the processor runs
+        billions of cycles. So the CPU cannot just read <primer-math>\text{KBDR}</primer-math> whenever it likes;
+        it must first check the ready bit. <strong>Polling</strong> is the simplest strategy: <em>spin in a loop
+        reading the status register until the ready bit flips</em>, then transfer the data.
+      </p>
+      <p>
+        In LC-3 assembly, waiting for a keypress is the classic three-line spin:
+      </p>
+      <primer-code lang="text">
+POLL   LDI  R0, KBSRptr    ; R0 <- KBSR (the status word)
+       BRzp POLL           ; bit[15] still 0? keep spinning
+       LDI  R0, KBDRptr    ; ready! read the character from KBDR
+      </primer-code>
+      <p>
+        Output is the mirror image: spin on <primer-math>\text{DSR}</primer-math> until the display says "I'm ready",
+        then store the character into <primer-math>\text{DDR}</primer-math>. The shape — <em>wait for ready, then
+        transfer</em> — is identical for every polled device on Earth.
+      </p>
+      <primer-theorem name="Memory-mapped I/O and polling">
+        <ul>
+          <li><strong>memory-mapped I/O</strong>: device registers appear as ordinary memory addresses, so plain
+            load/store instructions drive the hardware;</li>
+          <li>each device has a <strong>status register</strong> (a ready/busy bit) and a <strong>data
+            register</strong>;</li>
+          <li><strong>polling</strong> = busy-wait: loop reading the status register until ready, then read/write the
+            data register;</li>
+          <li>polling is simple but burns every cycle spent spinning — the CPU does no useful work while it waits.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Simulate it: count the wasted spins</h2>
+      <p>
+        Let's poll a keyboard that delivers the message one character at a time, with the hardware taking several
+        spin-iterations to produce each key. The loop reads the status register, busy-waits while the ready bit is
+        clear, and consumes a character when it sets. Watch how many polls are pure waste.
+      </p>
+      <primer-code run>
+        // Polling a memory-mapped keyboard. KBSR.ready is the status bit; KBDR is the data register.
+        const message = "HI!";
+        const KBSR = { ready: false };
+        let KBDR = 0;
+
+        let charIdx = 0;
+        let spinsUntilNext = 4;                 // slow hardware: 4 CPU polls between characters
+        let totalPolls = 0, ch2read = 0;
+        const out: string[] = [];
+
+        // The device's own clock: after enough polls, it makes the next character "ready".
+        function deviceTick(): void {
+          if (!KBSR.ready &amp;&amp; charIdx &lt; message.length) {
+            spinsUntilNext -= 1;
+            if (spinsUntilNext &lt;= 0) { KBDR = message.charCodeAt(charIdx); charIdx += 1; KBSR.ready = true; }
+          }
+        }
+
+        while (ch2read &lt; message.length) {
+          totalPolls += 1;                      // one trip round the poll loop = one status read
+          deviceTick();
+          if (KBSR.ready) {                     // ready bit set -> transfer the data
+            out.push(String.fromCharCode(KBDR));
+            ch2read += 1;
+            KBSR.ready = false;                 // clearing it lets the device fetch the next key
+            spinsUntilNext = 4;
+          }
+          // else: busy-wait -- this poll did no useful work
+        }
+
+        const wasted = totalPolls - ch2read;
+        console.log(`Read "${out.join("")}" with ${totalPolls} status polls for ${ch2read} characters.`);
+        console.log(`Busy-wait polls wasted: ${wasted}  (${Math.round(100 * wasted / totalPolls)}% of the loop).`);
+      </primer-code>
+      <p>
+        Most of the loop's trips did nothing but ask "ready yet?" and hear "no". Scale the device's slowness up to
+        real human typing speed and the CPU would spin <em>billions</em> of times per keystroke — a spectacular
+        misuse of a machine, and precisely the waste Amdahl's law warns about: the whole runtime becomes the part you
+        can't speed up. That is the motive for the next lesson's fix, the
+        <primer-ref forward to="computer-science/computer-architecture/datapath/interrupt-driven-io-and-exceptions">interrupt</primer-ref>.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why does C mark device registers 'volatile' — what breaks without it?">
+      <p>
+        Because a device register is <em>not</em> ordinary memory, and a compiler doesn't know that. Look at the poll
+        loop: it reads <primer-math>\text{KBSR}</primer-math> over and over, testing the same address. A clever
+        optimiser, seeing nothing in the loop change that address, will "helpfully" read it <em>once</em> and cache
+        the value in a register — turning your poll into an infinite loop that never notices the ready bit. The
+        <strong><code>volatile</code></strong> keyword tells the compiler "this location can change under your feet
+        and reads/writes have side effects — touch memory <em>every</em> time, in <em>exactly</em> the order I wrote."
+        Memory-mapped I/O is where <code>volatile</code> stops being pedantry and starts being the difference between
+        a working driver and a hang.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Reading a device register can have SIDE EFFECTS — it is not plain memory">
+      <p>
+        With RAM, reading a cell twice gives the same value and changes nothing. Device registers break that
+        assumption. On the LC-3, <em>reading</em> <primer-math>\text{KBDR}</primer-math> <strong>clears</strong> the
+        keyboard's ready bit — that read is how the hardware learns the character was consumed and it may fetch the
+        next one. So a stray extra read can swallow a keystroke, and reading a status register may itself reset flags.
+        Treat device registers as live wires with side effects, not as a scratchpad: read each exactly when the
+        protocol says, no more, no less.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: MMIO vs port-mapped, status/data registers, polling, waste. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "ioQuiz@1": {
+          "intro": "Memory-mapped I/O: device registers are memory addresses. Each device has a status register (ready bit) + a data register. Polling = busy-wait on the ready bit; it wastes cycles.",
+          "mmQ": "Memory-mapped I/O means…",
+          "mmRight": "device registers appear as ordinary memory addresses, used with load/store",
+          "mmWrong1": "devices need special IN/OUT instructions and a separate address space",
+          "mmWrong2": "all I/O goes through the disk",
+          "mmWrong3": "the CPU cannot reach devices at all",
+          "pmQ": "Port-mapped (isolated) I/O differs from memory-mapped I/O by…",
+          "pmRight": "using special instructions and a separate I/O address space",
+          "pmWrong1": "being the only scheme RISC machines use",
+          "pmWrong2": "requiring no device registers",
+          "pmWrong3": "being identical in every way",
+          "statusQ": "The STATUS register of a device holds…",
+          "stRight": "a ready/busy bit saying whether the device is ready to transfer",
+          "stWrong1": "the actual data byte being transferred",
+          "stWrong2": "the CPU's program counter",
+          "stWrong3": "the whole user program",
+          "dataQ": "The DATA register of a device holds…",
+          "daRight": "the byte going into or out of the device",
+          "daWrong1": "the ready/busy status bit",
+          "daWrong2": "the device's memory address",
+          "daWrong3": "the interrupt vector",
+          "kbsrQ": "On the LC-3, the KBSR is the…",
+          "kbRight": "keyboard status register, whose bit[15] signals a waiting key",
+          "kbWrong1": "keyboard data register holding the character",
+          "kbWrong2": "display data register",
+          "kbWrong3": "program counter",
+          "pollQ": "Polling a device means…",
+          "poRight": "looping on the status register until the ready bit is set, then transferring data",
+          "poWrong1": "letting the device interrupt the CPU when ready",
+          "poWrong2": "reading the data register without ever checking status",
+          "poWrong3": "writing directly to the program counter",
+          "wasteQ": "The main drawback of polling is that…",
+          "waRight": "the CPU burns cycles busy-waiting and does no useful work while it spins",
+          "waWrong1": "it requires a separate I/O address space",
+          "waWrong2": "it can only read, never write, devices",
+          "waWrong3": "it makes the clock run slower",
+          "amdahlQ": "Why is heavy polling a textbook Amdahl's-law problem?",
+          "amRight": "time spent spinning becomes runtime you cannot speed up with a faster CPU",
+          "amWrong1": "polling has no effect on performance at all",
+          "amWrong2": "it doubles the clock frequency",
+          "amWrong3": "it only affects memory capacity",
+          "outQ": "To print a character by polling the LC-3 display, you…",
+          "ouRight": "spin on DSR until ready, then store the character into DDR",
+          "ouWrong1": "store the character into KBDR",
+          "ouWrong2": "read DDR until its ready bit clears",
+          "ouWrong3": "write directly to the trap vector table",
+          "volQ": "Device registers must be marked 'volatile' in C because…",
+          "voRight": "the compiler must re-read them every time; they can change and reads have side effects",
+          "voWrong1": "they are faster than normal variables",
+          "voWrong2": "the CPU cannot address them otherwise",
+          "voWrong3": "volatile makes the loop run only once",
+          "sideQ": "Reading the LC-3 KBDR has what side effect?",
+          "siRight": "it clears the keyboard ready bit, letting the next key be fetched",
+          "siWrong1": "it prints the character to the display",
+          "siWrong2": "it halts the processor",
+          "siWrong3": "none — it is exactly like reading RAM",
+          "costQ": "A memory-mapped I/O region costs the system…",
+          "coRight": "some address space that then cannot hold RAM",
+          "coWrong1": "nothing at all, ever",
+          "coWrong2": "the entire register file",
+          "coWrong3": "one extra clock per instruction always"
+        }
+      }
+    </script>
+
+    <primer-quiz name="ioQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/computer-architecture/datapath/the-instruction-cycle-as-a-state-machine"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- The LC-3 memory map: a vertical tower of address regions, low addresses at top, with the device-register
+     slice at the bottom highlighted and zoomed to show KBSR/KBDR/DSR/DDR. Colours only from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "memmap",
+    ({ board, colors, step, sceneStrings }) => {
+      // A region bar of the memory tower: x in [0,3.4], from yBot to yTop.
+      const region = (yBot, yTop, txt, ci) => {
+        board.create(
+          "polygon",
+          [[0, yBot], [3.4, yBot], [3.4, yTop], [0, yTop]],
+          { fillColor: colors.cat[ci], fillOpacity: 0.22, strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false } },
+        );
+        board.create("text", [1.7, (yBot + yTop) / 2, txt], { strokeColor: colors.ink, fontSize: 9, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      };
+      // A device-register row in the zoom panel: x in [5.6, 9.6].
+      const regRow = (cy, txt) => {
+        board.create(
+          "polygon",
+          [[5.6, cy - 0.32], [9.6, cy - 0.32], [9.6, cy + 0.32], [5.6, cy + 0.32]],
+          { fillColor: colors.cat[3], fillOpacity: 0.2, strokeColor: colors.line, strokeWidth: 1.2, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false } },
+        );
+        board.create("text", [7.6, cy, txt], { strokeColor: colors.ink, fontSize: 9, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false });
+      };
+
+      // The tower, revealed top (low address) to bottom (high address).
+      step(sceneStrings("trap"), () => region(9.1, 10.0, sceneStrings("trap"), 0));
+      step(sceneStrings("ivt"),  () => region(8.2, 9.1, sceneStrings("ivt"), 0));
+      step(sceneStrings("os"),   () => region(6.0, 8.2, sceneStrings("os"), 1));
+      step(sceneStrings("user"), () => region(1.4, 6.0, sceneStrings("user"), 2));
+      step(sceneStrings("io"),   () => region(0.4, 1.4, sceneStrings("io"), 3));
+
+      // Zoom the I/O slice out to the four device registers on the right.
+      step(sceneStrings("zoom"), () => {
+        board.create("segment", [[3.4, 1.4], [5.6, 2.2]], { strokeColor: colors.cat[3], strokeWidth: 1.5, dash: 2, highlight: false, fixed: true });
+        board.create("segment", [[3.4, 0.4], [5.6, -0.6]], { strokeColor: colors.cat[3], strokeWidth: 1.5, dash: 2, highlight: false, fixed: true });
+        board.create("text", [7.6, 2.55, sceneStrings("zoom")], { strokeColor: colors.cat[3], fontSize: 9, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600" });
+        regRow(1.6, sceneStrings("kbsr"));
+        regRow(0.85, sceneStrings("kbdr"));
+        regRow(0.1, sceneStrings("dsr"));
+        regRow(-0.65, sceneStrings("ddr"));
+      });
+    },
+    { boundingbox: [-0.8, 10.6, 10.2, -1.3], keepAspect: false, title: () => makeStrings("memmap")("title") },
+  );
+
+  registerQuiz("ioQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("mmQ"), options: [
+      { text: () => sceneStrings("mmRight"), correct: true },
+      { text: () => sceneStrings("mmWrong1"), correct: false },
+      { text: () => sceneStrings("mmWrong2"), correct: false },
+      { text: () => sceneStrings("mmWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("pmQ"), options: [
+      { text: () => sceneStrings("pmRight"), correct: true },
+      { text: () => sceneStrings("pmWrong1"), correct: false },
+      { text: () => sceneStrings("pmWrong2"), correct: false },
+      { text: () => sceneStrings("pmWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("statusQ"), options: [
+      { text: () => sceneStrings("stRight"), correct: true },
+      { text: () => sceneStrings("stWrong1"), correct: false },
+      { text: () => sceneStrings("stWrong2"), correct: false },
+      { text: () => sceneStrings("stWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dataQ"), options: [
+      { text: () => sceneStrings("daRight"), correct: true },
+      { text: () => sceneStrings("daWrong1"), correct: false },
+      { text: () => sceneStrings("daWrong2"), correct: false },
+      { text: () => sceneStrings("daWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("kbsrQ"), options: [
+      { text: () => sceneStrings("kbRight"), correct: true },
+      { text: () => sceneStrings("kbWrong1"), correct: false },
+      { text: () => sceneStrings("kbWrong2"), correct: false },
+      { text: () => sceneStrings("kbWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("pollQ"), options: [
+      { text: () => sceneStrings("poRight"), correct: true },
+      { text: () => sceneStrings("poWrong1"), correct: false },
+      { text: () => sceneStrings("poWrong2"), correct: false },
+      { text: () => sceneStrings("poWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("wasteQ"), options: [
+      { text: () => sceneStrings("waRight"), correct: true },
+      { text: () => sceneStrings("waWrong1"), correct: false },
+      { text: () => sceneStrings("waWrong2"), correct: false },
+      { text: () => sceneStrings("waWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("amdahlQ"), options: [
+      { text: () => sceneStrings("amRight"), correct: true },
+      { text: () => sceneStrings("amWrong1"), correct: false },
+      { text: () => sceneStrings("amWrong2"), correct: false },
+      { text: () => sceneStrings("amWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("outQ"), options: [
+      { text: () => sceneStrings("ouRight"), correct: true },
+      { text: () => sceneStrings("ouWrong1"), correct: false },
+      { text: () => sceneStrings("ouWrong2"), correct: false },
+      { text: () => sceneStrings("ouWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("volQ"), options: [
+      { text: () => sceneStrings("voRight"), correct: true },
+      { text: () => sceneStrings("voWrong1"), correct: false },
+      { text: () => sceneStrings("voWrong2"), correct: false },
+      { text: () => sceneStrings("voWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("sideQ"), options: [
+      { text: () => sceneStrings("siRight"), correct: true },
+      { text: () => sceneStrings("siWrong1"), correct: false },
+      { text: () => sceneStrings("siWrong2"), correct: false },
+      { text: () => sceneStrings("siWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("costQ"), options: [
+      { text: () => sceneStrings("coRight"), correct: true },
+      { text: () => sceneStrings("coWrong1"), correct: false },
+      { text: () => sceneStrings("coWrong2"), correct: false },
+      { text: () => sceneStrings("coWrong3"), correct: false },
+    ] },
+  ]);
+</script>
