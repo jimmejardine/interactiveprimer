@@ -173,10 +173,10 @@ async function main() {
   // `<primer-ref soft to="X">` creates NO edge — we collect them only to validate X exists.
   /** @type {Map<string, string[]>} concept id → ids it soft-refs */
   const softByConcept = new Map();
-  // `<primer-ref todo to="…">` placeholders — no edge, never validated; tracked only to report how
-  // many planned-but-unwritten concepts are still referenced.
-  /** @type {Set<string>} */
-  const todoTargets = new Set();
+  // `<primer-ref todo to="…">` placeholders — no edge, never validated; tracked only to report which
+  // planned-but-unwritten concepts are still referenced, and from where.
+  /** @type {Map<string, string[]>} todo target id → ids of the pages that reference it */
+  const todoByTarget = new Map();
   let todoPages = 0;
 
   const files = (await listHtml(CONCEPTS_DIR)).sort();
@@ -225,7 +225,11 @@ async function main() {
       const todos = extractTodoRefs(html);
       if (todos.length) {
         todoPages++;
-        for (const tdo of todos) todoTargets.add(tdo);
+        for (const tdo of todos) {
+          const referrers = todoByTarget.get(tdo) ?? [];
+          referrers.push(id);
+          todoByTarget.set(tdo, referrers);
+        }
       }
     } catch (err) {
       fileDiagnostics.push({
@@ -315,8 +319,12 @@ async function main() {
     `\nScanned ${files.length} page(s) → ${concepts.length} concept(s); ` +
       `${errors.length} error(s), ${warnings.length} warning(s).`,
   );
-  if (todoTargets.size > 0) {
-    console.log(`📝 ${todoTargets.size} todo placeholder(s) referenced across ${todoPages} page(s).`);
+  if (todoByTarget.size > 0) {
+    console.log(`📝 ${todoByTarget.size} todo placeholder(s) referenced across ${todoPages} page(s):`);
+    for (const target of [...todoByTarget.keys()].sort()) {
+      const referrers = todoByTarget.get(target);
+      console.log(`     ${target}  ← ${[...new Set(referrers)].sort().join(", ")}`);
+    }
   }
 
   // A dangling prerequisite is an error, but it does NOT stop us building the graph: every graph
