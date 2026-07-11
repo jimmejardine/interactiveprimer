@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Asynchronous I/O and io_uring</primer-title>
+
+    <primer-card>
+      <p>
+        You have an NVMe SSD that can complete a million I/Os per second. Can one program actually <em>drive</em>
+        it that hard? With the classic toolkit — a
+        <primer-ref to="computer-science/advanced-operating-systems/storage/the-block-io-layer">blocking</primer-ref>
+        <primer-math>\texttt{read()}</primer-math> per request — the answer is no, and the reason is the
+        <strong>syscall</strong>. Each blocking call crosses into the kernel (hundreds of cycles), does one I/O,
+        and comes back. A million I/Os means a million crossings; the CPU spends its life on boundary-crossing
+        overhead, not work. This lesson is the story of how the interface between a program and the kernel was
+        redesigned — culminating in <strong>io_uring</strong> — to make that overhead nearly vanish.
+      </p>
+      <p>
+        The theme threads back to the very first lesson of the course: "avoid the syscall." Here it becomes an
+        engineering discipline. We'll see why threads-plus-blocking doesn't scale, why POSIX AIO disappointed, why
+        <primer-math>\texttt{epoll}</primer-math> solves a <em>different</em> problem than you might think, and how
+        shared ring buffers finally let a program submit thousands of I/Os and reap thousands of completions with
+        <em>one</em> system call — or none.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Three failed or partial answers</h2>
+      <p>
+        Before io_uring, three approaches each solved part of the problem and left a gap:
+      </p>
+      <ul>
+        <li><strong>Thread-per-request + blocking I/O.</strong> Give each in-flight I/O its own thread that blocks
+          while its <primer-math>\texttt{read()}</primer-math> runs. Simple, but a thread costs ~1–2 MB of stack
+          and real scheduler and context-switch overhead; ten thousand concurrent I/Os means ten thousand
+          threads thrashing the scheduler. It doesn't scale (the "C10K/C10M" problem).</li>
+        <li><strong>POSIX AIO.</strong> The standard asynchronous API — but on Linux it was largely implemented
+          with a hidden <em>thread pool</em> doing blocking calls anyway, had a clumsy interface, worked poorly
+          for buffered files, and never delivered the promised performance. Effectively dead on arrival.</li>
+        <li><strong>epoll (readiness).</strong> The scalable heart of every event loop — but note carefully what
+          it does. <primer-math>\texttt{epoll}</primer-math> is <strong>readiness</strong>-based: it tells you
+          "socket X is now readable," and <em>then</em> you still issue a (non-blocking)
+          <primer-math>\texttt{read()}</primer-math> yourself. That works beautifully for sockets but poorly for
+          <em>files</em>, which are essentially always "ready" — the cost isn't waiting for readiness, it's the
+          data transfer itself. epoll can't make disk I/O asynchronous.</li>
+      </ul>
+      <primer-vignette title="Readiness vs completion — the distinction that explains everything">
+        <p>
+          This is the conceptual crux of the whole lesson. A <strong>readiness</strong> model
+          (<primer-math>\texttt{select}</primer-math>, <primer-math>\texttt{poll}</primer-math>,
+          <primer-math>\texttt{epoll}</primer-math>) tells you <em>when you may start</em> an operation without
+          blocking — then you perform it. A <strong>completion</strong> model (Windows IOCP, io_uring) is the
+          opposite: you <em>start</em> the operation immediately, and the kernel tells you <em>when it is
+          finished</em>, having already moved the data. For sockets, readiness is natural (you wait for a packet
+          to arrive). For disk files there is no meaningful "ready" moment — the operation simply takes time —
+          so only a <em>completion</em> model can make file I/O truly asynchronous. io_uring is Linux finally
+          getting a first-class completion interface, decades after IOCP.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <!-- Strings for the io_uring SQ/CQ ring figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "uring": {
+          "title": "io_uring: two shared ring buffers (SQ, CQ) in memory mapped by BOTH user and kernel",
+          "user": "User space",
+          "kernel": "Kernel",
+          "sq": "Submission Queue (SQ) — app pushes requests here",
+          "cq": "Completion Queue (CQ) — kernel pushes results here",
+          "shared": "shared memory (mmap): no copy, no per-op syscall",
+          "submit": "app fills SQ entries →",
+          "complete": "← kernel fills CQ entries",
+          "batch": "one io_uring_enter() submits MANY (or SQPOLL: zero syscalls)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>io_uring: two rings in shared memory</h2>
+      <p>
+        io_uring's insight is to stop passing I/O requests <em>through</em> the syscall boundary one at a time,
+        and instead put them in memory that <strong>both</strong> the application and the kernel can see. It sets
+        up two circular buffers, mapped into the process by <primer-math>\texttt{mmap}</primer-math>:
+      </p>
+      <ul>
+        <li>the <strong>Submission Queue (SQ)</strong> — the app writes I/O requests (opcode, fd, buffer, offset)
+          into free slots;</li>
+        <li>the <strong>Completion Queue (CQ)</strong> — the kernel writes results (which request, return value)
+          into slots the app then reads.</li>
+      </ul>
+      <primer-geometry scene="uring"></primer-geometry>
+      <p>
+        Because the rings are shared memory, adding a request is just a memory write — <em>no syscall</em>. The
+        app can queue up hundreds of I/Os and then make <strong>one</strong>
+        <primer-math>\texttt{io\_uring\_enter()}</primer-math> call to tell the kernel "go" — amortising a single
+        boundary crossing over the entire batch. Completions likewise appear in the CQ with no per-I/O syscall to
+        collect them. And in <strong>SQPOLL</strong> mode a kernel thread polls the SQ itself, so a busy app can
+        submit and complete I/O with <strong>zero</strong> system calls at all — the boundary crossing is gone
+        entirely.
+      </p>
+      <primer-theorem name="io_uring — the essentials">
+        <ul>
+          <li>it is a <strong>completion</strong>-based async interface (start now, told when finished) — unlike
+            <strong>readiness</strong>-based epoll;</li>
+          <li>two <strong>shared-memory ring buffers</strong> (SQ, CQ) let the app and kernel exchange requests
+            and results without copying or per-op syscalls;</li>
+          <li>one <primer-math>\texttt{io\_uring\_enter()}</primer-math> <strong>batches</strong> many submissions;
+            <strong>SQPOLL</strong> can reach <strong>zero</strong> syscalls under load;</li>
+          <li>it works for <em>files and sockets alike</em>, fixing the gaps left by POSIX AIO and epoll.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Count the syscalls saved by batching</h2>
+      <p>
+        The model contrasts one-syscall-per-I/O (blocking <primer-math>\texttt{read()}</primer-math>) with
+        io_uring's batched submission: <primer-math>N</primer-math> I/Os submitted <primer-math>B</primer-math> at
+        a time cost <primer-math>\lceil N/B \rceil</primer-math> calls — and SQPOLL costs zero.
+      </p>
+      <primer-code run>
+        // Syscalls to perform N I/Os three ways.
+        const N = 100_000;          // number of I/O operations
+        const batch = 256;          // io_uring submission batch size
+
+        const blocking = N;                              // one read() per I/O
+        const uringBatched = Math.ceil(N / batch);       // one io_uring_enter() per batch
+        const uringSqpoll = 0;                           // kernel poller: no enter() syscalls at all
+
+        const pct = (x: number) =&gt; (100 * (1 - x / blocking)).toFixed(3);
+
+        console.log(`I/O operations:                 ${N.toLocaleString()}`);
+        console.log(`blocking read():   ${blocking.toLocaleString()} syscalls`);
+        console.log(`io_uring (batch ${batch}): ${uringBatched.toLocaleString()} syscalls   (${pct(uringBatched)}% fewer)`);
+        console.log(`io_uring + SQPOLL:  ${uringSqpoll} syscalls   (100% fewer)`);
+        console.log(`\nAt ~1000 cycles per boundary crossing, blocking spends ~${(blocking * 1000 / 1e6).toFixed(0)}M cycles`);
+        console.log(`just crossing into the kernel; batched io_uring spends ~${(uringBatched * 1000 / 1e6).toFixed(2)}M.`);
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="Watch out! 'asynchronous' is not the same as 'more threads'">
+      <p>
+        A frequent misread is "async I/O just means the kernel spins up threads to do my blocking reads in the
+        background." That is precisely the <em>old</em> POSIX-AIO trick, and precisely what io_uring
+        <strong>avoids</strong>. Real completion-based async I/O submits the request to the device and lets
+        <em>hardware</em> (DMA + the device's own queues) do the work while your single thread moves on; the
+        completion is a data structure the kernel fills, not a thread that woke up. The win is doing more I/O with
+        <em>fewer</em> threads and fewer context switches, not more. If your "async" framework is secretly a
+        thread pool running blocking syscalls, you've reintroduced every cost you were trying to escape — the
+        scheduler churn, the stacks, the context switches. The whole point is to stop paying per-operation thread
+        and syscall overhead, not to relocate it.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The extreme: leaving the kernel behind entirely</h2>
+      <p>
+        io_uring makes the syscall cheap. The logical endpoint is to remove the kernel from the data path
+        <em>altogether</em>. Frameworks like <strong>SPDK</strong> (storage) and <strong>DPDK</strong>
+        (networking) do exactly this <strong>kernel bypass</strong>: they map the NVMe device's queues directly
+        into a user-space process and run the driver in user space, so a request goes from application to hardware
+        with <em>no</em> kernel involvement, no interrupts, and a busy-polling loop reaping completions. A single
+        core can then push millions of IOPS at the theoretical limit of the device.
+      </p>
+      <p>
+        The cost is that you give up everything the kernel provided — the file system, permissions, sharing the
+        device between processes, the general-purpose scheduler. Kernel bypass is a specialist's tool for
+        dedicated storage/networking appliances, not a general application technique. But it completes the arc of
+        this module beautifully: from "call the kernel for every byte" to "map the hardware into your address
+        space and never call the kernel at all." The whole history of fast I/O is the history of getting the
+        operating system out of the way — carefully.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: async concepts + numeric syscall-batching calcs.
+         Variables avoid evaluator collisions (nio, bb, thr, cyc). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "uringQuiz@1": {
+          "intro": "Why blocking-I/O-plus-threads doesn't scale; POSIX AIO's failure; epoll is readiness not completion; io_uring's shared SQ/CQ rings that batch (or eliminate) syscalls; and kernel bypass (SPDK/DPDK).",
+          "scaleQ": "Thread-per-request with blocking I/O fails to scale because…",
+          "scRight": "each thread costs memory and scheduler/context-switch overhead — thousands of them thrash",
+          "scWrong1": "threads cannot perform I/O at all",
+          "scWrong2": "the kernel forbids more than one thread",
+          "scWrong3": "blocking reads are impossible",
+          "aioQ": "Linux POSIX AIO disappointed largely because it…",
+          "aiRight": "was often just a hidden thread pool doing blocking calls, with a clumsy interface",
+          "aiWrong1": "was faster than every alternative",
+          "aiWrong2": "required special hardware",
+          "aiWrong3": "only worked on Windows",
+          "epollQ": "epoll is a 'readiness' interface, meaning it…",
+          "epRight": "tells you when an fd is ready so you can then perform the operation yourself",
+          "epWrong1": "performs the I/O and hands you the finished data",
+          "epWrong2": "guarantees the data is already on disk",
+          "epWrong3": "works only for disk files, never sockets",
+          "epfileQ": "epoll works poorly for regular disk files because…",
+          "efRight": "files are essentially always 'ready' — the cost is the transfer, which epoll can't overlap",
+          "efWrong1": "files cannot be opened non-blocking",
+          "efWrong2": "the kernel refuses to poll files",
+          "efWrong3": "files have no file descriptor",
+          "complQ": "A 'completion'-based model (io_uring, IOCP) differs from readiness in that it…",
+          "coRight": "starts the operation immediately and notifies you when it has finished",
+          "coWrong1": "only tells you when you may start",
+          "coWrong2": "never actually performs the I/O",
+          "coWrong3": "requires one thread per operation",
+          "ringQ": "io_uring's two ring buffers (SQ and CQ) are special because they are…",
+          "riRight": "shared memory mapped by both user and kernel, so adding a request needs no syscall",
+          "riWrong1": "stored only on the disk",
+          "riWrong2": "copied across the boundary on every operation",
+          "riWrong3": "encrypted queues in the CPU cache",
+          "batchQ": "The main efficiency win of io_uring is that…",
+          "baRight": "one io_uring_enter() can submit many I/Os, amortising the boundary crossing",
+          "baWrong1": "it makes each individual read() faster",
+          "baWrong2": "it disables DMA",
+          "baWrong3": "it uses more threads than blocking I/O",
+          "sqpollQ": "In SQPOLL mode, io_uring can achieve…",
+          "spRight": "zero submission syscalls — a kernel thread polls the SQ directly",
+          "spWrong1": "one syscall per byte transferred",
+          "spWrong2": "twice as many syscalls for safety",
+          "spWrong3": "no I/O at all",
+          "bypassQ": "Kernel bypass (SPDK/DPDK) works by…",
+          "byRight": "mapping device queues into user space so I/O skips the kernel entirely",
+          "byWrong1": "running the whole application inside the kernel",
+          "byWrong2": "adding an extra kernel layer for safety",
+          "byWrong3": "using the page cache more aggressively",
+          "asyncThreadQ": "Which statement about completion-based async I/O is TRUE?",
+          "atRight": "it lets one thread keep many I/Os in flight without a thread each — not 'more threads'",
+          "atWrong1": "it always spawns one kernel thread per I/O",
+          "atWrong2": "it is identical to POSIX AIO's thread pool",
+          "atWrong3": "it makes I/O synchronous",
+          "batchNumQ": "To perform {nio} I/O operations in batches of {bb}, how many io_uring_enter() syscalls are needed? (answer = ceil(nio / bb))",
+          "savedNumQ": "Blocking I/O needs {nio} syscalls; io_uring batches of {bb} need ceil(nio/bb). How many syscalls are SAVED? (answer = nio − ceil(nio/bb))",
+          "cycNumQ": "If each syscall costs {cyc} cycles and you avoid {saved} syscalls, how many MILLIONS of cycles are saved? (answer = cyc × saved / 1,000,000, to 1 dp)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="uringQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/storage/the-block-io-layer",
+      "computer-science/advanced-operating-systems/concurrency/event-driven-vs-threaded-concurrency"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- io_uring SQ/CQ rings: two boxes (user space, kernel) with two shared ring buffers between them, arrows
+     for submit (down into SQ) and complete (up from CQ). Static BASE content, visible on load. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "uring",
+    ({ board, colors, sceneStrings }) => {
+      const W = 11.0, x0 = 0.6;
+      // User space band (top).
+      board.create("polygon", [[x0, 5.4], [x0 + W, 5.4], [x0 + W, 6.6], [x0, 6.6]], {
+        fillColor: colors.cat[0], fillOpacity: 0.14, borders: { strokeColor: colors.line, strokeWidth: 1.2, highlight: false },
+        vertices: { visible: false }, fixed: true, highlight: false,
+      });
+      board.create("text", [x0 + 0.3, 6.0, sceneStrings("user")], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "left", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600",
+      });
+      // Kernel band (bottom).
+      board.create("polygon", [[x0, 0.0], [x0 + W, 0.0], [x0 + W, 1.2], [x0, 1.2]], {
+        fillColor: colors.cat[2], fillOpacity: 0.14, borders: { strokeColor: colors.line, strokeWidth: 1.2, highlight: false },
+        vertices: { visible: false }, fixed: true, highlight: false,
+      });
+      board.create("text", [x0 + 0.3, 0.6, sceneStrings("kernel")], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "left", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600",
+      });
+
+      // Shared-memory region label between them.
+      board.create("text", [x0 + W / 2, 4.7, sceneStrings("shared")], {
+        strokeColor: colors.ink, fontSize: 10, anchorX: "middle", fixed: true, highlight: false, cssStyle: "opacity:0.85",
+      });
+
+      // Two ring buffers drawn as rows of slots.
+      const drawRing = (cx, cy, key, fill) => {
+        const NS = 6, SW = 1.0, SH = 0.85;
+        const startX = cx - (NS * SW) / 2;
+        for (let i = 0; i < NS; i++) {
+          board.create("polygon", [[startX + i * SW, cy], [startX + i * SW + SW - 0.1, cy], [startX + i * SW + SW - 0.1, cy + SH], [startX + i * SW, cy + SH]], {
+            fillColor: fill, fillOpacity: 0.28, borders: { strokeColor: colors.line, strokeWidth: 1, highlight: false },
+            vertices: { visible: false }, fixed: true, highlight: false,
+          });
+        }
+        board.create("text", [cx, cy + SH + 0.35, sceneStrings(key)], {
+          strokeColor: colors.ink, fontSize: 10, anchorX: "middle", fixed: true, highlight: false, cssStyle: "max-width:340px; font-weight:600",
+        });
+      };
+      drawRing(x0 + W / 2 - 3.0, 2.9, "sq", colors.cat[1]);
+      drawRing(x0 + W / 2 + 3.0, 2.9, "cq", colors.cat[3]);
+
+      // Submit arrow (user -> SQ -> kernel).
+      board.create("arrow", [[x0 + W / 2 - 3.0, 5.3], [x0 + W / 2 - 3.0, 4.0]], {
+        strokeColor: colors.cat[1], strokeWidth: 2, lastArrow: { size: 5 }, fixed: true, highlight: false,
+      });
+      board.create("arrow", [[x0 + W / 2 - 3.0, 2.75], [x0 + W / 2 - 3.0, 1.3]], {
+        strokeColor: colors.cat[1], strokeWidth: 2, lastArrow: { size: 5 }, fixed: true, highlight: false,
+      });
+      // Complete arrow (kernel -> CQ -> user).
+      board.create("arrow", [[x0 + W / 2 + 3.0, 1.3], [x0 + W / 2 + 3.0, 2.75]], {
+        strokeColor: colors.cat[3], strokeWidth: 2, lastArrow: { size: 5 }, fixed: true, highlight: false,
+      });
+      board.create("arrow", [[x0 + W / 2 + 3.0, 4.0], [x0 + W / 2 + 3.0, 5.3]], {
+        strokeColor: colors.cat[3], strokeWidth: 2, lastArrow: { size: 5 }, fixed: true, highlight: false,
+      });
+
+      board.create("text", [x0 + W / 2, -0.5, sceneStrings("batch")], {
+        strokeColor: colors.ink, fontSize: 10, anchorX: "middle", fixed: true, highlight: false, cssStyle: "max-width:500px; opacity:0.9",
+      });
+    },
+    {
+      boundingbox: [-0.4, 7.2, 12.2, -1.1],
+      keepAspect: false,
+      title: () => makeStrings("uring")("title"),
+    },
+  );
+
+  registerQuiz("uringQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("scaleQ"), options: [
+      { text: () => sceneStrings("scRight"), correct: true },
+      { text: () => sceneStrings("scWrong1"), correct: false },
+      { text: () => sceneStrings("scWrong2"), correct: false },
+      { text: () => sceneStrings("scWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("aioQ"), options: [
+      { text: () => sceneStrings("aiRight"), correct: true },
+      { text: () => sceneStrings("aiWrong1"), correct: false },
+      { text: () => sceneStrings("aiWrong2"), correct: false },
+      { text: () => sceneStrings("aiWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("epollQ"), options: [
+      { text: () => sceneStrings("epRight"), correct: true },
+      { text: () => sceneStrings("epWrong1"), correct: false },
+      { text: () => sceneStrings("epWrong2"), correct: false },
+      { text: () => sceneStrings("epWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("epfileQ"), options: [
+      { text: () => sceneStrings("efRight"), correct: true },
+      { text: () => sceneStrings("efWrong1"), correct: false },
+      { text: () => sceneStrings("efWrong2"), correct: false },
+      { text: () => sceneStrings("efWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("complQ"), options: [
+      { text: () => sceneStrings("coRight"), correct: true },
+      { text: () => sceneStrings("coWrong1"), correct: false },
+      { text: () => sceneStrings("coWrong2"), correct: false },
+      { text: () => sceneStrings("coWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("ringQ"), options: [
+      { text: () => sceneStrings("riRight"), correct: true },
+      { text: () => sceneStrings("riWrong1"), correct: false },
+      { text: () => sceneStrings("riWrong2"), correct: false },
+      { text: () => sceneStrings("riWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("batchQ"), options: [
+      { text: () => sceneStrings("baRight"), correct: true },
+      { text: () => sceneStrings("baWrong1"), correct: false },
+      { text: () => sceneStrings("baWrong2"), correct: false },
+      { text: () => sceneStrings("baWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("sqpollQ"), options: [
+      { text: () => sceneStrings("spRight"), correct: true },
+      { text: () => sceneStrings("spWrong1"), correct: false },
+      { text: () => sceneStrings("spWrong2"), correct: false },
+      { text: () => sceneStrings("spWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("bypassQ"), options: [
+      { text: () => sceneStrings("byRight"), correct: true },
+      { text: () => sceneStrings("byWrong1"), correct: false },
+      { text: () => sceneStrings("byWrong2"), correct: false },
+      { text: () => sceneStrings("byWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("asyncThreadQ"), options: [
+      { text: () => sceneStrings("atRight"), correct: true },
+      { text: () => sceneStrings("atWrong1"), correct: false },
+      { text: () => sceneStrings("atWrong2"), correct: false },
+      { text: () => sceneStrings("atWrong3"), correct: false },
+    ] },
+    {
+      // enter() calls = ceil(nio / bb).
+      prompt: (v) => sceneStrings("batchNumQ", v),
+      variables: "nio=[1000,4096,10000] bb=[64,128,256]",
+      answer: (v) => Math.ceil(v.nio / v.bb),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // saved = nio - ceil(nio/bb).
+      prompt: (v) => sceneStrings("savedNumQ", v),
+      variables: "nio=[1024,4096,8192] bb=[64,128,256]",
+      answer: (v) => v.nio - Math.ceil(v.nio / v.bb),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // millions of cycles saved = cyc * saved / 1e6, to 1 dp.
+      prompt: (v) => sceneStrings("cycNumQ", v),
+      variables: "cyc=[500,1000,1500] saved=[1000,5000,10000]",
+      answer: (v) => Math.round((v.cyc * v.saved / 1000000) * 10) / 10,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

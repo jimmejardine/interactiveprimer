@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>I/O Virtualization</primer-title>
+
+    <primer-card>
+      <p>
+        We have given each virtual machine a virtual CPU (via
+        <primer-ref to="computer-science/advanced-operating-systems/virtualization/hardware-assisted-virtualization">VT-x</primer-ref>)
+        and virtual memory (via
+        <primer-ref to="computer-science/advanced-operating-systems/virtualization/memory-virtualization">nested
+        page tables</primer-ref>). But a computer is useless without <strong>devices</strong> — a network card, a
+        disk, a GPU. A guest OS expects to see real hardware to drive, yet ten guests cannot each own the one
+        physical network card. Giving every VM its illusion of private devices is the job of <strong>I/O
+        virtualization</strong>, and it turns out to be where most of the real performance is won or lost, because
+        real workloads are dominated by I/O.
+      </p>
+      <p>
+        There is a spectrum of three approaches, trading <strong>compatibility</strong> against
+        <strong>speed</strong>: full emulation, paravirtualized devices, and direct hardware passthrough.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the three-approaches figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "ioapproaches": {
+          "title": "Three ways to give a VM a device — compatibility vs speed",
+          "emul": "Full emulation: the VMM pretends to be a real (old) device, in software. Works with ANY guest driver — but every register access traps → slow.",
+          "virtio": "Paravirtual (virtio): guest runs a VM-aware driver that shares a ring buffer with the host. One notification moves many requests → fast.",
+          "pass": "Passthrough / SR-IOV: the guest drives a real (virtual) device directly, IOMMU makes DMA safe → near-native, but ties the VM to that hardware."
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Full emulation — maximum compatibility, minimum speed</h2>
+      <p>
+        The most compatible trick is to have the VMM <strong>pretend to be a real device</strong> — usually an
+        old, well-understood one like the Intel e1000 network card or an IDE disk. The guest loads its ordinary
+        driver, writes to what it thinks are the card's registers, and every one of those accesses
+        <strong>traps</strong> into the VMM, which emulates the effect in software (QEMU is the classic emulator).
+      </p>
+      <p>
+        This works with an <em>unmodified</em> guest — even a decades-old OS that has never heard of virtualization
+        — which is its great virtue. But it is slow: a single network packet can cause many
+        <primer-ref to="computer-science/advanced-operating-systems/virtualization/hardware-assisted-virtualization">VM-exits</primer-ref>,
+        each costing thousands of cycles. Emulation is for compatibility and boot-time devices, not for the fast
+        path.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Paravirtual devices (virtio) — a shared ring buffer</h2>
+      <p>
+        The insight of <strong>virtio</strong> is to stop pretending. Instead of emulating real silicon, define a
+        <em>virtual</em> device designed for virtualization, and give the guest a driver that knows it is a guest.
+        Guest and host then communicate through a shared-memory <strong>virtqueue</strong>: the guest places many
+        requests into a ring buffer and rings a doorbell <em>once</em>; the host processes the batch and posts
+        completions back. It is the same batching idea as
+        <primer-ref to="computer-science/advanced-operating-systems/storage/asynchronous-io-and-io-uring">io_uring</primer-ref> —
+        amortise the expensive world-crossing over many operations.
+      </p>
+      <p>
+        Because one notification moves a whole batch, virtio slashes the number of VM-exits and gets close to
+        native throughput. The price is a small loss of transparency: the guest needs virtio drivers (universal in
+        modern Linux/Windows). This is the default for almost every cloud VM today.
+      </p>
+      <primer-code run>
+        // Emulation vs virtio: count the expensive VM-exits to move N I/O requests.
+        // Emulation traps on each device-register access (~4 per request); virtio batches, ~1 exit per batch.
+        function emulationExits(requests: number): number {
+          const ACCESSES_PER_REQ = 4;      // program descriptor, kick, read status, ack IRQ
+          return requests * ACCESSES_PER_REQ;
+        }
+        function virtioExits(requests: number, batch: number): number {
+          return Math.ceil(requests / batch);  // one doorbell per batch of `batch` requests
+        }
+
+        const N = 1000, BATCH = 64;
+        console.log(`emulation VM-exits for ${N} requests: ${emulationExits(N)}`);
+        console.log(`virtio    VM-exits for ${N} requests: ${virtioExits(N, BATCH)}  (batch=${BATCH})`);
+        console.log(`reduction: ${(emulationExits(N) / virtioExits(N, BATCH)).toFixed(0)}x fewer costly exits`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Passthrough and SR-IOV — near-native, at a cost</h2>
+      <p>
+        For the very fastest I/O, hand the guest a <strong>real device</strong> to drive directly, with no VMM in
+        the data path at all. The danger is <strong>DMA</strong>: a device programmed by the guest could be told
+        to read or write <em>any</em> physical memory, escaping its VM. The <strong>IOMMU</strong> (Intel VT-d,
+        AMD-Vi) solves this — it is an MMU for devices, translating and bounding the physical addresses a device
+        may touch to the guest's own memory, so passthrough is safe.
+      </p>
+      <p>
+        But one card can only be handed to one VM. <strong>SR-IOV</strong> (Single-Root I/O Virtualization) fixes
+        that: a single physical NIC advertises many lightweight <strong>virtual functions</strong>, each
+        assignable to a different VM, each appearing as its own device. Guests get near-native network speed. The
+        cost is flexibility: the VM is now bound to that specific hardware, complicating
+        <primer-ref soft to="computer-science/advanced-operating-systems/virtualization/hypervisor-architectures">live
+        migration</primer-ref>.
+      </p>
+      <primer-geometry scene="ioapproaches"></primer-geometry>
+      <primer-theorem name="I/O virtualization">
+        <ul>
+          <li><strong>Full emulation</strong> — the VMM mimics real hardware; works with any unmodified guest
+            driver, but every register access traps → slowest;</li>
+          <li><strong>Paravirtual (virtio)</strong> — a VM-aware guest driver shares a ring buffer with the host,
+            batching many requests per notification → fast, the cloud default;</li>
+          <li><strong>Passthrough / SR-IOV</strong> — the guest drives a real (virtual) device directly, made safe
+            by the <strong>IOMMU</strong>; near-native speed, but ties the VM to that hardware;</li>
+          <li>the recurring theme: fewer VMM crossings = more speed, at the cost of less transparency/portability.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="What actually stops a passed-through device from reading another VM's memory?">
+      <p>
+        This is the whole game, and the answer is the <strong>IOMMU</strong>. Without it, a device does DMA using
+        raw physical addresses — so a malicious or buggy guest that owns a real NIC could program it to scribble
+        over the hypervisor or a neighbouring VM, and hardware isolation would be a lie. The IOMMU sits between
+        devices and memory exactly as the
+        <primer-ref to="computer-science/advanced-operating-systems/memory/address-translation-in-depth">MMU</primer-ref>
+        sits between the CPU and memory: it translates the addresses a device issues and refuses any that fall
+        outside the memory that VM is allowed to touch. It is the reason passthrough can be both fast <em>and</em>
+        safe, and it is why "just give the VM the hardware" only became practical once IOMMUs shipped.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Faster I/O virtualization usually means less portability">
+      <p>
+        It is tempting to reach for SR-IOV everywhere because it is fastest — but each step toward the metal
+        trades away the very flexibility that made virtualization attractive. An emulated device can be
+        <primer-ref soft to="computer-science/advanced-operating-systems/virtualization/hypervisor-architectures">live-migrated</primer-ref>
+        to any host and works with any guest. A virtio device migrates easily too. But a VM bound to a specific
+        physical NIC's virtual function cannot simply be paused and resumed on another machine — its device state
+        lives in hardware you're leaving behind. Cloud providers therefore default to virtio and reserve
+        passthrough/SR-IOV for workloads (high-frequency trading, NFV, GPUs) that genuinely need the last few
+        microseconds and can give up seamless migration to get them.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz. Bank of 11, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "ioVirtQuiz@1": {
+          "intro": "Emulation (compatible, slow) → virtio (batched ring, fast) → passthrough/SR-IOV (near-native, IOMMU-protected, less portable).",
+          "emulQ": "Full device emulation's main advantage is…",
+          "emulRight": "it works with any unmodified guest driver (maximum compatibility)",
+          "emulWrong1": "it is the fastest option",
+          "emulWrong2": "it needs no software",
+          "emulWrong3": "it requires SR-IOV hardware",
+          "emulSlowQ": "Full emulation is slow mainly because…",
+          "emulSlowRight": "each device-register access traps into the VMM (many VM-exits)",
+          "emulSlowWrong1": "the emulated device is physically old",
+          "emulSlowWrong2": "it encrypts every packet",
+          "emulSlowWrong3": "it disables the cache",
+          "virtioQ": "virtio achieves speed by…",
+          "virtioRight": "sharing a ring buffer so many requests move per single notification (batching)",
+          "virtioWrong1": "emulating a faster real card",
+          "virtioWrong2": "trapping on every byte",
+          "virtioWrong3": "removing the guest driver entirely",
+          "virtioCostQ": "The cost of virtio (vs full emulation) is…",
+          "virtioCostRight": "the guest needs a virtualization-aware (virtio) driver",
+          "virtioCostWrong1": "it only works on one specific NIC",
+          "virtioCostWrong2": "it cannot be migrated",
+          "virtioCostWrong3": "there is no cost at all",
+          "iommuQ": "The IOMMU's role in device passthrough is to…",
+          "iommuRight": "translate and bound the physical addresses a device may DMA to, keeping it inside its VM",
+          "iommuWrong1": "make the device run faster",
+          "iommuWrong2": "emulate the device in software",
+          "iommuWrong3": "compress DMA transfers",
+          "srQ": "SR-IOV lets one physical device…",
+          "srRight": "expose many virtual functions, each assignable to a different VM",
+          "srWrong1": "be shared only by emulation",
+          "srWrong2": "serve exactly one VM forever",
+          "srWrong3": "run without any driver",
+          "portQ": "Compared with virtio, SR-IOV passthrough is…",
+          "portRight": "faster but less portable — it ties the VM to specific hardware, complicating migration",
+          "portWrong1": "slower and more portable",
+          "portWrong2": "identical in every way",
+          "portWrong3": "impossible to make safe",
+          "exitNumQ": "Emulation costs {a} VM-exits per request; virtio batches {b} requests into 1 exit. For {n} requests, how many FEWER exits does virtio use? (emulation total minus virtio total)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="ioVirtQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/virtualization/hardware-assisted-virtualization",
+      "computer-science/advanced-operating-systems/storage/the-block-io-layer"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Three-approaches figure (emulation / virtio / passthrough, stacked) + quiz. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "ioapproaches",
+    ({ board, colors, step, sceneStrings }) => {
+      const W = 10;
+      const rows = [
+        { key: "emul", c: 0 },
+        { key: "virtio", c: 1 },
+        { key: "pass", c: 2 },
+      ];
+      let yTop = 3 * 1.5;
+      rows.forEach((r) =>
+        step(sceneStrings(r.key), () => {
+          const yBot = yTop - 1.3;
+          board.create("polygon", [[0, yBot], [W, yBot], [W, yTop], [0, yTop]], {
+            fillColor: colors.cat[r.c], fillOpacity: 0.18,
+            borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+            vertices: { visible: false }, fixed: true, highlight: false,
+          });
+          board.create("text", [W / 2, yTop - 0.65, sceneStrings(r.key)], {
+            strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+            cssStyle: "max-width:420px",
+          });
+          yTop = yBot - 0.2;
+        }),
+      );
+    },
+    { boundingbox: [-0.6, 4.8, 11.2, -0.8], keepAspect: false, title: () => makeStrings("ioapproaches")("title") },
+  );
+
+  registerQuiz("ioVirtQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("emulQ"), options: [
+      { text: () => sceneStrings("emulRight"), correct: true },
+      { text: () => sceneStrings("emulWrong1"), correct: false },
+      { text: () => sceneStrings("emulWrong2"), correct: false },
+      { text: () => sceneStrings("emulWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("emulSlowQ"), options: [
+      { text: () => sceneStrings("emulSlowRight"), correct: true },
+      { text: () => sceneStrings("emulSlowWrong1"), correct: false },
+      { text: () => sceneStrings("emulSlowWrong2"), correct: false },
+      { text: () => sceneStrings("emulSlowWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("virtioQ"), options: [
+      { text: () => sceneStrings("virtioRight"), correct: true },
+      { text: () => sceneStrings("virtioWrong1"), correct: false },
+      { text: () => sceneStrings("virtioWrong2"), correct: false },
+      { text: () => sceneStrings("virtioWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("virtioCostQ"), options: [
+      { text: () => sceneStrings("virtioCostRight"), correct: true },
+      { text: () => sceneStrings("virtioCostWrong1"), correct: false },
+      { text: () => sceneStrings("virtioCostWrong2"), correct: false },
+      { text: () => sceneStrings("virtioCostWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("iommuQ"), options: [
+      { text: () => sceneStrings("iommuRight"), correct: true },
+      { text: () => sceneStrings("iommuWrong1"), correct: false },
+      { text: () => sceneStrings("iommuWrong2"), correct: false },
+      { text: () => sceneStrings("iommuWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("srQ"), options: [
+      { text: () => sceneStrings("srRight"), correct: true },
+      { text: () => sceneStrings("srWrong1"), correct: false },
+      { text: () => sceneStrings("srWrong2"), correct: false },
+      { text: () => sceneStrings("srWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("portQ"), options: [
+      { text: () => sceneStrings("portRight"), correct: true },
+      { text: () => sceneStrings("portWrong1"), correct: false },
+      { text: () => sceneStrings("portWrong2"), correct: false },
+      { text: () => sceneStrings("portWrong3"), correct: false } ] },
+    { prompt: (v) => sceneStrings("exitNumQ", v),
+      variables: "a=[3:5] b=[32,64] n=[128,256]",
+      answer: (v) => v.a * v.n - Math.ceil(v.n / v.b),
+      keyboard: "geometry-lengths" },
+  ]);
+</script>

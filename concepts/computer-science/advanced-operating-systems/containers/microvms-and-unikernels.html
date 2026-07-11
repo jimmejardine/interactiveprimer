@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>MicroVMs and Unikernels</primer-title>
+
+    <primer-card>
+      <p>
+        We ended
+        <primer-ref to="computer-science/advanced-operating-systems/containers/containers-vs-virtual-machines">containers
+        vs VMs</primer-ref> with a genuine dilemma. Containers give you millisecond starts and huge density but a
+        <em>weak, shared-kernel</em> boundary. VMs give you a hard, hardware-enforced boundary but seconds to boot
+        and hundreds of megabytes each. When you must run <em>untrusted</em> code — a stranger's serverless
+        function, a multi-tenant CI job — you seem forced to choose between "fast but leaky" and "safe but heavy".
+      </p>
+      <p>
+        This final lesson is about the engineers who refused the dilemma and built new points on the spectrum.
+        Three ideas close the isolation gap without paying the full VM tax: <strong>gVisor</strong> (a
+        user-space guest kernel that intercepts syscalls), <strong>microVMs</strong> like
+        <strong>Firecracker</strong> (a hypervisor stripped to the studs, booting a real kernel in ~125 ms), and
+        <strong>unikernels</strong> (compile the app and only the OS libraries it needs into one tiny image with
+        no syscalls at all). Each trades a little overhead for a lot of isolation, and together they turn the
+        binary "container or VM?" into a rich spectrum you can dial along.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The isolation ⇄ overhead spectrum</h2>
+      <p>
+        The right way to hold all of this is a single line, ordered by how strong the isolation boundary is — and,
+        because it is the same axis, by how much overhead each option carries. From a bare process (no isolation,
+        zero overhead) to a full VM (hardware boundary, seconds and hundreds of MB), each rung buys isolation with
+        overhead.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Approach</th><th>Isolation boundary</th><th>Boot</th><th>Overhead</th><th>Where it's used</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Process</strong></td><td>none (same OS view)</td><td>&lt;1 ms</td><td>zero</td><td>ordinary programs</td></tr>
+            <tr><td><strong>Container</strong></td><td>namespaces on a shared kernel</td><td>~ms</td><td>near zero</td><td>microservices, packaging</td></tr>
+            <tr><td><strong>gVisor</strong></td><td>user-space guest kernel intercepts syscalls</td><td>tens of ms</td><td>syscall-heavy: noticeable</td><td>GKE Sandbox, App Engine</td></tr>
+            <tr><td><strong>microVM</strong></td><td>real guest kernel, minimal hypervisor</td><td>~125 ms</td><td>a few %</td><td>AWS Lambda, Fargate</td></tr>
+            <tr><td><strong>Unikernel</strong></td><td>single-purpose image on a hypervisor</td><td>~ms</td><td>tiny (no syscalls)</td><td>appliances, edge, research</td></tr>
+            <tr><td><strong>Full VM</strong></td><td>hardware-enforced, full guest OS</td><td>seconds</td><td>a few %, big memory</td><td>general virtualization, IaaS</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Notice that gVisor, microVMs, and unikernels all land <em>between</em> the container and the full VM —
+        that middle band, "container-fast with VM-ish isolation", is exactly the gap they were invented to fill.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>gVisor — a guest kernel in user space</h2>
+      <p>
+        Google's <strong>gVisor</strong> takes a startling approach: instead of letting the container's syscalls
+        hit the host kernel, it <em>intercepts</em> them and services them in a sandbox process called
+        <primer-math>\texttt{Sentry}</primer-math> — essentially a <em>re-implementation of the Linux kernel's
+        syscall interface, written in Go, running in user space</em>. The container thinks it is talking to Linux;
+        it is really talking to gVisor, which handles most syscalls itself and only makes a small, tightly
+        restricted set of calls to the real host kernel on its behalf.
+      </p>
+      <p>
+        The payoff is a dramatically <strong>smaller host-kernel attack surface</strong>: the container can no
+        longer reach hundreds of host syscalls directly, only the handful gVisor forwards. The cost is
+        <strong>performance</strong> — every intercepted syscall is now a user-space round trip through the
+        Sentry, so syscall-heavy workloads (lots of tiny I/O) slow down noticeably, while compute-bound workloads
+        barely notice. It is the microkernel trade-off from earlier in the course, reincarnated for container
+        isolation: put a software layer between the workload and the kernel, pay in indirection, gain in safety.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the three-architecture figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "isoarch": {
+          "title": "Three ways to close the gap: gVisor, a microVM, and a unikernel",
+          "gvTitle": "gVisor",
+          "mvTitle": "microVM (Firecracker)",
+          "unTitle": "unikernel",
+          "app": "app",
+          "sentry": "Sentry: user-space guest kernel (intercepts syscalls)",
+          "hostk": "host kernel (few forwarded syscalls only)",
+          "guestk": "minimal guest kernel",
+          "fc": "Firecracker VMM: tiny device model, ~125 ms boot",
+          "kvm": "KVM (hardware virtualization)",
+          "libos": "app + libOS compiled into ONE image — no syscalls, one address space",
+          "hyper": "hypervisor",
+          "hw": "hardware"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Firecracker microVMs and unikernels, pictured</h2>
+      <p>
+        <strong>Firecracker</strong> asked: why is a VM slow to boot? Not because hardware virtualization is
+        slow — that part is fast — but because general-purpose VMMs (QEMU) emulate a whole PC: BIOS, PCI, dozens
+        of legacy devices. Firecracker throws almost all of it away, keeping a <em>minimal device model</em>
+        (a few virtio devices, a serial port) and a stripped boot path. The result is a <em>real</em> guest
+        kernel with a hardware-enforced boundary that boots in about <strong>125 ms</strong> and adds only a few
+        MB of overhead — the isolation of a VM at nearly the agility of a container. It runs under AWS Lambda and
+        Fargate, launching millions of microVMs to isolate every tenant's function.
+      </p>
+      <p>
+        A <strong>unikernel</strong> attacks from the opposite side. Rather than shrink the VM around a general OS,
+        it shrinks the OS to nothing but what one app needs: you <em>compile</em> the application together with
+        just the library-OS pieces it calls (a TCP stack, a scheduler, a filesystem — as libraries) into a single
+        image that runs directly on the hypervisor in <em>one address space</em>. There is no user/kernel split
+        and <em>no syscalls</em> — a "syscall" is just a function call. The image is tiny (megabytes), boots in
+        milliseconds, and has a minuscule attack surface because code the app never uses simply isn't there.
+        <primer-math>\texttt{MirageOS}</primer-math> (OCaml) and
+        <primer-math>\texttt{Unikraft}</primer-math> are the flag-bearers.
+      </p>
+      <primer-geometry scene="isoarch"></primer-geometry>
+      <p>
+        Three different shapes, one shared goal: shrink what the untrusted code can touch. gVisor shrinks the
+        <em>reachable host kernel</em>; Firecracker shrinks the <em>VM around a real kernel</em>; the unikernel
+        shrinks the <em>OS itself</em> down to one app.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Comparing boot time and attack surface</h2>
+      <p>
+        Let's put rough numbers on the spectrum and let the ordering emerge. The simulation models each approach
+        by two coordinates — a boot time and a relative "attack-surface" score (how much host-kernel code the
+        untrusted workload can reach) — and sorts them, so you can see the trade curve rather than memorise a
+        table.
+      </p>
+      <primer-code run>
+        // Rough model of the isolation<->overhead spectrum. attackSurface = relative host-kernel code
+        // reachable by untrusted code (lower = safer); bootMs = cold start. Numbers are illustrative.
+        interface Approach { name: string; bootMs: number; attackSurface: number; }
+
+        const approaches: Approach[] = [
+          { name: "container",  bootMs: 30,   attackSurface: 100 },  // full host syscall table
+          { name: "gVisor",     bootMs: 120,  attackSurface: 20  },  // only forwarded syscalls
+          { name: "microVM",    bootMs: 125,  attackSurface: 8   },  // hw boundary + minimal device model
+          { name: "unikernel",  bootMs: 20,   attackSurface: 5   },  // no syscalls, tiny image
+          { name: "full VM",    bootMs: 2500, attackSurface: 8   },  // hw boundary, but big general OS
+        ];
+
+        // Order by isolation strength (smaller attack surface = stronger).
+        const bySafety = [...approaches].sort((a, b) =&gt; a.attackSurface - b.attackSurface);
+        console.log("Ranked by isolation (safest first):");
+        for (const a of bySafety) {
+          const bar = "#".repeat(Math.max(1, Math.round(a.attackSurface / 5)));
+          console.log(`  ${a.name.padEnd(10)} surface ${String(a.attackSurface).padStart(3)}  ${bar.padEnd(20)} boot ${a.bootMs} ms`);
+        }
+
+        // The sweet spot for untrusted, fast, dense workloads: strong isolation AND low boot.
+        const sweet = approaches
+          .filter((a) =&gt; a.attackSurface &lt;= 10 && a.bootMs &lt;= 200)
+          .map((a) =&gt; a.name);
+        console.log(`\nStrong isolation (surface ≤ 10) AND fast boot (≤ 200 ms): ${sweet.join(", ")}`);
+        console.log("=> exactly why AWS built Firecracker for Lambda, and why unikernels intrigue researchers.");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The design law</h2>
+      <primer-theorem name="Closing the isolation gap">
+        <ul>
+          <li>Isolation and overhead are the <strong>same axis</strong>: process → container → gVisor → microVM →
+            VM trades more overhead for a stronger boundary.</li>
+          <li><strong>gVisor</strong> runs a <em>user-space guest kernel</em> (Sentry) that intercepts syscalls,
+            shrinking the reachable host kernel; cost is per-syscall indirection.</li>
+          <li><strong>Firecracker/microVMs</strong> keep a <em>real guest kernel</em> but strip the VMM to a
+            minimal device model — a hardware-enforced boundary that boots in ~125 ms (AWS Lambda/Fargate).</li>
+          <li><strong>Unikernels</strong> compile the app + just its library-OS into <em>one single-address-space
+            image</em> — no user/kernel split, no syscalls, tiny attack surface, ms boot.</li>
+          <li>All three occupy the middle band: <strong>container-fast agility with VM-grade isolation.</strong></li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="How does AWS Lambda run millions of strangers' functions on shared hardware safely?">
+      <p>
+        For years the answer was awkward: Lambda packed functions into containers, but multi-tenant containers on
+        a shared kernel are a security worry, so AWS actually ran one <em>full</em> VM per customer and packed
+        that customer's functions inside — safe, but wasteful and slow to scale. Firecracker dissolved the
+        compromise. Now each function instance gets its <em>own</em> microVM: a real, hardware-isolated guest
+        kernel that boots in about <primer-math>125</primer-math> ms and costs only a few MB, so AWS can give
+        <em>every</em> invocation VM-strength isolation and still start it fast enough to feel serverless.
+        Firecracker is open-source, written in Rust for memory safety, and deliberately tiny — around
+        <primer-math>50{,}000</primer-math> lines versus QEMU's millions — because in a security boundary, less
+        code is less to get wrong. It is the whole "isolation vs overhead" course lesson turned into a shipping
+        product.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Stronger isolation' is not free, and a unikernel is not a container">
+      <p>
+        Two traps. First, do not read this lesson as "microVMs beat containers, always use them." Every rung up
+        the isolation ladder costs something — gVisor taxes syscall-heavy workloads, microVMs add ~125 ms and a
+        few MB per instance, unikernels demand you rebuild your app against a library OS and lose the rich
+        debugging and tooling of a normal Linux. If your tenants already trust each other, a plain container is
+        the right, cheapest tool. Second, a unikernel is <em>not</em> a lightweight container: it has no shared
+        host kernel, no <primer-math>\texttt{ps}</primer-math>, no shell, no multiple processes — it runs one
+        program in one address space on a hypervisor. That is its strength (tiny attack surface) and its pain (no
+        familiar OS underneath, a hard porting story). Match the isolation mechanism to the <em>threat model and
+        the workload</em> — the point of a spectrum is that you get to choose where to stand, not that one end
+        wins.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: the spectrum ordering, gVisor/Firecracker/unikernel definitions, trade-offs, real users.
+         Bank of 12, draws 5. Variable names avoid evaluator collisions (boot, insts, ...). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "mvuQuiz@1": {
+          "intro": "Closing the container↔VM isolation gap: gVisor (user-space guest kernel), Firecracker microVMs, and unikernels — a spectrum of isolation vs overhead.",
+          "gvQ": "gVisor achieves stronger isolation by…",
+          "gvRight": "running a user-space guest kernel (Sentry) that intercepts the container's syscalls",
+          "gvWrong1": "emulating the entire PC hardware like QEMU",
+          "gvWrong2": "giving each container its own physical CPU core",
+          "gvWrong3": "encrypting the container's memory",
+          "gvCostQ": "The main cost of gVisor is…",
+          "gvCostRight": "syscall-heavy workloads slow down due to user-space interception overhead",
+          "gvCostWrong1": "it needs seconds to boot like a full VM",
+          "gvCostWrong2": "it uses hundreds of MB of RAM per container",
+          "gvCostWrong3": "it cannot run compute-bound code at all",
+          "fcQ": "Firecracker boots a real guest kernel in ~125 ms because it…",
+          "fcRight": "strips the VMM to a minimal device model instead of emulating a whole PC",
+          "fcWrong1": "shares the host kernel like a container",
+          "fcWrong2": "skips hardware virtualization entirely",
+          "fcWrong3": "compiles the app into the hypervisor",
+          "fcUseQ": "Firecracker microVMs are used in production by…",
+          "fcUseRight": "AWS Lambda and Fargate, to isolate each tenant's function",
+          "fcUseWrong1": "no one — it is only a research prototype",
+          "fcUseWrong2": "desktop Linux to run the browser",
+          "fcUseWrong3": "the Linux kernel's own scheduler",
+          "unQ": "A unikernel is…",
+          "unRight": "the app plus just the library-OS it needs, compiled into one single-address-space image",
+          "unWrong1": "a container that shares the host kernel",
+          "unWrong2": "a hypervisor that runs one VM",
+          "unWrong3": "a kernel that supports a single CPU",
+          "unSysQ": "How many syscalls does a unikernel make?",
+          "unSysRight": "none — with no user/kernel split, an 'OS call' is just a function call",
+          "unSysWrong1": "the full ~400 the Linux kernel offers",
+          "unSysWrong2": "exactly one, at boot",
+          "unSysWrong3": "twice as many as a container",
+          "unWhyQ": "Why does a unikernel have a tiny attack surface?",
+          "unWhyRight": "OS code the app never uses simply isn't compiled into the image",
+          "unWhyWrong1": "it runs entirely without hardware",
+          "unWhyWrong2": "it encrypts every instruction",
+          "unWhyWrong3": "it has more device drivers than Linux",
+          "specQ": "Ordered from WEAKEST to STRONGEST isolation, which sequence is right?",
+          "specRight": "process → container → gVisor/microVM → full VM",
+          "specWrong1": "full VM → microVM → container → process",
+          "specWrong2": "container → process → full VM → gVisor",
+          "specWrong3": "gVisor → process → full VM → container",
+          "gapQ": "gVisor, microVMs, and unikernels all aim to provide…",
+          "gapRight": "container-like agility with VM-grade isolation — filling the middle of the spectrum",
+          "gapWrong1": "the absolute lowest overhead, beating a bare process",
+          "gapWrong2": "a way to run without any kernel or hypervisor",
+          "gapWrong3": "weaker isolation than a plain container",
+          "whyfcQ": "Firecracker is deliberately ~50k lines (vs QEMU's millions) because…",
+          "whyfcRight": "in a security boundary, less code means less to get wrong",
+          "whyfcWrong1": "Rust cannot compile large programs",
+          "whyfcWrong2": "it needs to fit in the CPU cache",
+          "whyfcWrong3": "AWS ran out of time to write more",
+          "chooseQ": "If your tenants already fully trust each other, the right tool is usually…",
+          "chooseRight": "a plain container — cheapest, and the extra isolation isn't needed",
+          "chooseWrong1": "always a unikernel, for safety",
+          "chooseWrong2": "a full VM per process",
+          "chooseWrong3": "gVisor, always",
+          "bootQ": "A microVM boots in ${boot}$ ms. To launch ${insts}$ of them for a burst of traffic, how many total SECONDS of boot time is that? (round to 1 dp)",
+          "densQ": "Each microVM adds ${mb}$ MB overhead. On a ${gb}$ GB host, roughly how many microVMs fit by memory overhead alone? (integer)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="mvuQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/containers/containers-vs-virtual-machines"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Three side-by-side architecture stacks: gVisor (app -> Sentry -> host kernel -> hw), microVM
+     (app -> guest kernel -> Firecracker -> KVM -> hw), unikernel (libOS image -> hypervisor -> hw).
+     keepAspect false, wide. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "isoarch",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, text, ci, opacity, weight) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: colors.cat[ci], fillOpacity: opacity,
+          borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, text], {
+          strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: `text-align:center; white-space:pre-line; ${weight ? "font-weight:700;" : ""} max-width:150px`,
+        });
+      };
+      const caption = (x, y, text, weight) =>
+        board.create("text", [x, y, text], {
+          strokeColor: colors.ink, fontSize: 11.5, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: (weight ? "font-weight:700;" : "") + "max-width:170px",
+        });
+
+      const A0 = 0.2, A1 = 3.7;    // gVisor column
+      const B0 = 4.1, B1 = 7.6;    // microVM column
+      const C0 = 8.0, C1 = 11.5;   // unikernel column
+
+      caption((A0 + A1) / 2, 6.7, sceneStrings("gvTitle"), true);
+      caption((B0 + B1) / 2, 6.7, sceneStrings("mvTitle"), true);
+      caption((C0 + C1) / 2, 6.7, sceneStrings("unTitle"), true);
+
+      // gVisor stack.
+      step(sceneStrings("gvTitle"), () => {
+        box(A0, 5.1, A1, 6.1, sceneStrings("app"), 0, 0.24, false);
+        box(A0, 3.7, A1, 5.0, sceneStrings("sentry"), 1, 0.28, true);
+        box(A0, 2.3, A1, 3.6, sceneStrings("hostk"), 2, 0.28, false);
+        box(A0, 1.1, A1, 2.2, sceneStrings("hw"), 2, 0.16, false);
+      });
+
+      // microVM stack.
+      step(sceneStrings("mvTitle"), () => {
+        box(B0, 5.5, B1, 6.1, sceneStrings("app"), 0, 0.24, false);
+        box(B0, 4.5, B1, 5.4, sceneStrings("guestk"), 1, 0.28, true);
+        box(B0, 3.3, B1, 4.4, sceneStrings("fc"), 2, 0.28, false);
+        box(B0, 2.3, B1, 3.2, sceneStrings("kvm"), 2, 0.22, false);
+        box(B0, 1.1, B1, 2.2, sceneStrings("hw"), 2, 0.16, false);
+      });
+
+      // unikernel stack.
+      step(sceneStrings("unTitle"), () => {
+        box(C0, 4.3, C1, 6.1, sceneStrings("libos"), 1, 0.30, true);
+        box(C0, 2.9, C1, 4.2, sceneStrings("hyper"), 2, 0.28, false);
+        box(C0, 1.1, C1, 2.8, sceneStrings("hw"), 2, 0.16, false);
+      });
+    },
+    {
+      boundingbox: [-0.4, 7.2, 12.2, 0.5],
+      keepAspect: false,
+      title: () => makeStrings("isoarch")("title"),
+    },
+  );
+
+  registerQuiz("mvuQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("gvQ"), options: [
+      { text: () => sceneStrings("gvRight"), correct: true },
+      { text: () => sceneStrings("gvWrong1"), correct: false },
+      { text: () => sceneStrings("gvWrong2"), correct: false },
+      { text: () => sceneStrings("gvWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("gvCostQ"), options: [
+      { text: () => sceneStrings("gvCostRight"), correct: true },
+      { text: () => sceneStrings("gvCostWrong1"), correct: false },
+      { text: () => sceneStrings("gvCostWrong2"), correct: false },
+      { text: () => sceneStrings("gvCostWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fcQ"), options: [
+      { text: () => sceneStrings("fcRight"), correct: true },
+      { text: () => sceneStrings("fcWrong1"), correct: false },
+      { text: () => sceneStrings("fcWrong2"), correct: false },
+      { text: () => sceneStrings("fcWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fcUseQ"), options: [
+      { text: () => sceneStrings("fcUseRight"), correct: true },
+      { text: () => sceneStrings("fcUseWrong1"), correct: false },
+      { text: () => sceneStrings("fcUseWrong2"), correct: false },
+      { text: () => sceneStrings("fcUseWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("unQ"), options: [
+      { text: () => sceneStrings("unRight"), correct: true },
+      { text: () => sceneStrings("unWrong1"), correct: false },
+      { text: () => sceneStrings("unWrong2"), correct: false },
+      { text: () => sceneStrings("unWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("unSysQ"), options: [
+      { text: () => sceneStrings("unSysRight"), correct: true },
+      { text: () => sceneStrings("unSysWrong1"), correct: false },
+      { text: () => sceneStrings("unSysWrong2"), correct: false },
+      { text: () => sceneStrings("unSysWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("unWhyQ"), options: [
+      { text: () => sceneStrings("unWhyRight"), correct: true },
+      { text: () => sceneStrings("unWhyWrong1"), correct: false },
+      { text: () => sceneStrings("unWhyWrong2"), correct: false },
+      { text: () => sceneStrings("unWhyWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("specQ"), options: [
+      { text: () => sceneStrings("specRight"), correct: true },
+      { text: () => sceneStrings("specWrong1"), correct: false },
+      { text: () => sceneStrings("specWrong2"), correct: false },
+      { text: () => sceneStrings("specWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("gapQ"), options: [
+      { text: () => sceneStrings("gapRight"), correct: true },
+      { text: () => sceneStrings("gapWrong1"), correct: false },
+      { text: () => sceneStrings("gapWrong2"), correct: false },
+      { text: () => sceneStrings("gapWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("whyfcQ"), options: [
+      { text: () => sceneStrings("whyfcRight"), correct: true },
+      { text: () => sceneStrings("whyfcWrong1"), correct: false },
+      { text: () => sceneStrings("whyfcWrong2"), correct: false },
+      { text: () => sceneStrings("whyfcWrong3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("chooseQ"), options: [
+      { text: () => sceneStrings("chooseRight"), correct: true },
+      { text: () => sceneStrings("chooseWrong1"), correct: false },
+      { text: () => sceneStrings("chooseWrong2"), correct: false },
+      { text: () => sceneStrings("chooseWrong3"), correct: false },
+    ] },
+    {
+      // total boot seconds = insts*boot/1000, 1dp.
+      prompt: (v) => sceneStrings("bootQ", v),
+      variables: "boot=[110,125,150] insts=[20:200]",
+      answer: (v) => Math.round((v.insts * v.boot) / 100) / 10,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // fit = floor(gb*1024 / mb).
+      prompt: (v) => sceneStrings("densQ", v),
+      variables: "mb=[3,5,8] gb=[16,32,64]",
+      answer: (v) => Math.floor((v.gb * 1024) / v.mb),
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

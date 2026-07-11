@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Sandboxing and Confinement</primer-title>
+
+    <primer-card>
+      <p>
+        Every day your computer runs code you have every reason to distrust: a web page's JavaScript, a PDF's
+        embedded fonts, a downloaded game, an image decoder fed a hostile file. You cannot avoid running it — that
+        is the whole point of a browser — so the question is not <em>whether</em> to run untrusted code but how to
+        run it in a <strong>box</strong> small enough that even if it is fully compromised, it can touch almost
+        nothing. That box is a <strong>sandbox</strong>, and building good ones is one of the hardest, most
+        important jobs in modern systems security.
+      </p>
+      <p>
+        The strategy is <strong>defence in depth</strong>: assume any single wall can be breached, so stack many.
+        A sandbox is not one feature but a careful composition of the confinement primitives you have already met.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The confinement toolbox</h2>
+      <p>
+        A sandbox is assembled from the kernel's isolation primitives, each shrinking a different dimension of
+        what the confined process can do:
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th>Tool</th><th>What it confines</th></tr></thead>
+          <tbody>
+            <tr><td><primer-ref to="computer-science/advanced-operating-systems/containers/capabilities-and-seccomp">seccomp-bpf</primer-ref></td><td>which <strong>system calls</strong> the process may make at all — the biggest lever on kernel attack surface</td></tr>
+            <tr><td><primer-ref to="computer-science/advanced-operating-systems/containers/capabilities-and-seccomp">capabilities</primer-ref></td><td>which slivers of root's power it holds (drop nearly all)</td></tr>
+            <tr><td><primer-ref to="computer-science/advanced-operating-systems/containers/namespaces-and-cgroups">namespaces</primer-ref></td><td>what it can <em>see</em> — its own pid/mount/net/user view</td></tr>
+            <tr><td>chroot / pivot_root</td><td>which part of the filesystem tree it can reach</td></tr>
+            <tr><td>rlimits / cgroups</td><td>how much CPU, memory, and how many files/processes it may consume</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The single most powerful of these is <strong>seccomp</strong>. Every kernel bug lives behind some system
+        call; a process that is only allowed to call <primer-math>\texttt{read}</primer-math>,
+        <primer-math>\texttt{write}</primer-math>, <primer-math>\texttt{exit}</primer-math> and a handful of others
+        simply cannot reach the vulnerable code behind the hundreds of calls it has forbidden. You reduce the
+        <primer-ref to="computer-science/advanced-operating-systems/security/the-kernel-attack-surface-and-hardening">kernel
+        attack surface</primer-ref> to the few doors you actually need.
+      </p>
+      <primer-code run>
+        // A seccomp-style syscall allow-list: the sandbox permits only what the task needs; everything
+        // else is killed. Even a fully-compromised worker can't reach the kernel behind a blocked call.
+        const ALLOW = new Set(["read", "write", "exit", "sigreturn", "brk"]);
+        function sandboxedSyscall(name: string): string {
+          if (ALLOW.has(name)) return `${name}: allowed`;
+          return `${name}: BLOCKED (SIGKILL) — attack surface removed`;
+        }
+        for (const s of ["read", "write", "open", "socket", "ptrace", "execve", "exit"]) {
+          console.log(sandboxedSyscall(s));
+        }
+        console.log(`allow-list size: ${ALLOW.size} of ~400 Linux syscalls -> ~99% of the kernel is unreachable`);
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Chrome: the browser as the hardest sandbox on Earth</h2>
+      <p>
+        The canonical production sandbox is a web browser, and Chrome's is the reference design. Its core move is
+        <strong>multi-process architecture</strong>: the untrusted work — parsing HTML, running a site's
+        JavaScript, decoding its images — happens in a low-privilege <strong>renderer process</strong>, one per
+        site, that is heavily confined (seccomp filter, no filesystem, no network of its own, dropped
+        capabilities, its own namespaces). The renderer can talk <em>only</em> to a trusted
+        <strong>browser process</strong> over a narrow IPC channel, and the browser process brokers every
+        sensitive action.
+      </p>
+      <p>
+        So when an attacker pops the renderer with a JavaScript-engine exploit — which happens — they land inside
+        a box that can barely make a system call, cannot open a file, and cannot see other tabs. To do real
+        damage they need a <em>second</em> exploit to escape the sandbox itself. Requiring a full exploit
+        <em>chain</em> instead of a single bug is what defence in depth buys you.
+      </p>
+      <primer-geometry scene="sandbox"></primer-geometry>
+      <primer-theorem name="Sandboxing and confinement">
+        <ul>
+          <li>a <strong>sandbox</strong> confines untrusted code so a full compromise still touches almost
+            nothing — built by <strong>composing</strong> seccomp, capabilities, namespaces, chroot, and
+            rlimits/cgroups;</li>
+          <li><strong>seccomp</strong> is the strongest single lever: restrict the allowed <em>syscalls</em> and
+            most of the kernel becomes unreachable;</li>
+          <li><strong>defence in depth</strong> — stack independent barriers so breaching one is not enough;</li>
+          <li>real sandboxes (Chrome's per-site renderers, OpenBSD <primer-math>\texttt{pledge}</primer-math>/<primer-math>\texttt{unveil}</primer-math>)
+            force an attacker to chain multiple exploits — one to compromise, another to escape.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Designing for confinement: pledge and unveil</h2>
+      <p>
+        Adding a sandbox to existing software is painful — you must discover exactly which syscalls and files it
+        needs. OpenBSD's <primer-math>\texttt{pledge}</primer-math> and <primer-math>\texttt{unveil}</primer-math>
+        make it almost pleasant: a program voluntarily declares "from here on I only need the
+        <em>stdio</em> and <em>rpath</em> promises" (<primer-math>\texttt{pledge}</primer-math>) and "I only need
+        to see <primer-math>\texttt{/etc/hosts}</primer-math>" (<primer-math>\texttt{unveil}</primer-math>). After
+        the declaration, any attempt to do more kills the process. Because a program self-confines <em>after</em>
+        its setup phase (when it still needs broad access) but <em>before</em> it touches untrusted input, the
+        dangerous window is tiny. It is the principle of least privilege made into two easy calls.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why is chroot NOT a security boundary on its own?">
+      <p>
+        Newcomers reach for <primer-math>\texttt{chroot}</primer-math> as a jail — "change the root directory and
+        the process is trapped." It isn't. A process that still has the <primer-math>\texttt{CAP\_SYS\_ADMIN}</primer-math>
+        capability (or is root) can simply <primer-math>\texttt{chroot}</primer-math> <em>again</em> from a
+        directory whose file descriptor it kept open, and walk right out — the classic chroot escape. Worse,
+        chroot confines only the <em>filesystem</em> view; it does nothing about the network, other processes, or
+        the syscall interface. This is exactly why real sandboxes never rely on any single primitive: chroot is
+        one thin wall in a stack that also drops capabilities, applies seccomp, and enters new namespaces.
+        <primer-math>\texttt{pivot\_root}</primer-math> inside a fresh mount+user namespace, with capabilities
+        dropped, is the modern, escape-resistant replacement.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A sandbox shrinks damage, it does not prevent compromise">
+      <p>
+        The mental model to avoid is "sandboxed = safe." A sandbox does not stop the untrusted code from being
+        exploited — the renderer <em>will</em> get popped — it limits what the attacker can <em>do next</em>. The
+        security value is entirely in the size of the box: a sandbox that still allows
+        <primer-math>\texttt{execve}</primer-math>, filesystem access, or a broad syscall set is theatre. And
+        sandboxes have their own bugs: a flaw in the kernel's namespace or seccomp implementation, or in the
+        broker that services the sandbox's IPC requests, becomes the escape hatch. That is why the design goal is
+        always to make the attacker need a <em>chain</em> — and why the trusted broker on the other side of the
+        sandbox must itself be tiny and paranoid.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz. Bank of 11, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "sandboxQuiz@1": {
+          "intro": "A sandbox composes seccomp + caps + namespaces + chroot + limits; defence in depth forces an exploit chain.",
+          "defQ": "A sandbox's purpose is to…",
+          "defRight": "confine untrusted code so that even a full compromise can touch almost nothing",
+          "defWrong1": "make untrusted code impossible to exploit",
+          "defWrong2": "speed up the confined program",
+          "defWrong3": "encrypt the program's source",
+          "seccompQ": "Why is seccomp the strongest single sandbox lever?",
+          "seccompRight": "restricting the allowed syscalls makes most of the kernel's attack surface unreachable",
+          "seccompWrong1": "it encrypts memory",
+          "seccompWrong2": "it makes syscalls faster",
+          "seccompWrong3": "it adds more capabilities",
+          "didQ": "\"Defence in depth\" means…",
+          "didRight": "stacking multiple independent barriers so breaching one is not enough",
+          "didWrong1": "relying on one very strong wall",
+          "didWrong2": "running deeper in the kernel",
+          "didWrong3": "using a deeper directory",
+          "chromeQ": "Chrome sandboxes untrusted web content by…",
+          "chromeRight": "running each site's parsing/JS in a low-privilege renderer process that can only talk to a trusted broker",
+          "chromeWrong1": "running all sites in the kernel",
+          "chromeWrong2": "trusting every web page fully",
+          "chromeWrong3": "disabling JavaScript entirely",
+          "chainQ": "After popping a well-sandboxed renderer, an attacker still needs…",
+          "chainRight": "a second exploit to escape the sandbox itself",
+          "chainWrong1": "nothing more — they own the machine",
+          "chainWrong2": "to reboot the machine",
+          "chainWrong3": "physical access",
+          "chrootQ": "chroot alone is NOT a security boundary because…",
+          "chrootRight": "a privileged process can escape it, and it confines only the filesystem view",
+          "chrootWrong1": "it is too slow",
+          "chrootWrong2": "it blocks all syscalls",
+          "chrootWrong3": "it needs a network connection",
+          "pledgeQ": "OpenBSD's pledge/unveil let a program…",
+          "pledgeRight": "voluntarily drop to a minimal set of allowed operations/files after setup",
+          "pledgeWrong1": "gain root access",
+          "pledgeWrong2": "disable the kernel",
+          "pledgeWrong3": "run faster",
+          "leastQ": "Confinement is an application of which principle?",
+          "leastRight": "least privilege — grant only the access actually needed",
+          "leastWrong1": "maximum privilege for convenience",
+          "leastWrong2": "security through obscurity",
+          "leastWrong3": "fail-open by default",
+          "surfNumQ": "A sandbox allows {a} of about {t} Linux syscalls. What PERCENTAGE of syscalls are blocked? (nearest whole %, using blocked = t − a)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="sandboxQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/containers/capabilities-and-seccomp",
+      "computer-science/advanced-operating-systems/security/the-kernel-attack-surface-and-hardening"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Chrome-style layered sandbox figure + quiz. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "sandbox",
+    ({ board, colors, step, sceneStrings }) => {
+      // Base: the trusted browser (broker) box and the kernel line.
+      board.create("polygon", [[0, 0], [10, 0], [10, 1], [0, 1]], {
+        fillColor: colors.cat[0], fillOpacity: 0.16,
+        borders: { strokeColor: colors.line, highlight: false }, vertices: { visible: false }, fixed: true, highlight: false,
+      });
+      board.create("text", [5, 0.5, "Trusted browser process (broker) — brokers every sensitive action"], {
+        strokeColor: colors.ink, fontSize: 11.5, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+      });
+      // Three confined renderer boxes on top, revealed one at a time, each with its walls.
+      const walls = "seccomp · no FS · dropped caps · own namespaces";
+      [0, 1, 2].forEach((i) =>
+        step(`Confined renderer ${i + 1} (one site) — ${walls}`, () => {
+          const x0 = 0.4 + i * 3.3, x1 = x0 + 2.9;
+          board.create("polygon", [[x0, 1.6], [x1, 1.6], [x1, 3.0], [x0, 3.0]], {
+            fillColor: colors.cat[1], fillOpacity: 0.22,
+            borders: { strokeColor: colors.line, strokeWidth: 1.5, dash: 2, highlight: false },
+            vertices: { visible: false }, fixed: true, highlight: false,
+          });
+          board.create("text", [(x0 + x1) / 2, 2.5, `renderer ${i + 1}`], {
+            strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600",
+          });
+          board.create("text", [(x0 + x1) / 2, 2.05, "untrusted JS / parsing"], {
+            strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+          });
+          // narrow IPC channel down to the broker
+          board.create("arrow", [[(x0 + x1) / 2, 1.6], [(x0 + x1) / 2, 1.02]], { strokeColor: colors.cat[2], strokeWidth: 2, highlight: false });
+        }),
+      );
+    },
+    { boundingbox: [-0.6, 3.4, 10.8, -0.5], keepAspect: false, title: () => "A sandbox stacks walls: confined renderers speak only to a trusted broker" },
+  );
+
+  registerQuiz("sandboxQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("defQ"), options: [
+      { text: () => sceneStrings("defRight"), correct: true },
+      { text: () => sceneStrings("defWrong1"), correct: false },
+      { text: () => sceneStrings("defWrong2"), correct: false },
+      { text: () => sceneStrings("defWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("seccompQ"), options: [
+      { text: () => sceneStrings("seccompRight"), correct: true },
+      { text: () => sceneStrings("seccompWrong1"), correct: false },
+      { text: () => sceneStrings("seccompWrong2"), correct: false },
+      { text: () => sceneStrings("seccompWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("didQ"), options: [
+      { text: () => sceneStrings("didRight"), correct: true },
+      { text: () => sceneStrings("didWrong1"), correct: false },
+      { text: () => sceneStrings("didWrong2"), correct: false },
+      { text: () => sceneStrings("didWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("chromeQ"), options: [
+      { text: () => sceneStrings("chromeRight"), correct: true },
+      { text: () => sceneStrings("chromeWrong1"), correct: false },
+      { text: () => sceneStrings("chromeWrong2"), correct: false },
+      { text: () => sceneStrings("chromeWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("chainQ"), options: [
+      { text: () => sceneStrings("chainRight"), correct: true },
+      { text: () => sceneStrings("chainWrong1"), correct: false },
+      { text: () => sceneStrings("chainWrong2"), correct: false },
+      { text: () => sceneStrings("chainWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("chrootQ"), options: [
+      { text: () => sceneStrings("chrootRight"), correct: true },
+      { text: () => sceneStrings("chrootWrong1"), correct: false },
+      { text: () => sceneStrings("chrootWrong2"), correct: false },
+      { text: () => sceneStrings("chrootWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("pledgeQ"), options: [
+      { text: () => sceneStrings("pledgeRight"), correct: true },
+      { text: () => sceneStrings("pledgeWrong1"), correct: false },
+      { text: () => sceneStrings("pledgeWrong2"), correct: false },
+      { text: () => sceneStrings("pledgeWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("leastQ"), options: [
+      { text: () => sceneStrings("leastRight"), correct: true },
+      { text: () => sceneStrings("leastWrong1"), correct: false },
+      { text: () => sceneStrings("leastWrong2"), correct: false },
+      { text: () => sceneStrings("leastWrong3"), correct: false } ] },
+    { prompt: (v) => sceneStrings("surfNumQ", v),
+      variables: "a=[5:40] t=[350,400,450]",
+      answer: (v) => Math.round(((v.t - v.a) / v.t) * 100),
+      keyboard: "geometry-lengths" },
+  ]);
+</script>

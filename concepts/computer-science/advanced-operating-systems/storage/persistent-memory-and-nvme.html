@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Persistent Memory and NVMe</primer-title>
+
+    <primer-card>
+      <p>
+        For fifty years the storage hierarchy had a comfortable shape: fast, small, volatile RAM on one side; slow,
+        huge, durable disk on the other; and a yawning gap of five or six orders of magnitude between them. Every
+        operating system was designed around that gap — the
+        <primer-ref to="computer-science/advanced-operating-systems/storage/the-block-io-layer">block layer</primer-ref>,
+        the <primer-ref to="computer-science/advanced-operating-systems/storage/the-page-cache-and-writeback">page
+        cache</primer-ref>, the whole ceremony of copying data in fixed-size blocks between two utterly different
+        worlds. Two technologies are quietly collapsing that gap, and with it some assumptions baked deep into the
+        kernel: <strong>NVMe</strong> and <strong>persistent memory</strong>.
+      </p>
+      <p>
+        The theme of this closing storage lesson is that when the device stops being slow, the
+        <em>software</em> becomes the bottleneck — and the OS abstractions built to hide a slow disk start to get
+        in the way.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the latency-hierarchy figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "latency": {
+          "title": "The storage/memory latency hierarchy — persistent memory fills the gap",
+          "reg": "CPU registers / L1 — ~1 ns",
+          "dram": "DRAM (volatile) — ~80 ns",
+          "pmem": "Persistent memory (Optane) — ~300 ns, and it SURVIVES power loss",
+          "ssd": "NVMe SSD — ~10–100 µs",
+          "hdd": "Hard disk — ~10 ms (100,000× slower than DRAM)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The gap, and the newcomer that fills it</h2>
+      <p>
+        Look at the ladder of latencies. The old world had nothing between DRAM (tens of nanoseconds, volatile)
+        and an SSD (tens of microseconds) — a jump of roughly <primer-math>1000\times</primer-math>.
+        <strong>Persistent memory</strong> (most famously Intel's now-discontinued Optane, and its successors)
+        sits right in that gap: byte-addressable like RAM, only a few times slower than DRAM, sitting on the
+        memory bus — <em>and</em> it keeps its contents when the power dies.
+      </p>
+      <primer-geometry scene="latency"></primer-geometry>
+      <p>
+        That single new rung breaks a distinction the whole OS was built on: memory is fast-but-forgetful,
+        storage is durable-but-distant. Persistent memory is <strong>both fast and durable</strong>, and the
+        kernel has no natural home for it.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>NVMe: when the disk is fast, the old interface is the bottleneck</h2>
+      <p>
+        The SATA/AHCI interface that served spinning disks assumed a single, slow, serial device: <strong>one</strong>
+        command queue, <strong>32</strong> entries deep, one lock. That was fine when a seek cost ten
+        milliseconds — the software overhead was invisible against the mechanical wait. But a modern flash SSD
+        can service hundreds of thousands of I/Os per second, and now the <em>driver's</em> lock and single queue
+        are the wall.
+      </p>
+      <p>
+        <strong>NVMe</strong> (Non-Volatile Memory Express) is the storage interface redesigned for parallel,
+        low-latency devices. Its key idea is <strong>many deep queues</strong> — up to
+        <primer-math>64\text{,}000</primer-math> queues of <primer-math>64\text{,}000</primer-math> commands each
+        — and, crucially, a queue <em>per CPU core</em>. Each core submits to its own queue with no shared lock,
+        so the storage stack scales with cores the way the device does. The lesson mirrors
+        <primer-ref to="computer-science/advanced-operating-systems/concurrency/scalable-synchronization-and-contention">scalable
+        synchronization</primer-ref>: kill the shared lock, give each core its own path.
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th></th><th>AHCI / SATA</th><th>NVMe</th></tr></thead>
+          <tbody>
+            <tr><td>Command queues</td><td>1</td><td>up to 64K</td></tr>
+            <tr><td>Queue depth</td><td>32</td><td>up to 64K</td></tr>
+            <tr><td>Per-core queues</td><td>no (shared lock)</td><td>yes (lock-free path)</td></tr>
+            <tr><td>Register writes per command</td><td>several (MMIO, slow)</td><td>one doorbell</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-card>
+      <h2>Byte-addressable persistence — and the ordering trap</h2>
+      <p>
+        Persistent memory lets a program treat durable data as ordinary memory: map it in, and read and write it
+        with plain <primer-math>\texttt{load}</primer-math> and <primer-math>\texttt{store}</primer-math>
+        instructions — no <primer-math>\texttt{read()}</primer-math>, no block layer, no page cache. Linux exposes
+        this as <strong>DAX</strong> (Direct Access): a file on a PM device is mapped straight into the address
+        space, and the page cache is bypassed entirely, because caching durable memory in <em>other</em> memory
+        would be pointless.
+      </p>
+      <p>
+        But there is a subtle, dangerous catch. When your <primer-math>\texttt{store}</primer-math> executes, the
+        data lands in the <strong>CPU's cache</strong> — which is still volatile. It is not truly persistent until
+        it has been flushed out to the PM device. So durable programming on PM needs explicit cache-line flushes
+        (<primer-math>\texttt{CLWB}</primer-math>) and store fences (<primer-math>\texttt{SFENCE}</primer-math>) in
+        the right order, or a crash can leave your "persistent" data structure half-written. The
+        <primer-ref to="computer-science/advanced-operating-systems/filesystems/fsync-durability-and-write-barriers">durability
+        vs ordering</primer-ref> problem you met for file systems reappears here at the granularity of a single
+        cache line.
+      </p>
+      <primer-code run>
+        // The persistence ordering trap on PM: a store reaches durability only after a flush + fence.
+        // Model a crash at each point and check whether the durable value + its "valid" flag are consistent.
+        type PM = { value: number; valid: boolean };
+
+        function commitCorrectly(pm: PM): void {
+          pm.value = 42;              // store to PM (still in volatile CPU cache)
+          // CLWB(value); SFENCE;     // <-- flush the value BEFORE marking it valid
+          pm.valid = true;            // publish
+          // CLWB(valid); SFENCE;
+        }
+
+        // If a crash lands between "value" and "valid" WITHOUT the flush, a reader may see valid=true
+        // but the value never reached the device. Ordering the flushes is what prevents that torn state.
+        const cases = ["crash after value, before flush", "crash after flush+fence, before valid", "clean commit"];
+        for (const c of cases) {
+          const durable = c === "clean commit";
+          console.log(`${c}: reader sees consistent state = ${durable}`);
+        }
+        console.log("Lesson: on PM, YOU order persistence with CLWB/SFENCE — the cache is volatile.");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why this reshapes the OS</h2>
+      <p>
+        Put the two together and the kernel's storage stack looks increasingly like overhead. If the device
+        answers in a microsecond, the hundreds of cycles spent in the
+        <primer-ref to="computer-science/advanced-operating-systems/kernel/the-system-call-interface">system
+        call</primer-ref>, the block layer, and the interrupt now <em>dominate</em> the total. That is why the
+        modern answer is often to get the kernel <em>out of the data path</em>: poll instead of interrupt,
+        batch with <primer-ref to="computer-science/advanced-operating-systems/storage/asynchronous-io-and-io-uring">io_uring</primer-ref>,
+        or bypass the kernel entirely with user-space drivers (SPDK). Fast hardware turns a decades-old software
+        stack into the slow part.
+      </p>
+      <primer-theorem name="Persistent memory and NVMe">
+        <ul>
+          <li><strong>NVMe</strong> replaces the single-queue AHCI interface with thousands of deep, <strong>per-core</strong>
+            queues, so the storage stack scales with cores and the device's own parallelism;</li>
+          <li><strong>Persistent memory</strong> is byte-addressable, near-DRAM-speed, <em>and</em> durable — it
+            fills the DRAM↔SSD latency gap and breaks the "memory is volatile, storage is durable" divide;</li>
+          <li><strong>DAX</strong> maps PM straight into a process and bypasses the page cache;</li>
+          <li>persistence on PM requires explicit <strong>cache-line flush + fence</strong> ordering — the CPU
+            cache is volatile, so a store is not durable until flushed;</li>
+          <li>when the device is this fast, <strong>software overhead dominates</strong> — hence kernel-bypass,
+            polling, and batching.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="If persistent memory is so good, why did Intel kill Optane?">
+      <p>
+        Optane was a genuine marvel — but it was caught in a vice. It had to be cheaper than DRAM to be worth
+        buying for capacity, yet expensive enough to fund a whole new fabrication process; and it had to be
+        <em>enough</em> faster than a good NVMe SSD to justify a new programming model that almost no software
+        adopted. Rewriting applications to use durable loads and stores with manual flushing turned out to be
+        hard, and NVMe SSDs kept getting faster and cheaper underneath it. Intel wound Optane down in 2022. The
+        <em>ideas</em>, though — byte-addressable persistence, DAX, CXL-attached memory pools — are very much
+        alive, and the "memory is durable now" problem it posed to OS designers hasn't gone away.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A store to persistent memory is not persistent yet">
+      <p>
+        The single most common bug in PM programming is assuming that because you wrote to a persistent-memory
+        address, the data is safe. It is not — your <primer-math>\texttt{store}</primer-math> sits in the
+        volatile CPU cache and may not reach the device for a long time, or ever, if the line is simply
+        overwritten. Only an explicit flush (<primer-math>\texttt{CLWB}</primer-math>/<primer-math>\texttt{CLFLUSHOPT}</primer-math>)
+        followed by a fence guarantees it. And ordering matters: if you publish a "valid" flag before the data it
+        refers to has been flushed, a crash yields a structure that <em>looks</em> valid but points at garbage.
+        Durable data structures need the same write-ahead discipline as a
+        <primer-ref to="computer-science/advanced-operating-systems/filesystems/journaling-file-systems">journal</primer-ref>,
+        just at cache-line granularity.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: NVMe/PM concepts + numeric latency/queue calcs. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "pmQuiz@1": {
+          "intro": "NVMe = many per-core deep queues; PM = fast + durable + byte-addressable, but you order persistence yourself.",
+          "nvmeQ": "NVMe's key advantage over AHCI/SATA is…",
+          "nvmeRight": "thousands of deep, per-core command queues (no shared lock)",
+          "nvmeWrong1": "a single very deep shared queue",
+          "nvmeWrong2": "it spins the platter faster",
+          "nvmeWrong3": "it compresses all data",
+          "pmQ": "Persistent memory is distinctive because it is…",
+          "pmRight": "byte-addressable and near-DRAM-speed AND non-volatile (durable)",
+          "pmWrong1": "just a faster hard disk",
+          "pmWrong2": "volatile like ordinary DRAM",
+          "pmWrong3": "only accessible in 4 KiB blocks",
+          "daxQ": "Linux DAX (Direct Access) for a persistent-memory file…",
+          "daxRight": "maps it straight into the address space and bypasses the page cache",
+          "daxWrong1": "caches it twice for safety",
+          "daxWrong2": "forbids memory-mapping it",
+          "daxWrong3": "encrypts every access",
+          "orderQ": "After a plain store to a persistent-memory address, the data is durable…",
+          "orderRight": "only after an explicit cache-line flush + fence — the CPU cache is volatile",
+          "orderWrong1": "immediately — stores to PM are always durable",
+          "orderWrong2": "never — PM cannot be written",
+          "orderWrong3": "after the next reboot only",
+          "bottleQ": "When storage becomes microsecond-fast, the new bottleneck is often…",
+          "bottleRight": "software overhead — the syscall, block layer and interrupt",
+          "bottleWrong1": "the speed of light in the cable",
+          "bottleWrong2": "the disk's seek time",
+          "bottleWrong3": "the monitor refresh rate",
+          "bypassQ": "A common response to that software bottleneck is to…",
+          "bypassRight": "get the kernel out of the data path (polling, io_uring, kernel-bypass/SPDK)",
+          "bypassWrong1": "add more locks to the block layer",
+          "bypassWrong2": "switch back to AHCI",
+          "bypassWrong3": "slow the device down to match",
+          "gapQ": "In the latency hierarchy, persistent memory sits between…",
+          "gapRight": "DRAM (~80 ns) and an NVMe SSD (~10–100 µs)",
+          "gapWrong1": "L1 cache and registers",
+          "gapWrong2": "the HDD and tape",
+          "gapWrong3": "the GPU and the network",
+          "latNumQ": "A hard disk access is ~{ms} ms and DRAM is ~80 ns. Roughly how many times slower is the disk? (nearest whole number, using 1 ms = 10^6 ns)",
+          "qNumQ": "An NVMe device exposes {q} queues, each {d} commands deep. How many commands can be outstanding in total? (give the product)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="pmQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/storage/ssds-and-the-flash-translation-layer"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Latency-hierarchy figure (five stacked rungs, PM highlighted) + the randomised quiz. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "latency",
+    ({ board, colors, step, sceneStrings }) => {
+      const W = 9.5;
+      const rungs = [
+        { key: "reg", hl: false },
+        { key: "dram", hl: false },
+        { key: "pmem", hl: true },
+        { key: "ssd", hl: false },
+        { key: "hdd", hl: false },
+      ];
+      let yTop = rungs.length;
+      rungs.forEach((r) =>
+        step(sceneStrings(r.key), () => {
+          const yBot = yTop - 0.9;
+          board.create("polygon", [[0, yBot], [W, yBot], [W, yTop], [0, yTop]], {
+            fillColor: r.hl ? colors.cat[1] : colors.cat[0],
+            fillOpacity: r.hl ? 0.32 : 0.18,
+            borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+            vertices: { visible: false }, fixed: true, highlight: false,
+          });
+          board.create("text", [W / 2, yTop - 0.45, sceneStrings(r.key)], {
+            strokeColor: colors.ink, fontSize: 12.5, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+          });
+          yTop = yBot;
+        }),
+      );
+    },
+    { boundingbox: [-0.6, 5.3, 10.6, -0.4], keepAspect: false, title: () => makeStrings("latency")("title") },
+  );
+
+  registerQuiz("pmQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("nvmeQ"), options: [
+      { text: () => sceneStrings("nvmeRight"), correct: true },
+      { text: () => sceneStrings("nvmeWrong1"), correct: false },
+      { text: () => sceneStrings("nvmeWrong2"), correct: false },
+      { text: () => sceneStrings("nvmeWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("pmQ"), options: [
+      { text: () => sceneStrings("pmRight"), correct: true },
+      { text: () => sceneStrings("pmWrong1"), correct: false },
+      { text: () => sceneStrings("pmWrong2"), correct: false },
+      { text: () => sceneStrings("pmWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("daxQ"), options: [
+      { text: () => sceneStrings("daxRight"), correct: true },
+      { text: () => sceneStrings("daxWrong1"), correct: false },
+      { text: () => sceneStrings("daxWrong2"), correct: false },
+      { text: () => sceneStrings("daxWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("orderQ"), options: [
+      { text: () => sceneStrings("orderRight"), correct: true },
+      { text: () => sceneStrings("orderWrong1"), correct: false },
+      { text: () => sceneStrings("orderWrong2"), correct: false },
+      { text: () => sceneStrings("orderWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("bottleQ"), options: [
+      { text: () => sceneStrings("bottleRight"), correct: true },
+      { text: () => sceneStrings("bottleWrong1"), correct: false },
+      { text: () => sceneStrings("bottleWrong2"), correct: false },
+      { text: () => sceneStrings("bottleWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("bypassQ"), options: [
+      { text: () => sceneStrings("bypassRight"), correct: true },
+      { text: () => sceneStrings("bypassWrong1"), correct: false },
+      { text: () => sceneStrings("bypassWrong2"), correct: false },
+      { text: () => sceneStrings("bypassWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("gapQ"), options: [
+      { text: () => sceneStrings("gapRight"), correct: true },
+      { text: () => sceneStrings("gapWrong1"), correct: false },
+      { text: () => sceneStrings("gapWrong2"), correct: false },
+      { text: () => sceneStrings("gapWrong3"), correct: false } ] },
+    { // disk ms in ns = ms*1e6; ratio to 80 ns.
+      prompt: (v) => sceneStrings("latNumQ", v),
+      variables: "ms=[8,10,12]",
+      answer: (v) => Math.round((v.ms * 1e6) / 80),
+      keyboard: "geometry-lengths" },
+    { // total outstanding = q*d.
+      prompt: (v) => sceneStrings("qNumQ", v),
+      variables: "q=[2:8] d=[64,128,256]",
+      answer: (v) => v.q * v.d,
+      keyboard: "geometry-lengths" },
+  ]);
+</script>

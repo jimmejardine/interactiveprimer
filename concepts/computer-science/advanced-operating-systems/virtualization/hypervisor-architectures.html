@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Hypervisor Architectures</primer-title>
+
+    <primer-card>
+      <p>
+        We now have all the mechanisms — <primer-ref to="computer-science/advanced-operating-systems/virtualization/hardware-assisted-virtualization">CPU
+        virtualization</primer-ref>, <primer-ref to="computer-science/advanced-operating-systems/virtualization/memory-virtualization">memory
+        virtualization</primer-ref>, <primer-ref to="computer-science/advanced-operating-systems/virtualization/io-virtualization">I/O
+        virtualization</primer-ref>. The <strong>hypervisor</strong> (or VMM) is the piece of software that puts
+        them together and actually runs the virtual machines. But <em>where</em> does that software sit? The
+        answer shapes performance, security, and the entire cloud. There are two classic answers and one modern
+        twist that quietly won.
+      </p>
+    </primer-card>
+
+    <!-- Strings for the type-1 / type-2 / KVM figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "hyptypes": {
+          "title": "Where the hypervisor sits: Type-1 vs Type-2 vs KVM",
+          "t1": "Type-1 (bare-metal): the hypervisor runs directly on hardware; guests sit on top. ESXi, Xen, Hyper-V.",
+          "t2": "Type-2 (hosted): the hypervisor is an app on a normal host OS. VirtualBox, VMware Workstation.",
+          "kvm": "KVM: a kernel module turns Linux ITSELF into a Type-1 hypervisor — the host OS *is* the hypervisor."
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Type-1 and Type-2 — the classic split</h2>
+      <p>
+        A <strong>Type-1</strong> or <em>bare-metal</em> hypervisor runs directly on the hardware, with no host OS
+        beneath it; the VMs run on top. It owns the machine, so it is lean, fast, and has a small trusted
+        computing base — the choice for servers and the cloud (VMware ESXi, Xen, Microsoft Hyper-V).
+      </p>
+      <p>
+        A <strong>Type-2</strong> or <em>hosted</em> hypervisor runs as an ordinary application <em>on top of</em>
+        a normal operating system (VirtualBox, VMware Workstation, Parallels). It is wonderfully convenient — you
+        install it like any program on your laptop and keep using your desktop — but it goes through the host OS
+        for scheduling and I/O, adding a layer of overhead. It is the choice for developers and desktops.
+      </p>
+      <primer-geometry scene="hyptypes"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>KVM — the twist that ate the distinction</h2>
+      <p>
+        Then Linux blurred the line. <strong>KVM</strong> (Kernel-based Virtual Machine) is not a separate
+        hypervisor program at all — it is a <em>kernel module</em> that lets the Linux kernel use the hardware
+        <primer-ref to="computer-science/advanced-operating-systems/virtualization/hardware-assisted-virtualization">VT-x/AMD-V</primer-ref>
+        modes directly. Load it, and Linux itself <em>becomes</em> a Type-1 hypervisor: a VM is just a Linux
+        process whose threads are virtual CPUs, scheduled by the ordinary
+        <primer-ref to="computer-science/advanced-operating-systems/scheduling/the-completely-fair-scheduler">CFS
+        scheduler</primer-ref>, using the ordinary
+        <primer-ref to="computer-science/advanced-operating-systems/memory/address-translation-in-depth">memory
+        management</primer-ref>. It is arguably both types at once — bare-metal performance because it uses
+        hardware modes directly, yet backed by a full general-purpose OS. KVM (with QEMU for device models and
+        virtio) powers most of the world's public clouds.
+      </p>
+      <primer-theorem name="Hypervisor architectures">
+        <ul>
+          <li><strong>Type-1 (bare-metal)</strong> — runs directly on hardware, no host OS; lean, fast, small TCB
+            (ESXi, Xen, Hyper-V); the server/cloud choice;</li>
+          <li><strong>Type-2 (hosted)</strong> — an application on a normal OS; convenient but adds a host-OS
+            layer (VirtualBox, VMware Workstation); the desktop choice;</li>
+          <li><strong>KVM</strong> — a kernel module that turns Linux into a Type-1 hypervisor; a VM is a Linux
+            process, scheduled and memory-managed like any other;</li>
+          <li>the deeper the hypervisor sits (closer to hardware), the lower the overhead and the smaller the
+            attack surface.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Live migration — moving a running machine</h2>
+      <p>
+        One of virtualization's most magical tricks is <strong>live migration</strong>: moving a
+        <em>running</em> VM from one physical host to another with barely a hiccup — used constantly in the cloud
+        to drain a host for maintenance or rebalance load. The dominant technique is <strong>pre-copy</strong>:
+      </p>
+      <ul>
+        <li>copy all the VM's memory pages to the destination <em>while it keeps running</em>;</li>
+        <li>the running VM keeps <strong>dirtying</strong> pages, so re-copy just the pages that changed since the
+          last round — each round is smaller than the last;</li>
+        <li>when the remaining dirty set is tiny, briefly <strong>stop</strong> the VM, copy that last little bit
+          and the CPU state, and resume on the destination — a pause of only milliseconds.</li>
+      </ul>
+      <p>
+        It converges only if the VM dirties memory slower than the network can copy it; a write-heavy VM can
+        thrash the pre-copy loop, which is why there is also <em>post-copy</em> (start on the destination
+        immediately, fault missing pages across). Watch pre-copy shrink the dirty set round by round.
+      </p>
+      <primer-code run>
+        // Pre-copy live migration: each round copies the pages dirtied during the previous round.
+        // It converges when the dirty set is small enough for a sub-second stop-and-copy.
+        let dirty = 1_000_000;          // pages to send initially (whole memory)
+        const NET = 300_000;            // pages/round the network can copy
+        const DIRTY_RATE = 0.25;        // fraction of copied pages the running VM re-dirties
+        let round = 0, sent = 0;
+        while (dirty > 20_000 &amp;&amp; round &lt; 12) {
+          round++;
+          const copy = Math.min(dirty, NET);
+          sent += copy;
+          dirty = Math.round(copy * DIRTY_RATE);   // pages re-dirtied while we copied
+          console.log(`round ${round}: copied ${copy}, re-dirtied ${dirty} remaining`);
+        }
+        console.log(`STOP-AND-COPY the last ${dirty} pages -> resume on destination (pause ~ms)`);
+        console.log(`total pages sent: ${sent}`);
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="Can you run a hypervisor inside a hypervisor?">
+      <p>
+        Yes — it is called <strong>nested virtualization</strong>, and it is more than a party trick. It is how
+        you run a Windows/WSL2 VM inside a cloud VM, how CI systems test hypervisors, and how confidential-computing
+        VMs layer. The hard part is that only the bottom hypervisor really has the hardware VT-x mode; the nested
+        (L1) hypervisor <em>thinks</em> it does, so the L0 hypervisor has to emulate the virtualization hardware
+        for it — shadowing the guest's VMCS structures and multiplexing the single real hardware mode. It works,
+        with a performance tax that grows with each level. That the abstraction composes at all — a VM believing
+        it is bare metal all the way down — is a small marvel of the
+        <primer-ref to="computer-science/advanced-operating-systems/virtualization/machine-virtualization-and-popek-goldberg">fidelity</primer-ref>
+        property.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Type-1 is always faster than Type-2' is too glib">
+      <p>
+        The textbook ranking — bare-metal beats hosted — is a fine rule of thumb, but KVM breaks the neat picture.
+        KVM is <em>hosted inside</em> a full Linux kernel, which by the old taxonomy sounds like Type-2, yet it
+        runs guests through the hardware virtualization modes directly and delivers essentially bare-metal
+        performance — so it is usually classified Type-1. The lesson: the "Type-1 vs Type-2" box matters less than
+        <em>where the guest's instructions and I/O actually execute</em>. If the fast path goes straight through
+        hardware modes and virtio/passthrough, the label on the box barely matters; if it detours through an
+        emulator or a host-OS syscall on every operation, it will crawl regardless of its "type."
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz. Bank of 12, draws 5. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "hypQuiz@1": {
+          "intro": "Type-1 (bare-metal), Type-2 (hosted), KVM (Linux-as-hypervisor); live migration = pre-copy rounds shrinking the dirty set.",
+          "t1Q": "A Type-1 (bare-metal) hypervisor…",
+          "t1Right": "runs directly on the hardware with no host OS beneath it",
+          "t1Wrong1": "runs as an app on a normal operating system",
+          "t1Wrong2": "cannot run more than one VM",
+          "t1Wrong3": "needs no hardware support",
+          "t2Q": "A Type-2 (hosted) hypervisor…",
+          "t2Right": "runs as an application on top of a normal host OS",
+          "t2Wrong1": "runs directly on bare metal",
+          "t2Wrong2": "is always faster than Type-1",
+          "t2Wrong3": "is what ESXi and Xen are",
+          "kvmQ": "KVM is best described as…",
+          "kvmRight": "a kernel module that turns Linux itself into a Type-1 hypervisor; a VM is a Linux process",
+          "kvmWrong1": "a Type-2 emulator with no hardware support",
+          "kvmWrong2": "a separate OS that replaces Linux",
+          "kvmWrong3": "a network protocol",
+          "kvmSchedQ": "Under KVM, a virtual CPU is scheduled by…",
+          "kvmSchedRight": "the ordinary Linux scheduler (a vCPU is just a thread)",
+          "kvmSchedWrong1": "a completely separate hypervisor scheduler only",
+          "kvmSchedWrong2": "the guest BIOS",
+          "kvmSchedWrong3": "the network card",
+          "exampleQ": "Which is a Type-1 hypervisor?",
+          "exampleRight": "VMware ESXi",
+          "exampleWrong1": "VirtualBox",
+          "exampleWrong2": "VMware Workstation",
+          "exampleWrong3": "a web browser",
+          "migQ": "Pre-copy live migration works by…",
+          "migRight": "copying memory while the VM runs, re-copying dirtied pages each round, then a brief stop-and-copy",
+          "migWrong1": "shutting the VM down and copying its disk",
+          "migWrong2": "copying nothing and hoping",
+          "migWrong3": "emailing the VM to the new host",
+          "migConvQ": "Pre-copy migration fails to converge when…",
+          "migConvRight": "the VM dirties pages faster than the network can copy them",
+          "migConvWrong1": "the network is too fast",
+          "migConvWrong2": "the VM is idle",
+          "migConvWrong3": "there is only one VM",
+          "nestedQ": "Nested virtualization means…",
+          "nestedRight": "running a hypervisor inside a VM; L0 emulates the virtualization hardware for L1",
+          "nestedWrong1": "two VMs sharing one page",
+          "nestedWrong2": "a VM with two vCPUs",
+          "nestedWrong3": "it is impossible",
+          "roundNumQ": "Pre-copy has {d} dirty pages; the network copies {n} pages/round and {p}% are re-dirtied. After ONE round, how many pages remain dirty? (round to a whole number; assume d > n)"
+        }
+      }
+    </script>
+
+    <primer-quiz name="hypQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/advanced-operating-systems/virtualization/memory-virtualization"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<!-- Type-1/Type-2/KVM figure + quiz. Colours from themeColors(). -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "hyptypes",
+    ({ board, colors, step, sceneStrings }) => {
+      const W = 10;
+      const rows = [
+        { key: "t1", c: 0 },
+        { key: "t2", c: 1 },
+        { key: "kvm", c: 2 },
+      ];
+      let yTop = 3 * 1.5;
+      rows.forEach((r) =>
+        step(sceneStrings(r.key), () => {
+          const yBot = yTop - 1.3;
+          board.create("polygon", [[0, yBot], [W, yBot], [W, yTop], [0, yTop]], {
+            fillColor: colors.cat[r.c], fillOpacity: 0.18,
+            borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+            vertices: { visible: false }, fixed: true, highlight: false,
+          });
+          board.create("text", [W / 2, yTop - 0.65, sceneStrings(r.key)], {
+            strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+            cssStyle: "max-width:430px",
+          });
+          yTop = yBot - 0.2;
+        }),
+      );
+    },
+    { boundingbox: [-0.6, 4.8, 11.2, -0.8], keepAspect: false, title: () => makeStrings("hyptypes")("title") },
+  );
+
+  registerQuiz("hypQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("t1Q"), options: [
+      { text: () => sceneStrings("t1Right"), correct: true },
+      { text: () => sceneStrings("t1Wrong1"), correct: false },
+      { text: () => sceneStrings("t1Wrong2"), correct: false },
+      { text: () => sceneStrings("t1Wrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("t2Q"), options: [
+      { text: () => sceneStrings("t2Right"), correct: true },
+      { text: () => sceneStrings("t2Wrong1"), correct: false },
+      { text: () => sceneStrings("t2Wrong2"), correct: false },
+      { text: () => sceneStrings("t2Wrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("kvmQ"), options: [
+      { text: () => sceneStrings("kvmRight"), correct: true },
+      { text: () => sceneStrings("kvmWrong1"), correct: false },
+      { text: () => sceneStrings("kvmWrong2"), correct: false },
+      { text: () => sceneStrings("kvmWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("kvmSchedQ"), options: [
+      { text: () => sceneStrings("kvmSchedRight"), correct: true },
+      { text: () => sceneStrings("kvmSchedWrong1"), correct: false },
+      { text: () => sceneStrings("kvmSchedWrong2"), correct: false },
+      { text: () => sceneStrings("kvmSchedWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("exampleQ"), options: [
+      { text: () => sceneStrings("exampleRight"), correct: true },
+      { text: () => sceneStrings("exampleWrong1"), correct: false },
+      { text: () => sceneStrings("exampleWrong2"), correct: false },
+      { text: () => sceneStrings("exampleWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("migQ"), options: [
+      { text: () => sceneStrings("migRight"), correct: true },
+      { text: () => sceneStrings("migWrong1"), correct: false },
+      { text: () => sceneStrings("migWrong2"), correct: false },
+      { text: () => sceneStrings("migWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("migConvQ"), options: [
+      { text: () => sceneStrings("migConvRight"), correct: true },
+      { text: () => sceneStrings("migConvWrong1"), correct: false },
+      { text: () => sceneStrings("migConvWrong2"), correct: false },
+      { text: () => sceneStrings("migConvWrong3"), correct: false } ] },
+    { prompt: () => sceneStrings("nestedQ"), options: [
+      { text: () => sceneStrings("nestedRight"), correct: true },
+      { text: () => sceneStrings("nestedWrong1"), correct: false },
+      { text: () => sceneStrings("nestedWrong2"), correct: false },
+      { text: () => sceneStrings("nestedWrong3"), correct: false } ] },
+    { prompt: (v) => sceneStrings("roundNumQ", v),
+      variables: "d=[500:900] n=[200:400] p=[10:40]",
+      answer: (v) => Math.round(v.n * (v.p / 100)),
+      keyboard: "geometry-lengths" },
+  ]);
+</script>
