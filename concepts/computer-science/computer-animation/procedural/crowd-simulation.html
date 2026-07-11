@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Crowd Simulation</primer-title>
+
+    <primer-card>
+      <p>
+        The armies at Helm's Deep in <em>The Lord of the Rings</em> were not ten thousand actors and not ten
+        thousand hand-keyed characters. They were <strong>agents</strong>: each an autonomous little brain
+        that knew where it wanted to go, could see its neighbours, chose a footstep, and played a walk cycle —
+        all of it computed, not animated. Multiply one such brain by tens of thousands and you have a
+        <strong>crowd simulation</strong>: the art of animating hundreds, thousands, sometimes millions of
+        characters that no human could ever pose by hand.
+      </p>
+      <p>
+        The trick that makes this tractable is <strong>layering</strong>. You never solve "animate a crowd" in
+        one go. You split it into a tall stack — <em>navigation</em> decides where each agent should head,
+        <em>local collision avoidance</em> stops agents from walking through one another on the way, and the
+        <em>animation</em> layer turns those decisions into moving legs. This page walks the whole stack, then
+        zooms in on the beautiful idea at its heart: how two strangers on a collision course each turn a
+        <em>little</em> bit and pass smoothly, instead of doing that awkward pavement dance forever.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The layered pipeline</h2>
+      <p>
+        Think of each agent as a person crossing a busy railway station. Two utterly different questions are
+        being answered at once, on two different timescales, and a crowd engine keeps them
+        <strong>separate</strong>:
+      </p>
+      <primer-theorem name="The two layers of agent motion">
+        <ul>
+          <li><strong>Navigation (global path planning)</strong> — <em>where do I go?</em> A slow, map-scale
+            plan from the agent's current spot to its goal, computed over the walkable world. It ignores the
+            exact positions of other agents and just yields a preferred direction to travel.</li>
+          <li><strong>Local collision avoidance (steering)</strong> — <em>how do I not hit anyone right now?</em>
+            A fast, metre-scale adjustment that takes the preferred direction and nudges it to dodge nearby
+            agents and obstacles this instant, then hands the result to the legs.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Above both sits the <strong>animation layer</strong>: given the velocity the steering layer chose, play
+        and blend locomotion clips so the character actually <em>looks</em> like it is walking at that speed. So
+        the flow each frame is roughly:
+      </p>
+      <primer-math display>\text{goal} \;\xrightarrow{\;\text{navigation}\;}\; \vec{v}_{\text{pref}} \;\xrightarrow{\;\text{avoidance}\;}\; \vec{v}_{\text{new}} \;\xrightarrow{\;\text{animation}\;}\; \text{blended walk cycle}.</primer-math>
+      <p>
+        Keeping these layers apart is not tidiness for its own sake — <primer-ref soft to="computer-science/computer-animation/procedural/steering-behaviours">steering behaviours</primer-ref>
+        and pathfinding fail in completely different ways, and conflating them is the classic beginner error
+        (more on that in the "Watch out!" below).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Navigation: finding the way</h2>
+      <p>
+        The navigation layer needs a model of <em>where an agent may walk</em>. Three families dominate,
+        ordered roughly by how dense the crowd is:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Method</th><th>Idea</th><th>Best for</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Navigation mesh + A*</strong></td>
+              <td>Cover the walkable floor with convex polygons (the <em>navmesh</em>); run
+                <primer-math>A^\*</primer-math> graph search over adjacent polygons to get a corridor, then a
+                smooth path through it.</td>
+              <td>Games, sparse-to-medium crowds, complex level geometry.</td>
+            </tr>
+            <tr>
+              <td><strong>Roadmaps / waypoint graphs</strong></td>
+              <td>A hand- or auto-placed graph of nodes and links; agents route along edges. A precomputed
+                <em>probabilistic roadmap</em> is the classic robotics version.</td>
+              <td>Fixed environments where the same routes are reused constantly.</td>
+            </tr>
+            <tr>
+              <td><strong>Continuum / flow fields</strong></td>
+              <td>Solve one field over the whole map (like a fluid potential) so <em>every</em> cell stores a
+                direction toward the goal; every agent just reads its local arrow. One solve serves the whole
+                crowd.</td>
+              <td>Very dense crowds all heading for the same goal (stadium exits, marching armies).</td>
+            </tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The key move with <strong>flow fields</strong> is that cost is shared: computing a per-agent
+        <primer-math>A^\*</primer-math> path for a million agents is hopeless, but computing <em>one</em> field
+        that a million agents sample is cheap. When many agents share a destination, continuum crowds (Treuille,
+        Cooper &amp; Popović, 2006) even fold density right into the field so agents naturally flow around
+        congestion, like water finding the widest channel.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "voCone": {
+          "title": "The velocity obstacle: which velocities lead to a collision",
+          "agentA": "Agent A",
+          "agentB": "Agent B (obstacle)",
+          "prefLabel": "preferred v (toward goal)",
+          "coneLabel": "velocity obstacle (collision cone)",
+          "newLabel": "chosen v (turned aside)",
+          "relLabel": "relative position B − A"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Local avoidance: the velocity obstacle</h2>
+      <p>
+        Now the hard part. An agent has its preferred velocity <primer-math>\vec{v}_{\text{pref}}</primer-math>
+        from navigation, but another agent is in the way. Which velocities are actually <em>safe</em>? The
+        elegant answer is the <strong>velocity obstacle</strong> (VO): the set of all velocities that, if held,
+        would eventually drive agent <primer-math>A</primer-math> into agent <primer-math>B</primer-math>.
+        Geometrically it is a <strong>cone</strong> in velocity-space, opening from
+        <primer-math>A</primer-math> toward <primer-math>B</primer-math>, whose width is set by the two agents'
+        radii and their separation.
+      </p>
+      <primer-geometry
+        scene="voCone"
+        caption="Agent A (left) heading right toward its goal; agent B ahead-right is an obstacle. The shaded cone is the velocity obstacle — any velocity pointing into it collides. A picks a velocity just outside the cone edge (turned slightly aside)."
+      ></primer-geometry>
+      <primer-theorem name="Velocity obstacle (VO)">
+        The velocity obstacle <primer-math>VO_{A|B}</primer-math> that agent <primer-math>B</primer-math>
+        induces on agent <primer-math>A</primer-math> is the set of relative velocities
+        <primer-math>\vec{v}_A - \vec{v}_B</primer-math> that lead to a collision within some time horizon:
+        <ul>
+          <li>It is the cone of directions from <primer-math>A</primer-math> that graze or hit the disc of
+            <primer-math>B</primer-math>, grown by the sum of the two radii
+            <primer-math>r_A + r_B</primer-math>.</li>
+          <li>If <primer-math>A</primer-math>'s chosen velocity lies <strong>outside</strong> every neighbour's
+            VO, no collision occurs within the horizon.</li>
+          <li>Steering is then a small optimisation: pick the safe velocity <strong>closest</strong> to
+            <primer-math>\vec{v}_{\text{pref}}</primer-math>.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        So avoidance becomes: "find the velocity nearest to what I wanted, that isn't inside the forbidden
+        cone." That is a tiny, fast geometry problem you can solve tens of thousands of times per frame.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>RVO and ORCA: sharing the blame</h2>
+      <p>
+        Plain velocity obstacles have a nasty flaw. If <primer-math>A</primer-math> assumes
+        <primer-math>B</primer-math> holds its course and steers fully out of the way, but
+        <primer-math>B</primer-math> is <em>also</em> a VO agent assuming the same about
+        <primer-math>A</primer-math>, then <strong>both over-correct</strong>. Next frame each sees the other has
+        moved, so each corrects back — and they wobble, dancing side to side. This is exactly the pavement
+        shuffle two people do when they can't decide which way to pass.
+      </p>
+      <p>
+        Jur van den Berg's fix (2008) is <strong>Reciprocal Velocity Obstacles</strong> (RVO): assume the
+        other agent is equally smart and will take <em>half</em> the avoidance. Instead of dodging by the full
+        amount, each agent dodges by half and trusts its partner to cover the rest. The oscillation vanishes.
+        Its refinement, <strong>ORCA</strong> (Optimal Reciprocal Collision Avoidance, 2011), replaces each
+        cone with a single half-plane of allowed velocities per neighbour; the safe region is the intersection
+        of all those half-planes, and the best velocity is found by a fast
+        <primer-ref soft to="applied-mathematics/game-development-math/foundations/points-and-vectors">2-D</primer-ref>
+        linear program.
+      </p>
+      <primer-theorem name="Reciprocity">
+        <ul>
+          <li><strong>RVO:</strong> each agent takes responsibility for exactly <em>half</em> of the relative
+            avoidance, choosing a velocity that is the average of its current velocity and a fully-avoiding
+            velocity.</li>
+          <li><strong>ORCA:</strong> for each neighbour, forbid a half-plane of velocities; the permitted set
+            is the intersection of half-planes over all neighbours, and the agent picks the permitted velocity
+            closest to <primer-math>\vec{v}_{\text{pref}}</primer-math> via linear programming.</li>
+          <li>Because both agents obey the <em>same</em> rule, their corrections are consistent and
+            <strong>jitter-free</strong> — no per-frame flip-flopping.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: two agents pass smoothly</h2>
+      <p>
+        Agent <primer-math>A</primer-math> walks east toward its goal at
+        <primer-math>1.4\,\text{m/s}</primer-math>; agent <primer-math>B</primer-math> walks west, straight at
+        <primer-math>A</primer-math>, at the same speed. Head-on. What does each layer do?
+      </p>
+      <p>
+        <strong>1. Navigation</strong> gives each a preferred velocity straight through the other —
+        <primer-math>\vec{v}_{\text{pref}}^A = (+1.4, 0)</primer-math> and
+        <primer-math>\vec{v}_{\text{pref}}^B = (-1.4, 0)</primer-math>. On their own these collide.
+      </p>
+      <p>
+        <strong>2. Avoidance.</strong> For <primer-math>A</primer-math>, the relative velocity
+        <primer-math>\vec{v}_A - \vec{v}_B = (2.8, 0)</primer-math> points dead into
+        <primer-math>B</primer-math>'s collision cone. The nearest velocity to
+        <primer-math>\vec{v}_{\text{pref}}^A</primer-math> that lies on the cone's edge is turned slightly —
+        say a few degrees <em>up</em>, to <primer-math>(1.39,\,+0.15)</primer-math>. Under
+        <strong>reciprocity</strong>, <primer-math>A</primer-math> only takes half, so it nudges up a touch;
+        <primer-math>B</primer-math>, running the identical rule and seeing the mirror-image geometry, nudges
+        the opposite way — down on its own frame, which is the <em>same physical side of the corridor</em>.
+      </p>
+      <p>
+        <strong>3. The result.</strong> Each veers by a small, symmetric amount, they slide past shoulder to
+        shoulder, and then navigation reasserts and both curve back onto their original lines. No stopping, no
+        wobble. Crucially, because the rule is shared and half-and-half, they never both jump to the same side
+        and re-collide — the deadlock that a naïve "assume the other stands still" avoider produces.
+      </p>
+      <primer-vignette title="What if a hundred agents meet in the middle?">
+        <p>
+          RVO/ORCA is defined pairwise, but each agent simply intersects the constraints from <em>all</em> its
+          near neighbours at once (ORCA's half-plane intersection). In a dense plaza this can over-constrain an
+          agent until <em>no</em> safe velocity exists — the linear program is infeasible. Production
+          implementations then fall back to the "least-bad" velocity (the one that minimises the worst
+          penetration), so agents slow and shuffle rather than freeze. And for genuinely packed crowds — a
+          crushing stadium exit — engines switch models entirely and treat the crowd as a
+          <strong>continuum</strong>, solving flow like a fluid where individual dodging no longer makes sense.
+          Density models and agent models are two ends of one spectrum.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Very dense crowds: go fluid</h2>
+      <p>
+        When agents are packed shoulder to shoulder, tracking pairwise cones is both expensive and wrong —
+        nobody in a crush is picking an "optimal velocity," they are being carried by the mass around them. So
+        the dense regime borrows from <primer-ref soft to="physics/fluid-dynamics/fluid-dynamics">fluid dynamics</primer-ref>:
+        represent the crowd as a <strong>density field</strong> and a <strong>velocity field</strong>, and push
+        density toward the goal while pressure spreads it away from congestion. Agents become tracer particles
+        riding the flow. This captures emergent crowd phenomena — lane formation, stop-and-go waves, the way a
+        dense stream of people spontaneously self-organises into counter-flowing lanes — that no per-agent rule
+        was told to produce.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The animation layer: many bodies, no clones</h2>
+      <p>
+        Steering hands the animation layer a speed and heading; the layer must make the character
+        <em>look</em> like it moves that way. Each agent runs a locomotion
+        <primer-ref soft to="computer-science/computer-animation/computer-animation">blend tree</primer-ref>:
+        idle / walk / jog / run clips blended by current speed, with the playback rate
+        <strong>foot-synced</strong> so feet plant on the ground instead of skating. The great danger at scale
+        is the <strong>clone army</strong> — a thousand identical figures marching in lockstep screams "CGI."
+        The fixes are all about <em>variation</em>:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Variation trick</th><th>What it breaks up</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Random clip start-time / phase offset</td><td>Everyone stepping on the same frame.</td></tr>
+            <tr><td>Slight per-agent speed &amp; height scaling</td><td>Identical stride length and size.</td></tr>
+            <tr><td>Swappable meshes, textures, colours ("variants")</td><td>Identical costumes and faces.</td></tr>
+            <tr><td>Small random idle fidgets &amp; look-ats</td><td>Frozen, robotic stillness.</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Getting this layer wrong is subtle: an agent can navigate and avoid <em>perfectly</em> and still ruin
+        the shot if its feet slide or a hundred copies blink at once. The believability of a crowd lives as
+        much here as in the maths of the steering.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Production systems and performance</h2>
+      <p>
+        The idea of an agent-with-a-brain was industrialised by <strong>Massive</strong> (Stephen Regelous),
+        built to fill the battlefields of <em>The Lord of the Rings</em> — each soldier a little fuzzy-logic
+        brain reacting to what it "saw." Today the field also has <strong>Golaem</strong> and
+        <strong>Houdini's</strong> crowd tools, which wrap navigation, ORCA-style avoidance, and clip-blending
+        into a director-friendly package. Under the hood, sheer <em>count</em> forces two performance tricks:
+      </p>
+      <primer-theorem name="Scaling to huge counts">
+        <ul>
+          <li><strong>Instancing</strong> — draw thousands of copies of a mesh in one GPU call, varying only a
+            per-instance transform (and variant id), instead of one draw call each.</li>
+          <li><strong>Level of detail (LOD)</strong> — distant agents drop to cheaper meshes, coarser
+            skeletons, and even "impostor" flat cards; only the near ones get full geometry and full
+            simulation. Off-screen agents may be simulated at a reduced rate or not at all.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        These are the same instancing and LOD ideas used everywhere in real-time graphics, but crowds lean on
+        them the hardest: the difference between a thousand agents and a million is almost entirely a story
+        about draw calls and LOD budgets.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! Reciprocity, and don't mix up your layers">
+      <p>
+        <strong>The reciprocity trap.</strong> The single most important idea in local avoidance is the
+        <em>reciprocal</em> part. If each agent naïvely avoids <em>assuming the other will not move</em>, both
+        dodge by the full amount and to the same side; next frame the situation has flipped, so both dodge back
+        — a shivering, oscillating deadlock (the pavement dance). RVO/ORCA fix this by having each agent take
+        only <strong>half</strong> the avoidance and trust its partner for the rest. Shared responsibility,
+        consistent corrections, no jitter. If your crowd wobbles or vibrates when agents meet, you are almost
+        certainly avoiding non-reciprocally.
+      </p>
+      <p>
+        <strong>Don't conflate navigation with avoidance.</strong> Navigation answers <em>where to go</em> at
+        map scale; avoidance answers <em>how not to collide right now</em> at metre scale. Fold them together —
+        e.g. let local dodging also try to do the long-range routing — and agents get stuck grinding against
+        walls and pillars, because a local avoider has no idea the wall is part of a corridor it must go
+        <em>around</em>. Keep the layers separate: navigation gives the preferred velocity; avoidance only
+        perturbs it. An agent pinned against a wall is the signature of the two layers having been mashed into
+        one.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "crowdSimQuiz@1": {
+          "intro": "Crowd sim layers navigation (where to go) under local avoidance (how not to collide) under animation (blended walk cycles). RVO/ORCA share the avoidance to kill jitter. Fresh questions each time.",
+          "layersQ": "A crowd engine separates an agent's motion into which two main decision layers?",
+          "layersRight": "global navigation (where to go) and local collision avoidance (how not to collide)",
+          "layersW1": "rendering and compositing",
+          "layersW2": "modelling and texturing",
+          "layersW3": "physics and audio",
+          "navMethodQ": "Running A* over a mesh of convex walkable polygons to plan a route is called…",
+          "navMethodRight": "navigation-mesh (navmesh) pathfinding",
+          "navMethodW1": "reciprocal velocity obstacles",
+          "navMethodW2": "linear blend skinning",
+          "navMethodW3": "ambient occlusion",
+          "flowQ": "For a very dense crowd all heading to the same goal, which navigation method scales best?",
+          "flowRight": "a continuum / flow field — one solve gives every cell a direction, shared by all agents",
+          "flowW1": "a separate A* path recomputed per agent per frame",
+          "flowW2": "hand-keying each agent's route",
+          "flowW3": "ray tracing each agent's line of sight",
+          "voQ": "The 'velocity obstacle' for an agent is…",
+          "voRight": "the cone of velocities that would lead to a collision with a neighbour",
+          "voW1": "the set of colours an agent may wear",
+          "voW2": "the list of animation clips it can play",
+          "voW3": "the polygons of the navmesh it stands on",
+          "voShapeQ": "In velocity space, a velocity obstacle induced by one neighbour has what shape?",
+          "voShapeRight": "a cone opening toward the neighbour",
+          "voShapeW1": "a single point",
+          "voShapeW2": "a full circle around the agent",
+          "voShapeW3": "a straight horizontal line",
+          "rvoQ": "What problem does the 'reciprocal' in RVO/ORCA solve?",
+          "rvoRight": "oscillation — two agents dodging the same way, then back, in a jitter",
+          "rvoW1": "textures loading too slowly",
+          "rvoW2": "shadows being too dark",
+          "rvoW3": "the goal being unreachable on the map",
+          "shareQ": "Under reciprocity, how much of the mutual avoidance does each of two agents take?",
+          "shareRight": "half each — they share the responsibility",
+          "shareW1": "all of it each (both fully avoid)",
+          "shareW2": "none — they rely on physics collisions",
+          "shareW3": "it is chosen randomly every frame",
+          "orcaQ": "ORCA finds each agent's new velocity by…",
+          "orcaRight": "intersecting a half-plane per neighbour and solving a small 2-D linear program",
+          "orcaW1": "ray-marching a signed distance field",
+          "orcaW2": "training a neural network each frame",
+          "orcaW3": "sorting agents alphabetically",
+          "naiveQ": "If each agent avoids assuming the other will NOT move, the typical failure is…",
+          "naiveRight": "both dodge the same way and oscillate back and forth (the pavement dance)",
+          "naiveW1": "they pass perfectly with no error",
+          "naiveW2": "they speed up indefinitely",
+          "naiveW3": "they turn invisible",
+          "denseQ": "For an extremely dense crush of people, crowd engines often switch to…",
+          "denseRight": "a fluid/continuum model treating the crowd as a density and flow field",
+          "denseW1": "hand-animating every character",
+          "denseW2": "disabling collisions entirely",
+          "denseW3": "rendering only wireframes",
+          "cloneQ": "To avoid a 'clone army' look, the animation layer varies agents by…",
+          "cloneRight": "random clip phase offsets, speed/height scaling, and swappable mesh variants",
+          "cloneW1": "using one identical clip synced across all agents",
+          "cloneW2": "removing all locomotion clips",
+          "cloneW3": "making every agent the same colour",
+          "perfQ": "Which pair of techniques lets a crowd scale to huge counts?",
+          "perfRight": "GPU instancing and level of detail (LOD)",
+          "perfW1": "higher render resolution and more lights",
+          "perfW2": "longer animation clips and bigger textures",
+          "perfW3": "slower playback and motion blur",
+          "massiveQ": "Which production system was built to animate the battle crowds of The Lord of the Rings?",
+          "massiveRight": "Massive",
+          "massiveW1": "Photoshop",
+          "massiveW2": "Pro Tools",
+          "massiveW3": "Excel",
+          "conflateQ": "An agent keeps getting stuck grinding against a wall. The most likely cause is…",
+          "conflateRight": "conflating navigation with local avoidance — the local dodger can't route around the wall",
+          "conflateW1": "too many animation clips",
+          "conflateW2": "the texture resolution is too high",
+          "conflateW3": "the frame rate is too fast",
+          "syncQ": "Playing a walk clip so the feet plant on the ground instead of skating is called…",
+          "syncRight": "foot-syncing the locomotion to the agent's speed",
+          "syncW1": "ambient occlusion",
+          "syncW2": "gamma correction",
+          "syncW3": "frustum culling"
+        }
+      }
+    </script>
+
+    <primer-quiz name="crowdSimQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/computer-animation/computer-animation"]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Velocity-obstacle figure: two agents (points), velocity arrows, and a static collision cone.
+          No steps → static base content, shows fully on load. ---- */
+  const voStr = makeStrings("voCone");
+  registerGeometryScene(
+    "voCone",
+    ({ board, colors, sceneStrings }) => {
+      // Agent A at origin, agent B ahead and slightly up-right.
+      const ax = 0, ay = 0;
+      const bx = 5, by = 1.4;
+      const rSum = 1.1; // combined radius sets the cone half-width
+
+      // Combined-radius disc around B (what A must miss).
+      board.create("circle", [[bx, by], rSum], {
+        strokeColor: colors.line, strokeWidth: 1, dash: 2, fillColor: colors.cat[1], fillOpacity: 0.12, highlight: false,
+      });
+
+      // Collision cone: apex at A, tangent to B's disc. Compute the two tangent directions.
+      const dx = bx - ax, dy = by - ay;
+      const dist = Math.hypot(dx, dy);
+      const base = Math.atan2(dy, dx);
+      const half = Math.asin(Math.min(1, rSum / dist));
+      const len = 8;
+      const e1 = [ax + len * Math.cos(base - half), ay + len * Math.sin(base - half)];
+      const e2 = [ax + len * Math.cos(base + half), ay + len * Math.sin(base + half)];
+
+      // Shaded cone (apex A, two tangent rays).
+      board.create("polygon", [[ax, ay], e1, e2], {
+        borders: { strokeColor: colors.cat[1], strokeWidth: 1, strokeOpacity: 0.6 },
+        fillColor: colors.cat[1], fillOpacity: 0.16, vertices: { visible: false }, highlight: false, fixed: true,
+      });
+      board.create("text", [3.4, 3.2, () => sceneStrings("coneLabel")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.cat[1],
+      });
+
+      // Preferred velocity — straight toward the goal (into the cone).
+      board.create("arrow", [[ax, ay], [3.6, 1.0]], { strokeColor: colors.line, strokeWidth: 2, lastArrow: { size: 6 } });
+      board.create("text", [1.5, 0.35, () => sceneStrings("prefLabel")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.ink,
+      });
+
+      // Chosen velocity — turned aside, just outside the lower cone edge.
+      board.create("arrow", [[ax, ay], [3.7, -0.9]], { strokeColor: colors.cat[0], strokeWidth: 3, lastArrow: { size: 7 } });
+      board.create("text", [2.0, -1.5, () => sceneStrings("newLabel")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.cat[0], cssStyle: "font-weight:700",
+      });
+
+      // The two agents themselves.
+      board.create("point", [ax, ay], { size: 5, strokeColor: colors.cat[0], fillColor: colors.cat[0], fixed: true, name: "", highlight: false });
+      board.create("text", [-0.9, -0.55, () => sceneStrings("agentA")], { anchorX: "left", fontSize: 13, strokeColor: colors.cat[0], cssStyle: "font-weight:700" });
+      board.create("point", [bx, by], { size: 5, strokeColor: colors.cat[1], fillColor: colors.cat[1], fixed: true, name: "", highlight: false });
+      board.create("text", [bx + 0.3, by + 0.1, () => sceneStrings("agentB")], { anchorX: "left", fontSize: 13, strokeColor: colors.cat[1], cssStyle: "font-weight:700" });
+    },
+    { boundingbox: [-1.5, 4, 9.5, -2.5], keepAspect: true, title: () => voStr("title") },
+  );
+
+  registerQuiz("crowdSimQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("layersQ"), options: [
+      { text: () => sceneStrings("layersRight"), correct: true },
+      { text: () => sceneStrings("layersW1"), correct: false },
+      { text: () => sceneStrings("layersW2"), correct: false },
+      { text: () => sceneStrings("layersW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("navMethodQ"), options: [
+      { text: () => sceneStrings("navMethodRight"), correct: true },
+      { text: () => sceneStrings("navMethodW1"), correct: false },
+      { text: () => sceneStrings("navMethodW2"), correct: false },
+      { text: () => sceneStrings("navMethodW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("flowQ"), options: [
+      { text: () => sceneStrings("flowRight"), correct: true },
+      { text: () => sceneStrings("flowW1"), correct: false },
+      { text: () => sceneStrings("flowW2"), correct: false },
+      { text: () => sceneStrings("flowW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("voQ"), options: [
+      { text: () => sceneStrings("voRight"), correct: true },
+      { text: () => sceneStrings("voW1"), correct: false },
+      { text: () => sceneStrings("voW2"), correct: false },
+      { text: () => sceneStrings("voW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("voShapeQ"), options: [
+      { text: () => sceneStrings("voShapeRight"), correct: true },
+      { text: () => sceneStrings("voShapeW1"), correct: false },
+      { text: () => sceneStrings("voShapeW2"), correct: false },
+      { text: () => sceneStrings("voShapeW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("rvoQ"), options: [
+      { text: () => sceneStrings("rvoRight"), correct: true },
+      { text: () => sceneStrings("rvoW1"), correct: false },
+      { text: () => sceneStrings("rvoW2"), correct: false },
+      { text: () => sceneStrings("rvoW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("shareQ"), options: [
+      { text: () => sceneStrings("shareRight"), correct: true },
+      { text: () => sceneStrings("shareW1"), correct: false },
+      { text: () => sceneStrings("shareW2"), correct: false },
+      { text: () => sceneStrings("shareW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("orcaQ"), options: [
+      { text: () => sceneStrings("orcaRight"), correct: true },
+      { text: () => sceneStrings("orcaW1"), correct: false },
+      { text: () => sceneStrings("orcaW2"), correct: false },
+      { text: () => sceneStrings("orcaW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("naiveQ"), options: [
+      { text: () => sceneStrings("naiveRight"), correct: true },
+      { text: () => sceneStrings("naiveW1"), correct: false },
+      { text: () => sceneStrings("naiveW2"), correct: false },
+      { text: () => sceneStrings("naiveW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("denseQ"), options: [
+      { text: () => sceneStrings("denseRight"), correct: true },
+      { text: () => sceneStrings("denseW1"), correct: false },
+      { text: () => sceneStrings("denseW2"), correct: false },
+      { text: () => sceneStrings("denseW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cloneQ"), options: [
+      { text: () => sceneStrings("cloneRight"), correct: true },
+      { text: () => sceneStrings("cloneW1"), correct: false },
+      { text: () => sceneStrings("cloneW2"), correct: false },
+      { text: () => sceneStrings("cloneW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("perfQ"), options: [
+      { text: () => sceneStrings("perfRight"), correct: true },
+      { text: () => sceneStrings("perfW1"), correct: false },
+      { text: () => sceneStrings("perfW2"), correct: false },
+      { text: () => sceneStrings("perfW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("massiveQ"), options: [
+      { text: () => sceneStrings("massiveRight"), correct: true },
+      { text: () => sceneStrings("massiveW1"), correct: false },
+      { text: () => sceneStrings("massiveW2"), correct: false },
+      { text: () => sceneStrings("massiveW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("conflateQ"), options: [
+      { text: () => sceneStrings("conflateRight"), correct: true },
+      { text: () => sceneStrings("conflateW1"), correct: false },
+      { text: () => sceneStrings("conflateW2"), correct: false },
+      { text: () => sceneStrings("conflateW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("syncQ"), options: [
+      { text: () => sceneStrings("syncRight"), correct: true },
+      { text: () => sceneStrings("syncW1"), correct: false },
+      { text: () => sceneStrings("syncW2"), correct: false },
+      { text: () => sceneStrings("syncW3"), correct: false },
+    ] },
+  ]);
+</script>

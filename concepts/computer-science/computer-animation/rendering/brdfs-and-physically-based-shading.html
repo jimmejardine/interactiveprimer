@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>BRDFs and Physically Based Shading</primer-title>
+
+    <primer-card>
+      <p>
+        Put a billiard ball, a brushed-steel spoon and a sheet of paper on the same table under the same
+        lamp. The ball shows a tight, bright highlight; the spoon smears that highlight into a long streak;
+        the paper has no highlight at all, just an even glow. Nothing about the light changed — only the
+        <strong>surface</strong> changed how it <em>redistributes</em> the light it receives. This page is
+        about the one function that captures that difference for <em>any</em> material: the
+        <strong>BRDF</strong>, and the physically-based recipe modern renderers build on top of it.
+      </p>
+      <p>
+        You have already met ad-hoc shading — the
+        <primer-ref soft to="computer-science/computer-graphics/shading-and-lighting">diffuse + specular Phong lighting</primer-ref>
+        that lit early real-time graphics by hand-tuning knobs until it "looked OK". Here we do it
+        <em>physically</em>: we insist the surface obeys the same conservation laws real materials obey, and
+        those constraints are exactly what make a material look convincing under <em>any</em> lighting rather
+        than only the one scene it was tuned in. The BRDF is also the material half of
+        <primer-ref soft to="computer-science/computer-animation/rendering/the-rendering-equation">the rendering equation</primer-ref>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What the BRDF actually is</h2>
+      <p>
+        Stand at a point on a surface. Light arrives from some incoming direction
+        <primer-math>\omega_i</primer-math>, and a camera looks back along some outgoing direction
+        <primer-math>\omega_o</primer-math>. The <strong>Bidirectional Reflectance Distribution Function</strong>
+        answers one question: of the light landing from <primer-math>\omega_i</primer-math>, how much heads
+        out toward <primer-math>\omega_o</primer-math>? Precisely, it is the ratio of the reflected
+        <em>radiance</em> leaving in <primer-math>\omega_o</primer-math> to the <em>irradiance</em> arriving
+        from <primer-math>\omega_i</primer-math>:
+      </p>
+      <primer-math display>f_r(\omega_i, \omega_o) \;=\; \frac{dL_o(\omega_o)}{dE_i(\omega_i)} \;=\; \frac{dL_o(\omega_o)}{L_i(\omega_i)\,\cos\theta_i\,d\omega_i}.</primer-math>
+      <p>
+        That <primer-math>\cos\theta_i</primer-math> (with <primer-math>\theta_i</primer-math> the angle
+        between <primer-math>\omega_i</primer-math> and the surface normal) is <strong>Lambert's cosine</strong>:
+        light hitting at a glancing angle spreads its energy over more surface, so it delivers less irradiance
+        per unit area. The BRDF is a function of <em>four</em> angles (two directions, each a hemisphere
+        coordinate), and its units are inverse steradians. Every material — chalk, gold, car paint, skin — is
+        just a different shape of <primer-math>f_r</primer-math>.
+      </p>
+      <primer-theorem name="The three physical constraints">
+        A BRDF that describes a real, passive surface must satisfy all three:
+        <ul>
+          <li><strong>Non-negativity:</strong> <primer-math>f_r(\omega_i,\omega_o) \ge 0</primer-math>. A
+            surface cannot reflect a <em>negative</em> amount of light.</li>
+          <li><strong>Helmholtz reciprocity:</strong>
+            <primer-math>f_r(\omega_i,\omega_o) = f_r(\omega_o,\omega_i)</primer-math>. Swap the roles of light
+            and camera and the value is unchanged — a consequence of time-reversibility of light paths, and
+            what makes bidirectional path tracing valid.</li>
+          <li><strong>Energy conservation:</strong> for every incoming direction, the total reflected over the
+            hemisphere cannot exceed what came in:
+            <primer-math>\int_{\Omega} f_r(\omega_i,\omega_o)\,\cos\theta_o\,d\omega_o \le 1</primer-math>. A
+            surface may absorb energy; it may never manufacture it.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The two extremes: diffuse and specular</h2>
+      <p>
+        The simplest legal BRDF is the <strong>Lambertian</strong> (perfectly diffuse) surface: it scatters
+        incoming light <em>equally</em> in all outgoing directions, so <primer-math>f_r</primer-math> is a
+        constant that does not depend on <primer-math>\omega_i</primer-math> or <primer-math>\omega_o</primer-math>
+        at all. If the surface reflects a fraction <primer-math>\rho</primer-math> of the light it receives
+        (its <em>albedo</em>, with <primer-math>0 \le \rho \le 1</primer-math>), energy conservation pins the
+        constant exactly:
+      </p>
+      <primer-math display>f_r^{\text{diffuse}} = \frac{\rho}{\pi}.</primer-math>
+      <p>
+        Where does the <primer-math>\pi</primer-math> come from? Integrate a constant
+        <primer-math>c</primer-math> against <primer-math>\cos\theta_o</primer-math> over the hemisphere and
+        you get <primer-math>c\pi</primer-math>; forcing that to equal <primer-math>\rho</primer-math> gives
+        <primer-math>c = \rho/\pi</primer-math>. Beginners who forget the <primer-math>\pi</primer-math> get a
+        surface that is too bright by a factor of about three — a classic energy leak.
+      </p>
+      <p>
+        The opposite extreme is a perfect <strong>mirror</strong> (specular): light from
+        <primer-math>\omega_i</primer-math> leaves in exactly one direction, the mirror reflection, and
+        nowhere else. Its BRDF is a spike — a delta function — infinitely tall and infinitely thin. Real
+        materials live <em>between</em> these two: a glossy surface has a diffuse base plus a specular
+        <strong>lobe</strong> that is a blurred, finite-width version of the mirror spike. The width of that
+        lobe is the whole game, and physically-based rendering earns the blur from first principles.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Microfacets: a rough surface is a sea of tiny mirrors</h2>
+      <p>
+        Physically Based Rendering (PBR) explains gloss with one idea: zoom in far enough and a "rough"
+        surface is not smooth at all — it is a landscape of millions of microscopic facets, each a
+        <em>perfect</em> mirror pointing in a slightly different direction. You see a broad soft highlight not
+        because any facet blurs light, but because the facets' normals are <em>scattered</em>, so different
+        facets flash the light toward your eye from a whole range of surface points. A polished surface has
+        facets nearly aligned with the macroscopic normal (a tight highlight); a rough surface has wildly
+        varying facet normals (a wide, soft sheen).
+      </p>
+      <p>
+        The <strong>Cook–Torrance</strong> microfacet BRDF turns that picture into three factors. Only facets
+        whose normal points exactly along the <em>half-vector</em>
+        <primer-math>h = \tfrac{\omega_i + \omega_o}{\lvert \omega_i + \omega_o \rvert}</primer-math> can
+        mirror light from <primer-math>\omega_i</primer-math> to <primer-math>\omega_o</primer-math>. So the
+        specular BRDF is:
+      </p>
+      <primer-math display>f_r^{\text{spec}}(\omega_i,\omega_o) \;=\; \frac{D(h)\,F(\omega_o,h)\,G(\omega_i,\omega_o)}{4\,\cos\theta_i\,\cos\theta_o}.</primer-math>
+      <primer-theorem name="The three microfacet terms">
+        <ul>
+          <li><strong>D — the normal distribution:</strong> what fraction of facets point along
+            <primer-math>h</primer-math>. Modern renderers use <strong>GGX / Trowbridge–Reitz</strong>,
+            controlled by a <strong>roughness</strong> parameter <primer-math>\alpha</primer-math>. Small
+            <primer-math>\alpha</primer-math> concentrates facets near the normal (sharp highlight); large
+            <primer-math>\alpha</primer-math> spreads them out (broad lobe). GGX is prized for its long,
+            realistic tails.</li>
+          <li><strong>F — Fresnel reflectance:</strong> the fraction of light reflected rather than
+            transmitted, which <em>rises toward 1 at grazing angles</em>. Cheaply approximated by
+            <strong>Schlick</strong>:
+            <primer-math>F(\theta) = F_0 + (1 - F_0)(1 - \cos\theta)^5</primer-math>, where
+            <primer-math>F_0</primer-math> is the head-on reflectance.</li>
+          <li><strong>G — geometry / shadowing–masking:</strong> facets in a rough surface hide behind one
+            another, blocking incoming light (shadowing) or outgoing light (masking). <primer-math>G</primer-math>
+            accounts for that self-occlusion, and matters most at grazing angles.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The <primer-math>4\cos\theta_i\cos\theta_o</primer-math> denominator is the geometric bookkeeping that
+        converts between facet-space and surface-space solid angles. Crucially, this BRDF is built to be
+        reciprocal and energy-conserving by construction — the physics is baked in, not tuned in.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "ggxLobe": {
+          "title": "The GGX specular lobe: drag roughness to widen the highlight",
+          "rough": "Roughness α"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Watch the lobe widen</h2>
+      <p>
+        Below is a cross-section of the GGX distribution <primer-math>D</primer-math> as a function of the
+        angle between a facet's normal and the surface normal. Drag the <strong>roughness</strong> slider. At
+        low roughness the curve is a tall, narrow spike — nearly all facets aligned, so the highlight is a
+        crisp mirror dot. As roughness climbs the peak collapses and the curve flattens into a broad hump:
+        the same total energy, now smeared across a wide range of angles — the sharp highlight melts into a
+        soft satin sheen. That single knob, from <primer-math>\alpha \to 0</primer-math> (chrome) to
+        <primer-math>\alpha \to 1</primer-math> (chalky), sweeps a material through its entire range of gloss.
+      </p>
+      <primer-chart scene="ggxLobe"></primer-chart>
+      <primer-chart-sliders name="ggx"></primer-chart-sliders>
+      <p>
+        Notice the area under the curve stays roughly fixed as it spreads — that is energy conservation
+        visible as a picture. A rough surface does not reflect <em>less</em> specular light overall; it just
+        distributes the same light over a wider cone, so any one direction gets a dimmer share.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: roughness, and the grazing-angle trick</h2>
+      <p>
+        <strong>Widening the lobe.</strong> Take a GGX surface and push
+        <primer-math>\alpha</primer-math> from <primer-math>0.05</primer-math> to
+        <primer-math>0.6</primer-math>. At <primer-math>\alpha = 0.05</primer-math> the distribution's peak is
+        enormous — the highlight is a pinpoint reflection of the light source, a chrome bearing. At
+        <primer-math>\alpha = 0.6</primer-math> the peak value drops by more than an order of magnitude and
+        the lobe fans out over tens of degrees: the light source is no longer recognisable, just a soft bright
+        smear the size of a fist. The transition is smooth and monotone — no re-tuning, no per-light hacks —
+        which is exactly why one roughness map can describe a scuffed metal panel that reads correctly under a
+        studio softbox <em>and</em> a hard noon sun.
+      </p>
+      <p>
+        <strong>Fresnel makes even a rough surface a mirror at grazing angles.</strong> Take a rough dielectric
+        — unpolished plastic, dry asphalt — with a tiny head-on reflectance
+        <primer-math>F_0 \approx 0.04</primer-math> (about 4%, typical of non-metals). Look straight down at
+        it (<primer-math>\theta = 0</primer-math>): Schlick gives
+        <primer-math>F = 0.04</primer-math>, barely reflective, and you see its dull diffuse colour. Now slide
+        your eye to a grazing angle, <primer-math>\theta = 80^\circ</primer-math>, so
+        <primer-math>\cos\theta \approx 0.174</primer-math>:
+      </p>
+      <primer-math display>F = 0.04 + (1 - 0.04)(1 - 0.174)^5 \approx 0.04 + 0.96 \times 0.385 \approx 0.41.</primer-math>
+      <p>
+        Reflectance has leapt from 4% to about <strong>41%</strong> — an order of magnitude — purely from
+        viewing angle. This is why a dull road turns into a blinding mirror in low evening sun, why the far
+        edge of a matte table gleams, and why a lake is glassy near the far shore. Every surface, however
+        rough, becomes mirror-like at a shallow enough angle. Fresnel is the term that captures it, and its
+        absence is the single most common giveaway of a "fake"-looking render.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The metallic / roughness workflow</h2>
+      <p>
+        PBR's constraints did something quietly revolutionary for artists: they made materials
+        <strong>portable</strong>. Because a physically-based BRDF behaves correctly under any lighting,
+        studios converged on a tiny, intuitive set of authored channels — the <strong>metallic/roughness</strong>
+        workflow:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Channel</th><th>Meaning</th><th>Effect on the BRDF</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Base colour (albedo)</td><td>The surface's intrinsic colour</td><td>Diffuse <primer-math>\rho</primer-math> for dielectrics; tints <primer-math>F_0</primer-math> for metals</td></tr>
+            <tr><td>Metallic</td><td>Is it a conductor? (0 or 1)</td><td>Metal: no diffuse, coloured specular (high <primer-math>F_0</primer-math>). Dielectric: diffuse + neutral 4% specular</td></tr>
+            <tr><td>Roughness</td><td>Microfacet spread</td><td>Sets GGX <primer-math>\alpha</primer-math> — sharp to soft highlight</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Three or four sliders, and the same material dropped into a night street, a sunset, or a spaceship
+        interior looks like the <em>same stuff</em> every time. Before PBR, a material was tuned to a scene
+        and broke when the lighting changed; after PBR, a material is a description of a <em>surface</em>, and
+        the renderer figures out the rest. That consistency — energy conservation plus Fresnel plus a single
+        roughness knob — is what makes PBR read as "real".
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why is gold-coloured light reflected by gold but a red apple isn't 'red-metallic'?">
+      <p>
+        In PBR, <strong>metals</strong> (conductors) have <em>no diffuse term at all</em> — free electrons
+        reabsorb any light that would penetrate — and their specular reflectance
+        <primer-math>F_0</primer-math> is both high (60–95%) <em>and coloured</em>. Gold's
+        <primer-math>F_0</primer-math> is high in red and green but low in blue, so its <em>reflections</em>
+        are golden. A red apple is a <strong>dielectric</strong>: its specular highlight is a neutral white
+        4% (you see the white kitchen window in it, not a red one), and its red comes from the diffuse term
+        underneath. That is the deep reason the metallic channel is nearly binary — the two physics regimes
+        genuinely differ, and mixing them is what makes cheap plastic "chrome" look like a toy.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Ad-hoc BRDFs break the moment the light moves">
+      <p>
+        Classic hand-tuned Phong specular is <em>not</em> a legal BRDF. Its normalisation was chosen by eye,
+        so it is generally <strong>not energy-conserving</strong> (crank the shininess and a surface can
+        reflect back more light than it received) and the raw formula is <strong>not reciprocal</strong>. The
+        symptom is unmistakable once you know it: the surface seems to <em>glow</em> or <em>gain energy</em>
+        as the light moves, and a material carefully tuned to look right in one scene looks plastic, blown
+        out, or dead in the next. There is no single roughness that "just works" everywhere, because the
+        model isn't grounded in physics — you are forever re-tuning per scene.
+      </p>
+      <p>
+        The fix is the two constraints this page is built on. Enforce <strong>energy conservation</strong>
+        (the diffuse <primer-math>\rho/\pi</primer-math>, a properly normalised GGX, a diffuse/specular balance
+        that never sums above 1) and you get consistency for free. And <strong>never forget Fresnel</strong>:
+        the second-most-common mistake, after leaking energy, is a surface with no grazing-angle brightening —
+        it stays flatly matte at every angle and instantly reads as CG. Everything is shiny at a glancing
+        angle. If your render looks "off" and you can't say why, check those two first.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "brdfQuiz@1": {
+          "intro": "A BRDF f_r(ω_i,ω_o) is reflected radiance over incoming irradiance, and must be non-negative, reciprocal and energy-conserving. Fresh questions each time.",
+          "defQ": "The BRDF $f_r(\\omega_i,\\omega_o)$ is the ratio of…",
+          "defR": "reflected radiance in $\\omega_o$ to incoming irradiance from $\\omega_i$",
+          "defW1": "incoming radiance to outgoing irradiance",
+          "defW2": "surface area to solid angle",
+          "defW3": "the light's colour to the surface's colour",
+          "recipQ": "Helmholtz reciprocity states that a BRDF satisfies…",
+          "recipR": "$f_r(\\omega_i,\\omega_o) = f_r(\\omega_o,\\omega_i)$ — swapping light and eye is unchanged",
+          "recipW1": "$f_r(\\omega_i,\\omega_o) = -f_r(\\omega_o,\\omega_i)$",
+          "recipW2": "$f_r$ is always exactly 1",
+          "recipW3": "$f_r$ depends only on $\\omega_o$",
+          "energyQ": "Energy conservation for a BRDF requires that…",
+          "energyR": "$\\int f_r \\cos\\theta_o\\, d\\omega_o \\le 1$ — it can't reflect more than it receives",
+          "energyW1": "$\\int f_r\\, d\\omega_o = \\infty$",
+          "energyW2": "$f_r$ integrates to exactly 4π",
+          "energyW3": "$f_r$ must be negative somewhere",
+          "negQ": "The non-negativity constraint says a physical BRDF must be…",
+          "negR": "$f_r \\ge 0$ everywhere — no negative reflection",
+          "negW1": "$f_r \\le 0$ everywhere",
+          "negW2": "an integer",
+          "negW3": "independent of wavelength",
+          "lambQ": "The Lambertian (perfectly diffuse) BRDF with albedo $\\rho$ equals…",
+          "lambR": "$\\rho/\\pi$ — a constant in all directions",
+          "lambW1": "$\\rho$ exactly, with no $\\pi$",
+          "lambW2": "a delta spike at the mirror direction",
+          "lambW3": "$\\rho \\cos\\theta$",
+          "piQ": "Why does the Lambertian BRDF carry a factor of $1/\\pi$?",
+          "piR": "so the reflected energy integrates to $\\rho$ — it normalises the hemisphere",
+          "piW1": "because π is the surface's roughness",
+          "piW2": "to convert degrees to radians",
+          "piW3": "it is an arbitrary artist choice",
+          "cookQ": "The Cook–Torrance specular BRDF is $D\\,F\\,G / (4\\cos\\theta_i\\cos\\theta_o)$. What does $D$ model?",
+          "cookR": "the distribution of microfacet normals (GGX), set by roughness",
+          "cookW1": "the surface's diffuse colour",
+          "cookW2": "the camera's exposure",
+          "cookW3": "the number of light bounces",
+          "roughQ": "In a GGX microfacet model, increasing roughness $\\alpha$ makes the specular lobe…",
+          "roughR": "wider and lower — a broad soft sheen instead of a sharp highlight",
+          "roughW1": "narrower and taller — a sharper highlight",
+          "roughW2": "disappear entirely",
+          "roughW3": "turn the surface into a perfect mirror",
+          "fresQ": "The Fresnel term $F$ describes reflectance that…",
+          "fresR": "rises toward 1 at grazing angles — everything is shiny edge-on",
+          "fresW1": "falls to 0 at grazing angles",
+          "fresW2": "is constant at all angles",
+          "fresW3": "depends only on roughness",
+          "schlickQ": "Schlick's approximation for Fresnel is $F = F_0 + (1-F_0)(1-\\cos\\theta)^5$. At $\\theta = 0$ (head-on) it gives…",
+          "schlickR": "$F = F_0$, the base reflectance",
+          "schlickW1": "$F = 1$ always",
+          "schlickW2": "$F = 0$ always",
+          "schlickW3": "$F = 0.5$",
+          "gQ": "The geometry term $G$ in a microfacet BRDF accounts for…",
+          "gR": "microfacets shadowing and masking each other, mainly at grazing angles",
+          "gW1": "the light source's intensity",
+          "gW2": "the surface's base colour",
+          "gW3": "gamma correction",
+          "workflowQ": "The metallic/roughness PBR workflow authors a material mainly with…",
+          "workflowR": "base colour, metallic and roughness channels",
+          "workflowW1": "ambient, diffuse, specular and shininess exponents tuned per scene",
+          "workflowW2": "only a single hardcoded colour",
+          "workflowW3": "polygon count and texture resolution",
+          "metalQ": "In PBR, a metal (conductor) differs from a dielectric because a metal has…",
+          "metalR": "no diffuse term and a high, often coloured specular $F_0$",
+          "metalW1": "a strong diffuse term and no specular",
+          "metalW2": "a negative BRDF",
+          "metalW3": "no dependence on roughness",
+          "adhocQ": "Why can an old ad-hoc (non-energy-conserving, non-reciprocal) BRDF look wrong?",
+          "adhocR": "surfaces can gain energy/glow as light moves and look different per scene",
+          "adhocW1": "it renders too slowly to use",
+          "adhocW2": "it only works for metals",
+          "adhocW3": "it cannot represent colour",
+          "consistQ": "What property of PBR makes a material look the same under any lighting?",
+          "consistR": "energy conservation plus Fresnel — the BRDF is grounded in physics, not per-scene tuning",
+          "consistW1": "using more polygons",
+          "consistW2": "rendering at a higher resolution",
+          "consistW3": "disabling shadows",
+          "fresCompQ": "Schlick Fresnel with $F_0 = 0.04$: evaluate $F$ at $\\cos\\theta = {c}/10$ to 3 decimals.",
+          "lambCompQ": "A Lambertian BRDF is $\\rho/\\pi$. For albedo $\\rho = {r}/10$, give $f_r$ to 3 decimals."
+        }
+      }
+    </script>
+
+    <primer-quiz name="brdfQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  { "prerequisites": ["computer-science/computer-animation/computer-animation"] }
+</script>
+
+<script type="module">
+  import { registerCharts, registerChartSliders, registerQuiz, makeStrings } from "primer";
+
+  /* ---- GGX normal distribution cross-section vs roughness. We plot D against the angle θ_m between a
+          microfacet normal and the surface normal, using the standard GGX/Trowbridge–Reitz form. As
+          roughness α grows, the central spike collapses into a broad hump — the lobe widens. ---- */
+  const ggxD = (thetaM, alpha) => {
+    const a2 = alpha * alpha;
+    const cosT = Math.cos(thetaM);
+    const denom = cosT * cosT * (a2 - 1) + 1;
+    return a2 / (Math.PI * denom * denom);
+  };
+
+  const lob = makeStrings("ggxLobe");
+  registerChartSliders("ggx", [
+    { name: "alpha", label: () => lob("rough"), min: 0.05, max: 1, step: 0.05, value: 0.25, anchors: [0.05, 0.25, 0.5, 0.75, 1] },
+  ]);
+  registerCharts(
+    [
+      {
+        name: "ggxLobe",
+        f: (x, sl) => ggxD(x, sl.alpha ?? 0.25),
+        line: (colors) => ({ strokeColor: colors.cat[0], strokeWidth: 3 }),
+        legend: ["GGX D(θ) at roughness α"],
+      },
+    ],
+    { id: "ggxLobe", xmin: -1.4, xmax: 1.4, ymin: 0, ymax: 6, xticks: 0.5, yticks: 1,
+      xaxisname: "facet angle θ (rad)", yaxisname: "D (facet density)", title: () => lob("title") },
+    "ggx",
+  );
+
+  registerQuiz("brdfQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("defQ"), options: [
+      { text: () => sceneStrings("defR"), correct: true },
+      { text: () => sceneStrings("defW1"), correct: false },
+      { text: () => sceneStrings("defW2"), correct: false },
+      { text: () => sceneStrings("defW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("recipQ"), options: [
+      { text: () => sceneStrings("recipR"), correct: true },
+      { text: () => sceneStrings("recipW1"), correct: false },
+      { text: () => sceneStrings("recipW2"), correct: false },
+      { text: () => sceneStrings("recipW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("energyQ"), options: [
+      { text: () => sceneStrings("energyR"), correct: true },
+      { text: () => sceneStrings("energyW1"), correct: false },
+      { text: () => sceneStrings("energyW2"), correct: false },
+      { text: () => sceneStrings("energyW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("negQ"), options: [
+      { text: () => sceneStrings("negR"), correct: true },
+      { text: () => sceneStrings("negW1"), correct: false },
+      { text: () => sceneStrings("negW2"), correct: false },
+      { text: () => sceneStrings("negW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("lambQ"), options: [
+      { text: () => sceneStrings("lambR"), correct: true },
+      { text: () => sceneStrings("lambW1"), correct: false },
+      { text: () => sceneStrings("lambW2"), correct: false },
+      { text: () => sceneStrings("lambW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("piQ"), options: [
+      { text: () => sceneStrings("piR"), correct: true },
+      { text: () => sceneStrings("piW1"), correct: false },
+      { text: () => sceneStrings("piW2"), correct: false },
+      { text: () => sceneStrings("piW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cookQ"), options: [
+      { text: () => sceneStrings("cookR"), correct: true },
+      { text: () => sceneStrings("cookW1"), correct: false },
+      { text: () => sceneStrings("cookW2"), correct: false },
+      { text: () => sceneStrings("cookW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("roughQ"), options: [
+      { text: () => sceneStrings("roughR"), correct: true },
+      { text: () => sceneStrings("roughW1"), correct: false },
+      { text: () => sceneStrings("roughW2"), correct: false },
+      { text: () => sceneStrings("roughW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fresQ"), options: [
+      { text: () => sceneStrings("fresR"), correct: true },
+      { text: () => sceneStrings("fresW1"), correct: false },
+      { text: () => sceneStrings("fresW2"), correct: false },
+      { text: () => sceneStrings("fresW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("schlickQ"), options: [
+      { text: () => sceneStrings("schlickR"), correct: true },
+      { text: () => sceneStrings("schlickW1"), correct: false },
+      { text: () => sceneStrings("schlickW2"), correct: false },
+      { text: () => sceneStrings("schlickW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("gQ"), options: [
+      { text: () => sceneStrings("gR"), correct: true },
+      { text: () => sceneStrings("gW1"), correct: false },
+      { text: () => sceneStrings("gW2"), correct: false },
+      { text: () => sceneStrings("gW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("workflowQ"), options: [
+      { text: () => sceneStrings("workflowR"), correct: true },
+      { text: () => sceneStrings("workflowW1"), correct: false },
+      { text: () => sceneStrings("workflowW2"), correct: false },
+      { text: () => sceneStrings("workflowW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("metalQ"), options: [
+      { text: () => sceneStrings("metalR"), correct: true },
+      { text: () => sceneStrings("metalW1"), correct: false },
+      { text: () => sceneStrings("metalW2"), correct: false },
+      { text: () => sceneStrings("metalW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("adhocQ"), options: [
+      { text: () => sceneStrings("adhocR"), correct: true },
+      { text: () => sceneStrings("adhocW1"), correct: false },
+      { text: () => sceneStrings("adhocW2"), correct: false },
+      { text: () => sceneStrings("adhocW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("consistQ"), options: [
+      { text: () => sceneStrings("consistR"), correct: true },
+      { text: () => sceneStrings("consistW1"), correct: false },
+      { text: () => sceneStrings("consistW2"), correct: false },
+      { text: () => sceneStrings("consistW3"), correct: false },
+    ] },
+    { prompt: (v) => sceneStrings("fresCompQ", v), variables: "c=[1:9]",
+      answer: (v) => { const cos = v.c / 10; return 0.04 + (1 - 0.04) * Math.pow(1 - cos, 5); } },
+    { prompt: (v) => sceneStrings("lambCompQ", v), variables: "r=[1:9]",
+      answer: (v) => (v.r / 10) / Math.PI },
+  ]);
+</script>

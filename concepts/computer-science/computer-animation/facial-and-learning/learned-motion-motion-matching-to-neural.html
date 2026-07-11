@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Learned Motion: from Motion Matching to Neural</primer-title>
+
+    <primer-card>
+      <p>
+        Imagine a game character sprinting across broken terrain, cutting sideways the instant you flick the
+        stick, planting a foot on a ledge and pushing off — all reading as one continuous, weighty
+        performance. For a decade the state of the art behind that was
+        <primer-ref to="computer-science/computer-animation/mocap/motion-matching">motion matching</primer-ref>:
+        keep a huge library of motion-captured frames, and <strong>every single frame of gameplay</strong>,
+        search that library for the recorded pose whose future best fits where the player wants to go, then
+        jump to it. It looks fantastic. It also drags a database of <em>millions</em> of poses around in
+        memory and pays a nearest-neighbour search 30–60 times a second.
+      </p>
+      <p>
+        This page is about the shift that answered the obvious question: <em>what if a neural network could
+        replace the database?</em> Instead of storing every pose and looking one up, train a net to map
+        <strong>(current character state + where the player wants to go)</strong> straight to the
+        <strong>next pose</strong> — learning the whole motion library into a handful of megabytes of weights.
+        We'll trace the landmark models (PFNN, Mode-Adaptive Networks, Learned Motion Matching), see why the
+        naive version collapses into blurry mush, and set up the jump to
+        <primer-ref soft to="computer-science/computer-animation/facial-and-learning/motion-vaes-and-diffusion">motion VAEs and diffusion</primer-ref>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Recap: motion matching, and what it costs</h2>
+      <p>
+        Motion matching is beautifully simple. You hold a big flat pile of mocap frames. Each frame is tagged
+        with a <strong>feature vector</strong> — the character's current pose and velocity, plus the near-future
+        <em>trajectory</em> that actually followed it in the capture. At runtime you build a
+        <em>desired</em> feature vector from the player's input (where they're steering) and the current pose,
+        and you find the stored frame whose feature vector is nearest:
+      </p>
+      <primer-math display>i^\star \;=\; \arg\min_{i}\; \big\lVert\, \mathbf{f}_i - \mathbf{f}_{\text{query}} \,\big\rVert^2 .</primer-math>
+      <p>
+        Play forward from <primer-math>i^\star</primer-math>, re-search a few frames later, blend across the
+        jumps, and you get gorgeous, grounded motion with essentially no hand-authored state machine. The
+        price is paid in two currencies:
+      </p>
+      <primer-theorem name="The two costs of motion matching">
+        <ul>
+          <li><strong>Memory.</strong> Quality scales with coverage, so production databases balloon to
+            <em>millions</em> of frames — often hundreds of megabytes to gigabytes of pose data that must sit
+            in RAM.</li>
+          <li><strong>Search.</strong> Every query is a nearest-neighbour lookup over that whole set, repeated
+            many times per second, per character — costly to do, and awkward to scale to crowds.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        There's a subtler cost too: the system can only ever reproduce poses it <em>recorded</em>. It never
+        invents an in-between it wasn't given; it can only pick and blend among clips it already owns.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The neural alternative: learn the database away</h2>
+      <p>
+        The core idea is to treat the controller as a <strong>function</strong> and approximate it with a
+        network. Feed in the character's current state and the desired trajectory/goal; read out the next
+        pose. Written abstractly, with network weights <primer-math>\theta</primer-math>:
+      </p>
+      <primer-math display>\mathbf{y}_{t+1} \;=\; \Phi_\theta\big(\, \mathbf{x}_t,\; \mathbf{g}_t \,\big),</primer-math>
+      <p>
+        where <primer-math>\mathbf{x}_t</primer-math> is the current state (pose, joint velocities, foot
+        contacts, phase — more on that below), <primer-math>\mathbf{g}_t</primer-math> is the goal (the desired
+        future trajectory, gait, and terrain profile), and <primer-math>\mathbf{y}_{t+1}</primer-math> is the
+        predicted next pose. You <strong>train</strong> <primer-math>\theta</primer-math> on the very same
+        mocap that would have filled the database, minimising the difference between the predicted pose and the
+        recorded one. At runtime the database is gone: all that ships is <primer-math>\theta</primer-math>.
+      </p>
+      <p>
+        The payoffs are exactly the mirror image of motion matching's costs — <strong>tiny memory</strong> (a
+        few MB of weights instead of a giant pose bank), a <strong>fixed, predictable cost per frame</strong>
+        (one forward pass, no search over a growing set), and <strong>generalisation</strong>: a network can
+        interpolate smoothly <em>between</em> clips it never literally saw, filling in motions the capture
+        never recorded. But it doesn't come for free — you pay up front in training data and training time,
+        and a badly-posed network fails in a spectacular way we'll meet in the "Watch out!" box.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "pfnnSchematic": {
+          "title": "State + goal → network → next pose; a phase clock chooses the weights",
+          "stateBox": "state xₜ",
+          "stateSub": "pose, velocities, foot contacts",
+          "goalBox": "goal gₜ",
+          "goalSub": "desired trajectory, terrain",
+          "netBox": "phase-functioned network Φθ",
+          "poseBox": "next pose yₜ₊₁",
+          "phaseTitle": "phase φ (foot cycle)",
+          "wLabel": "weights θ(φ) blended around the circle"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Landmark model: the Phase-Functioned Neural Network (PFNN)</h2>
+      <p>
+        The breakthrough that made neural locomotion crisp was Holden, Komura and Saito's
+        <strong>Phase-Functioned Neural Network</strong> (2017). Its insight is that locomotion is
+        fundamentally <em>cyclic</em>: the left foot strikes, rolls, lifts; the right foot strikes, rolls,
+        lifts. Encode where you are in that cycle as a single <strong>phase</strong> variable
+        <primer-math>\phi \in [0, 2\pi)</primer-math>, and let the network's <em>weights themselves be a
+        function of phase</em>:
+      </p>
+      <primer-math display>\mathbf{y}_{t+1} \;=\; \Phi\big(\mathbf{x}_t,\; \theta(\phi)\big), \qquad \theta(\phi) = \text{Catmull–Rom blend of a few control weight sets around the cycle}.</primer-math>
+      <p>
+        Rather than one fixed set of weights trying to cover both "foot planting" and "foot swinging" at once,
+        PFNN stores a small number of <strong>control weight sets</strong> spaced around the phase circle and
+        smoothly interpolates between them as <primer-math>\phi</primer-math> advances. The effect is a compact
+        network that behaves like a different specialist at each moment of the stride, yet stays continuous.
+        The result: high-quality, responsive locomotion over uneven terrain, from a model small enough to ship,
+        with a fixed per-frame cost.
+      </p>
+      <primer-geometry
+        scene="pfnnSchematic"
+        caption="Schematic of a phase-functioned controller: the current state and the goal feed a network whose weights θ(φ) are chosen by a phase clock tracking the foot cycle; the output is the next pose."
+      ></primer-geometry>
+      <p>
+        Why does the phase input matter so much? Because it tells the network <em>which part of the stride it
+        is in</em>, it resolves the ambiguity that would otherwise make the net average incompatible poses
+        together. That single scalar is the difference between crisp footfalls and the blurry damped mush of
+        naive regression — the failure the "Watch out!" below dissects.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Beyond one clock: Mode-Adaptive Networks and gating experts</h2>
+      <p>
+        A single phase variable is perfect for a biped walking and running, but it strains on richer motion —
+        a <strong>quadruped</strong> has multiple limbs on different, coupled rhythms (walk, trot, canter,
+        gallop), and there's no one clean foot cycle to key everything off. Zhang, Starke, Komura and Yang's
+        <strong>Mode-Adaptive Neural Networks</strong> (2018) generalised the idea: instead of a hand-defined
+        phase driving the blend, a small <strong>gating network</strong> looks at the state and produces
+        blending coefficients that mix a bank of <strong>expert</strong> weight sets:
+      </p>
+      <primer-math display>\theta \;=\; \sum_{k=1}^{K} \alpha_k(\mathbf{x})\,\theta_k, \qquad \boldsymbol{\alpha}(\mathbf{x}) = \text{gating network output}, \quad \textstyle\sum_k \alpha_k = 1 .</primer-math>
+      <p>
+        The gating net <em>learns</em> when to lean on which expert — effectively discovering its own phases
+        and gait modes rather than being told them. This mixture-of-experts idea is the backbone of much of
+        the modern neural-character work (later systems layer local phases per limb on top of it), and it's the
+        general answer to "one cyclic clock isn't enough."
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Learned Motion Matching: keep the paradigm, drop the database</h2>
+      <p>
+        There's a third path that's especially loved in games because it preserves the exact feel and
+        controllability of motion matching while shedding its memory cost. Holden and colleagues'
+        <strong>Learned Motion Matching</strong> (2020) replaces the giant pose database with a set of small
+        networks trained to <em>imitate what motion matching would have done</em>:
+      </p>
+      <primer-theorem name="Learned Motion Matching, in pieces">
+        <ul>
+          <li>A <strong>compressor / decompressor</strong> (an autoencoder) squeezes each pose into a compact
+            latent code and reconstructs it — so poses need not be stored explicitly.</li>
+          <li>A <strong>stepper</strong> network predicts how the latent feature evolves frame to frame while a
+            clip plays out — replacing "read the next stored frame".</li>
+          <li>A <strong>projector</strong> network maps a query feature to the nearest good feature —
+            replacing the nearest-neighbour <em>search</em> over the database.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Together these reproduce motion-matching-quality output at a <strong>fraction of the memory</strong>
+        (databases shrink from hundreds of MB to a few MB of weights) and with a bounded per-frame cost — no
+        search over a growing set. Crucially it keeps the motion-matching <em>authoring workflow</em>: you
+        still think in terms of a feature database and trajectories, you just no longer ship the database.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: a database vs weights that interpolate</h2>
+      <p>
+        Put numbers on the trade-off. Take a locomotion set captured at
+        <primer-math>60\,\text{Hz}</primer-math>, giving <primer-math>1{,}000{,}000</primer-math> frames of
+        skeleton animation. Suppose each frame stores a modest
+        <primer-math>60</primer-math>-DoF pose (positions + rotations + velocities) as
+        <primer-math>32</primer-math>-bit floats:
+      </p>
+      <primer-math display>10^{6}\ \text{frames} \times 60\ \text{floats} \times 4\ \text{bytes} \;=\; 240{,}000{,}000\ \text{bytes} \;\approx\; 229\ \text{MB}</primer-math>
+      <p>
+        …and that's before the feature index and blend metadata a real system also carries. A PFNN trained on
+        the <em>same</em> capture might have on the order of a few hundred thousand parameters per control
+        weight set; even generously counted, the shipped weights land in the low single-digit
+        <strong>megabytes</strong> — call it a
+        <primer-math>50\text{–}100\times</primer-math> reduction. Two things are happening at once:
+      </p>
+      <ul>
+        <li><strong>Compression.</strong> The net stops storing individual frames and stores only the
+          <em>rule</em> that generated them.</li>
+        <li><strong>Generalisation.</strong> Ask motion matching for a gait at a speed and turn radius it never
+          recorded, and it can only stitch the nearest recorded clips. The trained net evaluates
+          <primer-math>\Phi_\theta</primer-math> and <strong>interpolates a pose it never saw</strong> — a
+          genuinely new frame consistent with everything it learned.</li>
+      </ul>
+      <p>
+        And the phase input is what keeps that interpolation honest. Without it, when several plausible next
+        poses exist (foot could be landing <em>or</em> lifting), the network — trained to minimise average
+        error — hedges by predicting the <em>average</em> of them, which is a limp, foot-sliding non-pose. The
+        phase tells it which of those futures applies, so it commits to a crisp one.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why not just make the network bigger to fix the blur?">
+      <p>
+        A tempting reflex: if regression to the mean blurs the motion, throw a bigger network at it. It
+        doesn't help — and understanding why is the whole point. The blur isn't a <em>capacity</em> problem;
+        it's a <strong>problem specification</strong> problem. If the input state genuinely maps to several
+        different valid next poses, then the mathematically optimal single-output predictor <em>is</em> their
+        mean, no matter how many parameters it has. A bigger net just fits that mean more precisely. The fix is
+        never "more capacity" — it's to <strong>remove the ambiguity</strong> (add a phase or gait input so the
+        mapping becomes one-to-one), or to <strong>model the distribution instead of a point</strong> (mixture
+        density, or a generative model that <em>samples</em> a future rather than averaging). That's exactly the
+        thread that leads into the next lesson on generative motion models.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Naive pose regression collapses to the mean">
+      <p>
+        The single most common way a first neural-motion attempt fails: build a plain network that takes the
+        current state and directly regresses the next pose, train it with a mean-squared-error loss, and watch
+        the output turn into <strong>blurry, damped, foot-sliding mush</strong> — motion that looks like it's
+        wading through treacle, with no crisp footfalls.
+      </p>
+      <p>
+        The cause is <strong>multimodality</strong>. From a given state, <em>many</em> futures are plausible
+        (the character could plant the left foot, or the right, or keep gliding). MSE training pushes the
+        network toward the value that minimises average squared error over all those futures — which is their
+        <strong>average</strong>. The average of a foot-down pose and a foot-up pose is a foot hovering
+        mid-air: physically wrong, visually dead. The cures are exactly the models on this page and the next:
+      </p>
+      <ul>
+        <li><strong>Phase conditioning</strong> (PFNN) — tell the net where in the cycle it is, so each state
+          has one answer.</li>
+        <li><strong>Mixture / expert models</strong> (Mode-Adaptive nets) — let different experts own different
+          modes instead of blending them into one.</li>
+        <li><strong>Autoregression with noise / generative sampling</strong> — sample a specific future rather
+          than averaging all of them.</li>
+      </ul>
+      <p>
+        If your learned character walks like it's underwater, suspect mean-collapse before you suspect a bug.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "learnedMotionQuiz@1": {
+          "intro": "Neural motion controllers replace a mocap database with a trained network mapping (state + goal) → next pose. Phase/experts/generative models keep motion crisp. Fresh questions each time.",
+          "costQ": "What are the two headline runtime costs of classic motion matching?",
+          "costRight": "large memory for the pose database, and a nearest-neighbour search every frame",
+          "costW1": "GPU shader compilation and texture streaming",
+          "costW2": "network latency and packet loss",
+          "costW3": "solving inverse kinematics and cloth simulation",
+          "replaceQ": "The core idea of neural motion control is to…",
+          "replaceRight": "train a network to replace the database, mapping (state + goal) → next pose",
+          "replaceW1": "render the database at a higher frame rate",
+          "replaceW2": "compress textures with an autoencoder",
+          "replaceW3": "store every pose twice for redundancy",
+          "pfnnQ": "In a Phase-Functioned Neural Network (PFNN), what does the phase variable do?",
+          "pfnnRight": "it blends the network's weights around the foot cycle so a compact net acts as a specialist at each stride moment",
+          "pfnnW1": "it sets the screen resolution of the render",
+          "pfnnW2": "it counts how many frames are in the database",
+          "pfnnW3": "it randomly reinitialises the weights each frame",
+          "phaseWhatQ": "The 'phase' in a PFNN represents…",
+          "phaseWhatRight": "where the character is in its cyclic foot/locomotion cycle",
+          "phaseWhatW1": "the phase of the moon in the game world",
+          "phaseWhatW2": "the compile phase of the shader",
+          "phaseWhatW3": "the alpha value of a texture",
+          "manQ": "Naive pose regression (state → next pose, MSE loss) tends to fail by producing…",
+          "manRight": "blurry, damped, foot-sliding motion — the mean of many plausible futures",
+          "manW1": "perfectly crisp motion with no training",
+          "manW2": "motion that is too fast to see",
+          "manW3": "a database twice the original size",
+          "manCauseQ": "Why does naive pose regression collapse to the mean?",
+          "manCauseRight": "many futures are plausible from one state, and MSE is minimised by their average",
+          "manCauseW1": "the network has too few parameters to store one pose",
+          "manCauseW2": "floating-point rounding accumulates each frame",
+          "manCauseW3": "the mocap was captured at too high a frame rate",
+          "biggerQ": "Making the network bigger to cure mean-collapse blur…",
+          "biggerRight": "does not help — the blur is a problem-specification issue, not a capacity one",
+          "biggerW1": "always fixes it, since capacity is the only limit",
+          "biggerW2": "makes the database larger",
+          "biggerW3": "removes the need for any mocap data",
+          "moeQ": "Mode-Adaptive Neural Networks handle richer motion (e.g. quadrupeds) by…",
+          "moeRight": "using a gating network to blend a bank of expert weight sets",
+          "moeW1": "storing a separate database per animal",
+          "moeW2": "disabling the phase entirely and averaging all poses",
+          "moeW3": "rendering each limb on a separate GPU",
+          "lmmQ": "Learned Motion Matching (Holden 2020) replaces the database with…",
+          "lmmRight": "compressor/decompressor, stepper and projector networks that imitate motion matching",
+          "lmmW1": "a bigger, doubly-indexed database",
+          "lmmW2": "a hand-authored finite state machine",
+          "lmmW3": "a cloud service that streams poses on demand",
+          "lmmWhyQ": "The main win of Learned Motion Matching over classic motion matching is…",
+          "lmmWhyRight": "motion-matching quality at a fraction of the memory, with bounded per-frame cost",
+          "lmmWhyW1": "it needs no mocap data at all",
+          "lmmWhyW2": "it removes the need for a GPU",
+          "lmmWhyW3": "it doubles the animation frame rate",
+          "genQ": "A neural controller can produce a pose the mocap never recorded because it…",
+          "genRight": "interpolates/generalises between clips by evaluating the learned function",
+          "genW1": "secretly stores every possible pose in advance",
+          "genW2": "downloads missing poses from a server",
+          "genW3": "cannot — it can only replay recorded frames",
+          "memQ": "Compared with a multi-hundred-MB pose database, a trained neural controller ships…",
+          "memRight": "only a few MB of network weights",
+          "memW1": "a larger file, because networks are always bigger",
+          "memW2": "the same database plus the weights",
+          "memW3": "nothing — it regenerates from nothing at runtime",
+          "tradeQ": "The main trade-off you accept when moving from a database to a neural controller is…",
+          "tradeRight": "up-front training data and training time, in exchange for tiny memory and generalisation",
+          "tradeW1": "worse memory use but faster search",
+          "tradeW2": "no trade-off at all — it is strictly better in every way",
+          "tradeW3": "losing all controllability of the character",
+          "ratioQ": "A database of {frames} million 60-DoF float32 frames needs about how much memory? (60 floats × 4 bytes each)",
+          "ratioUnit": "MB"
+        }
+      }
+    </script>
+
+    <primer-quiz name="learnedMotionQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/computer-animation/computer-animation"]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Schematic: state + goal → phase-functioned network → next pose, with a phase circle above
+          feeding the weights. Static base content (no steps) so it shows fully on load. ---- */
+  const ps = makeStrings("pfnnSchematic");
+  registerGeometryScene(
+    "pfnnSchematic",
+    ({ board, colors, sceneStrings }) => {
+      const box = (cx, cy, w, h, stroke) =>
+        board.create(
+          "polygon",
+          [
+            [cx - w / 2, cy - h / 2],
+            [cx + w / 2, cy - h / 2],
+            [cx + w / 2, cy + h / 2],
+            [cx - w / 2, cy + h / 2],
+          ],
+          { borders: { strokeColor: stroke, strokeWidth: 2 }, fillOpacity: 0, vertices: { visible: false }, fixed: true, highlight: false },
+        );
+      const arrow = (from, to) =>
+        board.create("arrow", [from, to], { strokeColor: colors.line, strokeWidth: 2, lastArrow: { type: 2, size: 5 } });
+
+      // Input boxes (left column).
+      box(-6.5, 1.6, 3.4, 1.6, colors.cat[0]);
+      board.create("text", [-6.5, 1.95, () => sceneStrings("stateBox")], { anchorX: "middle", fontSize: 15, strokeColor: colors.cat[0], cssStyle: "font-weight:700" });
+      board.create("text", [-6.5, 1.25, () => sceneStrings("stateSub")], { anchorX: "middle", fontSize: 11, strokeColor: colors.ink });
+
+      box(-6.5, -1.2, 3.4, 1.6, colors.cat[1]);
+      board.create("text", [-6.5, -0.85, () => sceneStrings("goalBox")], { anchorX: "middle", fontSize: 15, strokeColor: colors.cat[1], cssStyle: "font-weight:700" });
+      board.create("text", [-6.5, -1.55, () => sceneStrings("goalSub")], { anchorX: "middle", fontSize: 11, strokeColor: colors.ink });
+
+      // Network box (centre).
+      box(0, 0.2, 4.2, 2.2, colors.line);
+      board.create("text", [0, 0.2, () => sceneStrings("netBox")], { anchorX: "middle", fontSize: 15, strokeColor: colors.ink, cssStyle: "font-weight:700" });
+
+      // Output box (right).
+      box(6.4, 0.2, 3.4, 1.6, colors.cat[2]);
+      board.create("text", [6.4, 0.2, () => sceneStrings("poseBox")], { anchorX: "middle", fontSize: 15, strokeColor: colors.cat[2], cssStyle: "font-weight:700" });
+
+      // Arrows from inputs → net, net → output.
+      arrow([-4.8, 1.6], [-2.1, 0.6]);
+      arrow([-4.8, -1.2], [-2.1, -0.2]);
+      arrow([2.1, 0.2], [4.7, 0.2]);
+
+      // Phase circle above, feeding weights into the network.
+      const pc = [0, 3.7];
+      board.create("circle", [pc, 0.9], { strokeColor: colors.cat[0], strokeWidth: 2, fillOpacity: 0 });
+      // A marker on the circle showing "where in the cycle" we are.
+      const ang = Math.PI * 0.35;
+      board.create("point", [pc[0] + 0.9 * Math.cos(ang), pc[1] + 0.9 * Math.sin(ang)], {
+        size: 3, strokeColor: colors.cat[2], fillColor: colors.cat[2], fixed: true, name: "", highlight: false,
+      });
+      board.create("text", [0, 4.9, () => sceneStrings("phaseTitle")], { anchorX: "middle", fontSize: 13, strokeColor: colors.cat[0], cssStyle: "font-weight:700" });
+      arrow([0, 2.75], [0, 1.35]);
+      board.create("text", [3.3, 2.6, () => sceneStrings("wLabel")], { anchorX: "middle", fontSize: 11, strokeColor: colors.ink });
+    },
+    { boundingbox: [-9, 5.6, 9, -2.7], keepAspect: false, title: () => ps("title") },
+  );
+
+  registerQuiz("learnedMotionQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("costQ"), options: [
+      { text: () => sceneStrings("costRight"), correct: true },
+      { text: () => sceneStrings("costW1"), correct: false },
+      { text: () => sceneStrings("costW2"), correct: false },
+      { text: () => sceneStrings("costW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("replaceQ"), options: [
+      { text: () => sceneStrings("replaceRight"), correct: true },
+      { text: () => sceneStrings("replaceW1"), correct: false },
+      { text: () => sceneStrings("replaceW2"), correct: false },
+      { text: () => sceneStrings("replaceW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("pfnnQ"), options: [
+      { text: () => sceneStrings("pfnnRight"), correct: true },
+      { text: () => sceneStrings("pfnnW1"), correct: false },
+      { text: () => sceneStrings("pfnnW2"), correct: false },
+      { text: () => sceneStrings("pfnnW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("phaseWhatQ"), options: [
+      { text: () => sceneStrings("phaseWhatRight"), correct: true },
+      { text: () => sceneStrings("phaseWhatW1"), correct: false },
+      { text: () => sceneStrings("phaseWhatW2"), correct: false },
+      { text: () => sceneStrings("phaseWhatW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("manQ"), options: [
+      { text: () => sceneStrings("manRight"), correct: true },
+      { text: () => sceneStrings("manW1"), correct: false },
+      { text: () => sceneStrings("manW2"), correct: false },
+      { text: () => sceneStrings("manW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("manCauseQ"), options: [
+      { text: () => sceneStrings("manCauseRight"), correct: true },
+      { text: () => sceneStrings("manCauseW1"), correct: false },
+      { text: () => sceneStrings("manCauseW2"), correct: false },
+      { text: () => sceneStrings("manCauseW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("biggerQ"), options: [
+      { text: () => sceneStrings("biggerRight"), correct: true },
+      { text: () => sceneStrings("biggerW1"), correct: false },
+      { text: () => sceneStrings("biggerW2"), correct: false },
+      { text: () => sceneStrings("biggerW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("moeQ"), options: [
+      { text: () => sceneStrings("moeRight"), correct: true },
+      { text: () => sceneStrings("moeW1"), correct: false },
+      { text: () => sceneStrings("moeW2"), correct: false },
+      { text: () => sceneStrings("moeW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("lmmQ"), options: [
+      { text: () => sceneStrings("lmmRight"), correct: true },
+      { text: () => sceneStrings("lmmW1"), correct: false },
+      { text: () => sceneStrings("lmmW2"), correct: false },
+      { text: () => sceneStrings("lmmW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("lmmWhyQ"), options: [
+      { text: () => sceneStrings("lmmWhyRight"), correct: true },
+      { text: () => sceneStrings("lmmWhyW1"), correct: false },
+      { text: () => sceneStrings("lmmWhyW2"), correct: false },
+      { text: () => sceneStrings("lmmWhyW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("genQ"), options: [
+      { text: () => sceneStrings("genRight"), correct: true },
+      { text: () => sceneStrings("genW1"), correct: false },
+      { text: () => sceneStrings("genW2"), correct: false },
+      { text: () => sceneStrings("genW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("memQ"), options: [
+      { text: () => sceneStrings("memRight"), correct: true },
+      { text: () => sceneStrings("memW1"), correct: false },
+      { text: () => sceneStrings("memW2"), correct: false },
+      { text: () => sceneStrings("memW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("tradeQ"), options: [
+      { text: () => sceneStrings("tradeRight"), correct: true },
+      { text: () => sceneStrings("tradeW1"), correct: false },
+      { text: () => sceneStrings("tradeW2"), correct: false },
+      { text: () => sceneStrings("tradeW3"), correct: false },
+    ] },
+    { prompt: (v) => sceneStrings("ratioQ", v), variables: "frames=[1:5]", answer: (v) => v.frames * 1e6 * 60 * 4 / 1e6 },
+  ]);
+</script>

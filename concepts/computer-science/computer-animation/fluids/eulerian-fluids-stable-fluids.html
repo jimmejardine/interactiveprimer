@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Eulerian Fluids: Stable Fluids</primer-title>
+
+    <primer-card>
+      <p>
+        The rolling smoke in a film, the fireball of an explosion, the churn of a river surface — a huge
+        share of the fluid you see in modern computer graphics traces back to one remarkably short SIGGRAPH
+        paper: Jos Stam's <strong>"Stable Fluids"</strong> (1999). Before it, fluid solvers in animation were
+        fragile: push the timestep a little too hard and the simulation would explode into a screenful of
+        NaNs. Stam's trick made the solver <strong>unconditionally stable</strong> — you could take big,
+        movie-sized timesteps and it would never blow up. That single property is why grid-based fluids
+        became practical for production, and the method still sits at the heart of tools like FumeFX, Phoenix
+        and Houdini's smoke solver.
+      </p>
+      <p>
+        This page builds the solver from its idea outward: the <strong>Eulerian</strong> way of storing a
+        fluid, the equations that govern it, and Stam's four-step recipe — <em>add forces, advect, diffuse,
+        project</em> — with the two clever pieces (semi-Lagrangian advection and pressure projection) that
+        make it work. It assumes you have met
+        <primer-ref to="physics/fluid-dynamics/the-navier-stokes-equations">the Navier–Stokes equations</primer-ref>
+        and know your way around
+        <primer-ref soft to="computer-science/computer-animation/computer-animation">computer animation</primer-ref>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two ways to watch a fluid: Eulerian vs Lagrangian</h2>
+      <p>
+        There are two fundamentally different vantage points for describing a moving fluid, and choosing one
+        is the first design decision in any solver.
+      </p>
+      <primer-theorem name="Eulerian vs Lagrangian">
+        <ul>
+          <li><strong>Lagrangian</strong> — follow the <em>parcels</em>. You track a swarm of moving
+            particles, each carrying its own velocity and other quantities, and you ride along with them.
+            This is the world of <primer-ref todo to="computer-science/computer-animation/fluids/sph-lagrangian-particles">SPH particle fluids</primer-ref>.</li>
+          <li><strong>Eulerian</strong> — watch <em>fixed windows</em>. You lay down a stationary
+            <strong>grid</strong> of cells and, at each cell, store the fluid quantities <em>right now</em> —
+            the velocity <primer-math>\mathbf{u}</primer-math> passing through and the smoke density
+            <primer-math>\rho</primer-math> sitting there. The fluid flows <em>past</em> the cells; the cells
+            never move.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Stable Fluids is thoroughly <strong>Eulerian</strong>. Picture a fixed checkerboard laid over your
+        smoke: every square remembers two things, a little velocity arrow (which way and how fast the air is
+        moving there) and a greyness (how much smoke is in that square). Every timestep the solver rewrites
+        those two fields. The great advantage of a grid is that spatial derivatives — the gradients and
+        Laplacians all over Navier–Stokes — become simple <em>differences between neighbouring cells</em>, and
+        pressure can be solved globally across the whole grid at once. The cost is that fine detail can only
+        be as sharp as the grid is fine, a limitation we will meet head-on later.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The equations we are solving</h2>
+      <p>
+        A moving fluid of constant density obeys the <strong>incompressible Navier–Stokes equations</strong>.
+        The first says how the velocity field <primer-math>\mathbf{u}</primer-math> changes moment to moment;
+        the second is the incompressibility constraint that must hold at all times:
+      </p>
+      <primer-math display>\frac{\partial \mathbf{u}}{\partial t} = -(\mathbf{u}\cdot\nabla)\mathbf{u} \;-\; \frac{1}{\rho}\nabla p \;+\; \nu\nabla^2\mathbf{u} \;+\; \mathbf{f}, \qquad \nabla\cdot\mathbf{u} = 0.</primer-math>
+      <p>
+        Read the top equation term by term — each term is one thing the fluid does, and Stam's solver handles
+        each with its own dedicated step:
+      </p>
+      <primer-theorem name="The four forces on a parcel of fluid">
+        <ul>
+          <li><primer-math>-(\mathbf{u}\cdot\nabla)\mathbf{u}</primer-math> — <strong>advection</strong>: the
+            fluid carries itself (and everything in it) along its own flow.</li>
+          <li><primer-math>-\tfrac{1}{\rho}\nabla p</primer-math> — the <strong>pressure gradient</strong>:
+            pressure pushes fluid from crowded regions to empty ones.</li>
+          <li><primer-math>\nu\nabla^2\mathbf{u}</primer-math> — <strong>diffusion</strong> (viscosity):
+            neighbouring parcels drag on each other and smear velocity out;
+            <primer-math>\nu</primer-math> is the viscosity.</li>
+          <li><primer-math>\mathbf{f}</primer-math> — <strong>external forces</strong>: gravity,
+            buoyancy, the fan you switch on, a stir of the mouse.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The constraint <primer-math>\nabla\cdot\mathbf{u} = 0</primer-math> says the velocity field is
+        <strong>divergence-free</strong>: no cell may be a net source or sink. Divergence at a cell would mean
+        more fluid flowing out than in (or vice-versa) — fluid appearing from nowhere or vanishing into it.
+        For an incompressible fluid that is forbidden, and enforcing it is the subtle heart of the algorithm.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Operator splitting: solve one term at a time</h2>
+      <p>
+        Trying to satisfy that whole coupled system in one shot is hard. Stam's move — <strong>operator
+        splitting</strong> — is to march through the terms <em>one after another</em>, each a small,
+        well-understood sub-problem, feeding the output of one into the next. Over a single timestep
+        <primer-math>\Delta t</primer-math> the field passes through four stations:
+      </p>
+      <primer-theorem name="The Stable Fluids step">
+        <ul>
+          <li><strong>1. Add forces.</strong> Nudge the velocity by
+            <primer-math>\mathbf{f}\,\Delta t</primer-math> — buoyancy, gravity, user pushes.</li>
+          <li><strong>2. Advect.</strong> Transport the field along the current velocity — this is the
+            <primer-math>-(\mathbf{u}\cdot\nabla)\mathbf{u}</primer-math> term, done by the semi-Lagrangian
+            trick below.</li>
+          <li><strong>3. Diffuse.</strong> Apply viscosity <primer-math>\nu\nabla^2\mathbf{u}</primer-math> by
+            an implicit solve (an inviscid smoke sim can skip or minimise this).</li>
+          <li><strong>4. Project.</strong> Subtract the pressure gradient so that the result is
+            divergence-free — this is where <primer-math>\nabla\cdot\mathbf{u}=0</primer-math> is enforced.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        After the four stations the velocity field is ready for the next frame, and the smoke density is
+        advected along that same clean velocity so the smoke rides the flow. Splitting is an approximation —
+        the terms genuinely interact — but with small enough <primer-math>\Delta t</primer-math> it is
+        accurate, and it turns one intractable problem into four tractable ones.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "advectGrid": {
+          "title": "Semi-Lagrangian advection: trace backward, then sample",
+          "cellLabel": "grid cell x",
+          "backLabel": "backtrace  x − u·Δt",
+          "arrowsLabel": "velocity field u",
+          "sampleLabel": "sample here, copy to x"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The key trick: semi-Lagrangian advection</h2>
+      <p>
+        Advection is "move the field along the flow", and the naïve way to do it — step each quantity
+        <em>forward</em> along its velocity — is exactly what used to blow up: a big timestep sends stuff
+        flying past several cells and the scheme goes unstable. Stam's inspired reversal is to work
+        <strong>backward</strong>.
+      </p>
+      <p>
+        To find the new value at grid cell <primer-math>\mathbf{x}</primer-math>, ask: <em>where was the fluid
+        that is now arriving at</em> <primer-math>\mathbf{x}</primer-math>? Follow the velocity
+        <em>backward</em> for one timestep to the departure point
+        <primer-math>\mathbf{x} - \mathbf{u}(\mathbf{x})\,\Delta t</primer-math>, sample the old field there
+        (interpolating between the surrounding cells, since it rarely lands exactly on a grid point), and copy
+        that value to <primer-math>\mathbf{x}</primer-math>.
+      </p>
+      <primer-geometry
+        scene="advectGrid"
+        caption="Semi-Lagrangian advection on a velocity grid: to update cell x, trace backward along −u·Δt to a departure point, sample the old field there (bilinear interpolation between the four surrounding cells), and copy it to x. The result is bounded by neighbouring values, so it can never blow up."
+      ></primer-geometry>
+      <p>
+        Why is this <strong>unconditionally stable</strong>? Because the new value is an <em>interpolation of
+        values that already existed</em> in the old field. An average of existing numbers can never be larger
+        than the largest of them, so no matter how big <primer-math>\Delta t</primer-math> is, the field can
+        never grow without bound. The backtrace might overshoot wildly on a huge timestep, but the worst that
+        happens is you sample the wrong cell — you get an <em>inaccurate</em> answer, never an
+        <em>exploding</em> one. That trade — sacrifice some accuracy to buy guaranteed stability — is the
+        whole reason Stable Fluids earned its name.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Projection: the Helmholtz–Hodge decomposition</h2>
+      <p>
+        After forces, advection and diffusion, the velocity field is generally <em>not</em> divergence-free —
+        those steps don't respect the incompressibility constraint. The <strong>projection</strong> step fixes
+        that, and its justification is a clean theorem from vector calculus.
+      </p>
+      <primer-theorem name="Helmholtz–Hodge decomposition">
+        <ul>
+          <li>Any sufficiently smooth vector field <primer-math>\mathbf{w}</primer-math> splits uniquely into
+            two pieces: a <strong>divergence-free</strong> part <primer-math>\mathbf{u}</primer-math> and the
+            <strong>gradient</strong> of a scalar field <primer-math>p</primer-math>,
+            <primer-math>\mathbf{w} = \mathbf{u} + \nabla p</primer-math> with
+            <primer-math>\nabla\cdot\mathbf{u} = 0</primer-math>.</li>
+          <li>The two parts are orthogonal, so the divergence-free part is recovered by simply subtracting the
+            gradient: <primer-math>\mathbf{u} = \mathbf{w} - \nabla p</primer-math>.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The scalar <primer-math>p</primer-math> is exactly the <strong>pressure</strong>. To find it, take the
+        divergence of both sides of <primer-math>\mathbf{w} = \mathbf{u} + \nabla p</primer-math>. Since
+        <primer-math>\nabla\cdot\mathbf{u} = 0</primer-math>, the divergence-free part drops out and we are
+        left with a <strong>Poisson equation</strong> for the pressure:
+      </p>
+      <primer-math display>\nabla^2 p = \nabla\cdot\mathbf{w}.</primer-math>
+      <p>
+        On the grid this is a big sparse linear system (each cell's pressure couples to its neighbours), solved
+        iteratively — Gauss–Seidel, Jacobi or a multigrid/conjugate-gradient method. Once
+        <primer-math>p</primer-math> is known, subtract its gradient,
+        <primer-math>\mathbf{u} = \mathbf{w} - \nabla p</primer-math>, and the velocity is divergence-free.
+        <strong>Projection is what guarantees fluid neither appears nor vanishes</strong> — it is
+        conservation of mass, enforced globally, every single frame.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: one step on a tiny grid</h2>
+      <p>
+        Take a small <primer-math>3\times 3</primer-math> patch of cells with a puff of smoke sitting in the
+        bottom-middle cell and, for now, zero velocity everywhere. Walk it through one Stable-Fluids step.
+      </p>
+      <p>
+        <strong>Add forces.</strong> Warm smoke is buoyant, so apply an upward force
+        <primer-math>\mathbf{f} = (0, +g)</primer-math> to the smoke-filled cell. After
+        <primer-math>\mathbf{u} \mathrel{+}= \mathbf{f}\,\Delta t</primer-math> that cell now holds an upward
+        velocity arrow; its neighbours are still at rest.
+      </p>
+      <p>
+        <strong>Advect.</strong> Move the smoke density along <primer-math>\mathbf{u}</primer-math>. For the
+        cell <em>above</em> the puff, backtrace down its (borrowed) upward velocity to a departure point that
+        lands inside the smoky cell, sample the density there, and copy it up. The grey blob has shifted one
+        step upward — the smoke is rising, exactly as buoyancy should make it.
+      </p>
+      <p>
+        <strong>Project.</strong> That upward push has made the velocity field diverge: fluid is streaming out
+        of the top of the puff cell with nothing filling in from below, so
+        <primer-math>\nabla\cdot\mathbf{u} \ne 0</primer-math> there — a phantom source. Solve
+        <primer-math>\nabla^2 p = \nabla\cdot\mathbf{u}</primer-math> across the nine cells; the pressure comes
+        out high where fluid is piling up and low where it is thinning. Subtracting
+        <primer-math>\nabla p</primer-math> curls the straight-up arrows into a gentle circulation — fluid is
+        drawn <em>in from the sides</em> to replace what rose. Now every cell has as much flowing in as out.
+        The smoke rose, and not a single gram of fluid was created or destroyed. That is one frame; repeat a
+        few hundred times and you have a rising plume of smoke.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why did a stable solver take until 1999?">
+      <p>
+        Grid-based fluids in computational physics predate Stam by decades — but physicists cared about
+        <em>accuracy</em> and were willing to take tiny, carefully-bounded timesteps (the
+        Courant–Friedrichs–Lewy condition: a parcel must not cross more than one cell per step). Animation has
+        the opposite priorities — it wants big timesteps, it wants to never crash mid-render, and it can trade
+        a little physical accuracy for a lot of robustness because the goal is a <em>plausible-looking</em>
+        fluid, not a certified-correct one. Stam's genius was recognising that the graphics community's
+        different value function made the unconditionally-stable semi-Lagrangian scheme — too diffusive for a
+        physicist — exactly the right tool. It is a lovely case of a field's <em>constraints</em>, not just
+        its techniques, driving the breakthrough.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Semi-Lagrangian advection quietly eats your swirls">
+      <p>
+        The very interpolation that makes advection stable is also its curse: every backtrace <strong>averages
+        nearby cells</strong>, and averaging is smoothing. Step after step, that repeated blurring is
+        <strong>numerical dissipation</strong> — it bleeds energy out of the fine-scale motion and rounds off
+        exactly the small vortices and crisp filaments that make smoke look alive. A raw Stable-Fluids sim
+        tends to look too <em>smooth</em>, too <em>viscous</em>, as if the air were syrup, even when you set
+        the viscosity <primer-math>\nu</primer-math> to zero.
+      </p>
+      <p>
+        The fix is to <strong>put the lost detail back</strong>. Two standard remedies:
+        <strong>vorticity confinement</strong> (measure where curl is being lost and inject a small force that
+        pushes it back up, re-energising the swirls), and <strong>higher-order advection</strong> —
+        <strong>BFECC</strong> and <strong>MacCormack</strong> schemes, which run the semi-Lagrangian step
+        forward and backward to <em>estimate its own error</em> and cancel most of it, giving far sharper
+        smoke at a modest extra cost while keeping the stability. If your smoke looks like fog, reach for one
+        of these before you reach for a finer grid.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "stableFluidsQuiz@1": {
+          "intro": "Eulerian grids, operator splitting (force → advect → diffuse → project), semi-Lagrangian backtracing, and Helmholtz–Hodge projection. Fresh questions each time.",
+          "eulerQ": "In the Eulerian view used by Stable Fluids, the fluid quantities are stored…",
+          "eulerRight": "on a fixed grid of cells that the fluid flows past",
+          "eulerW1": "on moving particles that ride along with the fluid",
+          "eulerW2": "only at the boundary of the domain",
+          "eulerW3": "as a single average value for the whole fluid",
+          "lagQ": "The Lagrangian view (the opposite of Eulerian) instead tracks…",
+          "lagRight": "moving particles/parcels carrying their own quantities",
+          "lagW1": "a fixed stationary grid of cells",
+          "lagW2": "only the pressure field",
+          "lagW3": "the colour of each pixel",
+          "splitQ": "What is the correct order of the four Stable Fluids sub-steps?",
+          "splitRight": "add forces → advect → diffuse → project",
+          "splitW1": "project → diffuse → advect → add forces",
+          "splitW2": "advect → project → add forces → diffuse",
+          "splitW3": "diffuse → add forces → project → advect",
+          "semiQ": "Semi-Lagrangian advection updates a cell by…",
+          "semiRight": "tracing backward along the velocity and sampling the old field there",
+          "semiW1": "pushing each value forward one cell along the velocity",
+          "semiW2": "averaging every cell in the whole grid",
+          "semiW3": "solving a Poisson equation for velocity",
+          "stableQ": "Why is semi-Lagrangian advection unconditionally stable?",
+          "stableRight": "the new value is an interpolation of existing values, so it can't grow unbounded",
+          "stableW1": "it uses an infinitely small timestep",
+          "stableW2": "it ignores the velocity field entirely",
+          "stableW3": "it clamps every value to zero each step",
+          "projQ": "The projection step exists to enforce which condition?",
+          "projRight": "the velocity is divergence-free, ∇·u = 0",
+          "projW1": "the velocity is as large as possible",
+          "projW2": "the density is constant everywhere",
+          "projW3": "the timestep is below the CFL limit",
+          "poissonQ": "To project, Stable Fluids solves which equation for the pressure?",
+          "poissonRight": "the Poisson equation ∇²p = ∇·w",
+          "poissonW1": "the wave equation",
+          "poissonW2": "a single quadratic p² = ∇·w",
+          "poissonW3": "the ideal-gas law",
+          "hodgeQ": "The Helmholtz–Hodge decomposition splits any field into…",
+          "hodgeRight": "a divergence-free part plus the gradient of a scalar",
+          "hodgeW1": "a curl-free part plus a constant",
+          "hodgeW2": "two identical halves",
+          "hodgeW3": "a linear part plus a random part",
+          "afterprojQ": "After solving for pressure p, how is the divergence-free velocity obtained?",
+          "afterprojRight": "subtract the pressure gradient: u = w − ∇p",
+          "afterprojW1": "add the pressure gradient: u = w + ∇p",
+          "afterprojW2": "multiply the field by p",
+          "afterprojW3": "set the velocity to zero",
+          "divQ": "Non-zero divergence at a cell would physically mean…",
+          "divRight": "fluid appearing from nowhere or vanishing — forbidden for incompressible flow",
+          "divW1": "the fluid is perfectly incompressible",
+          "divW2": "the pressure is exactly zero there",
+          "divW3": "the grid is too fine",
+          "dissipQ": "The main visual artifact of plain semi-Lagrangian advection is…",
+          "dissipRight": "numerical dissipation — fine swirls are smoothed away, smoke looks too smooth",
+          "dissipW1": "the simulation exploding into NaNs",
+          "dissipW2": "sharp aliasing on every edge",
+          "dissipW3": "the smoke turning bright red",
+          "fixQ": "Which techniques restore the fine detail lost to advection dissipation?",
+          "fixRight": "vorticity confinement and higher-order advection (BFECC / MacCormack)",
+          "fixW1": "increasing the viscosity ν",
+          "fixW2": "removing the projection step",
+          "fixW3": "using a larger timestep",
+          "forceQ": "In the worked example, warm smoke is made to rise by adding which force?",
+          "forceRight": "an upward buoyancy force f = (0, +g)",
+          "forceW1": "a downward gravity force only",
+          "forceW2": "a sideways pressure force",
+          "forceW3": "no force at all",
+          "termQ": "Which Navier–Stokes term corresponds to viscosity/diffusion?",
+          "termRight": "ν∇²u",
+          "termW1": "−(u·∇)u",
+          "termW2": "−∇p/ρ",
+          "termW3": "the external force f"
+        }
+      }
+    </script>
+
+    <primer-quiz name="stableFluidsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "physics/fluid-dynamics/the-navier-stokes-equations",
+      "computer-science/computer-animation/computer-animation"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Static velocity grid with a backward-traced advection sample. No steps → shows fully on load. ---- */
+  const agStr = makeStrings("advectGrid");
+  registerGeometryScene(
+    "advectGrid",
+    ({ board, colors, sceneStrings }) => {
+      // Draw a 5x5 lattice of grid lines.
+      const lo = 0, hi = 4;
+      for (let i = lo; i <= hi; i++) {
+        board.create("segment", [[lo, i], [hi, i]], { strokeColor: colors.line, strokeWidth: 1, strokeOpacity: 0.4, highlight: false });
+        board.create("segment", [[i, lo], [i, hi]], { strokeColor: colors.line, strokeWidth: 1, strokeOpacity: 0.4, highlight: false });
+      }
+
+      // A uniform-ish velocity field: an arrow at each cell centre pointing up-right.
+      const vx = 0.55, vy = 0.35;
+      for (let cx = 0; cx < hi; cx++) {
+        for (let cy = 0; cy < hi; cy++) {
+          const px = cx + 0.5, py = cy + 0.5;
+          board.create("arrow", [[px - vx / 2, py - vy / 2], [px + vx / 2, py + vy / 2]], {
+            strokeColor: colors.cat[0], strokeWidth: 1.5, lastArrow: { type: 2, size: 4 }, highlight: false,
+          });
+        }
+      }
+
+      // The target cell x we are updating (top-right region).
+      const tx = 3.5, ty = 3.5;
+      board.create("point", [tx, ty], { size: 4, strokeColor: colors.cat[1], fillColor: colors.cat[1], fixed: true, name: "", highlight: false });
+      board.create("text", [tx + 0.12, ty + 0.28, () => sceneStrings("cellLabel")], { anchorX: "left", fontSize: 12, strokeColor: colors.cat[1], cssStyle: "font-weight:700" });
+
+      // Backtrace: from x, go backward along the velocity by one big Δt to the departure point.
+      const dt = 3.0;
+      const dx = tx - vx * dt, dy = ty - vy * dt;
+      board.create("arrow", [[tx, ty], [dx, dy]], { strokeColor: colors.cat[1], strokeWidth: 2.5, dash: 2, lastArrow: { type: 2, size: 6 }, highlight: false });
+      board.create("text", [(tx + dx) / 2 - 0.1, (ty + dy) / 2 + 0.2, () => sceneStrings("backLabel")], { anchorX: "left", fontSize: 12, strokeColor: colors.cat[1] });
+
+      // The departure / sample point.
+      board.create("point", [dx, dy], { size: 4, strokeColor: colors.cat[2], fillColor: colors.cat[2], fixed: true, name: "", highlight: false });
+      board.create("text", [dx + 0.15, dy - 0.35, () => sceneStrings("sampleLabel")], { anchorX: "left", fontSize: 12, strokeColor: colors.cat[2], cssStyle: "font-weight:700" });
+
+      // The four surrounding cell centres that get interpolated (bilinear).
+      const fx = Math.floor(dx) + 0.5, fy = Math.floor(dy) + 0.5;
+      for (const [ox, oy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+        board.create("point", [fx + ox - 0.5 + 0.5, fy + oy - 0.5 + 0.5], { size: 2, strokeColor: colors.cat[2], fillColor: colors.cat[2], fillOpacity: 0.5, fixed: true, name: "", highlight: false });
+      }
+
+      board.create("text", [0.1, -0.7, () => sceneStrings("arrowsLabel")], { anchorX: "left", fontSize: 12, strokeColor: colors.cat[0], cssStyle: "font-weight:700" });
+    },
+    { boundingbox: [-1.2, 5.2, 5.4, -1.4], keepAspect: true, title: () => agStr("title") },
+  );
+
+  registerQuiz("stableFluidsQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("eulerQ"), options: [
+      { text: () => sceneStrings("eulerRight"), correct: true },
+      { text: () => sceneStrings("eulerW1"), correct: false },
+      { text: () => sceneStrings("eulerW2"), correct: false },
+      { text: () => sceneStrings("eulerW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("lagQ"), options: [
+      { text: () => sceneStrings("lagRight"), correct: true },
+      { text: () => sceneStrings("lagW1"), correct: false },
+      { text: () => sceneStrings("lagW2"), correct: false },
+      { text: () => sceneStrings("lagW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("splitQ"), options: [
+      { text: () => sceneStrings("splitRight"), correct: true },
+      { text: () => sceneStrings("splitW1"), correct: false },
+      { text: () => sceneStrings("splitW2"), correct: false },
+      { text: () => sceneStrings("splitW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("semiQ"), options: [
+      { text: () => sceneStrings("semiRight"), correct: true },
+      { text: () => sceneStrings("semiW1"), correct: false },
+      { text: () => sceneStrings("semiW2"), correct: false },
+      { text: () => sceneStrings("semiW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("stableQ"), options: [
+      { text: () => sceneStrings("stableRight"), correct: true },
+      { text: () => sceneStrings("stableW1"), correct: false },
+      { text: () => sceneStrings("stableW2"), correct: false },
+      { text: () => sceneStrings("stableW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("projQ"), options: [
+      { text: () => sceneStrings("projRight"), correct: true },
+      { text: () => sceneStrings("projW1"), correct: false },
+      { text: () => sceneStrings("projW2"), correct: false },
+      { text: () => sceneStrings("projW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("poissonQ"), options: [
+      { text: () => sceneStrings("poissonRight"), correct: true },
+      { text: () => sceneStrings("poissonW1"), correct: false },
+      { text: () => sceneStrings("poissonW2"), correct: false },
+      { text: () => sceneStrings("poissonW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("hodgeQ"), options: [
+      { text: () => sceneStrings("hodgeRight"), correct: true },
+      { text: () => sceneStrings("hodgeW1"), correct: false },
+      { text: () => sceneStrings("hodgeW2"), correct: false },
+      { text: () => sceneStrings("hodgeW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("afterprojQ"), options: [
+      { text: () => sceneStrings("afterprojRight"), correct: true },
+      { text: () => sceneStrings("afterprojW1"), correct: false },
+      { text: () => sceneStrings("afterprojW2"), correct: false },
+      { text: () => sceneStrings("afterprojW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("divQ"), options: [
+      { text: () => sceneStrings("divRight"), correct: true },
+      { text: () => sceneStrings("divW1"), correct: false },
+      { text: () => sceneStrings("divW2"), correct: false },
+      { text: () => sceneStrings("divW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dissipQ"), options: [
+      { text: () => sceneStrings("dissipRight"), correct: true },
+      { text: () => sceneStrings("dissipW1"), correct: false },
+      { text: () => sceneStrings("dissipW2"), correct: false },
+      { text: () => sceneStrings("dissipW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fixQ"), options: [
+      { text: () => sceneStrings("fixRight"), correct: true },
+      { text: () => sceneStrings("fixW1"), correct: false },
+      { text: () => sceneStrings("fixW2"), correct: false },
+      { text: () => sceneStrings("fixW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("forceQ"), options: [
+      { text: () => sceneStrings("forceRight"), correct: true },
+      { text: () => sceneStrings("forceW1"), correct: false },
+      { text: () => sceneStrings("forceW2"), correct: false },
+      { text: () => sceneStrings("forceW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("termQ"), options: [
+      { text: () => sceneStrings("termRight"), correct: true },
+      { text: () => sceneStrings("termW1"), correct: false },
+      { text: () => sceneStrings("termW2"), correct: false },
+      { text: () => sceneStrings("termW3"), correct: false },
+    ] },
+  ]);
+</script>

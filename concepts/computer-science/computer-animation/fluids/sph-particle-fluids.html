@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>SPH Particle Fluids</primer-title>
+
+    <primer-card>
+      <p>
+        Splash a bucket of water across a floor and it does something no polygon mesh ever wants to do: it
+        <em>tears apart</em>, throws off droplets, sheets into a thin film, then puddles and merges again.
+        The topology changes every frame. One way to tame this chaos for a film shot is to stop thinking of
+        the water as a shape at all, and think of it as a <strong>crowd of tiny particles</strong> — each
+        carrying a little mass, each nudging its neighbours — that together <em>behave</em> like a fluid.
+      </p>
+      <p>
+        That is <strong>Smoothed Particle Hydrodynamics</strong> (SPH): the <strong>Lagrangian</strong>
+        (particle-following) way to simulate liquids, as opposed to the <strong>Eulerian</strong> (fixed-grid)
+        way of
+        <primer-ref soft to="computer-science/computer-animation/fluids/eulerian-fluids-stable-fluids">Stable Fluids</primer-ref>.
+        Born in 1977 for simulating <em>stars</em> in astrophysics, SPH turned out to be a wonderfully natural
+        fit for the splashy, merging, tearing liquids that grids find awkward. This page builds the SPH idea
+        from its one central trick — the kernel-weighted sum — up to a working pressure force, and is honest
+        about the two things it makes you pay for.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The one idea: estimate any field by a weighted sum over neighbours</h2>
+      <p>
+        In SPH the fluid <em>is</em> the particles. Each particle <primer-math>j</primer-math> carries a mass
+        <primer-math>m_j</primer-math>, a position <primer-math>\mathbf{x}_j</primer-math>, a velocity, and
+        whatever field values it samples (density, pressure, colour…). The magic is a recipe for reading off
+        the value of <em>any</em> field <primer-math>A</primer-math> at <em>any</em> point in space, even where
+        no particle sits, by a <strong>smoothed average</strong> of the nearby particles:
+      </p>
+      <primer-math display>A(\mathbf{x}) \;=\; \sum_{j} m_j \, \frac{A_j}{\rho_j} \, W(\mathbf{x} - \mathbf{x}_j,\, h).</primer-math>
+      <p>
+        Here <primer-math>\rho_j</primer-math> is particle <primer-math>j</primer-math>'s density and
+        <primer-math>W</primer-math> is the <strong>smoothing kernel</strong>: a smooth, bump-shaped weight
+        that is largest at the centre and falls to exactly zero beyond a <strong>support radius</strong>
+        <primer-math>h</primer-math>. So the sum is really only over the handful of particles within
+        <primer-math>h</primer-math> of <primer-math>\mathbf{x}</primer-math> — near neighbours count a lot,
+        far ones not at all, and everything past <primer-math>h</primer-math> contributes nothing. The factor
+        <primer-math>m_j/\rho_j</primer-math> is just the little volume that particle <primer-math>j</primer-math>
+        represents, so the formula is a volume-weighted, blurred sample of the field.
+      </p>
+      <primer-theorem name="The SPH approximation">
+        <ul>
+          <li>The fluid is discretised into <strong>particles</strong> carrying mass, not into grid cells.</li>
+          <li>Any field value at a point is a <strong>kernel-weighted sum</strong> over the neighbours within
+            the support radius <primer-math>h</primer-math>.</li>
+          <li>The kernel <primer-math>W(\mathbf{r}, h)</primer-math> is smooth, normalised
+            (<primer-math>\int W \, dV = 1</primer-math>), peaks at <primer-math>\mathbf{r}=0</primer-math>,
+            and is exactly zero for <primer-math>|\mathbf{r}| > h</primer-math>.</li>
+          <li>Because <primer-math>W</primer-math> is a known smooth function, <strong>derivatives are free</strong>:
+            <primer-math>\nabla A(\mathbf{x}) = \sum_j m_j \tfrac{A_j}{\rho_j}\, \nabla W(\mathbf{x}-\mathbf{x}_j, h)</primer-math>
+            — you differentiate the kernel, not the messy data.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        That last point is the quiet superpower. In a grid method you approximate gradients with finite
+        differences between cells; in SPH the gradient of a field is a sum against the <em>analytic</em>
+        gradient of a smooth kernel you chose. Pressure gradients, viscosity Laplacians — all become sums
+        over neighbours of <primer-math>\nabla W</primer-math> or <primer-math>\nabla^2 W</primer-math>.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "kernelRadius": {
+          "title": "A particle, its support radius h, and the neighbours inside it",
+          "center": "particle i",
+          "radius": "support radius h",
+          "inside": "neighbour (counts)",
+          "outside": "too far (ignored)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The neighbourhood picture</h2>
+      <p>
+        Everything in SPH is <em>local</em>. To evaluate any quantity at particle
+        <primer-math>i</primer-math> you look only inside a disc (a sphere in 3-D) of radius
+        <primer-math>h</primer-math> centred on it. The dark points below sit inside that radius and
+        contribute to <primer-math>i</primer-math>'s sums; the faint points are farther than
+        <primer-math>h</primer-math> away and the kernel zeroes them out entirely.
+      </p>
+      <primer-geometry
+        scene="kernelRadius"
+        caption="Particle i (centre) with its smoothing-kernel support radius h. Only the neighbours inside the circle contribute to i's density and forces; particles outside radius h are ignored."
+      ></primer-geometry>
+      <p>
+        Choosing <primer-math>h</primer-math> is a real trade-off: too small and a particle has too few
+        neighbours, so its sums are noisy and lumpy; too large and every particle sees hundreds of others and
+        the simulation crawls. A common target is a few dozen neighbours inside the radius. And because the
+        sums only ever touch nearby particles, the whole cost hinges on being able to find those neighbours
+        quickly — which is why SPH is glued to a <strong>neighbour search</strong> structure (more below).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>From particles to a force: density → pressure → motion</h2>
+      <p>
+        The loop that makes a puddle move has three beats each step. First, set
+        <primer-math>A = \rho</primer-math> in the master formula. The <primer-math>\rho_j</primer-math> and
+        the <primer-math>A_j = \rho_j</primer-math> cancel, leaving the beautifully simple
+        <strong>density estimate</strong>:
+      </p>
+      <primer-math display>\rho_i \;=\; \sum_{j} m_j \, W(\mathbf{x}_i - \mathbf{x}_j,\, h).</primer-math>
+      <p>
+        A particle is dense where its neighbours crowd in close (the kernel is large) and light where they
+        spread out. Second, turn that density into a <strong>pressure</strong> with a stiff
+        <strong>equation of state</strong> — the water pushes back when squeezed past its rest density
+        <primer-math>\rho_0</primer-math>:
+      </p>
+      <primer-math display>p_i \;=\; k\,(\rho_i - \rho_0),</primer-math>
+      <p>
+        where <primer-math>k</primer-math> is a stiffness constant. Third, drive the particles with the
+        <strong>pressure force</strong>, which pushes fluid from high pressure to low — the negative gradient
+        of pressure, evaluated as a kernel sum (a symmetrised form keeps the forces equal-and-opposite):
+      </p>
+      <primer-math display>\mathbf{f}^{\text{pressure}}_i \;=\; -\sum_{j} m_j \, \frac{p_i + p_j}{2\,\rho_j}\, \nabla W(\mathbf{x}_i - \mathbf{x}_j,\, h).</primer-math>
+      <p>
+        Add a <strong>viscosity</strong> force (a kernel Laplacian of velocity that smooths neighbouring
+        velocities together — this is the fluid's internal friction) and a <strong>surface-tension</strong>
+        force (which pulls the ragged boundary inward, letting droplets ball up), throw in gravity, and you
+        have the full acceleration
+        <primer-math>\mathbf{a}_i = (\mathbf{f}^{\text{pressure}}_i + \mathbf{f}^{\text{visc}}_i + \mathbf{f}^{\text{tens}}_i + \mathbf{f}^{\text{ext}}_i)/\rho_i</primer-math>.
+        Integrate that forward in time and the crowd of particles sloshes like water.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: one particle's density and pressure</h2>
+      <p>
+        Let's do the first two beats by hand. Take a particle <primer-math>i</primer-math> with exactly two
+        neighbours inside its radius, and use the classic <strong>poly6</strong> density kernel in 2-D-ish
+        constant form. To keep the arithmetic clean we'll use a kernel whose value at distance
+        <primer-math>r</primer-math> is
+      </p>
+      <primer-math display>W(r, h) \;=\; \frac{4}{\pi h^{2}}\left(1 - \frac{r^{2}}{h^{2}}\right)^{3} \quad \text{for } r \le h, \; 0 \text{ otherwise.}</primer-math>
+      <p>
+        Say every particle has mass <primer-math>m = 1</primer-math>, the support radius is
+        <primer-math>h = 2</primer-math>, and <primer-math>i</primer-math>'s two neighbours sit at distances
+        <primer-math>r_1 = 1</primer-math> and <primer-math>r_2 = 1.5</primer-math>. Include the particle's own
+        contribution at <primer-math>r_0 = 0</primer-math>. The kernel prefactor is
+        <primer-math>4/(\pi \cdot 4) = 1/\pi \approx 0.318</primer-math>.
+      </p>
+      <p>
+        <strong>Self term</strong> (<primer-math>r_0=0</primer-math>):
+        <primer-math>(1 - 0)^3 = 1</primer-math>, so <primer-math>W_0 = 0.318</primer-math>.
+        <br/>
+        <strong>Neighbour 1</strong> (<primer-math>r_1=1</primer-math>):
+        <primer-math>1 - 1/4 = 0.75</primer-math>, cubed is <primer-math>0.4219</primer-math>, so
+        <primer-math>W_1 = 0.318 \times 0.4219 \approx 0.1342</primer-math>.
+        <br/>
+        <strong>Neighbour 2</strong> (<primer-math>r_2=1.5</primer-math>):
+        <primer-math>1 - 2.25/4 = 0.4375</primer-math>, cubed is <primer-math>0.0837</primer-math>, so
+        <primer-math>W_2 = 0.318 \times 0.0837 \approx 0.0266</primer-math>.
+      </p>
+      <p>
+        Sum with the masses for the <strong>density</strong>:
+      </p>
+      <primer-math display>\rho_i \;=\; 1\cdot 0.318 + 1\cdot 0.1342 + 1\cdot 0.0266 \;\approx\; 0.479.</primer-math>
+      <p>
+        Now the <strong>pressure</strong>. Suppose the rest density is <primer-math>\rho_0 = 0.4</primer-math>
+        and the stiffness is <primer-math>k = 100</primer-math>. Then
+      </p>
+      <primer-math display>p_i \;=\; k\,(\rho_i - \rho_0) \;=\; 100\,(0.479 - 0.4) \;=\; 7.9.</primer-math>
+      <p>
+        Because <primer-math>i</primer-math> is a touch <em>denser</em> than rest, its pressure is positive,
+        so the pressure force will push its neighbours away — the fluid resisting compression, exactly as it
+        should. If those neighbours had been farther out, <primer-math>\rho_i</primer-math> would drop below
+        <primer-math>\rho_0</primer-math>, the pressure would go negative, and the force would pull inward
+        instead.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Finding the neighbours: a spatial grid</h2>
+      <p>
+        Every sum is over particles within <primer-math>h</primer-math>. Checking all
+        <primer-math>N</primer-math> particles against all others is <primer-math>O(N^2)</primer-math> — hopeless
+        for the hundreds of thousands of particles a splash needs. The standard fix is a
+        <strong>uniform spatial grid</strong> (or spatial hash) with cell size <primer-math>h</primer-math>:
+        bin every particle into its cell, and to find a particle's neighbours you only scan its own cell and
+        the eight (in 3-D, twenty-six) touching cells. Every neighbour within <primer-math>h</primer-math> is
+        guaranteed to live in that <primer-math>3\times3\times3</primer-math> block, so the search drops to
+        roughly <primer-math>O(N)</primer-math>. Rebuilding this grid each step is often the single biggest
+        chunk of an SPH frame's time budget.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why does SPH handle a shattering splash so effortlessly?">
+      <p>
+        Because there is no shape to keep consistent. In a mesh-based or grid-based method, water tearing into
+        droplets is a <em>topology change</em> — the surface has to split, and tracking that split is fiddly
+        and error-prone. In SPH there is nothing to split: a droplet flying off is just a few particles that
+        happened to drift beyond kernel range of the rest, so they stop feeling the main body's pressure and
+        sail away on their own. Two streams merging is just their particles coming within
+        <primer-math>h</primer-math> of each other and starting to share forces. Splitting and merging aren't
+        special cases you code — they fall out of the neighbourhood sums <em>for free</em>. That is exactly why
+        SPH is the go-to for the wild, foamy, topology-changing water that grids dread.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Basic SPH is stiff, and the surface is invisible">
+      <p>
+        Two traps bite everyone who writes their first SPH solver.
+      </p>
+      <p>
+        <strong>1. Weakly-compressible SPH needs a stiff pressure → tiny timesteps.</strong> The simple
+        equation of state <primer-math>p = k(\rho - \rho_0)</primer-math> only fights compression if
+        <primer-math>k</primer-math> is <em>large</em> — otherwise the "water" squashes like a sponge and looks
+        springy and wrong. But a stiff pressure means huge, sudden restoring forces, and an explicit
+        integrator can only follow those with a <strong>very small</strong> timestep. Push the step too far and
+        the fluid jitters, boils, and then <em>explodes</em> — particles flung to infinity. That is the
+        weakly-compressible (WCSPH) bargain: stiff enough to look incompressible, and therefore slow. This is
+        why the field invented <strong>PCISPH</strong>, <strong>IISPH</strong> and <strong>DFSPH</strong>,
+        which enforce (near-)incompressibility with predictor–corrector or implicit pressure solves and so
+        allow far larger, stable steps than raw WCSPH.
+      </p>
+      <p>
+        <strong>2. There is no explicit surface.</strong> You have a cloud of points, not a water boundary.
+        Render the particles raw and you get a lumpy field of blobs, not a smooth liquid. To get a renderable
+        surface you must <strong>reconstruct</strong> one from the particles each frame — typically build a
+        density (or signed-distance) field on a grid and run <primer-ref soft to="computer-science/computer-animation/fluids/level-sets-for-liquids">marching cubes</primer-ref>
+        (or a screen-space filter) to extract the isosurface. Forgetting this step is why a first SPH render
+        looks like a swarm of beads instead of water.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Contrast: particles (Lagrangian) vs grid (Eulerian)</h2>
+      <p>
+        SPH's opposite number is the grid approach of
+        <primer-ref soft to="computer-science/computer-animation/fluids/eulerian-fluids-stable-fluids">Stable Fluids</primer-ref>,
+        where the fluid quantities live on a <em>fixed</em> mesh of cells and the fluid "flows past" the grid.
+        Each style is strong exactly where the other is weak.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Question</th><th>SPH (Lagrangian, particles)</th><th>Grid (Eulerian, cells)</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Where does data live?</td><td>on moving particles</td><td>at fixed grid points</td></tr>
+            <tr><td>Mass conservation</td><td>exact — particles never vanish</td><td>needs care at cell boundaries</td></tr>
+            <tr><td>Splash / droplets / merging</td><td>free — no topology to track</td><td>hard — must track the surface</td></tr>
+            <tr><td>Incompressibility</td><td>awkward — stiff EOS or PCISPH/IISPH/DFSPH</td><td>natural — a global pressure Poisson solve</td></tr>
+            <tr><td>Empty space cost</td><td>free — no particles, no work</td><td>you still store empty cells</td></tr>
+            <tr><td>Renderable surface</td><td>must be reconstructed from points</td><td>often a level set already present</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The rough rule of thumb: reach for <strong>particles</strong> when the shot is splashy, thin, and
+        topology-changing (a crashing wave, a thrown bucket, spray), and for a <strong>grid</strong> when you
+        want smooth, strongly incompressible bulk motion (a calm pool, smoke, a filling tank). Modern
+        production solvers often blend the two — FLIP/PIC methods carry particles <em>and</em> a grid, taking
+        incompressibility from the grid and detail from the particles.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "sphQuiz@1": {
+          "intro": "SPH: fluid = particles carrying mass; any field = kernel-weighted sum over neighbours within radius h. Density → pressure (EOS) → force. Fresh numbers each time."
+        }
+      }
+    </script>
+
+    <primer-quiz name="sphQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  { "prerequisites": ["computer-science/computer-animation/computer-animation"] }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Kernel-radius figure: particle i at centre, a support circle of radius h, neighbours inside
+          (counted) and outside (ignored). Static base content so it renders fully on load. ---- */
+  const krStr = makeStrings("kernelRadius");
+  registerGeometryScene(
+    "kernelRadius",
+    ({ board, colors, sceneStrings }) => {
+      const cx = 0, cy = 0, h = 3;
+
+      // The support circle of radius h.
+      board.create("circle", [[cx, cy], h], {
+        strokeColor: colors.line, strokeWidth: 2, dash: 2, fillOpacity: 0, fixed: true, highlight: false,
+      });
+
+      // Central particle i.
+      board.create("point", [cx, cy], {
+        size: 5, strokeColor: colors.ink, fillColor: colors.ink, fixed: true, name: "", highlight: false,
+      });
+      board.create("text", [cx + 0.25, cy + 0.45, () => sceneStrings("center")], {
+        anchorX: "left", fontSize: 13, strokeColor: colors.ink, cssStyle: "font-weight:700",
+      });
+
+      // Radius marker: a segment from centre to the rim, labelled h.
+      board.create("segment", [[cx, cy], [cx + h, cy]], {
+        strokeColor: colors.line, strokeWidth: 1, strokeOpacity: 0.7, fixed: true, highlight: false,
+      });
+      board.create("text", [cx + h / 2 - 0.2, cy + 0.35, () => sceneStrings("radius")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.line,
+      });
+
+      // Neighbours INSIDE the radius (they count) — cat[0].
+      const inside = [[-1.4, 0.9], [1.1, -1.3], [0.6, 1.8], [-1.9, -0.8], [1.9, 0.7]];
+      inside.forEach(([x, y]) => {
+        board.create("point", [x, y], {
+          size: 4, strokeColor: colors.cat[0], fillColor: colors.cat[0], fixed: true, name: "", highlight: false,
+        });
+      });
+      board.create("text", [-3.4, 3.4, () => sceneStrings("inside")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.cat[0], cssStyle: "font-weight:700",
+      });
+
+      // Neighbours OUTSIDE the radius (ignored) — faint cat[1].
+      const outside = [[3.6, 2.1], [-3.2, 2.4], [2.8, -2.9], [-2.6, -3.1], [3.9, -1.2]];
+      outside.forEach(([x, y]) => {
+        board.create("point", [x, y], {
+          size: 4, strokeColor: colors.cat[1], fillColor: colors.cat[1], fillOpacity: 0.4,
+          strokeOpacity: 0.5, fixed: true, name: "", highlight: false,
+        });
+      });
+      board.create("text", [1.4, -3.6, () => sceneStrings("outside")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.cat[1],
+      });
+    },
+    { boundingbox: [-4.5, 4, 4.5, -4], keepAspect: true, title: () => krStr("title") },
+  );
+
+  /* ---- Quiz: variable-driven density/pressure computations + conceptual MC. ---- */
+  const poly6 = (r, h) => (r <= h ? (4 / (Math.PI * h * h)) * Math.pow(1 - (r * r) / (h * h), 3) : 0);
+
+  registerQuiz("sphQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+
+    { prompt: "In SPH, the fluid is represented as…", options: [
+      { text: "particles, each carrying mass", correct: true },
+      { text: "a fixed grid of cells the fluid flows past", correct: false },
+      { text: "a single triangle mesh surface", correct: false },
+      { text: "a stack of 2-D image layers", correct: false },
+    ] },
+    { prompt: "To estimate a field quantity at a point, SPH uses…", options: [
+      { text: "a kernel-weighted sum over nearby particles", correct: true },
+      { text: "a finite difference between grid cells", correct: false },
+      { text: "a global matrix inversion over all particles", correct: false },
+      { text: "the value of the single closest particle only", correct: false },
+    ] },
+    { prompt: "The smoothing kernel $W(\\mathbf{r}, h)$ is zero when…", options: [
+      { text: "the distance $|\\mathbf{r}|$ exceeds the support radius $h$", correct: true },
+      { text: "the distance is exactly zero", correct: false },
+      { text: "the two particles have equal mass", correct: false },
+      { text: "the density is above rest density", correct: false },
+    ] },
+    { prompt: "SPH density is computed as $\\rho_i = \\sum_j m_j W(\\ldots)$. This means a particle is densest when its neighbours are…", options: [
+      { text: "crowded close (kernel large)", correct: true },
+      { text: "spread far apart", correct: false },
+      { text: "all outside radius $h$", correct: false },
+      { text: "moving fastest", correct: false },
+    ] },
+    { prompt: "The equation of state $p = k(\\rho - \\rho_0)$ turns…", options: [
+      { text: "density into pressure", correct: true },
+      { text: "pressure into velocity", correct: false },
+      { text: "position into mass", correct: false },
+      { text: "the kernel into its gradient", correct: false },
+    ] },
+    { prompt: "The pressure force on a particle points…", options: [
+      { text: "from high pressure toward low pressure (down the pressure gradient)", correct: true },
+      { text: "always straight down (gravity)", correct: false },
+      { text: "toward the single densest neighbour", correct: false },
+      { text: "along the particle's own velocity", correct: false },
+    ] },
+    { prompt: "Weakly-compressible SPH (WCSPH) needs a STIFF pressure term. The main downside is…", options: [
+      { text: "it forces a very small timestep or the fluid jitters and explodes", correct: true },
+      { text: "it makes neighbour search impossible", correct: false },
+      { text: "it removes the need for a kernel", correct: false },
+      { text: "it conserves too much mass", correct: false },
+    ] },
+    { prompt: "PCISPH, IISPH and DFSPH exist mainly to…", options: [
+      { text: "enforce incompressibility better and allow larger stable steps", correct: true },
+      { text: "render the fluid surface", correct: false },
+      { text: "replace particles with a grid", correct: false },
+      { text: "speed up the neighbour search", correct: false },
+    ] },
+    { prompt: "Splashes, droplets and merging streams come 'for free' in SPH because…", options: [
+      { text: "there is no explicit surface topology to track — particles just drift in and out of kernel range", correct: true },
+      { text: "the grid automatically refines near the surface", correct: false },
+      { text: "particles are never allowed to separate", correct: false },
+      { text: "the kernel has infinite support", correct: false },
+    ] },
+    { prompt: "To render an SPH fluid you must first…", options: [
+      { text: "reconstruct a surface (e.g. marching cubes on a density field) — raw particles are just blobs", correct: true },
+      { text: "delete all interior particles", correct: false },
+      { text: "convert the particles to a fixed grid and stop", correct: false },
+      { text: "nothing — particles render as smooth water directly", correct: false },
+    ] },
+    { prompt: "SPH keeps neighbour search near $O(N)$ instead of $O(N^2)$ by using…", options: [
+      { text: "a uniform spatial grid / hash with cell size $h$", correct: true },
+      { text: "sorting particles by mass", correct: false },
+      { text: "a single global bounding box test", correct: false },
+      { text: "rendering to the screen first", correct: false },
+    ] },
+    { prompt: "Compared with a grid (Eulerian) fluid, SPH stores data…", options: [
+      { text: "on moving particles rather than fixed cells", correct: true },
+      { text: "on fixed cells rather than particles", correct: false },
+      { text: "only on the surface triangles", correct: false },
+      { text: "in a single global pressure value", correct: false },
+    ] },
+    { prompt: "Which task is HARDER for SPH than for a grid method?", options: [
+      { text: "enforcing strict incompressibility", correct: true },
+      { text: "conserving mass exactly", correct: false },
+      { text: "handling flying droplets", correct: false },
+      { text: "skipping work in empty space", correct: false },
+    ] },
+
+    // Variable-driven density computation with the worked-example kernel (m=1, h=2, one neighbour + self).
+    { prompt: "A particle has mass $1$, radius $h=2$, and ONE neighbour (mass $1$) at distance $r={r}/10$. Using $W(r,h)=\\frac{4}{\\pi h^2}(1-r^2/h^2)^3$ and including the self term at $r=0$, what is the density $\\rho$ to 3 decimals?",
+      variables: "r=[5:18]",
+      answer: (v) => { const h = 2, r = v.r / 10; return poly6(0, h) + poly6(r, h); } },
+
+    // Variable-driven pressure from the equation of state.
+    { prompt: "A particle's density is $\\rho={d}/100$ and the rest density is $\\rho_0=0.5$. With stiffness $k={k}$, the equation-of-state pressure $p=k(\\rho-\\rho_0)$ equals?",
+      variables: "d=[55:80] k=[50:150]",
+      answer: (v) => v.k * (v.d / 100 - 0.5) },
+  ]);
+</script>

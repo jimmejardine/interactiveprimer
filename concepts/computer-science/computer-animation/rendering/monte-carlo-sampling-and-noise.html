@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Monte Carlo Sampling and Noise</primer-title>
+
+    <primer-card>
+      <p>
+        Fire up a path tracer, let it throw a single ray-bundle at each pixel, and the first frame looks like
+        a photograph buried under television static — a <strong>grainy</strong>, speckled mess. Let it keep
+        going and the grain slowly melts away until the image is clean. What you are watching is
+        <strong>Monte Carlo integration</strong> at work: the renderer is <em>estimating</em> the colour of
+        every pixel by averaging random light paths, and the graininess is the estimator's error, called
+        <strong>variance</strong>, quietly shrinking.
+      </p>
+      <p>
+        This page explains why physically-based rendering is noisy in the first place, exactly how fast that
+        noise fades (spoiler: painfully — as <primer-math>1/\sqrt{N}</primer-math>), and the clever
+        <strong>variance-reduction</strong> tricks — importance sampling, stratification, quasi-Monte Carlo,
+        and multiple importance sampling — that are what actually make a path tracer usable, far more than
+        just firing more rays. It builds directly on the
+        <primer-ref soft to="computer-science/computer-animation/rendering/global-illumination-and-path-tracing">rendering equation and path tracing</primer-ref>,
+        and leads into
+        <primer-ref soft to="computer-science/computer-animation/rendering/temporal-coherence-and-denoising">denoising</primer-ref>,
+        which cleans up the noise that no amount of sampling can economically remove.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The one idea: an integral is an average</h2>
+      <p>
+        The colour arriving at a pixel is an <strong>integral</strong> — a sum over every direction light
+        could have come from, weighted by how the surface reflects it. There is no formula for that integral
+        in a real scene; it depends on the whole world of geometry and lights. Monte Carlo integration turns
+        the integral into something we <em>can</em> compute: a <strong>random average</strong>.
+      </p>
+      <primer-theorem name="Monte Carlo estimator">
+        <ul>
+          <li>To estimate <primer-math>I = \int_\Omega f(x)\,dx</primer-math>, draw samples
+            <primer-math>X_1,\dots,X_N</primer-math> independently from a probability density
+            <primer-math>p(x)</primer-math>, and average the values <primer-math>f/p</primer-math>:
+            <primer-math display>\hat I_N = \frac{1}{N}\sum_{i=1}^{N}\frac{f(X_i)}{p(X_i)}.</primer-math></li>
+          <li>The estimator is <strong>unbiased</strong>: its expected value is exactly the true integral,
+            <primer-math>\mathbb{E}[\hat I_N] = I</primer-math>, for <em>any</em> density
+            <primer-math>p</primer-math> that is nonzero wherever <primer-math>f</primer-math> is. It is right
+            <em>on average</em>, even from one sample.</li>
+          <li>Dividing by <primer-math>p(X_i)</primer-math> is the crucial correction: samples drawn from
+            regions we visit often (large <primer-math>p</primer-math>) are down-weighted, so no region gets
+            double-counted.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Applied to rendering, each random <strong>light path</strong> traced from the camera into the scene is
+        one sample <primer-math>X_i</primer-math>; the light it carries back, divided by the probability of
+        having chosen that path, is one term <primer-math>f(X_i)/p(X_i)</primer-math>; and the
+        <strong>pixel colour is the average</strong> of those terms. One sample is a wild guess. A thousand
+        samples average out into a picture.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why it is noisy: variance and the <primer-math>1/\sqrt{N}</primer-math> wall</h2>
+      <p>
+        Each single-sample estimate <primer-math>f(X_i)/p(X_i)</primer-math> scatters around the true answer.
+        The spread of that scatter is the <strong>variance</strong> <primer-math>\sigma^2</primer-math>.
+        Averaging <primer-math>N</primer-math> independent samples shrinks the variance of the average by a
+        factor of <primer-math>N</primer-math>:
+      </p>
+      <primer-math display>\operatorname{Var}[\hat I_N] = \frac{\sigma^2}{N}, \qquad \text{so the noise (standard error)} \quad \sqrt{\operatorname{Var}[\hat I_N]} = \frac{\sigma}{\sqrt{N}}.</primer-math>
+      <p>
+        The <em>visible</em> grain in the image is that standard error, and it falls only as
+        <primer-math>1/\sqrt{N}</primer-math>. This is the central, brutal fact of path tracing: to
+        <strong>halve</strong> the noise you must take <strong>four times</strong> as many samples; to make
+        the image ten times cleaner costs a hundred times the rays. Brute force runs into a wall of
+        diminishing returns almost immediately — the last bit of grain is fantastically expensive to remove by
+        counting alone.
+      </p>
+      <primer-vignette title="Why not just use a regular grid instead of random samples?">
+        <p>
+          A deterministic grid (quadrature) beats Monte Carlo handily in one or two dimensions. But a single
+          light path bounces many times, and each bounce adds two dimensions to the integral — a path of
+          <primer-math>b</primer-math> bounces lives in a space of dimension <primer-math>\sim 2b</primer-math>.
+          Grid methods suffer the <strong>curse of dimensionality</strong>: a grid with
+          <primer-math>k</primer-math> points per axis needs <primer-math>k^{d}</primer-math> points in
+          <primer-math>d</primer-math> dimensions — hopeless past a handful. Monte Carlo's
+          <primer-math>1/\sqrt{N}</primer-math> error, remarkably, <em>does not depend on the dimension</em> at
+          all. Slow but dimension-proof beats fast but dimension-cursed once the integral is high-dimensional,
+          which every real light-transport integral is.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "noiseDecay": {
+          "title": "Monte Carlo noise ∝ 1/√N — drag N to watch the wall",
+          "nparam": "Samples N"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Seeing the wall: error versus sample count</h2>
+      <p>
+        Here is the whole tragedy in one plot. The curve is the Monte Carlo error
+        <primer-math>\sigma/\sqrt{N}</primer-math> (with <primer-math>\sigma=1</primer-math>) as a function of
+        the number of samples <primer-math>N</primer-math>. Drag <primer-math>N</primer-math> and watch the
+        marker: early on, each extra sample buys a big drop in noise; but the curve flattens fast, and past a
+        few hundred samples you are pouring rays in for almost no visible gain. The faint straight line is a
+        hypothetical <primer-math>1/N</primer-math> decay — what a good
+        <strong>quasi-Monte Carlo</strong> sequence can approach, and why it is worth the trouble.
+      </p>
+      <primer-chart scene="noiseDecay"></primer-chart>
+      <p>
+        The gap between the two curves is exactly the prize that variance reduction chases. You cannot change
+        the <primer-math>1/\sqrt{N}</primer-math> <em>law</em> for plain random sampling, but you can shrink
+        the constant <primer-math>\sigma</primer-math> in front of it — often by orders of magnitude — and you
+        can switch to samples that decorrelate the error toward <primer-math>1/N</primer-math>. That is what
+        the rest of the page is about.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: shrinking <primer-math>\sigma</primer-math> with importance sampling</h2>
+      <p>
+        Forget rendering for a moment and estimate a concrete integral,
+        <primer-math display>I = \int_0^1 2x\,dx = 1.</primer-math>
+        We will estimate it two ways and compare the variance.
+      </p>
+      <p>
+        <strong>Uniform sampling.</strong> Draw <primer-math>X</primer-math> uniformly on
+        <primer-math>[0,1]</primer-math>, so <primer-math>p(x)=1</primer-math>. Each sample contributes
+        <primer-math>f(X)/p(X) = 2X</primer-math>. The mean is
+        <primer-math>\int_0^1 2x\,dx = 1</primer-math> (unbiased, good), and the variance of a single sample is
+        <primer-math display>\sigma^2_{\text{unif}} = \int_0^1 (2x)^2 dx - 1^2 = \tfrac{4}{3} - 1 = \tfrac{1}{3} \approx 0.333.</primer-math>
+        The samples scatter a lot, because <primer-math>2x</primer-math> is <primer-math>0</primer-math> at the
+        left and <primer-math>2</primer-math> at the right — most of the "value" hides near
+        <primer-math>x=1</primer-math>, where uniform sampling rarely looks.
+      </p>
+      <p>
+        <strong>Importance sampling.</strong> Now put the density <em>where the integrand is large</em>:
+        choose <primer-math>p(x) = 2x</primer-math> (a valid density — it integrates to
+        <primer-math>1</primer-math> on <primer-math>[0,1]</primer-math>). Then every sample contributes
+        <primer-math display>\frac{f(X)}{p(X)} = \frac{2X}{2X} = 1</primer-math>
+        — a constant! Every single sample returns exactly the right answer, so the variance is
+        <primer-math>\sigma^2_{\text{IS}} = 0</primer-math>. The estimator is <strong>perfect</strong> from one
+        sample.
+      </p>
+      <primer-theorem name="Zero-variance principle">
+        When the sampling density is proportional to the integrand,
+        <primer-math>p(x) \propto f(x)</primer-math>, the ratio <primer-math>f/p</primer-math> is constant and
+        the variance collapses to <strong>zero</strong>. We can never quite reach this ideal (if we knew
+        <primer-math>f</primer-math> exactly we would not need to integrate it), but the closer
+        <primer-math>p</primer-math> matches the <em>shape</em> of <primer-math>f</primer-math>, the lower the
+        variance. <strong>Importance sampling is the art of guessing that shape.</strong>
+      </primer-theorem>
+      <p>
+        In a renderer we do not know <primer-math>f</primer-math> — it is the full light transport — but we
+        know its <em>factors</em>: the BRDF has a bright specular lobe, and the light sources are where the
+        energy comes from. So we sample directions <strong>towards the light</strong> and
+        <strong>along the BRDF lobe</strong> instead of uniformly over the hemisphere. Each path then carries
+        more weight and less scatter, and the same picture emerges in a fraction of the samples.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The variance-reduction toolbox</h2>
+      <p>
+        Practical path tracers stack several tricks, each attacking the noise from a different angle.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Technique</th><th>Idea</th><th>What it buys</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Importance sampling</strong></td>
+              <td>Draw samples where the integrand is large — sample the BRDF lobe and the light sources, not
+                the whole hemisphere uniformly.</td>
+              <td>Shrinks <primer-math>\sigma</primer-math> dramatically; the closer <primer-math>p</primer-math>
+                matches <primer-math>f</primer-math>, the lower the variance.</td>
+            </tr>
+            <tr>
+              <td><strong>Stratification</strong> (jittered sampling)</td>
+              <td>Split the domain into cells and put one jittered sample in each, so samples cannot clump or
+                leave gaps.</td>
+              <td>Removes the clumping component of variance; cheap and always helpful.</td>
+            </tr>
+            <tr>
+              <td><strong>Quasi-Monte Carlo</strong></td>
+              <td>Replace random points with a <strong>low-discrepancy sequence</strong> (Halton, Sobol) that
+                fills space more evenly than randomness ever does.</td>
+              <td>Error approaches <primer-math>\sim 1/N</primer-math> instead of
+                <primer-math>1/\sqrt{N}</primer-math> — a different, faster law.</td>
+            </tr>
+            <tr>
+              <td><strong>Multiple importance sampling</strong> (MIS)</td>
+              <td>Combine two samplers (BRDF sampling and light sampling) with a clever weight so whichever one
+                is better <em>for this path</em> dominates.</td>
+              <td>Robust across shiny <em>and</em> matte surfaces, small <em>and</em> large lights — no single
+                sampler wins everywhere.</td>
+            </tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <primer-vignette title="Why does a shiny floor under a big light need BOTH samplers?">
+        <p>
+          Consider a glossy floor lit by a large area light — the classic
+          <primer-ref soft to="physics/computational-physics/monte-carlo-methods">Monte Carlo</primer-ref>
+          torture test. If you only <strong>sample the light</strong>, a near-mirror floor is a disaster: the
+          light directions almost never line up with the tight specular lobe, so nearly every sample is
+          wasted. If you only <strong>sample the BRDF</strong>, a rough floor under a tiny light is a
+          disaster: the fuzzy lobe rarely hits the small bright source. <strong>MIS</strong>, invented by Eric
+          Veach in his 1997 thesis, weights the two estimators so that for each surface roughness the
+          <em>appropriate</em> sampler carries the estimate — the shiny highlight comes out clean and the soft
+          diffuse shading comes out clean, in the <em>same</em> render. It is the single technique that made
+          general path tracing production-viable.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why some scenes stay stubbornly noisy</h2>
+      <p>
+        Even with the whole toolbox, a few light-transport effects fight back. <strong>Caustics</strong> —
+        the bright ripples where light focuses through glass or off water — arrive along rare, tightly-focused
+        paths that unidirectional sampling almost never finds, so they stay speckled for a very long time.
+        <strong>Small, intense lights</strong> (a bare bulb, the sun through a keyhole) concentrate enormous
+        energy into a tiny solid angle: miss it and you get black, hit it and you get a blinding
+        <strong>firefly</strong> — a single pixel spiking far above its neighbours because one sample had a
+        huge <primer-math>f/p</primer-math>. High variance <em>is</em> firefly pixels.
+      </p>
+      <p>
+        These are exactly the cases where throwing more samples is uneconomical, and where the next lesson
+        picks up: rather than integrate the noise away, we
+        <primer-ref soft to="computer-science/computer-animation/rendering/temporal-coherence-and-denoising">denoise</primer-ref>
+        — use a smart filter (often a neural one) to reconstruct a clean image from a noisy, low-sample render,
+        trading a little bias for a huge saving in rays.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! More rays is the wrong lever">
+      <p>
+        The most expensive mistake in rendering is trying to beat noise with sample count alone. Because noise
+        falls only as <primer-math>1/\sqrt{N}</primer-math>, <strong>quadrupling</strong> your render time
+        merely <strong>halves</strong> the grain — a terrible trade. What makes path tracing practical is not
+        more rays but <strong>better rays</strong>: <strong>importance sampling</strong> (matching
+        <primer-math>p</primer-math> to the integrand) and <strong>MIS</strong> can cut the variance constant
+        by orders of magnitude for free, which is worth thousands of extra samples. And beware the opposite
+        temptation: <strong>biased</strong> tricks (clamping fireflies, capping path length, some denoisers)
+        <em>do</em> kill noise, but they trade it for <strong>systematic error</strong> — the image converges
+        to the <em>wrong</em> answer, not just a noisy one. Unbiased estimators are noisy but honest; biased
+        ones are smooth but subtly lie. Know which you are using.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "monteCarloRenderQuiz@1": {
+          "intro": "Monte Carlo integration estimates ∫f by averaging f(X)/p(X); noise falls as 1/√N; importance sampling and MIS beat brute force. Fresh questions each time.",
+          "estQ": "The Monte Carlo estimator of ∫f is the average of which quantity over random samples X?",
+          "estRight": "$f(X)/p(X)$ — the integrand divided by the sampling density",
+          "estW1": "$f(X)\\cdot p(X)$",
+          "estW2": "$f(X)$ alone",
+          "estW3": "$p(X)/f(X)$",
+          "unbiasedQ": "'The estimator is unbiased' means…",
+          "unbiasedRight": "its expected value equals the true integral, for any valid density p",
+          "unbiasedW1": "it always gives the exact answer from one sample",
+          "unbiasedW2": "it never has any variance",
+          "unbiasedW3": "it only works for uniform p",
+          "rateQ": "As the sample count N grows, the Monte Carlo noise (standard error) falls as…",
+          "rateRight": "$1/\\sqrt{N}$",
+          "rateW1": "$1/N^2$",
+          "rateW2": "$1/N!$",
+          "rateW3": "$\\log N$",
+          "halveQ": "To halve the noise of a plain Monte Carlo render, you must multiply the sample count by…",
+          "halveRight": "4×",
+          "halveW1": "2×",
+          "halveW2": "1.5×",
+          "halveW3": "10×",
+          "sampleQ": "In path tracing, one Monte Carlo sample corresponds to…",
+          "sampleRight": "one traced light path; the pixel is the average of many paths",
+          "sampleW1": "one pixel of the final image",
+          "sampleW2": "one triangle of the scene",
+          "sampleW3": "one frame of the animation",
+          "isQ": "Importance sampling reduces variance by…",
+          "isRight": "drawing more samples where the integrand is large (matching p to f)",
+          "isW1": "spreading samples perfectly uniformly",
+          "isW2": "using fewer bounces per path",
+          "isW3": "lowering the image resolution",
+          "zeroQ": "Variance drops to exactly zero (in the ideal case) when the density p is chosen so that…",
+          "zeroRight": "$p(x) \\propto f(x)$, making $f/p$ constant",
+          "zeroW1": "p is uniform",
+          "zeroW2": "p is zero everywhere",
+          "zeroW3": "p is the second derivative of f",
+          "stratQ": "Stratified (jittered) sampling reduces noise by…",
+          "stratRight": "spreading samples evenly so they cannot clump or leave gaps",
+          "stratW1": "making all samples land at the same point",
+          "stratW2": "increasing the variance deliberately",
+          "stratW3": "removing the division by p",
+          "qmcQ": "Low-discrepancy (quasi-Monte Carlo) sequences like Halton and Sobol give error that approaches…",
+          "qmcRight": "$\\sim 1/N$ — faster than random sampling's $1/\\sqrt{N}$",
+          "qmcW1": "$1/\\sqrt{N}$ exactly, same as random",
+          "qmcW2": "$1/\\log N$, slower than random",
+          "qmcW3": "zero for any N",
+          "misQ": "Multiple importance sampling (MIS), due to Veach, works by…",
+          "misRight": "combining BRDF and light sampling with weights so the better sampler dominates",
+          "misW1": "always sampling only the light source",
+          "misW2": "always sampling only the BRDF",
+          "misW3": "disabling importance sampling entirely",
+          "fireflyQ": "A 'firefly' — a single pixel far brighter than its neighbours — is a symptom of…",
+          "fireflyW1": "a bug in the geometry",
+          "fireflyRight": "high variance: one sample with a very large $f/p$",
+          "fireflyW2": "too many bounces being clamped",
+          "fireflyW3": "the denoiser working correctly",
+          "stubbornQ": "Which effect tends to stay noisy longest in a plain path tracer?",
+          "stubbornRight": "caustics and tiny bright lights — rare, high-energy paths",
+          "stubbornW1": "flat matte walls in even lighting",
+          "stubbornW2": "a clear blue sky background",
+          "stubbornW3": "a solid grey floor",
+          "biasedQ": "Biased tricks (firefly clamping, path-length caps) reduce noise but…",
+          "biasedRight": "introduce systematic error — the image converges to the wrong answer",
+          "biasedW1": "make the estimator perfectly unbiased",
+          "biasedW2": "change the 1/√N law to 1/N automatically",
+          "biasedW3": "have no effect on the result at all",
+          "estCompQ": "Estimate $I=\\int_0^1 2x\\,dx$ with ONE uniform sample at $X={a}/10$: give $f(X)/p(X)=2X$ (with $p=1$).",
+          "varCompQ": "For uniform sampling of $\\int_0^1 2x\\,dx$, single-sample variance is $\\tfrac43-1$. Enter it to 3 decimals."
+        }
+      }
+    </script>
+
+    <primer-quiz name="monteCarloRenderQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/computer-animation/computer-animation"]
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Noise-decay chart: sigma/sqrt(N) vs N, with a hypothetical 1/N reference, and an N slider
+          driving a marker on the sqrt curve. x-axis is N (1..256). ---- */
+  const nd = makeStrings("noiseDecay");
+  registerCharts(
+    [
+      {
+        name: "noiseDecay",
+        f: [
+          (n) => (n >= 1 ? 1 / Math.sqrt(n) : 1),                          // Monte Carlo error 1/sqrt(N)
+          (n) => (n >= 1 ? 1 / n : 1),                                      // hypothetical 1/N (QMC) reference
+          (n, sl) => (Math.abs(n - (sl.N ?? 1)) < 1.2 ? 1 / Math.sqrt(Math.max(1, sl.N ?? 1)) : null), // marker dot
+        ],
+        line: (colors, i) =>
+          i === 0
+            ? { strokeColor: colors.cat[0], strokeWidth: 3 }
+            : i === 1
+              ? { strokeColor: colors.line, strokeWidth: 2, strokeOpacity: 0.35, dash: 2 }
+              : { strokeColor: colors.cat[1], strokeWidth: 2 },
+        legend: ["Monte Carlo error 1/√N", "quasi-MC reference 1/N", "N marker"],
+      },
+    ],
+    {
+      id: "noiseDecay",
+      xmin: 1, xmax: 256, ymin: 0, ymax: 1,
+      xticks: 32, yticks: 0.2,
+      xaxisname: "samples N", yaxisname: "noise (std error)",
+      title: () => nd("title"),
+    },
+    [
+      { name: "N", label: () => nd("nparam"), min: 1, max: 256, step: 1, value: 16, anchors: [1, 4, 16, 64, 256] },
+    ],
+  );
+
+  registerQuiz("monteCarloRenderQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("estQ"), options: [
+      { text: () => sceneStrings("estRight"), correct: true },
+      { text: () => sceneStrings("estW1"), correct: false },
+      { text: () => sceneStrings("estW2"), correct: false },
+      { text: () => sceneStrings("estW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("unbiasedQ"), options: [
+      { text: () => sceneStrings("unbiasedRight"), correct: true },
+      { text: () => sceneStrings("unbiasedW1"), correct: false },
+      { text: () => sceneStrings("unbiasedW2"), correct: false },
+      { text: () => sceneStrings("unbiasedW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("rateQ"), options: [
+      { text: () => sceneStrings("rateRight"), correct: true },
+      { text: () => sceneStrings("rateW1"), correct: false },
+      { text: () => sceneStrings("rateW2"), correct: false },
+      { text: () => sceneStrings("rateW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("halveQ"), options: [
+      { text: () => sceneStrings("halveRight"), correct: true },
+      { text: () => sceneStrings("halveW1"), correct: false },
+      { text: () => sceneStrings("halveW2"), correct: false },
+      { text: () => sceneStrings("halveW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("sampleQ"), options: [
+      { text: () => sceneStrings("sampleRight"), correct: true },
+      { text: () => sceneStrings("sampleW1"), correct: false },
+      { text: () => sceneStrings("sampleW2"), correct: false },
+      { text: () => sceneStrings("sampleW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("isQ"), options: [
+      { text: () => sceneStrings("isRight"), correct: true },
+      { text: () => sceneStrings("isW1"), correct: false },
+      { text: () => sceneStrings("isW2"), correct: false },
+      { text: () => sceneStrings("isW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("zeroQ"), options: [
+      { text: () => sceneStrings("zeroRight"), correct: true },
+      { text: () => sceneStrings("zeroW1"), correct: false },
+      { text: () => sceneStrings("zeroW2"), correct: false },
+      { text: () => sceneStrings("zeroW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("stratQ"), options: [
+      { text: () => sceneStrings("stratRight"), correct: true },
+      { text: () => sceneStrings("stratW1"), correct: false },
+      { text: () => sceneStrings("stratW2"), correct: false },
+      { text: () => sceneStrings("stratW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("qmcQ"), options: [
+      { text: () => sceneStrings("qmcRight"), correct: true },
+      { text: () => sceneStrings("qmcW1"), correct: false },
+      { text: () => sceneStrings("qmcW2"), correct: false },
+      { text: () => sceneStrings("qmcW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("misQ"), options: [
+      { text: () => sceneStrings("misRight"), correct: true },
+      { text: () => sceneStrings("misW1"), correct: false },
+      { text: () => sceneStrings("misW2"), correct: false },
+      { text: () => sceneStrings("misW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fireflyQ"), options: [
+      { text: () => sceneStrings("fireflyRight"), correct: true },
+      { text: () => sceneStrings("fireflyW1"), correct: false },
+      { text: () => sceneStrings("fireflyW2"), correct: false },
+      { text: () => sceneStrings("fireflyW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("stubbornQ"), options: [
+      { text: () => sceneStrings("stubbornRight"), correct: true },
+      { text: () => sceneStrings("stubbornW1"), correct: false },
+      { text: () => sceneStrings("stubbornW2"), correct: false },
+      { text: () => sceneStrings("stubbornW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("biasedQ"), options: [
+      { text: () => sceneStrings("biasedRight"), correct: true },
+      { text: () => sceneStrings("biasedW1"), correct: false },
+      { text: () => sceneStrings("biasedW2"), correct: false },
+      { text: () => sceneStrings("biasedW3"), correct: false },
+    ] },
+    { prompt: (v) => sceneStrings("estCompQ", v), variables: "a=[1:9]", answer: (v) => 2 * (v.a / 10) },
+    { prompt: () => sceneStrings("varCompQ"), answer: 0.333 },
+  ]);
+</script>
