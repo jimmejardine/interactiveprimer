@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>Public Key Infrastructure</primer-title>
+
+    <primer-card>
+      <p>
+        When your browser ran the
+        <primer-ref soft to="computer-science/networks/security/tls-and-https">TLS handshake</primer-ref>, the
+        server proved it owned a private key by signing the transcript. But that only proves the server holds
+        <em>some</em> key — it says nothing about <em>whose</em> key it is. An attacker who intercepts your
+        connection can generate a perfectly good key of their own and sign with it just as convincingly. The
+        hard problem is not the maths of signing; it is <strong>binding a public key to an identity</strong> — to
+        the actual <code>bank.com</code> — in a way you can verify while talking to a stranger you have never
+        met, across a network run by strangers.
+      </p>
+      <p>
+        The answer the Internet settled on is <strong>Public Key Infrastructure (PKI)</strong>: a global system
+        of <strong>certificates</strong>, <strong>Certificate Authorities</strong>, and a <strong>chain of
+        trust</strong> that reduces the impossible task of "trust a billion servers" to the manageable one of
+        "trust a few dozen roots your browser already ships with." This page is about how that machinery works —
+        the X.509 certificate, how a chain is validated, how a compromised key is revoked, and the modern
+        additions (Certificate Transparency and Let's Encrypt) that patched its worst flaws.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The certificate: a signed statement of identity</h2>
+      <p>
+        A certificate is a small structured document, formatted as <strong>X.509</strong>, that says in effect:
+        "the public key <primer-math>K</primer-math> belongs to the entity named <code>bank.com</code>, and I,
+        the issuer, vouch for it — here is my signature." The signature is what makes it trustworthy: it is
+        computed over all the other fields, so a single altered byte invalidates it.
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th>X.509 field</th><th>What it holds</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Subject</strong></td><td>Who the cert is <em>for</em> (e.g. CN/O of bank.com)</td></tr>
+            <tr><td><strong>Subject Public Key</strong></td><td>The public key being bound to that identity</td></tr>
+            <tr><td><strong>Subject Alt Names (SAN)</strong></td><td>The DNS names this cert is valid for — the field browsers actually check</td></tr>
+            <tr><td><strong>Issuer</strong></td><td>Which CA signed this cert (points one link up the chain)</td></tr>
+            <tr><td><strong>Validity</strong></td><td><code>notBefore</code> / <code>notAfter</code> — the lifetime window</td></tr>
+            <tr><td><strong>Serial number</strong></td><td>Unique ID the issuer assigned (used for revocation)</td></tr>
+            <tr><td><strong>Basic Constraints</strong></td><td><code>CA: TRUE/FALSE</code> — may this cert sign <em>other</em> certs?</td></tr>
+            <tr><td><strong>Signature</strong></td><td>The issuer's signature over all the above</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Two subtleties bite people. First, modern browsers ignore the old <strong>Common Name</strong> for host
+        matching and check only the <strong>SAN</strong> list, so a cert without a matching SAN entry is
+        rejected even if its CN looks right. Second, <strong>Basic Constraints <code>CA: FALSE</code></strong> is
+        what stops a leaf certificate from being abused to sign further certificates — a check whose <em>absence</em>
+        caused real breaches before browsers enforced it.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The chain of trust</h2>
+      <p>
+        No single CA signs every website directly — that would be far too much risk concentrated in one key.
+        Instead trust flows down a <strong>chain</strong>. Your browser and OS ship a <strong>root store</strong>:
+        a curated list of a few dozen to a couple hundred <strong>root CA</strong> certificates, self-signed and
+        implicitly trusted. Everything else earns trust by tracing back to one of those roots.
+      </p>
+      <primer-theorem name="The chain of trust">
+        <ul>
+          <li>
+            A <strong>root CA</strong> (self-signed, in your trust store, kept offline) signs one or more
+            <strong>intermediate CA</strong> certificates.
+          </li>
+          <li>
+            An <strong>intermediate CA</strong> (kept online, doing the day-to-day work) signs the
+            <strong>leaf</strong> certificate for an actual website.
+          </li>
+          <li>
+            To validate, the browser walks the chain <em>leaf → intermediate → root</em>, checking that each
+            certificate's signature verifies against the <em>next one up's</em> public key, and stops when it
+            reaches a root it already trusts. If every link checks out, the leaf is trusted.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Why the extra intermediate layer? Because the <strong>root's private key is the crown jewels</strong>:
+        if it leaked, every certificate under it would be forgeable, and you cannot easily replace a key baked
+        into billions of devices. So the root is kept <em>offline</em> in a vault and used rarely, only to sign
+        intermediates. If an intermediate is compromised, it can be revoked and replaced without touching the
+        precious root. Follow the chain being verified:
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "pkiChain": {
+            "title": "The chain of trust: root signs intermediate signs leaf; browser verifies upward",
+            "root": "Root CA  (self-signed, in the browser's trust store, kept OFFLINE)",
+            "inter": "Intermediate CA  (online, does the daily signing)",
+            "leaf": "Leaf: bank.com  (public key + SAN = bank.com)",
+            "sign1": "Root signs the Intermediate's certificate",
+            "sign2": "Intermediate signs bank.com's leaf certificate",
+            "verify": "Browser verifies UPWARD: leaf → intermediate → trusted root",
+            "trust": "Root is already trusted → whole chain accepted"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="pkiChain"
+        caption="Three stacked boxes. At the top a Root CA, self-signed and stored in the browser's trust store, kept offline. It signs the Intermediate CA in the middle, which is online and does the daily signing. The intermediate signs the leaf certificate for bank.com at the bottom. To validate, the browser verifies upward from the leaf through the intermediate to the trusted root; because the root is already trusted, the whole chain is accepted."
+      ></primer-geometry>
+
+      <primer-code run>
+        // Validate a certificate chain the way a browser does: each cert's issuer
+        // must be signed by the next cert up, dates must be valid, names must match,
+        // and the chain must terminate at a root in the trust store.
+        interface Cert {
+          subject: string; issuer: string; signedBy: string;
+          notBefore: number; notAfter: number; isCa: boolean; sanMatches: string;
+        }
+        const NOW = 2026.5;               // pretend "today"
+        const trustStore = new Set(["RootCA-X"]);
+
+        const chain: Cert[] = [
+          { subject: "bank.com", issuer: "Intermediate-A", signedBy: "Intermediate-A",
+            notBefore: 2026.0, notAfter: 2026.9, isCa: false, sanMatches: "bank.com" },
+          { subject: "Intermediate-A", issuer: "RootCA-X", signedBy: "RootCA-X",
+            notBefore: 2020.0, notAfter: 2030.0, isCa: true, sanMatches: "" },
+          { subject: "RootCA-X", issuer: "RootCA-X", signedBy: "RootCA-X",   // self-signed root
+            notBefore: 2015.0, notAfter: 2035.0, isCa: true, sanMatches: "" },
+        ];
+
+        function validate(chain: Cert[], host: string): string {
+          if (chain[0].sanMatches !== host) return "FAIL: leaf SAN does not match host";
+          for (let i = 0; i &lt; chain.length; i++) {
+            const c = chain[i];
+            if (NOW &lt; c.notBefore || NOW &gt; c.notAfter) return `FAIL: ${c.subject} expired/not-yet-valid`;
+            const signer = chain[i + 1];
+            if (signer) {
+              if (c.signedBy !== signer.subject) return `FAIL: ${c.subject} not signed by next cert`;
+              if (!signer.isCa) return `FAIL: ${signer.subject} is not allowed to be a CA`;
+            }
+          }
+          const root = chain[chain.length - 1];
+          if (!trustStore.has(root.subject)) return "FAIL: chain does not end at a trusted root";
+          return "PASS: chain valid, host authenticated";
+        }
+
+        console.log(validate(chain, "bank.com"));
+        console.log(validate(chain, "evil.com")); // SAN mismatch
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Revocation: taking a certificate back</h2>
+      <p>
+        Certificates have an expiry date, but sometimes you must kill one <em>early</em> — a server's private key
+        was stolen, or a cert was mis-issued. Since the certificate is a signed document already copied all over
+        the world, you cannot un-sign it; you need a way to <strong>tell the world it is no longer valid</strong>.
+        PKI offers two mechanisms, both flawed:
+      </p>
+      <ul>
+        <li>
+          <strong>CRL — Certificate Revocation List.</strong> Each CA publishes a signed list of the serial
+          numbers it has revoked. The problem: these lists grew to <em>megabytes</em>, are slow to download, and
+          are only as fresh as their last publish.
+        </li>
+        <li>
+          <strong>OCSP — Online Certificate Status Protocol.</strong> The browser asks the CA in real time, "is
+          serial number 12345 still good?" Fresher, but it adds latency to every connection <em>and</em> leaks to
+          the CA which sites you visit — a privacy hole. Worse, if the OCSP server is unreachable, browsers
+          historically <strong>soft-fail</strong> (assume "good"), which an attacker blocking OCSP can exploit.
+        </li>
+        <li>
+          <strong>OCSP stapling</strong> fixes both: the <em>server</em> fetches a recent, CA-signed OCSP
+          response and "staples" it into the TLS handshake, so the browser gets the status without a separate
+          request and without leaking anything.
+        </li>
+      </ul>
+      <p>
+        Because revocation is so unreliable, the industry has quietly shifted strategy toward <strong>short
+        lifetimes</strong>: if a certificate is only valid for <strong>90 days</strong> (or, increasingly, weeks),
+        a stolen one becomes worthless soon anyway, and revocation matters less. "Rotate often" is beating
+        "revoke reliably."
+      </p>
+
+      <primer-vignette title="Watch out! — a valid certificate authenticates the NAME, not the trustworthiness">
+        <p>
+          The deepest misconception about PKI: people think a valid certificate means the site is
+          <em>safe</em> or <em>reputable</em>. It means only that you are genuinely talking to whoever controls
+          that domain name. A criminal can obtain a perfectly valid, chain-verifying certificate for
+          <code>secure-paypa1.com</code> in <em>minutes, for free</em>, because domain-validated issuance just
+          checks you control the domain — not that you are honest. PKI answers "am I really talking to the owner
+          of this name?" It does <strong>not</strong> answer "is the owner of this name a good actor?"
+        </p>
+        <p>
+          A second trap: a <strong>self-signed</strong> certificate (subject = issuer, no chain to a trusted
+          root) is cryptographically fine but proves <em>nothing about identity</em> — anyone can self-sign any
+          name. That is why browsers reject them with a warning: there is no third party vouching for the binding.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Patching PKI's holes: Transparency and ACME</h2>
+      <p>
+        Classic PKI has a terrifying weakness: <strong>any</strong> trusted CA can issue a certificate for
+        <strong>any</strong> domain. There are hundreds of CAs (and their intermediates) in the world's trust
+        stores; a single one that is compromised or coerced can mint a valid <code>google.com</code> certificate,
+        and Google would never know. This is not hypothetical — in 2011 the Dutch CA <strong>DigiNotar</strong>
+        was hacked and issued fraudulent certificates for Google and others, used to spy on Iranian users;
+        DigiNotar was removed from every trust store and went bankrupt. Two modern additions harden the system:
+      </p>
+      <primer-theorem name="Certificate Transparency (CT)">
+        <ul>
+          <li>
+            Every issued certificate must be logged in public, <strong>append-only, cryptographically verifiable
+            logs</strong>. CAs submit certs and receive a <em>Signed Certificate Timestamp (SCT)</em>, which
+            browsers now <strong>require</strong> — a cert without SCTs is rejected.
+          </li>
+          <li>
+            Because the logs are public, a domain owner (or a monitor) can <em>watch</em> for certificates issued
+            for their name that they never requested — turning silent mis-issuance into something detectable
+            within hours. It converts "trust the CAs blindly" into "trust but publicly verify."
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The other revolution was <strong>Let's Encrypt</strong> and its <strong>ACME</strong> protocol (2015).
+        Before it, certificates cost money and were fiddly to install, so most of the web ran plain HTTP. ACME
+        <strong>automates</strong> the whole dance: your server proves it controls a domain by answering an
+        automated challenge (place this token at a URL, or in a DNS record), and receives a free, short-lived
+        certificate — renewed automatically by a background agent. The result was historic: HTTPS went from a
+        minority of web traffic to the <strong>overwhelming majority</strong> in a few years. Free, automatic,
+        short-lived certificates are why the padlock is now the default rather than the exception.
+      </p>
+
+      <primer-vignette title="If any CA can sign any domain, why isn't the whole system already broken?">
+        <p>
+          It nearly is — the CA model's weakest link really is "the least trustworthy CA in your store." What
+          holds it together is a stack of after-the-fact defences rather than prevention. Certificate
+          Transparency makes mis-issuance <em>visible</em>; browser vendors <em>aggressively distrust</em> CAs
+          that misbehave (Symantec's giant CA business was gradually distrusted by Chrome after sloppy issuance;
+          DigiNotar was killed outright). Some sites once pinned specific keys (HPKP), though that proved too
+          dangerous and was deprecated in favour of CT plus the CAA DNS record, which lets a domain declare
+          <em>which</em> CAs are allowed to issue for it. The system survives not because CAs can't cheat, but
+          because cheating is now loud, punished, and career-ending for a CA.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "pkiQuiz@1": { "instructions": "Check your grasp of PKI: X.509 certificates and their fields, the chain of trust to root CAs, chain validation, revocation (CRL/OCSP/stapling), Certificate Transparency, and Let's Encrypt/ACME." } }
+    </script>
+    <primer-quiz name="pkiQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/security/tls-and-https",
+      "computer-science/cyber-security/digital-signatures-and-certificates"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // Vertical chain of trust: Root CA (top) -> Intermediate -> Leaf (bottom),
+  // with "signs" arrows downward and "verify" upward.
+  registerGeometryScene("pkiChain", ({ board, step, colors, sceneStrings }) => {
+    const boxAt = (cy, key, col) => {
+      const w = 5.2, h = 1.1;
+      board.create("polygon", [
+        [-w, cy - h], [w, cy - h], [w, cy + h], [-w, cy + h],
+      ], {
+        fillColor: col, fillOpacity: 0.18, borders: { strokeColor: colors.line, strokeWidth: 2 },
+        vertices: { visible: false }, fixed: true, highlight: false, withLines: true,
+      });
+      board.create("text", [0, cy, sceneStrings(key)], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, strokeColor: colors.ink,
+        fixed: true, highlight: false, cssStyle: "font-weight:700; text-align:center; width:360px; display:inline-block",
+      });
+    };
+
+    // base boxes
+    boxAt(4, "root", colors.cat[0]);
+    boxAt(0, "inter", colors.cat[1]);
+    boxAt(-4, "leaf", colors.cat[2]);
+
+    const downArrow = (y0, y1, s, col) => {
+      board.create("arrow", [[-2.2, y0], [-2.2, y1]], { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false });
+      board.create("text", [-5.9, (y0 + y1) / 2, s], { anchorX: "middle", anchorY: "middle", fontSize: 10, strokeColor: col, color: col, fixed: true, highlight: false, cssStyle: "text-align:center; width:150px; display:inline-block" });
+    };
+    const upArrow = (y0, y1, s, col) => {
+      board.create("arrow", [[2.2, y0], [2.2, y1]], { strokeColor: col, strokeWidth: 2, dash: 2, fixed: true, highlight: false });
+      board.create("text", [5.9, (y0 + y1) / 2, s], { anchorX: "middle", anchorY: "middle", fontSize: 10, strokeColor: col, color: col, fixed: true, highlight: false, cssStyle: "text-align:center; width:150px; display:inline-block" });
+    };
+
+    step(sceneStrings("sign1"),  () => downArrow(2.8, 1.2, sceneStrings("sign1"), colors.cat[0]));
+    step(sceneStrings("sign2"),  () => downArrow(-1.2, -2.8, sceneStrings("sign2"), colors.cat[1]));
+    step(sceneStrings("verify"), () => { upArrow(-2.8, -1.2, "", colors.cat[2]); upArrow(1.2, 2.8, sceneStrings("verify"), colors.cat[2]); });
+    step(sceneStrings("trust"),  () => board.create("text", [0, 5.6, sceneStrings("trust")], { anchorX: "middle", anchorY: "middle", fontSize: 12, strokeColor: colors.cat[0], color: colors.cat[0], fixed: true, highlight: false, cssStyle: "font-weight:700; text-align:center; width:420px; display:inline-block" }));
+  }, {
+    boundingbox: [-8, 6.4, 8, -5.6],
+    keepAspect: false,
+    title: () => makeStrings("pkiChain")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("pkiQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "An X.509 certificate fundamentally binds…",
+      options: [
+        { text: "a public key to an identity (a domain name), stamped by an issuer's signature", correct: true },
+        { text: "a private key to an IP address", correct: false },
+        { text: "a password to a username", correct: false },
+        { text: "a TCP port to a process", correct: false },
+      ] },
+
+    { prompt: "Which certificate field do modern browsers actually check to match the hostname?",
+      options: [
+        { text: "Subject Alternative Names (SAN)", correct: true },
+        { text: "the serial number", correct: false },
+        { text: "the Common Name only", correct: false },
+        { text: "the validity notAfter date", correct: false },
+      ] },
+
+    { prompt: "The chain of trust works by…",
+      options: [
+        { text: "a root CA signing an intermediate, which signs the leaf; the browser verifies up to a trusted root", correct: true },
+        { text: "every website being signed directly by every root CA", correct: false },
+        { text: "the browser asking the user to approve each key", correct: false },
+        { text: "servers signing their own certificates", correct: false },
+      ] },
+
+    { prompt: "Why are intermediate CAs used instead of signing leaves directly with the root?",
+      options: [
+        { text: "the root's key is kept offline as crown jewels; a compromised intermediate can be revoked without replacing the root", correct: true },
+        { text: "intermediates make the handshake faster", correct: false },
+        { text: "roots are not allowed to sign anything", correct: false },
+        { text: "it reduces the certificate's file size", correct: false },
+      ] },
+
+    { prompt: "What does the browser's 'root store' contain?",
+      options: [
+        { text: "a curated list of trusted, self-signed root CA certificates", correct: true },
+        { text: "every website certificate on the Internet", correct: false },
+        { text: "the user's private keys", correct: false },
+        { text: "a list of blocked phishing domains", correct: false },
+      ] },
+
+    { prompt: "A self-signed certificate is rejected by browsers because…",
+      options: [
+        { text: "no trusted third party vouches for the key-to-identity binding — anyone can self-sign any name", correct: true },
+        { text: "the maths of the signature is broken", correct: false },
+        { text: "it cannot be used with TLS at all", correct: false },
+        { text: "it is always expired", correct: false },
+      ] },
+
+    { prompt: "OCSP improves on CRLs by…",
+      options: [
+        { text: "checking a single certificate's status in real time instead of downloading a huge list", correct: true },
+        { text: "removing the need for any revocation", correct: false },
+        { text: "encrypting the certificate", correct: false },
+        { text: "making certificates last forever", correct: false },
+      ] },
+
+    { prompt: "OCSP stapling helps because…",
+      options: [
+        { text: "the server attaches a recent CA-signed status to the handshake, avoiding a separate request and the privacy leak", correct: true },
+        { text: "it lets the browser skip revocation entirely", correct: false },
+        { text: "it staples two certificates together for strength", correct: false },
+        { text: "it makes the CRL shorter", correct: false },
+      ] },
+
+    { prompt: "Why has the industry shifted toward short (~90-day) certificate lifetimes?",
+      options: [
+        { text: "a stolen cert expires soon anyway, so unreliable revocation matters less", correct: true },
+        { text: "shorter certs are cryptographically stronger", correct: false },
+        { text: "browsers can't read long-lived certs", correct: false },
+        { text: "it makes the private key bigger", correct: false },
+      ] },
+
+    { prompt: "Certificate Transparency (CT) adds what protection?",
+      options: [
+        { text: "every issued cert is logged in public append-only logs, so mis-issuance for your domain is detectable", correct: true },
+        { text: "it encrypts the certificate so eavesdroppers can't read it", correct: false },
+        { text: "it makes CAs unnecessary", correct: false },
+        { text: "it hides which certs were issued", correct: false },
+      ] },
+
+    { prompt: "The 2011 DigiNotar incident demonstrated which PKI weakness?",
+      options: [
+        { text: "any trusted CA can issue a cert for any domain, so one compromised CA endangers everyone", correct: true },
+        { text: "TLS encryption can be broken by brute force", correct: false },
+        { text: "root keys expire too quickly", correct: false },
+        { text: "OCSP is always offline", correct: false },
+      ] },
+
+    { prompt: "Let's Encrypt / ACME changed the web by…",
+      options: [
+        { text: "automating free, short-lived certificate issuance via a domain-control challenge, driving HTTPS adoption", correct: true },
+        { text: "replacing TLS with a new protocol", correct: false },
+        { text: "making browsers trust all certificates", correct: false },
+        { text: "charging more for certificates", correct: false },
+      ] },
+
+    { prompt: "A domain-validated certificate proves…",
+      options: [
+        { text: "you control the domain — NOT that the site's owner is honest or reputable", correct: true },
+        { text: "the company behind the site has been vetted as trustworthy", correct: false },
+        { text: "the site cannot be a phishing site", correct: false },
+        { text: "the server's code is bug-free", correct: false },
+      ] },
+
+    { prompt: "The 'Basic Constraints: CA:FALSE' flag on a leaf certificate exists to…",
+      options: [
+        { text: "stop a leaf cert from being abused to sign other certificates", correct: true },
+        { text: "mark the certificate as expired", correct: false },
+        { text: "disable encryption for that site", correct: false },
+        { text: "shorten the certificate's validity", correct: false },
+      ] },
+
+    { prompt: "A chain has a leaf, ${m} intermediate CA(s), and one root. How many certificates are in the full chain?",
+      variables: "m=[1:4]",
+      answer: "m + 2" },
+
+    { prompt: "To validate the chain, the browser verifies each certificate's signature against the public key of…",
+      options: [
+        { text: "the next certificate up the chain (its issuer)", correct: true },
+        { text: "the leaf certificate", correct: false },
+        { text: "the user's own key", correct: false },
+        { text: "a random certificate", correct: false },
+      ] },
+  ]);
+</script>

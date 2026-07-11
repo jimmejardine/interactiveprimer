@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Devirtualization</primer-title>
+
+    <primer-card>
+      <p>
+        Object-oriented code is built on a small act of misdirection. When you write
+        <code>shape.area()</code>, the compiler usually cannot say <em>which</em> <code>area</code> will run —
+        a <code>Circle</code>'s? a <code>Square</code>'s? — because <code>shape</code>'s real type is decided at
+        run time. So it emits an <strong>indirect call</strong>: load the object's method table (its vtable),
+        fetch the right slot, and jump through the pointer. Flexible, but expensive — and, far worse than the
+        jump itself, an indirect call is a <strong>wall the optimiser cannot see past</strong>. It cannot inline
+        an unknown target, cannot propagate constants into it, cannot reason about its side effects.
+        <strong>Devirtualization</strong> is the optimisation that tears the wall down: prove (or bet) which
+        method the call really invokes, and replace the indirect call with a <em>direct</em>, inlinable one.
+      </p>
+      <p>
+        This is why it matters so much for OOP performance. A modern JIT or ahead-of-time optimiser lives and dies
+        by inlining, and a virtual call blocks inlining cold. Turn one virtual call into a direct call and you
+        often unlock a cascade — inline the callee, then constant-fold, then eliminate dead branches inside it.
+        Devirtualization is frequently the <em>first domino</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The cost of an indirect call</h2>
+      <p>
+        A virtual call is not one instruction but a little dance: load the vtable pointer from the object, load
+        the method address from a fixed slot, then an indirect <code>call</code> through that address.
+      </p>
+      <primer-code lang="text">
+        ; shape.area()  — virtual
+        vt   = load [shape]        ; the object's vtable pointer
+        fn   = load [vt + 8]       ; slot for area()
+        call *fn                   ; INDIRECT: target unknown to the optimiser
+      </primer-code>
+      <p>
+        Two extra loads, plus an indirect branch the CPU's predictor may miss — but the real damage is what does
+        <em>not</em> happen: <code>call *fn</code> is opaque, so inlining stops here, and every optimisation that
+        would have flowed through the callee is blocked. Compare the prize:
+      </p>
+      <primer-code lang="text">
+        ; shape.area()  — devirtualized to Circle::area, then inlined
+        area = 3.14159 * shape.r * shape.r    ; no call at all — the body is right here
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Proving the target: class-hierarchy analysis</h2>
+      <p>
+        The cheapest way to devirtualize is to look at the <strong>class hierarchy</strong>. If the compiler can
+        see the whole program's set of classes, it knows every type that could possibly be behind a reference of
+        static type <code>Shape</code> — namely <code>Shape</code> and all its subclasses. <strong>Class-hierarchy
+        analysis</strong> (CHA) asks: among all those types, how many actually <em>override</em>
+        <code>area()</code>? If the answer is <strong>exactly one</strong>, the call is <em>monomorphic</em> —
+        there is only one possible target — and the compiler can rewrite the indirect call as a direct call with
+        no guard at all.
+      </p>
+      <primer-geometry scene="chaTree"></primer-geometry>
+      <p>
+        In the hierarchy above, a call to <code>s.area()</code> where <code>s</code> could be any
+        <code>Shape</code> sees three overriding implementations — polymorphic, so plain CHA cannot devirtualize
+        it. But a call through a reference statically typed <code>Rectangle</code> sees only <code>Square</code>
+        as a further subclass; if <code>Square</code> does <em>not</em> override <code>area()</code>, the call is
+        monomorphic and becomes a direct call to <code>Rectangle::area</code>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Sharper still: type and points-to information</h2>
+      <p>
+        CHA reasons about <em>declared</em> types; <strong>points-to</strong> and <strong>type-flow</strong>
+        analysis reason about what a reference can <em>actually</em> hold. Even when a class has many subclasses,
+        the specific variable at a call site might only ever be assigned a <code>Circle</code> — a fact
+        <primer-ref to="computer-science/compiler-design/advanced/alias-and-pointer-analysis">pointer analysis</primer-ref>
+        can discover by tracking allocations through the program. If the points-to set of the receiver is the
+        single type <code>Circle</code>, the call is monomorphic <em>in practice</em> and can be devirtualized
+        even though <code>Shape</code> has many subclasses. This kind of whole-program reasoning is exactly what
+        <primer-ref to="computer-science/compiler-design/advanced/interprocedural-analysis">interprocedural analysis</primer-ref>
+        provides, and it feeds a virtuous circle: knowing the target lets you build call-graph edges, which
+        sharpens further analysis.
+      </p>
+      <primer-theorem name="Ways to devirtualize a call">
+        <ul>
+          <li><strong>Class-hierarchy analysis (CHA)</strong> — if only one type in the receiver's subtree
+            overrides the method, the call is monomorphic: rewrite to a direct call, <em>no guard</em>.</li>
+          <li><strong>Points-to / type-flow</strong> — if analysis proves the receiver's concrete type set is a
+            single class, devirtualize even under a wide hierarchy.</li>
+          <li><strong>Speculative (profile-guided)</strong> — if a type merely <em>dominates</em> at run time,
+            emit a <em>type guard</em> plus a direct fast path, with the indirect call as fallback.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>When you can't prove it: speculative devirtualization</h2>
+      <p>
+        Often the compiler cannot prove monomorphism — a new subclass might be loaded later (Java, C#), or profile
+        data merely shows one type is <em>usually</em> the receiver. Then it <strong>speculates</strong>: guess
+        the likely type, guard the guess with a cheap check, take a direct (inlinable) fast path when the check
+        passes, and fall back to the original indirect call when it fails.
+      </p>
+      <primer-code lang="text">
+        ; speculative devirtualization of shape.area(), betting on Circle
+        if typeof(shape) == Circle:
+            area = 3.14159 * shape.r * shape.r    ; FAST PATH: direct + inlined
+        else:
+            vt = load [shape]; fn = load [vt+8]   ; SLOW PATH: original indirect call
+            area = call *fn
+      </primer-code>
+      <p>
+        The guard costs one comparison and a well-predicted branch; in exchange the common case is fully inlined
+        and open to every downstream optimisation. This is the workhorse of JIT compilers — they collect actual
+        receiver types at run time, inline the hot one behind a guard, and rely on <strong>deoptimization</strong>
+        to bail out to the interpreter if the guard ever fails (say, because a new subclass finally shows up). The
+        bet is that the guard almost never fails, so the fast path almost always runs.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>CHA-based devirtualization, in code</h2>
+      <p>
+        Here is class-hierarchy analysis making the call. Given a hierarchy and which classes override a method,
+        we compute, for a call on a given static type, the set of possible targets; if it is a singleton, we
+        devirtualize.
+      </p>
+      <primer-code run>
+        type ClassInfo = { name: string; parent: string | null; overrides: boolean };
+
+        // Hierarchy: Shape -> {Circle, Rectangle -> {Square}}. Who overrides area()?
+        const classes: Record&lt;string, ClassInfo&gt; = {
+          Shape:     { name: "Shape",     parent: null,        overrides: false },
+          Circle:    { name: "Circle",    parent: "Shape",     overrides: true  },
+          Rectangle: { name: "Rectangle", parent: "Shape",     overrides: true  },
+          Square:    { name: "Square",    parent: "Rectangle", overrides: false }, // inherits Rectangle::area
+        };
+
+        const subtypesOf = (t: string): string[] =&gt; {
+          const out = [t];
+          for (const c of Object.values(classes)) {
+            let p = c.parent;
+            while (p) { if (p === t) { out.push(c.name); break; } p = classes[p].parent; }
+          }
+          return out;
+        };
+
+        // The concrete implementation a type uses = nearest ancestor (incl. self) that overrides.
+        const implFor = (t: string): string =&gt; {
+          let c: string | null = t;
+          while (c) { if (classes[c].overrides) return c; c = classes[c].parent; }
+          return "Shape"; // the base definition
+        };
+
+        function devirtualize(staticType: string): void {
+          const targets = new Set(subtypesOf(staticType).map(implFor));
+          if (targets.size === 1) {
+            console.log(`call on ${staticType}: MONOMORPHIC -> direct call to ${[...targets][0]}::area (inline!)`);
+          } else {
+            console.log(`call on ${staticType}: polymorphic (${[...targets].join(", ")}) -> keep indirect / speculate`);
+          }
+        }
+
+        devirtualize("Shape");     // Circle, Rectangle both possible -> polymorphic
+        devirtualize("Rectangle"); // Rectangle and Square both use Rectangle::area -> monomorphic!
+        devirtualize("Circle");    // only Circle -> monomorphic
+      </primer-code>
+      <p>
+        The result is exactly the hierarchy's story: a call on <code>Shape</code> is polymorphic and stays
+        indirect, but a call on <code>Rectangle</code> is <em>monomorphic</em> — both <code>Rectangle</code> and
+        its subclass <code>Square</code> resolve to <code>Rectangle::area</code> — so CHA rewrites it as a direct,
+        inlinable call. One walk of the class tree unlocks the inliner.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="How can a JIT devirtualize when a new subclass could be loaded at any moment?">
+      <p>
+        This is the deep tension in languages like Java: CHA's "only one override exists" can be <em>true today</em>
+        and <em>false a millisecond later</em> when the class loader pulls in a new subclass. The answer is
+        <strong>speculative optimisation backed by deoptimization</strong>. The JIT devirtualizes and inlines on
+        the current hierarchy, but records an <em>assumption</em> ("no class overriding <code>area</code> below
+        <code>Rectangle</code> exists"). If a class that violates the assumption is ever loaded, the runtime
+        <strong>invalidates</strong> the compiled code — it throws the optimised version away and deoptimizes back
+        to a safe interpreted or recompiled version. So the compiler gets to bet on a closed world for speed while
+        the language keeps its open world for flexibility. HotSpot calls these "class-hierarchy dependencies," and
+        they are checked on every class load. The optimisation is aggressive precisely because there is a safety
+        net under it.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A guard is not free — mis-speculation can make code slower">
+      <p>
+        Speculative devirtualization is a <em>bet</em>, and bets can lose. The type guard adds a comparison and a
+        branch on <em>every</em> call, and it duplicates code (a fast path and a slow path). If the guessed type
+        is wrong most of the time, you pay the guard <em>and</em> still take the indirect call — strictly worse
+        than leaving the call alone, plus the code bloat that can push hot instructions out of the instruction
+        cache. This is why serious speculation is <strong>profile-guided</strong>: only bet on a type the profiler
+        shows genuinely dominates. And beware <em>megamorphic</em> sites — call sites that see many types (a
+        generic container's <code>compare</code>, say). Guarding one type there is pointless; the mispredict rate
+        is high and the right move is often to leave it virtual, or use an inline cache with a few entries rather
+        than a single guarded target. Devirtualize where the receiver is predictable, not everywhere.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: indirect-call cost, CHA/monomorphic, points-to, speculative guard, deopt + variable-driven target-set sizes. Bank of 13, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "devirtQuiz@1": {
+          "intro": "Devirtualization turns an indirect (virtual) call into a direct, inlinable one via class-hierarchy or points-to info, or speculatively with a guard. Numbers change every attempt.",
+          "whyQ": "The biggest cost of a virtual (indirect) call to the optimiser is that…",
+          "whyBlock": "it is opaque — it blocks inlining and every optimisation that would flow through the callee",
+          "whyMem": "it uses too much memory",
+          "whySlow": "the loads take exactly 100 cycles",
+          "whyNone": "there is no cost at all",
+          "goalQ": "Devirtualization replaces an indirect call with…",
+          "glDirect": "a direct call to a known target, which can then be inlined",
+          "glSwitch": "a switch statement over integers",
+          "glLoop": "a loop",
+          "glNothing": "nothing — it deletes the call",
+          "chaQ": "Class-hierarchy analysis devirtualizes a call when…",
+          "chOne": "exactly one type in the receiver's subtree overrides the method (monomorphic)",
+          "chMany": "many types override the method",
+          "chNone": "the class has no methods",
+          "chAny": "the receiver is any integer",
+          "monoQ": "A MONOMORPHIC call site is one where…",
+          "moOne": "there is only one possible target method",
+          "moMany": "there are many possible targets",
+          "moZero": "there is no target",
+          "moGlobal": "the receiver is global",
+          "ptQ": "Points-to / type-flow analysis can devirtualize even under a wide hierarchy when…",
+          "ptSingle": "it proves the receiver's concrete type set is a single class",
+          "ptSort": "it sorts the classes alphabetically",
+          "ptCount": "there are fewer than 100 classes",
+          "ptName": "the class names match",
+          "specQ": "SPECULATIVE devirtualization emits…",
+          "spGuard": "a type guard with a direct inlined fast path and the indirect call as fallback",
+          "spOnly": "only the indirect call, unchanged",
+          "spDelete": "no fallback at all",
+          "spTable": "a jump table",
+          "deoptQ": "In a JIT, if a devirtualization assumption is later violated (a new subclass loads), the runtime…",
+          "deInval": "invalidates the compiled code and deoptimizes to a safe version",
+          "deIgnore": "ignores it and runs wrong code",
+          "deCrash": "must crash",
+          "deRelink": "relinks the object files",
+          "profQ": "Serious speculation should be PROFILE-GUIDED because…",
+          "prBet": "a guard that guesses wrong costs the guard AND the indirect call — worse than not speculating",
+          "prFast": "guards are always free",
+          "prSize": "profiles shrink the binary",
+          "prNever": "profiles are never available",
+          "megaQ": "At a MEGAMORPHIC call site (many receiver types), guarding a single type is…",
+          "mgBad": "usually a poor bet — leave it virtual or use a multi-entry inline cache",
+          "mgBest": "always the fastest choice",
+          "mgFree": "free of any cost",
+          "mgReq": "required by the language",
+          "cascadeQ": "Why is devirtualization often called the 'first domino'?",
+          "csInline": "a direct call can be inlined, which then unlocks constant folding, dead-code elimination, etc.",
+          "csLast": "it is always the last pass",
+          "csAlloc": "it allocates registers",
+          "csParse": "it re-parses the source",
+          "targetsQ": "A method has ${n} distinct overriding implementations reachable at a call site. Is the site monomorphic (devirtualizable by plain CHA)? Enter 1 if n = 1, else 0.",
+          "guardCostQ": "A speculative fast path replaces an indirect call. It adds exactly how many type-guard comparisons per call? Give 1.",
+          "polyQ": "A call site can reach implementations from ${n} different classes. How many type guards would a naive full guard-chain need to cover all but a final fallback? Give n - 1."
+        }
+      }
+    </script>
+
+    <primer-quiz name="devirtQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/advanced/interprocedural-analysis",
+      "computer-science/compiler-design/advanced/alias-and-pointer-analysis"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Class hierarchy: Shape -> {Circle, Rectangle -> Square}; mark who overrides area().
+  registerGeometryScene("chaTree", ({ board, step, colors }) => {
+    const R = 0.85;
+    const node = (p, name, fill) => {
+      board.create("circle", [[p[0], p[1]], R], {
+        strokeColor: fill, strokeWidth: 2.5, fillColor: fill, fillOpacity: 0.22, fixed: true, highlight: false,
+      });
+      board.create("text", [p[0], p[1], name], {
+        anchorX: "middle", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    const edge = (a, b) => {
+      const dx = b[0] - a[0], dy = b[1] - a[1], d = Math.hypot(dx, dy), ux = dx / d, uy = dy / d;
+      board.create("segment", [[a[0] + ux * R, a[1] + uy * R], [b[0] - ux * R, b[1] - uy * R]], {
+        strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false,
+        straightFirst: false, straightLast: false,
+      });
+    };
+    const tag = (x, y, t, col) => board.create("text", [x, y, t], {
+      anchorX: "middle", fontSize: 11, fixed: true, highlight: false, strokeColor: col, color: col,
+    });
+
+    const shape = [0, 3.4], circle = [-3.6, 0.4], rect = [3.6, 0.4], square = [3.6, -3];
+
+    // Base content: the hierarchy tree.
+    edge(shape, circle); edge(shape, rect); edge(rect, square);
+    node(shape, "Shape", colors.cat[3]);
+    node(circle, "Circle", colors.cat[0]);
+    node(rect, "Rectangle", colors.cat[1]);
+    node(square, "Square", colors.cat[2]);
+
+    step("Circle and Rectangle each OVERRIDE area(); Square does NOT (it inherits Rectangle::area).", () => {
+      tag(circle[0], circle[1] - 1.15, "overrides area()", colors.cat[0]);
+      tag(rect[0] + 0.2, rect[1] - 1.15, "overrides area()", colors.cat[1]);
+      tag(square[0], square[1] - 1.15, "inherits Rectangle::area", colors.cat[2]);
+    });
+    step("Call on a Shape: two overriders reachable -> POLYMORPHIC, stays indirect.", () => {
+      tag(shape[0] - 2.9, shape[1], "s.area() -> {Circle, Rectangle}", colors.cat[3]);
+    });
+    step("Call on a Rectangle: both Rectangle and Square use Rectangle::area -> MONOMORPHIC, devirtualize!", () => {
+      tag(rect[0] + 2.8, rect[1] + 0.9, "one target -> direct call", colors.cat[1]);
+    });
+  }, { boundingbox: [-7, 4.6, 8, -4.4], keepAspect: false, title: () => "Class-hierarchy analysis of area()" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("devirtQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("whyBlock"), correct: true },
+        { text: () => sceneStrings("whyMem"), correct: false },
+        { text: () => sceneStrings("whySlow"), correct: false },
+        { text: () => sceneStrings("whyNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("goalQ"),
+      options: [
+        { text: () => sceneStrings("glDirect"), correct: true },
+        { text: () => sceneStrings("glSwitch"), correct: false },
+        { text: () => sceneStrings("glLoop"), correct: false },
+        { text: () => sceneStrings("glNothing"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("chaQ"),
+      options: [
+        { text: () => sceneStrings("chOne"), correct: true },
+        { text: () => sceneStrings("chMany"), correct: false },
+        { text: () => sceneStrings("chNone"), correct: false },
+        { text: () => sceneStrings("chAny"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("monoQ"),
+      options: [
+        { text: () => sceneStrings("moOne"), correct: true },
+        { text: () => sceneStrings("moMany"), correct: false },
+        { text: () => sceneStrings("moZero"), correct: false },
+        { text: () => sceneStrings("moGlobal"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ptQ"),
+      options: [
+        { text: () => sceneStrings("ptSingle"), correct: true },
+        { text: () => sceneStrings("ptSort"), correct: false },
+        { text: () => sceneStrings("ptCount"), correct: false },
+        { text: () => sceneStrings("ptName"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("specQ"),
+      options: [
+        { text: () => sceneStrings("spGuard"), correct: true },
+        { text: () => sceneStrings("spOnly"), correct: false },
+        { text: () => sceneStrings("spDelete"), correct: false },
+        { text: () => sceneStrings("spTable"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("deoptQ"),
+      options: [
+        { text: () => sceneStrings("deInval"), correct: true },
+        { text: () => sceneStrings("deIgnore"), correct: false },
+        { text: () => sceneStrings("deCrash"), correct: false },
+        { text: () => sceneStrings("deRelink"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("profQ"),
+      options: [
+        { text: () => sceneStrings("prBet"), correct: true },
+        { text: () => sceneStrings("prFast"), correct: false },
+        { text: () => sceneStrings("prSize"), correct: false },
+        { text: () => sceneStrings("prNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("megaQ"),
+      options: [
+        { text: () => sceneStrings("mgBad"), correct: true },
+        { text: () => sceneStrings("mgBest"), correct: false },
+        { text: () => sceneStrings("mgFree"), correct: false },
+        { text: () => sceneStrings("mgReq"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cascadeQ"),
+      options: [
+        { text: () => sceneStrings("csInline"), correct: true },
+        { text: () => sceneStrings("csLast"), correct: false },
+        { text: () => sceneStrings("csAlloc"), correct: false },
+        { text: () => sceneStrings("csParse"), correct: false },
+      ],
+    },
+    {
+      // monomorphic iff n == 1
+      prompt: (v) => sceneStrings("targetsQ", v),
+      variables: "n=[1:5]",
+      answer: (v) => (v.n === 1 ? 1 : 0),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // exactly one guard per speculative call
+      prompt: () => sceneStrings("guardCostQ"),
+      answer: 1,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // n - 1 guards for a full chain
+      prompt: (v) => sceneStrings("polyQ", v),
+      variables: "n=[2:6]",
+      answer: (v) => v.n - 1,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

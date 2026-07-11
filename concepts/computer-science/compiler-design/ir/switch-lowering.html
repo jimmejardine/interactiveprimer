@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Lowering switch Statements</primer-title>
+
+    <primer-card>
+      <p>
+        A <code>switch</code> looks innocent — a value, a list of cases, jump to the one that matches. But it
+        hands the compiler a genuine <em>engineering decision</em>, because there is no single right way to turn
+        "pick one of many" into machine code. Should it test the cases one by one? Binary-search them? Or leap
+        straight to the answer through a table of addresses? Each is correct; each is fastest for a different
+        shape of <code>switch</code>. Deciding <em>which</em> — from the number of cases and how tightly their
+        values cluster — is one of the most visibly clever things a code generator does.
+      </p>
+      <p>
+        Every strategy is built from primitives you already know: conditional jumps and labels from
+        <primer-ref to="computer-science/compiler-design/ir/three-address-code">three-address code</primer-ref>,
+        and the same jumping-code discipline used to
+        <primer-ref to="computer-science/compiler-design/ir/translating-control-flow">translate control flow</primer-ref>.
+        What changes is how many comparisons the generated code performs before it lands on the right arm.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Three ways to dispatch</h2>
+      <p>
+        Consider a plain source <code>switch</code> on an integer, with a handful of case labels and a
+        <code>default</code>. The compiler weighs three canonical lowerings:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Strategy</th><th>Shape of generated code</th><th>Comparisons to dispatch</th><th>Chosen when…</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Linear if–else chain</td><td>test each case value in turn</td><td><primer-math>O(n)</primer-math></td><td>few cases (roughly <primer-math>\le 3\text{–}4</primer-math>)</td></tr>
+            <tr><td>Binary search tree</td><td>compare against a median, recurse into half</td><td><primer-math>O(\log n)</primer-math></td><td>many cases, values sparse / scattered</td></tr>
+            <tr><td>Jump table</td><td>index an array of addresses, one indirect jump</td><td><primer-math>O(1)</primer-math></td><td>many cases packed into a dense range</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The figure shows all three lowerings of the same six-case switch, so you can see the comparison count
+        shrink from a chain, to a tree, to a single indexed jump.
+      </p>
+      <primer-geometry scene="switchStrategies"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The linear if–else chain</h2>
+      <p>
+        The simplest lowering is a straight cascade of conditional jumps — exactly what a chain of
+        <code>if/else if</code> would produce:
+      </p>
+      <primer-code lang="text">
+        if t == 1 goto L1
+        if t == 2 goto L2
+        if t == 5 goto L5
+        goto Ldefault
+      </primer-code>
+      <p>
+        Each test that fails falls through to the next. For <primer-math>n</primer-math> cases the worst case is
+        <primer-math>n</primer-math> comparisons, and the <em>last</em> case listed is the slowest to reach — so
+        for a handful of cases it is perfectly fine, and for a <code>switch</code> with a hot common case, putting
+        that case first is a real speed-up. Beyond three or four arms, though, the linear scan starts to sting,
+        and the compiler reaches for something smarter.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The binary search tree</h2>
+      <p>
+        When there are many cases but their values are <strong>scattered</strong> — say
+        <primer-math>\{3, 17, 42, 99, 256, 1000\}</primer-math> — a jump table would be mostly empty holes, so
+        the compiler sorts the case values and emits a <strong>binary search</strong>. Compare the switch value
+        against the median case; if smaller, recurse into the lower half, if larger, the upper half:
+      </p>
+      <primer-code lang="text">
+        if t &lt; 42  goto Lo        // lower half: {3, 17}
+        if t == 42 goto L42
+        // upper half: {99, 256, 1000}
+        if t &lt; 256 goto L99_check
+        if t == 256 goto L256
+        if t == 1000 goto L1000
+        goto Ldefault
+        ...
+      </primer-code>
+      <p>
+        Each comparison halves the remaining candidates, so dispatch costs
+        <primer-math>O(\log_2 n)</primer-math> tests — six cases in about three comparisons, a thousand cases in
+        about ten. It needs no contiguous range and no wasted memory, which is why it is the workhorse for large,
+        sparse switches (and how a good compiler lowers a <code>switch</code> over scattered enum-like
+        constants).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The jump table: dispatch in O(1)</h2>
+      <p>
+        The prize lowering. If the case values fill a <strong>dense</strong> range — say
+        <primer-math>0,1,2,3,4,5</primer-math> — the compiler builds a <strong>jump table</strong>: an array of
+        code addresses, one slot per value in the range. Dispatch becomes a range check, an index, a load, and a
+        single indirect jump — <primer-math>O(1)</primer-math>, no matter how many cases:
+      </p>
+      <primer-code lang="text">
+        if t &lt; 0 goto Ldefault      // range check, low
+        if t &gt; 5 goto Ldefault      // range check, high
+        addr = JTAB[t]              // load the target address from the table
+        goto *addr                  // one indirect jump — done
+      JTAB: [L0, L1, L2, L3, L4, L5]   // a table of code addresses
+      </primer-code>
+      <p>
+        Slots for missing values in the range simply point at <code>Ldefault</code>. The catch is <em>density</em>:
+        a table for cases <primer-math>\{1, 1000000\}</primer-math> would need a million slots, almost all
+        pointing at the default — a megabyte of memory to dispatch two cases. So compilers gate the jump table on
+        a density heuristic: build one only when the filled fraction of the range,
+        <primer-math>\dfrac{\#\text{cases}}{(\text{max} - \text{min} + 1)}</primer-math>, exceeds a threshold
+        (GCC and LLVM use roughly 40–60%). Otherwise they fall back to a binary tree — often a <em>hybrid</em>:
+        dense clusters become little jump tables, sitting at the leaves of a binary search over the clusters.
+      </p>
+      <primer-theorem name="Choosing a switch lowering">
+        <ul>
+          <li><strong>Few cases</strong> (a handful): a <strong>linear if–else chain</strong>,
+            <primer-math>O(n)</primer-math> — simplest, and lets a hot case be tested first.</li>
+          <li><strong>Many, sparse cases</strong>: a <strong>binary search tree</strong> on sorted values,
+            <primer-math>O(\log n)</primer-math> — no wasted memory.</li>
+          <li><strong>Many, dense cases</strong> (a packed range): a <strong>jump table</strong> of addresses,
+            <primer-math>O(1)</primer-math> — chosen when the range's fill density clears a threshold.</li>
+          <li><strong>default</strong> is the fall-through target: the tail of the chain, a tree leaf, or the
+            filler for every empty jump-table slot and out-of-range value.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The density decision, in code</h2>
+      <p>
+        Here is the heart of the compiler's choice: given the set of case values, measure the range density and
+        pick a strategy. We run it on a dense switch, a sparse one, and a tiny one.
+      </p>
+      <primer-code run>
+        type Strategy = "jump-table" | "binary-search" | "if-else-chain";
+
+        function chooseLowering(cases: number[]): Strategy {
+          const n = cases.length;
+          if (n &lt;= 3) return "if-else-chain";            // too few to bother being clever
+
+          const lo = Math.min(...cases);
+          const hi = Math.max(...cases);
+          const span = hi - lo + 1;                       // slots a jump table would need
+          const density = n / span;                       // filled fraction of the range
+
+          console.log(`n=${n}  range=[${lo},${hi}]  span=${span}  density=${density.toFixed(2)}`);
+          // Dense range -> a jump table dispatches in O(1); otherwise binary-search the sorted values.
+          return density &gt;= 0.5 ? "jump-table" : "binary-search";
+        }
+
+        console.log("dense  :", chooseLowering([0, 1, 2, 3, 4, 5]));          // 6/6 = 1.00 -> jump table
+        console.log("sparse :", chooseLowering([3, 17, 42, 99, 256, 1000]));  // 6/998 -> binary search
+        console.log("tiny   :", chooseLowering([1, 2, 5]));                    // n<=3 -> if-else chain
+        console.log("cluster:", chooseLowering([10, 11, 12, 13, 90, 91]));    // 6/82 -> binary search (hybrid in practice)
+      </primer-code>
+      <p>
+        The dense case clears the threshold and gets an <primer-math>O(1)</primer-math> jump table; the scattered
+        one, with density under 1%, becomes a binary search; the three-case switch stays a simple chain. A real
+        compiler goes further and splits the <em>cluster</em> example into a jump table per dense run hung off a
+        binary search — the hybrid — but the core decision is exactly this density check.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why is a jump table sometimes SLOWER than an if-else chain, even when it is O(1)?">
+      <p>
+        Because <primer-math>O(1)</primer-math> counts comparisons, not clock cycles — and the indirect
+        <code>goto *addr</code> at the heart of a jump table is a <strong>indirect branch</strong> the CPU's
+        branch predictor struggles to guess. A mispredicted indirect jump can cost a dozen-plus cycles as the
+        pipeline flushes, whereas a short if–else chain is a string of <em>direct</em> conditional branches the
+        predictor handles beautifully, especially if one case dominates. So for a hot switch with a heavily
+        skewed distribution, a compiler (or a profile-guided optimiser) may deliberately keep a linear chain, or
+        peel the common case out in front of the table. Big-O is the start of the story, not the end;
+        the memory system and the branch predictor write the last chapter.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Fall-through and the default are not the same thing">
+      <p>
+        Two traps snare people lowering switches. First, in C-family languages a case without a <code>break</code>
+        <strong>falls through</strong> into the next case's body — that is control flow <em>inside</em> the arms,
+        totally separate from how the <code>switch</code> <em>dispatches</em> to an arm. Your lowering strategy
+        (chain / tree / table) picks the entry label; fall-through is just the absence of a jump at the end of an
+        arm. Conflating them produces code that runs the wrong arms. Second, the <strong>default</strong> is not
+        merely "the else at the bottom of a chain" — in a jump table it must fill <em>every</em> empty slot in the
+        range <em>and</em> catch every out-of-range value, which is why the lowering always emits the two range
+        checks <em>before</em> indexing. Forget either the empty-slot filler or a range check and an unlisted
+        value will index off the end of the table and jump to a garbage address.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: strategy selection, complexity, density, default handling + variable-driven density/branch counts. Bank of 13, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "switchQuiz@1": {
+          "intro": "Lowering a switch: if-else chain (O(n)), binary search (O(log n)), or jump table (O(1)) — chosen by case count and density. Numbers change every attempt.",
+          "fewQ": "For a switch with only a few cases, the compiler usually emits…",
+          "feChain": "a linear if-else chain of conditional jumps",
+          "feTable": "a million-entry jump table",
+          "feTree": "a deep binary tree",
+          "feHash": "a hash map",
+          "sparseQ": "For MANY cases whose values are widely scattered (sparse), the best lowering is…",
+          "spTree": "a binary search over the sorted case values, O(log n)",
+          "spTable": "a jump table spanning the whole range",
+          "spChain": "a linear chain over all cases",
+          "spNone": "refuse to compile",
+          "denseQ": "A jump table is chosen when the case values are…",
+          "deDense": "packed into a dense range, so most table slots are used",
+          "deSparse": "spread across a huge sparse range",
+          "deFew": "only two in number",
+          "deNeg": "all negative",
+          "tableCostQ": "Once built, a jump table dispatches to any case in…",
+          "tcO1": "O(1) — a range check, an index, a load, and one indirect jump",
+          "tcOn": "O(n) comparisons",
+          "tcLog": "O(log n) comparisons",
+          "tcN2": "O(n^2) time",
+          "treeCostQ": "A balanced binary-search lowering of n cases dispatches in about…",
+          "trLog": "log2(n) comparisons",
+          "trN": "n comparisons",
+          "trOne": "1 comparison",
+          "trN2": "n^2 comparisons",
+          "defQ": "In a jump table, the DEFAULT arm is used for…",
+          "dfEmpty": "every empty slot in the range and every out-of-range value",
+          "dfFirst": "only the first case",
+          "dfNever": "nothing — jump tables have no default",
+          "dfLast": "only the last slot",
+          "rangeQ": "Before indexing a jump table, the code must first…",
+          "rgCheck": "range-check the value (below min or above max jumps to default)",
+          "rgSort": "sort the table",
+          "rgNothing": "do nothing — indexing is always safe",
+          "rgHash": "hash the value",
+          "indirectQ": "A jump table can be slower than a chain in practice because…",
+          "inMispredict": "its indirect branch is often mispredicted, flushing the pipeline",
+          "inMemory": "arrays cannot be stored in memory",
+          "inCompare": "it does more comparisons",
+          "inNever": "it never is — O(1) always wins",
+          "ftQ": "C-style 'fall-through' (a case with no break) is…",
+          "ftFlow": "control flow inside the arms, separate from how the switch dispatches",
+          "ftTable": "the same thing as building a jump table",
+          "ftDefault": "identical to the default case",
+          "ftErr": "always a compile error",
+          "chainQ": "A linear if-else chain dispatching case number ${p} (1-based) out of ${n} cases performs how many equality tests in the worst path to that case? Give p.",
+          "densityQ": "A switch has ${c} cases spanning a range of ${span} slots. What is the fill density as a percentage (round to nearest integer)? Give round(100*c/span).",
+          "tableSlotsQ": "Case values run from ${lo} to ${hi} inclusive. How many slots must a full jump table have? Give hi - lo + 1.",
+          "logQ": "Roughly how many comparisons does a balanced binary search take for ${n} cases? Give floor(log2(n))."
+        }
+      }
+    </script>
+
+    <primer-quiz name="switchQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/ir/three-address-code",
+      "computer-science/compiler-design/ir/translating-control-flow"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Three side-by-side dispatch shapes for the same 6-case switch: chain, tree, jump table.
+  registerGeometryScene("switchStrategies", ({ board, step, colors }) => {
+    const box = (cx, cy, w, h, fill, label) => {
+      board.create("polygon",
+        [[cx - w / 2, cy - h / 2], [cx + w / 2, cy - h / 2], [cx + w / 2, cy + h / 2], [cx - w / 2, cy + h / 2]], {
+          fillColor: fill, fillOpacity: 0.25, borders: { strokeColor: colors.line, strokeWidth: 1.5 },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+      board.create("text", [cx, cy, label], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    const arrow = (ax, ay, bx, by) =>
+      board.create("arrow", [[ax, ay], [bx, by]], { strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false });
+    const heading = (x, y, t, col) =>
+      board.create("text", [x, y, t], { anchorX: "middle", fontSize: 12, fixed: true, highlight: false, strokeColor: col, color: col });
+
+    // Column 1: linear chain (base content).
+    heading(-8, 5.3, "if-else chain  O(n)", colors.cat[0]);
+    let py = 4;
+    for (let i = 0; i < 4; i++) {
+      const lbl = i < 3 ? `t==${[1, 2, 5][i]}?` : "default";
+      box(-8, py, 2.4, 0.9, colors.cat[0], lbl);
+      if (i > 0) arrow(-8, py + 1.35, -8, py + 0.5);
+      py -= 1.8;
+    }
+
+    // Column 2: binary tree.
+    step("Binary search: compare against a median, recurse into the matching half — O(log n).", () => {
+      heading(0, 5.3, "binary tree  O(log n)", colors.cat[1]);
+      box(0, 4, 2.2, 0.9, colors.cat[1], "t<42?");
+      box(-1.6, 2, 1.8, 0.8, colors.cat[1], "lo half");
+      box(1.6, 2, 1.8, 0.8, colors.cat[1], "hi half");
+      box(-2.6, 0.2, 1.5, 0.75, colors.cat[1], "t==3");
+      box(-0.6, 0.2, 1.5, 0.75, colors.cat[1], "t==17");
+      box(1.0, 0.2, 1.5, 0.75, colors.cat[1], "t==99");
+      box(2.9, 0.2, 1.5, 0.75, colors.cat[1], "t==256");
+      arrow(-0.5, 3.55, -1.6, 2.45); arrow(0.5, 3.55, 1.6, 2.45);
+      arrow(-1.9, 1.6, -2.6, 0.6); arrow(-1.3, 1.6, -0.6, 0.6);
+      arrow(1.3, 1.6, 1.0, 0.6); arrow(1.9, 1.6, 2.9, 0.6);
+    });
+
+    // Column 3: jump table.
+    step("Jump table: range-check, index the address array, one indirect jump — O(1).", () => {
+      heading(8, 5.3, "jump table  O(1)", colors.cat[2]);
+      box(8, 4, 2.6, 0.9, colors.cat[2], "0<=t<=5 ?");
+      box(8, 2.4, 2.6, 0.9, colors.cat[2], "addr = JTAB[t]");
+      box(8, 0.8, 2.6, 0.9, colors.cat[2], "goto *addr");
+      arrow(8, 3.55, 8, 2.85); arrow(8, 1.95, 8, 1.25);
+      for (let s = 0; s < 6; s++) box(6.0 + s * 0.8, -1.1, 0.72, 0.7, colors.cat[2], `L${s}`);
+      arrow(8, 0.35, 8, -0.7);
+    });
+  }, { boundingbox: [-10, 6, 10.5, -2], keepAspect: false, title: () => "Three lowerings of the same switch" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("switchQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("fewQ"),
+      options: [
+        { text: () => sceneStrings("feChain"), correct: true },
+        { text: () => sceneStrings("feTable"), correct: false },
+        { text: () => sceneStrings("feTree"), correct: false },
+        { text: () => sceneStrings("feHash"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sparseQ"),
+      options: [
+        { text: () => sceneStrings("spTree"), correct: true },
+        { text: () => sceneStrings("spTable"), correct: false },
+        { text: () => sceneStrings("spChain"), correct: false },
+        { text: () => sceneStrings("spNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("denseQ"),
+      options: [
+        { text: () => sceneStrings("deDense"), correct: true },
+        { text: () => sceneStrings("deSparse"), correct: false },
+        { text: () => sceneStrings("deFew"), correct: false },
+        { text: () => sceneStrings("deNeg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tableCostQ"),
+      options: [
+        { text: () => sceneStrings("tcO1"), correct: true },
+        { text: () => sceneStrings("tcOn"), correct: false },
+        { text: () => sceneStrings("tcLog"), correct: false },
+        { text: () => sceneStrings("tcN2"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("treeCostQ"),
+      options: [
+        { text: () => sceneStrings("trLog"), correct: true },
+        { text: () => sceneStrings("trN"), correct: false },
+        { text: () => sceneStrings("trOne"), correct: false },
+        { text: () => sceneStrings("trN2"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("defQ"),
+      options: [
+        { text: () => sceneStrings("dfEmpty"), correct: true },
+        { text: () => sceneStrings("dfFirst"), correct: false },
+        { text: () => sceneStrings("dfNever"), correct: false },
+        { text: () => sceneStrings("dfLast"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rangeQ"),
+      options: [
+        { text: () => sceneStrings("rgCheck"), correct: true },
+        { text: () => sceneStrings("rgSort"), correct: false },
+        { text: () => sceneStrings("rgNothing"), correct: false },
+        { text: () => sceneStrings("rgHash"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("indirectQ"),
+      options: [
+        { text: () => sceneStrings("inMispredict"), correct: true },
+        { text: () => sceneStrings("inMemory"), correct: false },
+        { text: () => sceneStrings("inCompare"), correct: false },
+        { text: () => sceneStrings("inNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ftQ"),
+      options: [
+        { text: () => sceneStrings("ftFlow"), correct: true },
+        { text: () => sceneStrings("ftTable"), correct: false },
+        { text: () => sceneStrings("ftDefault"), correct: false },
+        { text: () => sceneStrings("ftErr"), correct: false },
+      ],
+    },
+    {
+      // worst-path equality tests to reach the p-th case = p
+      prompt: (v) => sceneStrings("chainQ", v),
+      variables: "n=[4:8] p=[1:4]",
+      constraints: "p <= n",
+      answer: (v) => v.p,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // density percent = round(100*c/span)
+      prompt: (v) => sceneStrings("densityQ", v),
+      variables: "c=[3:8] span=[8:20]",
+      constraints: "c <= span",
+      answer: (v) => Math.round(100 * v.c / v.span),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // jump-table slots = hi - lo + 1
+      prompt: (v) => sceneStrings("tableSlotsQ", v),
+      variables: "lo=[0:5] hi=[6:20]",
+      answer: (v) => v.hi - v.lo + 1,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // floor(log2 n)
+      prompt: (v) => sceneStrings("logQ", v),
+      variables: "n=[4:64]",
+      answer: (v) => Math.floor(Math.log2(v.n)),
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

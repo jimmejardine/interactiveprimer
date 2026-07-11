@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>BGP and Autonomous Systems</primer-title>
+
+    <primer-card>
+      <p>
+        A packet leaving your phone for a server in Frankfurt crosses a dozen independent companies that have
+        never coordinated their engineering, run different equipment, and often actively compete. Yet the packet
+        arrives, usually in tens of milliseconds. There is <strong>no master map of the Internet</strong> stored
+        anywhere; no committee computes the routes. Instead the whole global structure emerges from thousands of
+        networks each shouting to their neighbours, "here are the destinations I can reach, and here's the path
+        to them." That gossip protocol is <strong>BGP</strong>, the Border Gateway Protocol — the single piece of
+        software that glues the Internet into one network.
+      </p>
+      <p>
+        We have already seen
+        <primer-ref soft to="computer-science/networks/network-layer/link-state-and-distance-vector-routing">how
+        routing works <em>inside</em> one network</primer-ref>. BGP is different in kind: it is
+        <strong>inter-domain</strong> routing, and its job is not to find the shortest path but to respect
+        <strong>business policy</strong> — who pays whom, who is allowed to carry whose traffic. This page is
+        about the unit BGP connects (the <em>autonomous system</em>), the path-vector mechanism it uses, the
+        money-shaped policies that actually decide routes, and the alarming fact that the protocol holding the
+        Internet together is built almost entirely on trust.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The autonomous system: the atom of the Internet</h2>
+      <p>
+        BGP does not route between computers or even between routers; it routes between
+        <strong>autonomous systems</strong>. An AS is a set of IP prefixes and routers under a
+        <em>single administrative control</em> with one consistent routing policy — an ISP, a big cloud, a large
+        university. Each AS is stamped with a globally unique <strong>Autonomous System Number (ASN)</strong>,
+        handed out by the regional registries.
+      </p>
+      <ul>
+        <li>
+          ASNs were originally <strong>16-bit</strong> (0–65535), but those ran out, so BGP was extended to
+          <strong>32-bit</strong> ASNs (up to ~4.2 billion). Familiar examples: <strong>AS15169</strong> is
+          Google, <strong>AS32934</strong> is Facebook/Meta, <strong>AS13335</strong> is Cloudflare.
+        </li>
+        <li>
+          An AS <strong>originates</strong> the prefixes it owns — e.g. Cloudflare originates
+          <code>104.16.0.0/12</code> — meaning "traffic for these addresses should ultimately come to me."
+        </li>
+        <li>
+          Ranges 64512–65534 and 4200000000–4294967294 are <strong>private ASNs</strong>, used internally the
+          way private IP ranges are, never seen in the global table.
+        </li>
+      </ul>
+      <p>
+        There are roughly <strong>75,000+ active ASes</strong> today, and the global BGP routing table has grown
+        past <strong>~950,000 IPv4 prefixes</strong> — a number every core router must hold in memory and search
+        on every packet, which is why router memory (the "FIB") is a real and expensive constraint.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Path-vector: advertise the whole AS-path</h2>
+      <p>
+        Interior protocols like OSPF flood link states; simple distance-vector protocols advertise only a
+        distance. BGP does something cannier — it is a <strong>path-vector</strong> protocol: every route
+        advertisement carries the <em>entire list of ASes</em> the route passes through, the
+        <strong>AS-path</strong>. When AS3 tells its neighbour AS4 "I can reach <code>203.0.113.0/24</code> via
+        AS-path <code>3 2 1</code>," AS4 records the route and, if it chooses to re-advertise it, <em>prepends
+        its own ASN</em>: it tells AS5 the path is <code>4 3 2 1</code>.
+      </p>
+      <p>
+        Carrying the full path buys two things a plain distance never could:
+      </p>
+      <primer-theorem name="Why the AS-path matters">
+        <ul>
+          <li>
+            <strong>Loop freedom, instantly.</strong> Before accepting a route, an AS checks whether
+            <em>its own ASN already appears</em> in the AS-path. If it does, the route would loop, so it is
+            rejected outright. No counting-to-infinity, no hold-down timers — the loop is visible in the path.
+          </li>
+          <li>
+            <strong>Policy, not just distance.</strong> A shorter AS-path is <em>preferred by default</em>, but
+            an AS is free to pick a longer path for business reasons, or to refuse to advertise a route at all.
+            The path is data for a policy decision, not an order.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Watch a prefix originated by AS1 ripple outward, each AS prepending itself so the path grows as it
+        travels:
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "bgpProp": {
+            "title": "A prefix propagating outward: each AS prepends its own number to the AS-path",
+            "as1": "AS1", "as2": "AS2", "as3": "AS3", "as4": "AS4", "as5": "AS5",
+            "origin": "AS1 originates 203.0.113.0/24 — AS-path: [1]",
+            "toa2": "AS1 → AS2 advertises it. AS2 stores path [2 1]",
+            "toa3": "AS2 → AS3. AS3 stores path [3 2 1]",
+            "toa4": "AS2 → AS4 (a different neighbour). AS4 stores path [4 2 1]",
+            "toa5": "AS3 & AS4 → AS5. AS5 sees TWO paths and picks the shorter/preferred one",
+            "loop": "AS1 would reject any path already containing '1' — instant loop detection"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="bgpProp"
+        caption="Five autonomous systems drawn as nodes. AS1 originates a prefix with AS-path [1]. It propagates to AS2 which stores [2 1], then to AS3 as [3 2 1] and to AS4 as [4 2 1]. AS5 hears the prefix from both AS3 and AS4, sees two candidate AS-paths, and selects the shorter or more preferred one. Any AS that finds its own number already in the path rejects the route as a loop."
+      ></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The routes are chosen by money, not distance</h2>
+      <p>
+        This is the part that surprises everyone: BGP's real decisions are commercial. Networks interconnect in
+        two economically different ways:
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th>Relationship</th><th>Who pays</th><th>What routes are shared</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>Transit</strong> (customer ↔ provider)</td>
+              <td>Customer pays the provider per bit</td>
+              <td>Provider gives the customer routes to the <em>whole</em> Internet</td>
+            </tr>
+            <tr>
+              <td><strong>Peering</strong> (peer ↔ peer)</td>
+              <td>Usually settlement-free (nobody pays)</td>
+              <td>Each shares only <em>its own + its customers'</em> routes, not the whole Internet</td>
+            </tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        These relationships drive the famous <strong>valley-free</strong> rule (Gao–Rexford): a network happily
+        carries traffic <em>for free</em> if doing so earns money or reaches a paying customer, but it will
+        <em>not</em> spend money to carry traffic that benefits a competitor. Concretely, an AS prefers routes in
+        this order: <strong>customer &gt; peer &gt; provider</strong> — because a customer route earns revenue, a
+        peer route is free, and a provider route costs money.
+      </p>
+      <p>
+        BGP encodes this with attributes, applied in a strict order when choosing among candidate routes for the
+        same prefix:
+      </p>
+      <ol>
+        <li><strong>LOCAL_PREF</strong> — highest wins. This is where the customer &gt; peer &gt; provider policy
+          is injected, so it dominates everything else.</li>
+        <li><strong>Shortest AS-path</strong> — fewer ASes, all else equal.</li>
+        <li><strong>MED, origin, eBGP-over-iBGP</strong>, then finally <strong>lowest router ID</strong> as an
+          arbitrary tie-break.</li>
+      </ol>
+      <p>
+        The upshot: the path your packets take is often <em>not</em> the geographically or topologically
+        shortest one — it is the cheapest one for the networks in between. Routing on the Internet is an
+        economic phenomenon wearing an engineering costume.
+      </p>
+
+      <primer-code run>
+        // BGP best-path selection (simplified): LOCAL_PREF first (higher wins),
+        // then shortest AS-path, then lowest router ID as a tie-break.
+        interface Route {
+          nextHopAs: string;
+          localPref: number;   // set by policy: customer=200, peer=100, provider=50
+          asPath: number[];
+          routerId: number;
+        }
+
+        const candidates: Route[] = [
+          { nextHopAs: "provider-X", localPref: 50,  asPath: [7, 9],        routerId: 3 },
+          { nextHopAs: "peer-Y",     localPref: 100, asPath: [11, 22, 33],  routerId: 5 },
+          { nextHopAs: "customer-Z", localPref: 200, asPath: [44, 55, 66],  routerId: 2 },
+        ];
+
+        function best(routes: Route[]): Route {
+          return [...routes].sort((a, b) =&gt;
+            b.localPref - a.localPref ||          // 1. highest LOCAL_PREF
+            a.asPath.length - b.asPath.length ||  // 2. shortest AS-path
+            a.routerId - b.routerId               // 3. lowest router ID
+          )[0];
+        }
+
+        const chosen = best(candidates);
+        console.log(`Chosen next hop: ${chosen.nextHopAs}`);
+        console.log(`  (LOCAL_PREF ${chosen.localPref}, AS-path length ${chosen.asPath.length})`);
+        console.log("Note: the customer route wins DESPITE having the LONGEST AS-path,");
+        console.log("because LOCAL_PREF (policy = revenue) is checked before path length.");
+      </primer-code>
+
+      <primer-vignette title="What's the difference between eBGP and iBGP?">
+        <p>
+          BGP wears two hats. <strong>eBGP (external)</strong> runs <em>between</em> different ASes — this is the
+          part that swaps routes across company boundaries and prepends ASNs. <strong>iBGP (internal)</strong>
+          runs <em>within</em> a single AS, distributing the externally-learned routes to all the AS's own border
+          routers so they agree on how to leave the network. A subtlety: to prevent internal loops, a route
+          learned via iBGP is <em>not</em> re-advertised to another iBGP peer — which is why large ASes need
+          route reflectors or a full mesh of iBGP sessions. Same protocol, two very different jobs.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>The trust problem: hijacks and leaks</h2>
+      <p>
+        Here is the uncomfortable truth. Classic BGP has <strong>no built-in authentication of who owns what</strong>.
+        When an AS announces "I originate <code>203.0.113.0/24</code>," its neighbours largely
+        <em>believe it</em>. That trust, combined with a rule that <strong>more-specific prefixes win</strong>,
+        makes two disasters possible:
+      </p>
+      <ul>
+        <li>
+          <strong>Prefix hijack.</strong> An AS announces a prefix it does not own. Because routers prefer the
+          most specific match, announcing a <em>longer</em> (more specific) prefix — say a <code>/24</code>
+          inside someone's <code>/22</code> — pulls the world's traffic to the impostor. In the famous
+          <strong>2008 incident, Pakistan Telecom (AS17557)</strong> announced a more-specific route for YouTube
+          intending to block it locally; the announcement leaked to its provider and <em>globally</em>, taking
+          YouTube offline for about two hours. A 2018 hijack rerouted Amazon Route 53 DNS traffic to steal
+          cryptocurrency.
+        </li>
+        <li>
+          <strong>Route leak.</strong> An AS re-advertises routes it should have kept to itself — e.g. a
+          multi-homed customer accidentally tells provider A about routes learned from provider B, making itself
+          look like a transit path between two giants. Traffic floods through a network far too small to carry
+          it, and everything melts. This has repeatedly caused large regional outages.
+        </li>
+      </ul>
+      <p>
+        The defences are being deployed but are still incomplete: <strong>RPKI</strong> (Resource Public Key
+        Infrastructure) cryptographically signs "AS <primer-math>X</primer-math> is authorised to originate
+        prefix <primer-math>P</primer-math>" as a <em>Route Origin Authorization</em>, so routers can drop
+        invalid origins; <strong>BGPsec</strong> would sign the whole AS-path but is barely deployed; and the
+        <strong>MANRS</strong> initiative pushes operators to filter their customers' announcements. The
+        Internet's core routing still runs largely on the assumption that everyone is telling the truth — which
+        is exactly why a single fat-fingered config in one AS can, and occasionally does, break connectivity for
+        millions.
+      </p>
+
+      <primer-vignette title="Watch out! — BGP finds a policy-compliant path, NOT the shortest or fastest one">
+        <p>
+          The seductive wrong model is "BGP finds the best route." It does not. BGP finds a route that is
+          <strong>consistent with every network's business policy</strong>, and among those, prefers a short
+          AS-path — but AS-path length is a crude proxy. One "hop" might be a transcontinental AS spanning
+          10,000 km; another might be a tiny local network. A path of two large ASes can be slower than a path of
+          four small ones. BGP has <em>no idea</em> about latency, bandwidth, or congestion; it counts ASes and
+          obeys money.
+        </p>
+        <p>
+          So your traffic can take a bizarre detour — Toronto to Montreal via New York, or two European users'
+          packets routed through the US — not because it is shorter, but because that is the path the commercial
+          relationships allowed. Never assume the BGP path is the geographically or performance-optimal one; it
+          is merely the policy-legal one with the fewest AS hops.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "bgpQuiz@1": { "instructions": "Check your grasp of BGP and autonomous systems: ASNs, path-vector routing and the AS-path, loop detection, transit vs peering, the LOCAL_PREF decision order, and the trust model behind hijacks and leaks." } }
+    </script>
+    <primer-quiz name="bgpQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/foundations/how-the-internet-is-organised",
+      "computer-science/networks/network-layer/link-state-and-distance-vector-routing",
+      "computer-science/networks/network-layer/ip-addressing-and-subnetting"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // AS topology: AS1 originates a prefix; it propagates to AS2, then AS3 and AS4,
+  // then AS5 (which hears two paths). AS-path grows via prepending.
+  registerGeometryScene("bgpProp", ({ board, step, colors, sceneStrings }) => {
+    const P = {
+      as1: [-6, 0], as2: [-2.5, 0], as3: [1, 2.2], as4: [1, -2.2], as5: [4.6, 0],
+    };
+    const edges = [["as1", "as2"], ["as2", "as3"], ["as2", "as4"], ["as3", "as5"], ["as4", "as5"]];
+
+    // base: edges + AS bubbles
+    for (const [a, b] of edges) {
+      board.create("segment", [P[a], P[b]], { strokeColor: colors.line, strokeWidth: 2, strokeOpacity: 0.5, fixed: true, highlight: false });
+    }
+    for (const key of Object.keys(P)) {
+      board.create("point", [P[key][0], P[key][1]], {
+        size: 16, face: "o", strokeColor: colors.cat[0], fillColor: colors.bg, fillOpacity: 1, strokeWidth: 2,
+        fixed: true, highlight: false, withLabel: false,
+      });
+      board.create("text", [P[key][0], P[key][1], sceneStrings(key)], {
+        anchorX: "middle", anchorY: "middle", fontSize: 12, strokeColor: colors.ink,
+        fixed: true, highlight: false, cssStyle: "font-weight:700",
+      });
+    }
+
+    const pathTag = (xy, s, col) =>
+      board.create("text", [xy[0], xy[1] + 0.95, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, strokeColor: col, color: col,
+        fixed: true, highlight: false, cssStyle: "font-weight:700",
+      });
+    const note = (s, col) =>
+      board.create("text", [-1, -4.3, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, strokeColor: col, color: col,
+        fixed: true, highlight: false, cssStyle: "text-align:center; width:340px; display:inline-block",
+      });
+
+    step(sceneStrings("origin"), () => { pathTag(P.as1, "[1]", colors.cat[1]); note(sceneStrings("origin"), colors.ink); });
+    step(sceneStrings("toa2"),   () => { pathTag(P.as2, "[2 1]", colors.cat[1]); note(sceneStrings("toa2"), colors.ink); });
+    step(sceneStrings("toa3"),   () => { pathTag(P.as3, "[3 2 1]", colors.cat[1]); note(sceneStrings("toa3"), colors.ink); });
+    step(sceneStrings("toa4"),   () => { pathTag(P.as4, "[4 2 1]", colors.cat[1]); note(sceneStrings("toa4"), colors.ink); });
+    step(sceneStrings("toa5"),   () => { pathTag(P.as5, "[5 3 2 1]", colors.cat[2]); note(sceneStrings("toa5"), colors.ink); });
+    step(sceneStrings("loop"),   () => note(sceneStrings("loop"), colors.cat[3] || colors.cat[2]));
+  }, {
+    boundingbox: [-8, 3.8, 6.5, -5],
+    keepAspect: false,
+    title: () => makeStrings("bgpProp")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("bgpQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "An autonomous system (AS) is…",
+      options: [
+        { text: "a set of IP prefixes and routers under a single administrative control with one routing policy", correct: true },
+        { text: "a single router", correct: false },
+        { text: "one physical cable between two cities", correct: false },
+        { text: "the DNS zone for a domain", correct: false },
+      ] },
+
+    { prompt: "BGP is best described as a … routing protocol.",
+      options: [
+        { text: "path-vector, inter-domain (between ASes)", correct: true },
+        { text: "link-state, intra-domain (within one AS)", correct: false },
+        { text: "flooding-based, per-packet", correct: false },
+        { text: "centralised, computed by ICANN", correct: false },
+      ] },
+
+    { prompt: "The AS-path in a BGP advertisement is…",
+      options: [
+        { text: "the ordered list of ASes the route passes through", correct: true },
+        { text: "the latency to the destination in milliseconds", correct: false },
+        { text: "the IP address of the destination host", correct: false },
+        { text: "the bandwidth of the slowest link", correct: false },
+      ] },
+
+    { prompt: "How does BGP detect and prevent routing loops?",
+      options: [
+        { text: "an AS rejects any advertised route whose AS-path already contains its own ASN", correct: true },
+        { text: "it uses a TTL that counts ASes", correct: false },
+        { text: "a central server checks every route for loops", correct: false },
+        { text: "loops are impossible in BGP by construction", correct: false },
+      ] },
+
+    { prompt: "When an AS re-advertises a route, it…",
+      options: [
+        { text: "prepends its own ASN to the front of the AS-path", correct: true },
+        { text: "removes all ASNs from the path", correct: false },
+        { text: "replaces the whole path with just its own ASN", correct: false },
+        { text: "leaves the AS-path completely unchanged", correct: false },
+      ] },
+
+    { prompt: "In a transit (customer↔provider) relationship…",
+      options: [
+        { text: "the customer pays the provider, and the provider gives routes to the whole Internet", correct: true },
+        { text: "nobody pays and each shares only its own customers' routes", correct: false },
+        { text: "the provider pays the customer", correct: false },
+        { text: "no routes are exchanged at all", correct: false },
+      ] },
+
+    { prompt: "In settlement-free peering, each network typically advertises…",
+      options: [
+        { text: "only its own and its customers' routes, not the whole Internet", correct: true },
+        { text: "the entire global routing table", correct: false },
+        { text: "no routes — peering carries no traffic", correct: false },
+        { text: "only routes learned from its providers", correct: false },
+      ] },
+
+    { prompt: "Which attribute does BGP consult FIRST when choosing among routes to the same prefix?",
+      options: [
+        { text: "LOCAL_PREF (highest wins) — this is where business policy is injected", correct: true },
+        { text: "the shortest AS-path", correct: false },
+        { text: "the lowest router ID", correct: false },
+        { text: "the geographic distance", correct: false },
+      ] },
+
+    { prompt: "A route with a LONG AS-path can still be chosen over a short one when…",
+      options: [
+        { text: "it has a higher LOCAL_PREF (e.g. it's a revenue-earning customer route)", correct: true },
+        { text: "never — shortest AS-path always wins", correct: false },
+        { text: "it has a lower TTL", correct: false },
+        { text: "the destination is closer geographically", correct: false },
+      ] },
+
+    { prompt: "A BGP 'prefix hijack' typically works by…",
+      options: [
+        { text: "announcing a more-specific prefix you don't own, which wins because routers prefer the longest match", correct: true },
+        { text: "flooding a router with too many packets", correct: false },
+        { text: "guessing the TCP sequence numbers", correct: false },
+        { text: "encrypting other networks' routes", correct: false },
+      ] },
+
+    { prompt: "The 2008 YouTube outage was caused when Pakistan Telecom…",
+      options: [
+        { text: "announced a more-specific route for YouTube that leaked globally instead of staying local", correct: true },
+        { text: "physically cut the undersea cable", correct: false },
+        { text: "launched a DDoS attack on YouTube", correct: false },
+        { text: "stole YouTube's TLS certificate", correct: false },
+      ] },
+
+    { prompt: "RPKI (Route Origin Authorizations) helps by…",
+      options: [
+        { text: "cryptographically stating which AS is allowed to originate which prefix, so invalid origins can be dropped", correct: true },
+        { text: "encrypting all packet payloads", correct: false },
+        { text: "replacing BGP with a centralised controller", correct: false },
+        { text: "making the AS-path shorter", correct: false },
+      ] },
+
+    { prompt: "Original ASNs were ${w}-bit; when they ran out, BGP was extended to 32-bit ASNs.",
+      variables: "w=[16,16]",
+      answer: "w" },
+
+    { prompt: "Under the customer > peer > provider preference, if a customer route has LOCAL_PREF 200 and a provider route has 50, the chosen LOCAL_PREF value is…",
+      variables: "cp=[150:250] pp=[10:90]",
+      constraints: "cp > pp",
+      answer: "cp" },
+
+    { prompt: "A route leak differs from a hijack in that the leaking AS…",
+      options: [
+        { text: "re-advertises real routes it should have kept private, becoming an unintended transit path", correct: true },
+        { text: "invents a prefix that doesn't exist", correct: false },
+        { text: "always intends to attack", correct: false },
+        { text: "encrypts the AS-path", correct: false },
+      ] },
+  ]);
+</script>

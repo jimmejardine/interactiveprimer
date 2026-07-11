@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Register Allocation</primer-title>
+
+    <primer-card>
+      <p>
+        The intermediate representation lied to you, generously. When
+        <primer-ref to="computer-science/compiler-design/ir/three-address-code">three-address code</primer-ref>
+        minted temporaries <primer-math>t_1, t_2, t_3, \dots</primer-math> without limit, it pretended the
+        machine had <em>infinitely many registers</em>. Real hardware does not: an x86-64 core has 16
+        general-purpose registers, ARM64 has 31, and a function routinely juggles hundreds of live values.
+        <strong>Register allocation</strong> is the phase that faces the lie head-on — it maps that unbounded set
+        of <em>virtual</em> registers onto the tiny fixed pool of <em>physical</em> ones, and decides which
+        unlucky values must be evicted to memory when the registers run out.
+      </p>
+      <p>
+        It matters enormously. Registers are the fastest storage a CPU has — a value in a register is free to use;
+        the same value in memory costs a load and a store every time. A good allocator can make the difference
+        between code that keeps its hot variables in registers across a whole loop and code that dutifully
+        shuttles them to the stack on every iteration. This is where the compiler earns much of its keep.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The problem: many virtuals, few physicals</h2>
+      <p>
+        State it plainly. The IR names values with virtual registers <primer-math>v_1, v_2, \dots</primer-math> —
+        as many as the code needed. The target offers <primer-math>k</primer-math> physical registers
+        (<primer-math>k = 16, 31, \dots</primer-math>). The allocator must assign each virtual to a physical such
+        that <strong>two values that are needed at the same time never share one register</strong>. When more
+        values are simultaneously needed than there are registers, some must <strong>spill</strong> to memory —
+        with loads before uses and stores after definitions — and spilling is exactly what we want to minimise.
+      </p>
+      <p>
+        The keystone is knowing when two values are "needed at the same time." That is
+        <strong>liveness</strong>: a value is <em>live</em> at a program point if it holds a value that may be
+        read later before being overwritten. Two values whose live ranges <strong>overlap</strong> cannot occupy
+        the same register — they <strong>interfere</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The interference graph</h2>
+      <p>
+        Overlapping live ranges cry out for a graph. Build the <strong>interference graph</strong>: one node per
+        value, and an edge between any two values whose live ranges overlap (that interfere). Now the whole
+        problem is reframed as pure combinatorics — assign each node a register so that adjacent nodes get
+        different registers. If registers are "colours", this is precisely <strong>graph colouring</strong>:
+        colour the interference graph with <primer-math>k</primer-math> colours, or spill if you cannot.
+      </p>
+      <primer-geometry scene="interferenceOverview"></primer-geometry>
+      <p>
+        In the figure, the values <primer-math>a, b, c</primer-math> are all live together — a triangle — so they
+        need three distinct registers. Value <primer-math>d</primer-math> interferes only with
+        <primer-math>a</primer-math> and <primer-math>c</primer-math>, never with <primer-math>b</primer-math>, so
+        it can <em>reuse</em> <primer-math>b</primer-math>'s register. Four values fit in three registers with no
+        spill — the allocator has found the reuse the schedule made possible.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Graph-colouring allocation (Chaitin)</h2>
+      <p>
+        The classic global allocator, due to <strong>Chaitin</strong> (1981) and refined by
+        <strong>Briggs</strong>, colours the interference graph with a beautifully simple heuristic resting on one
+        observation about node degree:
+      </p>
+      <primer-theorem name="The degree-&lt; k rule">
+        <ul>
+          <li>A node with <strong>fewer than <primer-math>k</primer-math></strong> neighbours can <em>always</em>
+            be coloured: whatever its neighbours take, at most <primer-math>k-1</primer-math> colours are used up,
+            so one remains free.</li>
+          <li>So repeatedly <strong>remove</strong> a degree-<primer-math>&lt;k</primer-math> node and push it on a
+            stack (<em>simplify</em>). Removing it only lowers its neighbours' degrees, exposing more removable
+            nodes.</li>
+          <li>Then <strong>pop</strong> the stack, giving each node a colour its already-coloured neighbours have
+            not used (<em>select</em>). A colour is guaranteed to be free, because each node had
+            <primer-math>&lt; k</primer-math> neighbours when it was removed.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        This <strong>simplify / select</strong> pair colours almost every real interference graph. The full
+        machinery — Briggs' <em>optimistic</em> pushing of high-degree nodes, and <em>coalescing</em> to delete
+        move instructions — is the subject of the dedicated
+        <primer-ref soft to="computer-science/compiler-design/codegen/register-allocation-by-graph-colouring">graph-colouring page</primer-ref>.
+        Here we care about the whole pipeline, and about the moment the colours run out.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>When colours run out: spilling</h2>
+      <p>
+        If some node cannot be coloured — its neighbours have used all <primer-math>k</primer-math> colours — that
+        value must <strong>spill</strong>. Spilling keeps the value in a stack slot and inserts a
+        <strong>load</strong> before each use and a <strong>store</strong> after each definition. This does three
+        things: it frees a register at every point the value is <em>not</em> being touched, it adds new (very
+        short) live ranges for the loaded/stored copies, and it therefore <strong>changes the code</strong> — so
+        the interference graph must be <em>rebuilt</em> and the whole colouring <em>re-run</em>. Allocation is a
+        loop that terminates when nothing spills.
+      </p>
+      <p>
+        Which value to spill? The allocator picks the one that hurts least — a common heuristic is to minimise
+        <primer-math>\dfrac{\text{spill cost}}{\text{degree}}</primer-math>, spilling a high-degree node (frees
+        lots of conflicts) whose uses are cheap and outside loops (a value used inside a tight loop is the
+        <em>last</em> thing you want in memory). The art of allocation is really the art of choosing good spills.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The fast alternative: linear scan</h2>
+      <p>
+        Graph colouring is powerful but not cheap: building the interference graph and iterating can dominate
+        compile time, which is fatal for a <primer-ref soft to="computer-science/compiler-design/advanced/just-in-time-compilation">JIT</primer-ref>
+        compiling at run time. <strong>Linear-scan</strong> allocation (Poletto &amp; Sarkar, 1999) trades a
+        little code quality for a lot of speed. It never builds a graph at all. Instead it approximates each
+        value's live range as a single <em>interval</em> on a linearised ordering of the code, sorts the
+        intervals by start point, and sweeps once left to right, keeping a pool of free registers: give each
+        interval a free register as it begins, return the register when the interval ends, and if none is free,
+        spill the interval that ends <em>latest</em>.
+      </p>
+      <primer-code run>
+        // Linear-scan register allocation over live intervals [start, end].
+        type Interval = { name: string; start: number; end: number };
+
+        function linearScan(intervals: Interval[], k: number): Record&lt;string, string&gt; {
+          const byStart = [...intervals].sort((a, b) =&gt; a.start - b.start);
+          const active: Interval[] = [];                 // live now, sorted by end
+          const free: string[] = Array.from({ length: k }, (_, i) =&gt; `R${i + 1}`);
+          const assign: Record&lt;string, string&gt; = {};
+
+          for (const cur of byStart) {
+            // Expire intervals that have ended before cur starts; reclaim their registers.
+            for (let i = active.length - 1; i &gt;= 0; i--) {
+              if (active[i].end &lt; cur.start) {
+                free.push(assign[active[i].name]);
+                active.splice(i, 1);
+              }
+            }
+            if (free.length &gt; 0) {
+              assign[cur.name] = free.pop()!;             // a register is available
+            } else {
+              // Spill the active interval that ends latest (heuristic).
+              active.sort((a, b) =&gt; a.end - b.end);
+              const victim = active[active.length - 1];
+              if (victim.end &gt; cur.end) {                 // cur outlives the victim: steal its register
+                assign[cur.name] = assign[victim.name];
+                assign[victim.name] = "SPILL";
+                active[active.length - 1] = cur;
+              } else {
+                assign[cur.name] = "SPILL";               // cur is the shortest-lived: spill it
+              }
+            }
+            active.push(cur);
+          }
+          return assign;
+        }
+
+        const ivals: Interval[] = [
+          { name: "a", start: 0, end: 6 },
+          { name: "b", start: 1, end: 3 },
+          { name: "c", start: 2, end: 8 },
+          { name: "d", start: 4, end: 5 },
+          { name: "e", start: 5, end: 9 },
+        ];
+        const result = linearScan(ivals, 2);   // only k = 2 registers
+        for (const iv of ivals) console.log(`${iv.name} [${iv.start},${iv.end}] -> ${result[iv.name]}`);
+      </primer-code>
+      <p>
+        With just two registers, the single sweep hands <code>a</code> and <code>b</code> the two registers,
+        reuses <code>b</code>'s once it expires, and spills whatever cannot fit — all in
+        <primer-math>O(n \log n)</primer-math>, dominated by the sort. No graph, no iteration to a fixpoint. This
+        is why HotSpot's client compiler, early V8, and many JITs allocate by linear scan: a hair worse than
+        Chaitin's code, produced an order of magnitude faster.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="The colouring analogy: why register allocation is literally a map-colouring puzzle">
+      <p>
+        The four-colour theorem asks: can you colour any map so no two bordering countries share a colour, using
+        only four colours? Register allocation asks the identical question with the numbers changed — can you
+        colour the interference graph so no two <em>interfering</em> values share a register, using only
+        <primer-math>k</primer-math> colours? The correspondence is exact: countries are values, shared borders
+        are interferences, colours are registers. And it inherits the bad news too: deciding
+        <primer-math>k</primer-math>-colourability of a general graph is <strong>NP-complete</strong>, so no
+        allocator is always optimal. What saves us is that program interference graphs are unusually
+        well-behaved — code without <code>goto</code> spaghetti yields <em>chordal</em> graphs, which
+        <em>can</em> be coloured optimally in polynomial time. The compiler plays a rigged game and mostly wins.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Spilling doesn't just reduce colours — it rewrites the code and forces a rebuild">
+      <p>
+        The seductive mistake is to treat a spill as "cross this node out and colour the rest." It is not.
+        Spilling <strong>inserts new load and store instructions</strong>, and those instructions define and use
+        fresh short-lived values with their <em>own</em> live ranges — so the interference graph you were
+        colouring is now <em>wrong</em>. You must rebuild the graph and colour again; do a round or two and it
+        settles. A second trap: not every register is yours to give. Some are reserved (a stack pointer, a frame
+        pointer, the zero register), and the calling convention splits the rest into <em>caller-saved</em>
+        (clobbered across a call) and <em>callee-saved</em> (preserved). A value that is live across a call site
+        prefers a callee-saved register, or it must be spilled around the call. Register allocation and the
+        <primer-ref soft to="computer-science/compiler-design/runtime/activation-records-and-the-stack">calling convention</primer-ref>
+        are inseparable — colour as if all <primer-math>k</primer-math> are free and you will clobber a live
+        value across a call.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: virtual->physical, liveness/interference, colouring, spilling, linear-scan + variable-driven counts. Bank of 14, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "regAllocQuiz@1": {
+          "intro": "Register allocation maps unlimited virtual registers onto k physical ones via colouring an interference graph, spilling when colours run out. Numbers change every attempt.",
+          "jobQ": "The job of register allocation is to…",
+          "jbMap": "map unbounded virtual registers onto the machine's k physical registers",
+          "jbEmit": "translate the AST into three-address code",
+          "jbParse": "build the parse tree",
+          "jbSchedule": "reorder instructions for the pipeline",
+          "liveQ": "A value is LIVE at a program point when…",
+          "lvRead": "its current value may be read later before being overwritten",
+          "lvName": "it has a name",
+          "lvConst": "it is a constant",
+          "lvGlobal": "it is a global variable",
+          "interQ": "Two values INTERFERE (get an edge in the graph) when…",
+          "inOverlap": "their live ranges overlap — both needed at the same time",
+          "inName": "they share a name",
+          "inAdj": "they are on adjacent lines",
+          "inSame": "they have the same type",
+          "colourQ": "Colouring the interference graph with k colours corresponds to…",
+          "clReg": "assigning values to k physical registers with no interfering pair sharing one",
+          "clBlock": "splitting the code into k basic blocks",
+          "clInstr": "emitting k instructions",
+          "clSort": "sorting the values",
+          "simpQ": "In Chaitin's SIMPLIFY, which node can be safely removed and pushed?",
+          "smLow": "any node with degree < k",
+          "smHigh": "only the highest-degree node",
+          "smLeaf": "only a CFG leaf",
+          "smAny": "any node, always with no consequence",
+          "spillQ": "When a value SPILLS, the allocator…",
+          "spLoadStore": "keeps it in memory with loads before uses and stores after definitions",
+          "spDelete": "deletes the value entirely",
+          "spDouble": "doubles the register count",
+          "spIgnore": "ignores it and continues",
+          "spillRebuildQ": "After inserting spill code, the allocator must…",
+          "srRebuild": "rebuild the interference graph and re-run colouring",
+          "srDone": "stop — it is finished",
+          "srKeep": "keep the old colouring unchanged",
+          "srReg": "add more physical registers",
+          "lsQ": "Linear-scan allocation is preferred when…",
+          "lsFast": "allocation speed matters (e.g. a JIT) — it never builds a graph",
+          "lsOptimal": "you need provably optimal colouring",
+          "lsSmall": "there is exactly one value",
+          "lsNever": "never — it is always worse",
+          "lsHowQ": "Linear scan works by…",
+          "lhSweep": "sorting live intervals by start and sweeping once, reclaiming registers as intervals end",
+          "lhGraph": "building and colouring the interference graph",
+          "lhRandom": "assigning registers at random",
+          "lhHash": "hashing value names to registers",
+          "conventionQ": "A value that is live ACROSS a call site should preferably go in a…",
+          "cvCallee": "callee-saved register (preserved across the call)",
+          "cvCaller": "caller-saved register (clobbered by the call)",
+          "cvStack": "the stack pointer register",
+          "cvZero": "the zero register",
+          "npQ": "Deciding k-colourability of a general interference graph is…",
+          "npHard": "NP-complete — allocators use heuristics",
+          "npEasy": "solvable in constant time",
+          "npUndec": "undecidable",
+          "npLinear": "always trivially linear and optimal",
+          "safeQ": "With ${k} physical registers, what is the largest node degree the degree rule still guarantees is colourable? Give k - 1.",
+          "spillNeedQ": "At one program point ${live} values are simultaneously live and there are ${k} registers. How many must be spilled at that point (0 if they fit)? Give max(0, live - k).",
+          "colourableQ": "A node has degree ${d}; there are ${k} registers. Is it GUARANTEED colourable by the degree rule? 1 for yes, 0 for no.",
+          "regUseQ": "A function has ${vals} live values but only ${k} registers and they never overlap enough to reuse. At least how many need a register at once, capped at k? Give min(vals, k)."
+        }
+      }
+    </script>
+
+    <primer-quiz name="regAllocQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/ir/three-address-code",
+      "computer-science/compiler-design/codegen/a-simple-code-generator"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Interference graph: triangle a-b-c plus d interfering only with a and c.
+  registerGeometryScene("interferenceOverview", ({ board, step, colors }) => {
+    const R = 0.62;
+    const edge = (a, b) => {
+      const dx = b[0] - a[0], dy = b[1] - a[1], d = Math.hypot(dx, dy), ux = dx / d, uy = dy / d;
+      board.create("segment", [[a[0] + ux * R, a[1] + uy * R], [b[0] - ux * R, b[1] - uy * R]], {
+        strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false,
+        straightFirst: false, straightLast: false,
+      });
+    };
+    const node = (p, label, fill) => {
+      board.create("circle", [[p[0], p[1]], R], {
+        strokeColor: fill, strokeWidth: 2.5, fillColor: fill, fillOpacity: 0.28, fixed: true, highlight: false,
+      });
+      board.create("text", [p[0], p[1], label], {
+        anchorX: "middle", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+
+    const a = [0, 3.4], b = [4.0, 0], c = [0, -3.4], d = [-4.0, 0];
+    // Base content: the interference edges, always visible.
+    edge(a, b); edge(b, c); edge(a, c); edge(a, d); edge(c, d);
+
+    step("a, b, c are all live together — a triangle — so they need three different registers.", () => {
+      node(a, "a:R1", colors.cat[0]);
+      node(b, "b:R2", colors.cat[1]);
+      node(c, "c:R3", colors.cat[2]);
+    });
+    step("d interferes only with a and c (not b) — so it REUSES b's register. 4 values, 3 registers, 0 spills.", () => {
+      node(d, "d:R2", colors.cat[1]);
+    });
+  }, { boundingbox: [-6.2, 4.8, 6.2, -4.8], keepAspect: false, title: () => "The interference graph (k = 3 registers)" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("regAllocQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("jobQ"),
+      options: [
+        { text: () => sceneStrings("jbMap"), correct: true },
+        { text: () => sceneStrings("jbEmit"), correct: false },
+        { text: () => sceneStrings("jbParse"), correct: false },
+        { text: () => sceneStrings("jbSchedule"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("liveQ"),
+      options: [
+        { text: () => sceneStrings("lvRead"), correct: true },
+        { text: () => sceneStrings("lvName"), correct: false },
+        { text: () => sceneStrings("lvConst"), correct: false },
+        { text: () => sceneStrings("lvGlobal"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("interQ"),
+      options: [
+        { text: () => sceneStrings("inOverlap"), correct: true },
+        { text: () => sceneStrings("inName"), correct: false },
+        { text: () => sceneStrings("inAdj"), correct: false },
+        { text: () => sceneStrings("inSame"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("colourQ"),
+      options: [
+        { text: () => sceneStrings("clReg"), correct: true },
+        { text: () => sceneStrings("clBlock"), correct: false },
+        { text: () => sceneStrings("clInstr"), correct: false },
+        { text: () => sceneStrings("clSort"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("simpQ"),
+      options: [
+        { text: () => sceneStrings("smLow"), correct: true },
+        { text: () => sceneStrings("smHigh"), correct: false },
+        { text: () => sceneStrings("smLeaf"), correct: false },
+        { text: () => sceneStrings("smAny"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("spillQ"),
+      options: [
+        { text: () => sceneStrings("spLoadStore"), correct: true },
+        { text: () => sceneStrings("spDelete"), correct: false },
+        { text: () => sceneStrings("spDouble"), correct: false },
+        { text: () => sceneStrings("spIgnore"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("spillRebuildQ"),
+      options: [
+        { text: () => sceneStrings("srRebuild"), correct: true },
+        { text: () => sceneStrings("srDone"), correct: false },
+        { text: () => sceneStrings("srKeep"), correct: false },
+        { text: () => sceneStrings("srReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lsQ"),
+      options: [
+        { text: () => sceneStrings("lsFast"), correct: true },
+        { text: () => sceneStrings("lsOptimal"), correct: false },
+        { text: () => sceneStrings("lsSmall"), correct: false },
+        { text: () => sceneStrings("lsNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lsHowQ"),
+      options: [
+        { text: () => sceneStrings("lhSweep"), correct: true },
+        { text: () => sceneStrings("lhGraph"), correct: false },
+        { text: () => sceneStrings("lhRandom"), correct: false },
+        { text: () => sceneStrings("lhHash"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("conventionQ"),
+      options: [
+        { text: () => sceneStrings("cvCallee"), correct: true },
+        { text: () => sceneStrings("cvCaller"), correct: false },
+        { text: () => sceneStrings("cvStack"), correct: false },
+        { text: () => sceneStrings("cvZero"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("npQ"),
+      options: [
+        { text: () => sceneStrings("npHard"), correct: true },
+        { text: () => sceneStrings("npEasy"), correct: false },
+        { text: () => sceneStrings("npUndec"), correct: false },
+        { text: () => sceneStrings("npLinear"), correct: false },
+      ],
+    },
+    {
+      // k - 1
+      prompt: (v) => sceneStrings("safeQ", v),
+      variables: "k=[2:9]",
+      answer: (v) => v.k - 1,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // max(0, live - k)
+      prompt: (v) => sceneStrings("spillNeedQ", v),
+      variables: "live=[2:12] k=[2:8]",
+      answer: (v) => Math.max(0, v.live - v.k),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // guaranteed colourable iff d < k
+      prompt: (v) => sceneStrings("colourableQ", v),
+      variables: "d=[1:9] k=[2:6]",
+      answer: (v) => (v.d < v.k ? 1 : 0),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // min(vals, k)
+      prompt: (v) => sceneStrings("regUseQ", v),
+      variables: "vals=[2:12] k=[2:8]",
+      answer: (v) => Math.min(v.vals, v.k),
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

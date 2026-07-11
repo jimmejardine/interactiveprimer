@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Data-Flow Analysis</primer-title>
+
+    <primer-card>
+      <p>
+        Almost every optimisation a compiler performs rests on a question of the form "<em>what do I know about
+        the program's values at this point?</em>" — is this variable definitely a constant here? is its current
+        value ever read again? has this expression already been computed on every path leading here?
+        <strong>Data-flow analysis</strong> is the single, unifying framework that answers all such questions.
+        It is one of the most powerful ideas in compiling precisely because it is not <em>an</em> optimisation but
+        the <em>machinery underneath</em> a whole family of them — reaching definitions, live variables, available
+        expressions, constant propagation — all the same algorithm with the pieces swapped out.
+      </p>
+      <p>
+        The setting is the
+        <primer-ref to="computer-science/compiler-design/codegen/basic-blocks-and-flow-graphs">control-flow graph</primer-ref>
+        of a function, and the currency is <em>facts</em> that flow along its edges. Each block transforms the
+        facts entering it into the facts leaving it; where edges merge, facts combine. Run that to a
+        <strong>fixed point</strong> and you have proved something true on every possible execution path — without
+        ever running the program.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The control-flow graph carries the facts</h2>
+      <p>
+        Recall the
+        <primer-ref to="computer-science/compiler-design/codegen/basic-blocks-and-flow-graphs">CFG</primer-ref>:
+        nodes are basic blocks (straight-line runs of
+        <primer-ref to="computer-science/compiler-design/ir/three-address-code">three-address code</primer-ref>),
+        edges are the possible transfers of control. Data-flow analysis attaches to every block two sets of facts:
+        <primer-math>\textit{IN}[B]</primer-math>, true on entry to <primer-math>B</primer-math>, and
+        <primer-math>\textit{OUT}[B]</primer-math>, true on exit. A block relates them through its
+        <strong>transfer function</strong>, and the CFG's edges relate one block's output to the next block's
+        input. Solving the analysis means finding <primer-math>\textit{IN}</primer-math> and
+        <primer-math>\textit{OUT}</primer-math> for every block that are mutually consistent.
+      </p>
+      <primer-geometry scene="dfgCFG"></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>gen and kill: what a block produces and destroys</h2>
+      <p>
+        A block's transfer function is built from two constant sets that summarise what happens inside it:
+      </p>
+      <primer-theorem name="The transfer function">
+        <ul>
+          <li><primer-math>\textit{gen}[B]</primer-math> — the facts the block <strong>creates</strong> (e.g. for
+            reaching definitions, the definitions made in <primer-math>B</primer-math> that survive to its end).</li>
+          <li><primer-math>\textit{kill}[B]</primer-math> — the facts the block <strong>destroys</strong> (e.g.
+            definitions of a variable that <primer-math>B</primer-math> redefines, invalidating earlier ones).</li>
+          <li>The block's output is what came in, minus what it killed, plus what it generated:
+            <primer-math>\textit{OUT}[B] = \textit{gen}[B]\cup(\textit{IN}[B]\setminus\textit{kill}[B])</primer-math>.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        That single equation — <em>generate, and pass through everything you didn't kill</em> — is the transfer
+        function for a forward "may" analysis like reaching definitions. Swap in different notions of
+        <primer-math>\textit{gen}</primer-math>, <primer-math>\textit{kill}</primer-math>, and set operator and you
+        get a different analysis, but the shape never changes.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Direction and the meet operator</h2>
+      <p>
+        Two knobs specialise the framework. The first is <strong>direction</strong>. A
+        <em>forward</em> analysis pushes facts along the edges (a block's <primer-math>\textit{IN}</primer-math>
+        comes from its predecessors' <primer-math>\textit{OUT}</primer-math>s) — this is how <strong>reaching
+        definitions</strong> and <strong>available expressions</strong> work. A <em>backward</em> analysis pulls
+        facts against the edges (a block's <primer-math>\textit{OUT}</primer-math> comes from its successors'
+        <primer-math>\textit{IN}</primer-math>s) — this is how <strong>live-variable analysis</strong> works,
+        because whether a value is needed depends on the <em>future</em>.
+      </p>
+      <p>
+        The second knob is the <strong>meet</strong> (or join) operator — how facts combine where control-flow
+        paths merge. Union (<primer-math>\cup</primer-math>) gives a <strong>"may"</strong> analysis: a fact holds
+        if it holds on <em>some</em> incoming path (a definition <em>may</em> reach here). Intersection
+        (<primer-math>\cap</primer-math>) gives a <strong>"must"</strong> analysis: a fact holds only if it holds
+        on <em>every</em> incoming path (an expression is available only if computed on <em>all</em> paths). The
+        meet-over-all-paths solution is what we are really after; the iterative algorithm computes it.
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Analysis</th><th>Direction</th><th>Meet</th><th>Fact tracked</th><th>Enables</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Reaching definitions</td><td>forward</td><td><primer-math>\cup</primer-math> (may)</td><td>which defs reach a point</td><td>use-def chains, const prop</td></tr>
+            <tr><td>Live variables</td><td>backward</td><td><primer-math>\cup</primer-math> (may)</td><td>values needed later</td><td>dead-code elim, allocation</td></tr>
+            <tr><td>Available expressions</td><td>forward</td><td><primer-math>\cap</primer-math> (must)</td><td>expressions already computed</td><td>common-subexpr elim</td></tr>
+            <tr><td>Very busy expressions</td><td>backward</td><td><primer-math>\cap</primer-math> (must)</td><td>exprs used on all future paths</td><td>code hoisting</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+    </primer-card>
+
+    <primer-card>
+      <h2>The iterative worklist algorithm</h2>
+      <p>
+        How do we solve the mutually-recursive <primer-math>\textit{IN}/\textit{OUT}</primer-math> equations? By
+        <strong>iterating to a fixed point</strong>. Initialise every set, then repeatedly recompute a block's
+        facts from its neighbours; when a block's output changes, its dependents might change too, so put them
+        back on a <strong>worklist</strong>. Keep going until nothing changes — the fixed point.
+      </p>
+      <primer-code lang="text">
+        // Forward "may" analysis (reaching definitions).
+        OUT[B] = {} for all B ; worklist = all blocks
+        while worklist not empty:
+            pick B from worklist
+            IN[B]  = union of OUT[P] for all predecessors P of B     // meet
+            newOut = gen[B] ∪ (IN[B] − kill[B])                       // transfer
+            if newOut ≠ OUT[B]:
+                OUT[B] = newOut
+                add all successors of B to the worklist              // they may change
+      </primer-code>
+      <p>
+        The worklist is just an efficiency trick — it avoids re-examining blocks whose inputs did not move.
+        Because facts are only ever <em>added</em> (the sets grow monotonically) and there are finitely many
+        possible facts, the loop must halt. Below, the same skeleton runs a real reaching-definitions analysis
+        on a small CFG with a loop.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Reaching definitions, worked in code</h2>
+      <p>
+        We solve reaching definitions for a four-block CFG — an entry, a loop head, a loop body (which redefines a
+        variable, killing the entry's definition), and an exit — and print the fixpoint
+        <primer-math>\textit{IN}</primer-math> sets.
+      </p>
+      <primer-code run>
+        type Block = { name: string; gen: string[]; kill: string[]; preds: string[] };
+
+        // d1: x defined in entry; d2: x defined in the loop body (d2 kills d1 and vice versa).
+        const cfg: Record&lt;string, Block&gt; = {
+          entry: { name: "entry", gen: ["d1"], kill: ["d2"], preds: [] },
+          head:  { name: "head",  gen: [],     kill: [],     preds: ["entry", "body"] },
+          body:  { name: "body",  gen: ["d2"], kill: ["d1"], preds: ["head"] },
+          exit:  { name: "exit",  gen: [],     kill: [],     preds: ["head"] },
+        };
+        const order = ["entry", "head", "body", "exit"];
+
+        const IN: Record&lt;string, Set&lt;string&gt;&gt; = {};
+        const OUT: Record&lt;string, Set&lt;string&gt;&gt; = {};
+        for (const b of order) { IN[b] = new Set(); OUT[b] = new Set(); }
+
+        const eq = (a: Set&lt;string&gt;, b: Set&lt;string&gt;) =&gt; a.size === b.size &amp;&amp; [...a].every((x) =&gt; b.has(x));
+
+        let changed = true, passes = 0;
+        while (changed) {
+          changed = false; passes++;
+          for (const b of order) {
+            const blk = cfg[b];
+            const inSet = new Set&lt;string&gt;();                       // IN = union of preds' OUT (may / forward)
+            for (const p of blk.preds) for (const d of OUT[p]) inSet.add(d);
+            const outSet = new Set&lt;string&gt;(blk.gen);               // OUT = gen ∪ (IN − kill)
+            for (const d of inSet) if (!blk.kill.includes(d)) outSet.add(d);
+            IN[b] = inSet;
+            if (!eq(outSet, OUT[b])) { OUT[b] = outSet; changed = true; }
+          }
+        }
+
+        console.log(`fixed point reached in ${passes} passes`);
+        for (const b of order) console.log(`IN[${b}] = {${[...IN[b]].sort().join(",")}}`);
+      </primer-code>
+      <p>
+        The interesting block is <code>head</code>: it is reached both from <code>entry</code> (carrying
+        <code>d1</code>) and from <code>body</code> (carrying <code>d2</code>), so at the fixed point
+        <primer-math>\textit{IN}[\texttt{head}] = \{d1, d2\}</primer-math> — <em>both</em> definitions of
+        <code>x</code> may reach the loop head. The analysis discovered that fact by chasing the back-edge around
+        until the sets stopped growing.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why it always terminates: lattices and monotonicity</h2>
+      <p>
+        The framework's guarantees come from order theory. The possible values of each
+        <primer-math>\textit{IN}/\textit{OUT}</primer-math> set form a <strong>lattice</strong> — a partially
+        ordered set (here, sets of facts ordered by <primer-math>\subseteq</primer-math>) with a meet operation
+        combining any two elements. The transfer functions are <strong>monotonic</strong>: give them a bigger
+        input and they produce a no-smaller output; they never undo progress. A finite lattice plus monotone
+        transfer functions is exactly the condition of the <strong>Kleene fixed-point theorem</strong>: iterate
+        from the bottom element and you climb the lattice, strictly, until you reach the <em>least fixed point</em>
+        — and because the lattice has finite height, you get there in finitely many steps.
+      </p>
+      <p>
+        That is the deep reason data-flow analysis is trustworthy: it is not a heuristic that "usually works," it
+        is a computation with a proof of termination and a proof that its answer is a <em>sound</em>
+        over-approximation of every real execution. The full theory of
+        <primer-ref soft to="computer-science/compiler-design/optimization/lattices-and-fixed-points">lattices and fixed points</primer-ref>
+        makes this precise.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If the answer is only an approximation, how can optimisation be safe?">
+      <p>
+        Because the approximation always errs in the <em>safe</em> direction — and which direction is safe flips
+        with the analysis. Live-variable analysis may report a variable live when it is actually dead; the cost is
+        a missed dead-code elimination, never a wrong deletion. Available-expressions analysis will only claim an
+        expression is available if it truly is on <em>every</em> path; if unsure, it says "not available" and you
+        miss a common-subexpression elimination, but you never reuse a stale value. This is the meaning of a
+        <strong>conservative</strong> (sound) analysis: it may leave optimisations on the table, but it never
+        performs an incorrect one. "May" analyses over-approximate; "must" analyses under-approximate; both
+        stay on the safe side of correctness. Optimisation is the art of being conservative without being timid.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Direction and meet are not free choices — each analysis fixes them">
+      <p>
+        A frequent muddle is to think you can pick forward/backward or union/intersection to taste. You cannot —
+        the <em>question</em> dictates both. "Which definitions <em>reach</em> here?" is inherently about the
+        <em>past</em>, so it is forward; and a definition reaching along <em>any</em> path counts, so it is union.
+        "Is this value <em>used later</em>?" is inherently about the <em>future</em>, so it is backward; used on
+        <em>any</em> future path counts, so union again. "Is this expression <em>already</em> computed on the way
+        here?" needs it computed on <em>all</em> paths to be safe, so it is intersection. Get the meet wrong —
+        use union where you needed intersection — and you will "prove" an expression is available when it was
+        computed on only one branch, and cheerfully reuse a value that was never computed on the other. The
+        direction and meet are part of the analysis's <em>specification</em>, not tuning parameters.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: gen/kill, direction, meet, worklist, lattice/termination + variable-driven set arithmetic. Bank of 14, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "dfaQuiz@1": {
+          "intro": "Data-flow analysis: gen/kill transfer functions over a CFG, forward/backward with a meet operator, iterated to a fixed point. Numbers change every attempt.",
+          "roleQ": "Data-flow analysis is best described as…",
+          "rFramework": "a unifying framework underlying many optimisations, not a single optimisation",
+          "rOne": "one specific optimisation called constant folding",
+          "rParser": "a kind of parser",
+          "rSched": "an instruction scheduler",
+          "transferQ": "The transfer function OUT[B] = gen[B] ∪ (IN[B] − kill[B]) says a block…",
+          "tPass": "generates its own facts and passes through everything it did not kill",
+          "tDelete": "deletes all incoming facts",
+          "tRandom": "produces random facts",
+          "tCopy": "copies IN unchanged always",
+          "genQ": "The set gen[B] contains…",
+          "gCreate": "the facts the block creates",
+          "gDestroy": "the facts the block destroys",
+          "gPred": "the block's predecessors",
+          "gAll": "every fact in the program",
+          "killQ": "The set kill[B] contains…",
+          "kDestroy": "the facts the block invalidates (destroys)",
+          "kCreate": "the facts the block creates",
+          "kSucc": "the block's successors",
+          "kEmpty": "always the empty set",
+          "reachQ": "Reaching definitions is a … analysis with a … meet.",
+          "rdFU": "forward, union (may)",
+          "rdBI": "backward, intersection (must)",
+          "rdBU": "backward, union",
+          "rdFI": "forward, intersection",
+          "liveQ": "Live-variable analysis is … because whether a value is needed depends on the future.",
+          "lvBack": "backward (facts pulled against the edges)",
+          "lvFwd": "forward (facts pushed along the edges)",
+          "lvNone": "directionless",
+          "lvRand": "randomly directed",
+          "availQ": "Available expressions uses INTERSECTION as its meet because an expression is available only if…",
+          "avAll": "it was computed on EVERY path reaching the point",
+          "avSome": "it was computed on SOME path",
+          "avOne": "it appears once anywhere",
+          "avNever": "it is never recomputed",
+          "meetQ": "Union (∪) as the meet operator makes an analysis a …; intersection (∩) makes it a …",
+          "mtMayMust": "may analysis; must analysis",
+          "mtMustMay": "must analysis; may analysis",
+          "mtSame": "both the same thing",
+          "mtNeither": "neither — meet is irrelevant",
+          "workQ": "In the worklist algorithm, when a block's OUT changes we…",
+          "wkAdd": "add its successors (forward) back to the worklist",
+          "wkStop": "stop immediately",
+          "wkAll": "restart the whole program",
+          "wkNothing": "do nothing",
+          "termQ": "Data-flow iteration is guaranteed to terminate because…",
+          "tmFinite": "the lattice has finite height and transfer functions are monotone",
+          "tmLuck": "of luck",
+          "tmTimeout": "of a fixed timeout",
+          "tmNever": "it isn't — it can loop forever",
+          "safeQ": "A conservative (sound) data-flow result…",
+          "sfSafe": "may miss some optimisations but never enables an incorrect one",
+          "sfWrong": "is often wrong and unsafe",
+          "sfExact": "is always exact",
+          "sfNone": "prevents all optimisation",
+          "unionQ": "IN[B] is the union of its predecessors' OUT sets. If pred A's OUT is a ${a}-element set and pred C's OUT is a ${c}-element set sharing exactly ${o} facts, how large is IN[B]? Give a + c - o.",
+          "killResQ": "A block has IN of size ${n}, kills ${k} of those facts, and generates ${g} new ones (none already present). What is |OUT|? Give n - k + g.",
+          "passExtraQ": "An analysis reaches a fixed point when a full pass changes nothing. If it converges after ${p} changing passes, how many total passes ran (including the final confirming pass)? Give p + 1."
+        }
+      }
+    </script>
+
+    <primer-quiz name="dfaQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/codegen/basic-blocks-and-flow-graphs",
+      "computer-science/compiler-design/ir/three-address-code"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // A small CFG with a loop; blocks carry IN/OUT and a back-edge.
+  registerGeometryScene("dfgCFG", ({ board, step, colors }) => {
+    const R = 0.85;
+    const node = (p, name, fill) => {
+      board.create("circle", [[p[0], p[1]], R], {
+        strokeColor: fill, strokeWidth: 2.5, fillColor: fill, fillOpacity: 0.2, fixed: true, highlight: false,
+      });
+      board.create("text", [p[0], p[1], name], {
+        anchorX: "middle", anchorY: "middle", fontSize: 14, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    const arrow = (a, b, col, curve = 0) => {
+      const dx = b[0] - a[0], dy = b[1] - a[1], d = Math.hypot(dx, dy), ux = dx / d, uy = dy / d;
+      const s = [a[0] + ux * R, a[1] + uy * R], e = [b[0] - ux * R, b[1] - uy * R];
+      if (curve === 0) {
+        board.create("arrow", [s, e], { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false });
+      } else {
+        const mx = (s[0] + e[0]) / 2 - uy * curve, my = (s[1] + e[1]) / 2 + ux * curve;
+        board.create("arrow", [s, [mx, my]], { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false });
+        board.create("arrow", [[mx, my], e], { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false });
+      }
+    };
+    const tag = (x, y, t, col) => board.create("text", [x, y, t], {
+      anchorX: "middle", fontSize: 12, fixed: true, highlight: false, strokeColor: col, color: col,
+    });
+
+    const entry = [0, 4], head = [0, 1.2], body = [3.2, -1.6], exit = [-3.2, -1.6];
+
+    // Base content: the CFG.
+    node(entry, "entry", colors.cat[0]);
+    node(head, "head", colors.cat[1]);
+    node(body, "body", colors.cat[2]);
+    node(exit, "exit", colors.cat[3]);
+    arrow(entry, head, colors.line);
+    arrow(head, body, colors.line);
+    arrow(head, exit, colors.line);
+    arrow(body, head, colors.line, 1.6);   // the loop back-edge
+
+    step("entry defines x (d1). Facts flow forward along the edges.", () => {
+      tag(entry[0] - 2.3, entry[1], "gen d1", colors.cat[0]);
+    });
+    step("body redefines x (d2), killing d1. The back-edge carries d2 up to head.", () => {
+      tag(body[0] + 1.9, body[1], "gen d2, kill d1", colors.cat[2]);
+    });
+    step("At the fixed point head sees BOTH: IN[head] = {d1, d2}.", () => {
+      tag(head[0] + 2.6, head[1], "IN = {d1,d2}", colors.cat[1]);
+    });
+  }, { boundingbox: [-6, 5, 6.5, -3], keepAspect: false, title: () => "Facts flowing over a CFG with a loop" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("dfaQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("roleQ"),
+      options: [
+        { text: () => sceneStrings("rFramework"), correct: true },
+        { text: () => sceneStrings("rOne"), correct: false },
+        { text: () => sceneStrings("rParser"), correct: false },
+        { text: () => sceneStrings("rSched"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("transferQ"),
+      options: [
+        { text: () => sceneStrings("tPass"), correct: true },
+        { text: () => sceneStrings("tDelete"), correct: false },
+        { text: () => sceneStrings("tRandom"), correct: false },
+        { text: () => sceneStrings("tCopy"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("genQ"),
+      options: [
+        { text: () => sceneStrings("gCreate"), correct: true },
+        { text: () => sceneStrings("gDestroy"), correct: false },
+        { text: () => sceneStrings("gPred"), correct: false },
+        { text: () => sceneStrings("gAll"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("killQ"),
+      options: [
+        { text: () => sceneStrings("kDestroy"), correct: true },
+        { text: () => sceneStrings("kCreate"), correct: false },
+        { text: () => sceneStrings("kSucc"), correct: false },
+        { text: () => sceneStrings("kEmpty"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("reachQ"),
+      options: [
+        { text: () => sceneStrings("rdFU"), correct: true },
+        { text: () => sceneStrings("rdBI"), correct: false },
+        { text: () => sceneStrings("rdBU"), correct: false },
+        { text: () => sceneStrings("rdFI"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("liveQ"),
+      options: [
+        { text: () => sceneStrings("lvBack"), correct: true },
+        { text: () => sceneStrings("lvFwd"), correct: false },
+        { text: () => sceneStrings("lvNone"), correct: false },
+        { text: () => sceneStrings("lvRand"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("availQ"),
+      options: [
+        { text: () => sceneStrings("avAll"), correct: true },
+        { text: () => sceneStrings("avSome"), correct: false },
+        { text: () => sceneStrings("avOne"), correct: false },
+        { text: () => sceneStrings("avNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("meetQ"),
+      options: [
+        { text: () => sceneStrings("mtMayMust"), correct: true },
+        { text: () => sceneStrings("mtMustMay"), correct: false },
+        { text: () => sceneStrings("mtSame"), correct: false },
+        { text: () => sceneStrings("mtNeither"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("workQ"),
+      options: [
+        { text: () => sceneStrings("wkAdd"), correct: true },
+        { text: () => sceneStrings("wkStop"), correct: false },
+        { text: () => sceneStrings("wkAll"), correct: false },
+        { text: () => sceneStrings("wkNothing"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("termQ"),
+      options: [
+        { text: () => sceneStrings("tmFinite"), correct: true },
+        { text: () => sceneStrings("tmLuck"), correct: false },
+        { text: () => sceneStrings("tmTimeout"), correct: false },
+        { text: () => sceneStrings("tmNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("safeQ"),
+      options: [
+        { text: () => sceneStrings("sfSafe"), correct: true },
+        { text: () => sceneStrings("sfWrong"), correct: false },
+        { text: () => sceneStrings("sfExact"), correct: false },
+        { text: () => sceneStrings("sfNone"), correct: false },
+      ],
+    },
+    {
+      // union size = a + c - overlap
+      prompt: (v) => sceneStrings("unionQ", v),
+      variables: "a=[2:6] c=[2:6] o=[0:2]",
+      constraints: "o <= a && o <= c",
+      answer: (v) => v.a + v.c - v.o,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // |OUT| = n - k + g
+      prompt: (v) => sceneStrings("killResQ", v),
+      variables: "n=[3:8] k=[0:3] g=[0:3]",
+      constraints: "k <= n",
+      answer: (v) => v.n - v.k + v.g,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // total passes = p + 1
+      prompt: (v) => sceneStrings("passExtraQ", v),
+      variables: "p=[1:5]",
+      answer: (v) => v.p + 1,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

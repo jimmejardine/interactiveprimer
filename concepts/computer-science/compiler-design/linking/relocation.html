@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Relocation and Linking</primer-title>
+
+    <primer-card>
+      <p>
+        The compiler's job ends with an <strong>object file</strong> — machine code for one source file, riddled
+        with holes. It cannot possibly be finished code: when your <code>main.o</code> calls <code>printf</code>,
+        the compiler has no idea what address <code>printf</code> will live at, because <code>printf</code> is in
+        a <em>different</em> file it never saw. So it leaves a blank where the address goes and writes a note to
+        itself: "fill this in later, once you know where <code>printf</code> ended up." <strong>Linking</strong>
+        is the phase that reads all those notes across every object file and library, decides the final memory
+        layout, and <strong>relocates</strong> — patches every blank with a real address — to produce a running
+        executable.
+      </p>
+      <p>
+        It is the same trick as
+        <primer-ref to="computer-science/compiler-design/ir/boolean-expressions-and-backpatching">backpatching</primer-ref>,
+        promoted from within one function to across an entire program: <em>emit now, record the hole, fill it
+        when the address is known</em>. Understanding it explains a dozen everyday mysteries — "undefined
+        reference" errors, why a static binary is huge and a dynamic one tiny, what a <code>.so</code> or DLL
+        actually is, and why the same shared library can sit at a different address in every process.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What's in an object file</h2>
+      <p>
+        An object file (ELF on Linux, Mach-O on macOS, COFF/PE on Windows) is more than raw bytes. It carries
+        three things the linker needs:
+      </p>
+      <primer-theorem name="The linker's raw materials">
+        <ul>
+          <li><strong>Sections</strong> of code and data — <code>.text</code> (instructions),
+            <code>.data</code> (initialised globals), <code>.bss</code> (zero-initialised) — each still assuming
+            it starts at address 0.</li>
+          <li>A <strong>symbol table</strong>: every name the file <em>defines</em> (a function or global it
+            provides) and every name it <em>references but does not define</em> (an <em>external</em>, or
+            "undefined", symbol).</li>
+          <li><strong>Relocation entries</strong>: a list of holes — for each, the <em>offset</em> in a section to
+            patch, <em>which symbol</em> supplies the value, and the <em>kind</em> of fix-up (absolute or
+            relative).</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The linker's two jobs fall straight out of this. <strong>Symbol resolution</strong>: match every
+        undefined reference to a definition somewhere in the other object files and libraries (fail, and you get
+        the dreaded "undefined reference to <code>printf</code>"). <strong>Relocation</strong>: now that every
+        symbol has a final address, walk the relocation entries and write those addresses into the holes.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>From object files to an executable</h2>
+      <p>
+        Watch the pipeline. Two object files each define some symbols and reference others; the linker lays their
+        sections end to end (assigning real addresses), resolves the cross-references, and patches the holes.
+      </p>
+      <primer-geometry scene="linkPipeline"></primer-geometry>
+      <p>
+        Once <code>main.o</code>'s <code>.text</code> is placed at, say, address <primer-math>0x400000</primer-math>
+        and <code>util.o</code>'s at <primer-math>0x400080</primer-math>, the linker knows
+        <code>helper</code> lives at <primer-math>0x400080</primer-math> and can finally fill the blank in
+        <code>main</code>'s <code>call helper</code>. Every hole becomes a number; the result is an executable
+        with no undefined symbols left.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Absolute vs relative relocations</h2>
+      <p>
+        Not all holes are patched the same way, and the difference is the crux of modern code. An
+        <strong>absolute</strong> relocation writes the symbol's <em>actual</em> address into the hole:
+        <primer-math>\textit{value} = S</primer-math> (plus an addend). Simple — but it bakes a fixed address
+        into the code, so the code only works if loaded at exactly the address the linker assumed.
+      </p>
+      <p>
+        A <strong>relative</strong> (PC-relative) relocation instead writes the <em>distance</em> from the patch
+        site to the target: <primer-math>\textit{value} = S + A - P</primer-math>, where <primer-math>S</primer-math>
+        is the symbol's address, <primer-math>A</primer-math> an addend, and <primer-math>P</primer-math> the
+        address of the hole itself. This is the magic ingredient of <strong>position-independent code</strong>
+        (PIC): if the whole block moves, the site <primer-math>P</primer-math> and the target
+        <primer-math>S</primer-math> move together, so the <em>difference</em> is unchanged and the same bytes
+        work at any load address. That is why a shared library can be mapped wherever the loader likes.
+      </p>
+      <primer-code lang="text">
+        Relocation entry:  { offset: 0x12,  symbol: "helper",  type: R_X86_64_PC32,  addend: -4 }
+
+        absolute (R_X86_64_64):   patch = S + A            // the target's real address
+        relative (R_X86_64_PC32): patch = S + A - P        // signed distance from the hole to the target
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Static vs dynamic linking</h2>
+      <p>
+        The final fork. <strong>Static linking</strong> copies the machine code of every library function you use
+        <em>into</em> the executable at link time and relocates it there. The binary is self-contained and needs
+        nothing at run time — but it is large, and every program that uses <code>printf</code> carries its own
+        private copy, wasting disk and RAM.
+      </p>
+      <p>
+        <strong>Dynamic linking</strong> leaves the library out and records only that the program <em>needs</em>,
+        say, <code>libc.so</code>. The <strong>loader</strong> maps the shared library into the process at run
+        time and fixes up the references then. One copy of <code>libc</code> in memory is shared by every process
+        — smaller binaries, and a security fix in the library helps everyone at once. The cost is a little
+        start-up work and a layer of indirection, which has two famous names:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th></th><th>Static linking</th><th>Dynamic linking</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>When resolved</td><td>at link time</td><td>at load / call time</td></tr>
+            <tr><td>Library code</td><td>copied into the binary</td><td>shared <code>.so</code>/DLL, one copy in RAM</td></tr>
+            <tr><td>Binary size</td><td>large</td><td>small</td></tr>
+            <tr><td>Indirection</td><td>none</td><td>via the GOT and PLT</td></tr>
+            <tr><td>Library update</td><td>relink required</td><td>swap the <code>.so</code></td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The indirection works through two tables. The <strong>GOT</strong> (Global Offset Table) is an array of
+        pointers, filled in with real addresses at load time; code reaches a global or function <em>through</em>
+        its GOT slot rather than by a baked-in address, so only the small GOT needs fixing up, not the code. The
+        <strong>PLT</strong> (Procedure Linkage Table) adds <em>lazy</em> binding: the first call to a dynamic
+        function jumps through a PLT stub that asks the loader to resolve the symbol and cache its address in the
+        GOT; every later call flies straight through the now-filled GOT slot. Cheap start-up, one-time cost per
+        function actually used.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Applying relocations, in code</h2>
+      <p>
+        Here is a miniature linker's relocation pass. We place two object files' sections at chosen base
+        addresses, build a symbol table of final addresses, then walk each relocation entry and compute the patch
+        value — absolute or PC-relative.
+      </p>
+      <primer-code run>
+        type Sym = { name: string; section: string; offset: number };
+        type Reloc = { section: string; offset: number; symbol: string; kind: "ABS" | "PC32"; addend: number };
+
+        // Final base address assigned to each section by the linker's layout.
+        const sectionBase: Record&lt;string, number&gt; = {
+          "main.text": 0x400000,
+          "util.text": 0x400080,
+        };
+
+        // Symbols defined across the object files (section-relative).
+        const defs: Sym[] = [
+          { name: "main",   section: "main.text", offset: 0x00 },
+          { name: "helper", section: "util.text", offset: 0x00 },
+          { name: "logmsg", section: "util.text", offset: 0x30 },
+        ];
+        const addrOf = (name: string) =&gt; {
+          const s = defs.find((d) =&gt; d.name === name)!;
+          return sectionBase[s.section] + s.offset;   // resolve to a final absolute address
+        };
+
+        // Holes to patch inside main.text.
+        const relocs: Reloc[] = [
+          { section: "main.text", offset: 0x12, symbol: "helper", kind: "PC32", addend: -4 },
+          { section: "main.text", offset: 0x20, symbol: "logmsg", kind: "ABS",  addend: 0 },
+        ];
+
+        for (const r of relocs) {
+          const S = addrOf(r.symbol);                 // target address
+          const P = sectionBase[r.section] + r.offset; // address of the hole itself
+          const patch = r.kind === "ABS" ? S + r.addend : S + r.addend - P;
+          const hex = (patch &gt;&gt;&gt; 0).toString(16);
+          console.log(`patch ${r.section}+0x${r.offset.toString(16)} (${r.symbol}, ${r.kind}) = 0x${hex}`);
+        }
+      </primer-code>
+      <p>
+        The <code>helper</code> call gets a small PC-relative displacement (target minus the site minus 4),
+        exactly the encoding an x86-64 <code>call rel32</code> wants; the <code>logmsg</code> reference gets the
+        full absolute address <primer-math>0x4000b0</primer-math>. Change a section base and the relative patch
+        adjusts itself while staying correct — the whole point of position independence.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why does the same shared library appear at a different address in every process?">
+      <p>
+        Two reasons, one old and one about security. The old reason: a shared library must coexist with
+        <em>whatever</em> else a process has mapped, and different programs have different memory maps, so the
+        loader picks whatever free region fits — which is only possible because the library is position-independent
+        (all those PC-relative relocations and GOT indirections mean the code does not care where it lands). The
+        modern reason is <strong>ASLR</strong> — Address Space Layout Randomisation. The loader deliberately
+        <em>randomises</em> the base address of the executable, libraries, stack and heap on every run, so an
+        attacker cannot predict where <code>system()</code> or a useful gadget will be. ASLR is only feasible
+        <em>because</em> relocation already made code relocatable: the security win rides for free on machinery the
+        linker built for sharing. Position-independence started as a memory-saving convenience and became a
+        cornerstone of exploit mitigation.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Undefined reference' is a resolution failure, not a compile error">
+      <p>
+        The classic beginner confusion is to see <code>undefined reference to 'sqrt'</code> and hunt for a syntax
+        mistake. There isn't one — your code <em>compiled fine</em>. The message comes from a <em>later</em>
+        phase, the <strong>linker</strong>, and it means resolution failed: some object file <em>referenced</em>
+        <code>sqrt</code> (left a relocation hole for it) but <em>no</em> object file or library on the link line
+        <em>defined</em> it, so the hole cannot be filled. The fix is never in the source; it is telling the
+        linker where the definition lives — link the maths library (<code>-lm</code>), add the missing
+        <code>.o</code>, or fix library order (linkers scan left to right, so a library must come <em>after</em>
+        the object that needs it). The mirror error, "multiple definition", is the opposite: two files
+        <em>defined</em> the same symbol and the linker can't choose. Compilation checks one file's grammar;
+        linking checks that the <em>whole program's</em> symbols line up.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: symbols, relocations, absolute/relative, static/dynamic, GOT/PLT + variable-driven patch arithmetic. Bank of 14, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "relocQuiz@1": {
+          "intro": "Linking resolves symbols across object files and relocates — patching address holes — to build an executable. Numbers change every attempt.",
+          "objQ": "An object file leaves address 'holes' because…",
+          "obOther": "some referenced symbols are defined in other files whose addresses aren't known yet",
+          "obBug": "the compiler made a mistake",
+          "obRandom": "addresses are chosen randomly",
+          "obNever": "it doesn't — object files are complete executables",
+          "symQ": "The symbol table records…",
+          "syDefRef": "names the file defines and names it references but does not define",
+          "syOnlyDef": "only defined names",
+          "syColors": "the syntax-highlighting colours",
+          "syLines": "source line numbers only",
+          "resolveQ": "Symbol RESOLUTION is…",
+          "reMatch": "matching each undefined reference to a definition somewhere in the linked files",
+          "reScale": "scaling array indices",
+          "reColour": "colouring the interference graph",
+          "reParse": "parsing the grammar",
+          "relocQ": "RELOCATION is…",
+          "rlPatch": "writing final addresses into the holes once symbols are placed",
+          "rlSort": "sorting the symbol table",
+          "rlAlloc": "allocating registers",
+          "rlToken": "tokenising the source",
+          "absQ": "An ABSOLUTE relocation patches a hole with…",
+          "abReal": "the symbol's actual final address (S + addend)",
+          "abDist": "the distance to the symbol",
+          "abZero": "always zero",
+          "abReg": "a register number",
+          "relQ": "A RELATIVE (PC-relative) relocation patches with S + A − P, which is the…",
+          "rvDist": "signed distance from the hole to the target — unchanged if both move together",
+          "rvAbs": "absolute address of the symbol",
+          "rvNeg": "negation of the symbol",
+          "rvReg": "a register offset",
+          "picQ": "PC-relative relocation enables position-independent code because…",
+          "picMove": "if the block moves, site and target move together, so the difference stays the same",
+          "picFix": "it fixes the load address forever",
+          "picBig": "it makes the binary larger",
+          "picNo": "it disables sharing",
+          "staticQ": "STATIC linking…",
+          "stCopy": "copies library code into the binary at link time — self-contained but larger",
+          "stShare": "shares one library copy at run time",
+          "stNone": "never resolves symbols",
+          "stJIT": "compiles at run time",
+          "dynQ": "DYNAMIC linking resolves references…",
+          "dyLoad": "at load/call time, sharing one library copy across processes",
+          "dyLink": "always fully at link time",
+          "dyNever": "never",
+          "dyCompile": "during lexing",
+          "gotQ": "The GOT (Global Offset Table) lets code…",
+          "gotThru": "reach a symbol through a pointer slot fixed up at load time, so code stays unpatched",
+          "gotParse": "parse the grammar",
+          "gotReg": "store registers",
+          "gotStack": "grow the stack",
+          "pltQ": "The PLT (Procedure Linkage Table) provides…",
+          "pltLazy": "lazy binding — resolve a function on first call, cache it in the GOT for later calls",
+          "pltEager": "eager evaluation of arithmetic",
+          "pltSort": "sorting of relocations",
+          "pltReg": "extra registers",
+          "undefQ": "An 'undefined reference' error comes from…",
+          "udLink": "the linker — a symbol was referenced but never defined; not a compile error",
+          "udParse": "the parser",
+          "udLex": "the lexer",
+          "udRun": "the running program crashing",
+          "absPatchQ": "A symbol is at (decimal) address ${saddr} and an ABSOLUTE relocation has addend ${add}. What value is written into the hole? Give saddr + add.",
+          "pcPatchQ": "For a PC-relative reloc, the target is at ${s}, the hole at ${p}, addend ${add}. What value is patched? Give s + add − p.",
+          "sizeQ": "The linker places section A of size ${szA} bytes at base 0, then section B right after it. At what byte offset does section B start? Give szA."
+        }
+      }
+    </script>
+
+    <primer-quiz name="relocQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/compiler-design/codegen/a-simple-code-generator",
+      "computer-science/compiler-design/foundations/the-phases-of-compilation"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene } from "primer";
+
+  // Two object files -> linker -> executable, with a resolved cross-reference arrow.
+  registerGeometryScene("linkPipeline", ({ board, step, colors }) => {
+    const box = (cx, cy, w, h, fill, title, sub) => {
+      board.create("polygon",
+        [[cx - w / 2, cy - h / 2], [cx + w / 2, cy - h / 2], [cx + w / 2, cy + h / 2], [cx - w / 2, cy + h / 2]], {
+          fillColor: fill, fillOpacity: 0.22, borders: { strokeColor: colors.line, strokeWidth: 1.5 },
+          vertices: { visible: false }, fixed: true, highlight: false,
+        });
+      board.create("text", [cx, cy + 0.35, title], {
+        anchorX: "middle", anchorY: "middle", fontSize: 13, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+      if (sub) board.create("text", [cx, cy - 0.45, sub], {
+        anchorX: "middle", anchorY: "middle", fontSize: 10, fixed: true, highlight: false,
+        strokeColor: colors.ink, color: colors.ink,
+      });
+    };
+    const arrow = (a, b, col) => board.create("arrow", [a, b], { strokeColor: col, strokeWidth: 2, fixed: true, highlight: false });
+
+    // Base content: two object files and the linker/executable stage.
+    box(-6, 2.2, 3.6, 1.7, colors.cat[0], "main.o", "call helper -> ?");
+    box(-6, -1.4, 3.6, 1.7, colors.cat[1], "util.o", "defines helper");
+    box(0, 0.4, 3.2, 2.0, colors.cat[2], "linker", "resolve + relocate");
+    box(6, 0.4, 3.6, 1.9, colors.cat[3], "a.out", "helper @ 0x400080");
+    arrow([-4.2, 2.2], [-1.6, 0.9], colors.line);
+    arrow([-4.2, -1.4], [-1.6, -0.1], colors.line);
+    arrow([1.6, 0.4], [4.2, 0.4], colors.line);
+
+    step("The linker matches main.o's undefined 'helper' to util.o's definition (symbol resolution).", () => {
+      board.create("text", [0, -2.4, "unresolved 'helper' -> found in util.o"], {
+        anchorX: "middle", fontSize: 12, fixed: true, highlight: false, strokeColor: colors.cat[1], color: colors.cat[1],
+      });
+    });
+    step("It assigns addresses, then patches the hole: call helper -> 0x400080 (relocation).", () => {
+      board.create("text", [6, -1.4, "hole patched with real address"], {
+        anchorX: "middle", fontSize: 12, fixed: true, highlight: false, strokeColor: colors.cat[3], color: colors.cat[3],
+      });
+    });
+  }, { boundingbox: [-8.5, 4, 8.5, -3.2], keepAspect: false, title: () => "Object files -> linker -> executable" });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("relocQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("objQ"),
+      options: [
+        { text: () => sceneStrings("obOther"), correct: true },
+        { text: () => sceneStrings("obBug"), correct: false },
+        { text: () => sceneStrings("obRandom"), correct: false },
+        { text: () => sceneStrings("obNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("symQ"),
+      options: [
+        { text: () => sceneStrings("syDefRef"), correct: true },
+        { text: () => sceneStrings("syOnlyDef"), correct: false },
+        { text: () => sceneStrings("syColors"), correct: false },
+        { text: () => sceneStrings("syLines"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("resolveQ"),
+      options: [
+        { text: () => sceneStrings("reMatch"), correct: true },
+        { text: () => sceneStrings("reScale"), correct: false },
+        { text: () => sceneStrings("reColour"), correct: false },
+        { text: () => sceneStrings("reParse"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("relocQ"),
+      options: [
+        { text: () => sceneStrings("rlPatch"), correct: true },
+        { text: () => sceneStrings("rlSort"), correct: false },
+        { text: () => sceneStrings("rlAlloc"), correct: false },
+        { text: () => sceneStrings("rlToken"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("absQ"),
+      options: [
+        { text: () => sceneStrings("abReal"), correct: true },
+        { text: () => sceneStrings("abDist"), correct: false },
+        { text: () => sceneStrings("abZero"), correct: false },
+        { text: () => sceneStrings("abReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("relQ"),
+      options: [
+        { text: () => sceneStrings("rvDist"), correct: true },
+        { text: () => sceneStrings("rvAbs"), correct: false },
+        { text: () => sceneStrings("rvNeg"), correct: false },
+        { text: () => sceneStrings("rvReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("picQ"),
+      options: [
+        { text: () => sceneStrings("picMove"), correct: true },
+        { text: () => sceneStrings("picFix"), correct: false },
+        { text: () => sceneStrings("picBig"), correct: false },
+        { text: () => sceneStrings("picNo"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("staticQ"),
+      options: [
+        { text: () => sceneStrings("stCopy"), correct: true },
+        { text: () => sceneStrings("stShare"), correct: false },
+        { text: () => sceneStrings("stNone"), correct: false },
+        { text: () => sceneStrings("stJIT"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dynQ"),
+      options: [
+        { text: () => sceneStrings("dyLoad"), correct: true },
+        { text: () => sceneStrings("dyLink"), correct: false },
+        { text: () => sceneStrings("dyNever"), correct: false },
+        { text: () => sceneStrings("dyCompile"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gotQ"),
+      options: [
+        { text: () => sceneStrings("gotThru"), correct: true },
+        { text: () => sceneStrings("gotParse"), correct: false },
+        { text: () => sceneStrings("gotReg"), correct: false },
+        { text: () => sceneStrings("gotStack"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pltQ"),
+      options: [
+        { text: () => sceneStrings("pltLazy"), correct: true },
+        { text: () => sceneStrings("pltEager"), correct: false },
+        { text: () => sceneStrings("pltSort"), correct: false },
+        { text: () => sceneStrings("pltReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("undefQ"),
+      options: [
+        { text: () => sceneStrings("udLink"), correct: true },
+        { text: () => sceneStrings("udParse"), correct: false },
+        { text: () => sceneStrings("udLex"), correct: false },
+        { text: () => sceneStrings("udRun"), correct: false },
+      ],
+    },
+    {
+      // absolute patch = saddr + add  (saddr given as small hex-ish integer, but we treat as decimal token)
+      prompt: (v) => sceneStrings("absPatchQ", v),
+      variables: "saddr=[100:400] add=[0:16]",
+      answer: (v) => v.saddr + v.add,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // PC-relative patch = s + add - p
+      prompt: (v) => sceneStrings("pcPatchQ", v),
+      variables: "s=[200:400] p=[100:199] add=[-8:0]",
+      answer: (v) => v.s + v.add - v.p,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // section B starts at szA
+      prompt: (v) => sceneStrings("sizeQ", v),
+      variables: "szA=[16:256]",
+      answer: (v) => v.szA,
+      keyboard: "geometry-lengths",
+    },
+  ]);
+</script>

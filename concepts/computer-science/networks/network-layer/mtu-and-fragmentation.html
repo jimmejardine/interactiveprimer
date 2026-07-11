@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+
+    <primer-title>MTU and Fragmentation</primer-title>
+
+    <primer-card>
+      <p>
+        A network link is not a smooth pipe you can pour any amount into at once. Every link has a
+        <strong>maximum frame size</strong> it will carry, and the moment your data exceeds it something has to
+        give. On the Ethernet that dominates the world, that limit — the <strong>Maximum Transmission Unit
+        (MTU)</strong> — is famously <strong>1500 bytes</strong>. Try to send a 4000-byte IP packet across it and
+        the network layer must chop your packet into pieces small enough to fit, ship them separately, and glue
+        them back together at the far end. That chopping-and-gluing is <strong>fragmentation</strong>, and it is
+        one of those quiet mechanisms that mostly works — until it spectacularly doesn't.
+      </p>
+      <p>
+        This page is about the MTU, how IPv4 fragments a too-big packet (and why that is more costly and fragile
+        than it looks), how <strong>Path MTU Discovery</strong> lets a sender find the largest size that will
+        survive end-to-end without any fragmentation at all, and how it all ties back to
+        <primer-ref soft to="computer-science/networks/transport/tcp-in-depth">TCP's</primer-ref> MSS and the
+        <primer-ref soft to="computer-science/networks/programming/udp-sockets">UDP</primer-ref> datagrams you
+        send by hand. Understanding MTU is the difference between a network that "mysteriously hangs on large
+        transfers" and one you can actually reason about.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The MTU: how big is one frame?</h2>
+      <p>
+        The MTU is the largest payload a link-layer frame will carry — i.e. the biggest IP packet that fits in
+        one frame without splitting. It is a property of the <em>link</em>, not the packet, so different hops on
+        a path can have different MTUs, and the one that matters is the <strong>smallest along the whole
+        path</strong> (the <em>path MTU</em>).
+      </p>
+      <primer-table>
+        <table>
+          <thead><tr><th>Link / context</th><th>MTU (bytes)</th></tr></thead>
+          <tbody>
+            <tr><td>Classic Ethernet</td><td><strong>1500</strong></td></tr>
+            <tr><td>Ethernet "jumbo frames" (data-centre)</td><td>9000</td></tr>
+            <tr><td>PPPoE (DSL) — 8 bytes of overhead</td><td>1492</td></tr>
+            <tr><td>IPv6 minimum every link must support</td><td>1280</td></tr>
+            <tr><td>Common "safe" internet size (tunnels, VPNs)</td><td>~1400 or 1200</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Note that tunnels and VPNs (IPsec, WireGuard, GRE) <em>wrap</em> your packet in extra headers, eating
+        into the 1500 and lowering the effective MTU — which is exactly why "it works normally but big transfers
+        over the VPN stall" is such a common, maddening symptom.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>How IPv4 fragments a too-big packet</h2>
+      <p>
+        Suppose a host wants to send <strong>4000 bytes</strong> of data in one IP packet, but the outgoing link
+        has MTU 1500. The IPv4 header is 20 bytes, so at most <primer-math>1500 - 20 = 1480</primer-math> bytes
+        of data fit per fragment — and because the <strong>fragment offset is measured in 8-byte units</strong>,
+        each non-final fragment must carry a multiple of 8 bytes (1480 is, conveniently, <primer-math>185 \times
+        8</primer-math>). So the 4000 bytes split into three fragments:
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "fragScene": {
+            "title": "Fragmenting 4000 bytes of data over an MTU-1500 link (1480 data bytes per fragment)",
+            "orig": "Original datagram — 4000 bytes of data, ID = 42",
+            "f1": "Fragment 1: bytes 0–1479 · offset 0 · MF=1",
+            "f2": "Fragment 2: bytes 1480–2959 · offset 185 · MF=1",
+            "f3": "Fragment 3: bytes 2960–3999 · offset 370 · MF=0 (last)",
+            "reasm": "Destination reassembles by ID + offsets; MF=0 marks the end"
+          }
+        }
+      </script>
+      <primer-geometry
+        scene="fragScene"
+        caption="A single 4000-byte datagram shown as one long bar, then split into three fragment bars. Fragment 1 carries bytes 0 to 1479 at offset 0 with the More Fragments flag set. Fragment 2 carries bytes 1480 to 2959 at offset 185 with MF set. Fragment 3 carries bytes 2960 to 3999 at offset 370 with MF cleared, marking the last fragment. The destination reassembles them using the shared Identification field and the offsets."
+      ></primer-geometry>
+
+      <p>
+        Three header fields make reassembly work, all in the IPv4 header:
+      </p>
+      <ul>
+        <li><strong>Identification (16 bits)</strong> — the same value on every fragment of one original packet, so the receiver knows which pieces belong together.</li>
+        <li><strong>Fragment Offset (13 bits)</strong> — where this fragment's data sits in the original, in 8-byte units.</li>
+        <li><strong>Flags</strong> — <strong>MF (More Fragments)</strong> is 1 on every fragment except the last; the receiver knows it has them all when it holds a contiguous run ending in an MF=0 fragment. The <strong>DF (Don't Fragment)</strong> bit is the key to Path MTU Discovery below.</li>
+      </ul>
+      <p>
+        Crucially, <strong>reassembly happens only at the final destination</strong> — never at intermediate
+        routers — because the fragments may take different paths and no single router is guaranteed to see them
+        all.
+      </p>
+
+      <primer-code run>
+        // Fragment an IPv4 datagram: given payload size and link MTU, compute each
+        // fragment's byte range, 8-byte offset unit, and More-Fragments flag.
+        // Also derive the TCP MSS that AVOIDS fragmentation on this link.
+        const IP_HDR = 20, TCP_HDR = 20;
+
+        function fragment(dataLen: number, mtu: number) {
+          const maxData = Math.floor((mtu - IP_HDR) / 8) * 8; // multiple of 8
+          const frags: string[] = [];
+          let off = 0, i = 1;
+          while (off &lt; dataLen) {
+            const len = Math.min(maxData, dataLen - off);
+            const mf = off + len &lt; dataLen ? 1 : 0;
+            frags.push(
+              `Frag ${i}: bytes ${off}-${off + len - 1}  ` +
+              `offset=${off / 8}  MF=${mf}  (${len} data bytes)`,
+            );
+            off += len; i++;
+          }
+          return frags;
+        }
+
+        for (const line of fragment(4000, 1500)) console.log(line);
+        const mss = 1500 - IP_HDR - TCP_HDR;
+        console.log(`\nTCP MSS on a 1500 MTU link = 1500 - ${IP_HDR} - ${TCP_HDR} = ${mss} bytes`);
+        console.log("Send segments of MSS or less and IP never has to fragment them.");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why fragmentation is something to avoid</h2>
+      <p>
+        Fragmentation <em>works</em>, but every seasoned network engineer treats it as a code smell. The reasons
+        stack up:
+      </p>
+      <primer-theorem name="The costs of IP fragmentation">
+        <ul>
+          <li>
+            <strong>All-or-nothing loss amplification.</strong> There is no per-fragment retransmission at the IP
+            layer. If <em>any single fragment</em> is lost, the destination cannot reassemble and discards the
+            <em>entire</em> datagram — so splitting into 3 fragments roughly <em>triples</em> your effective loss
+            rate for that packet.
+          </li>
+          <li>
+            <strong>Middleboxes drop fragments.</strong> Firewalls and NATs often can't apply their rules to a
+            fragment (only the first fragment has the TCP/UDP port numbers), so many simply drop non-first
+            fragments — silently breaking fragmented traffic.
+          </li>
+          <li>
+            <strong>Reassembly cost and attacks.</strong> The receiver must buffer fragments and run a timer;
+            this has been the basis of real attacks (teardrop, overlapping fragments, reassembly DoS).
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        <strong>IPv6 took the hint and banned router fragmentation entirely.</strong> In IPv6 an intermediate
+        router that finds a packet too big does <em>not</em> fragment it — it drops it and sends back an ICMPv6
+        <em>Packet Too Big</em> message. Only the <em>original source</em> may fragment, and it is expected to
+        avoid even that by discovering the path MTU first. The whole ecosystem now leans on finding the right
+        size <em>before</em> sending, not chopping up after.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Path MTU Discovery: find the size that fits</h2>
+      <p>
+        The elegant fix is to never send anything too big in the first place. <strong>Path MTU Discovery
+        (PMTUD)</strong> lets a sender probe for the largest size that survives the whole path:
+      </p>
+      <primer-theorem name="How PMTUD works">
+        <ul>
+          <li>
+            The sender sets the <strong>DF (Don't Fragment)</strong> bit on its packets and sends them at the
+            local MTU (e.g. 1500).
+          </li>
+          <li>
+            If some router on the path has a smaller MTU, it <strong>cannot</strong> fragment (DF is set), so it
+            <strong>drops</strong> the packet and returns an ICMP <em>"Fragmentation Needed"</em> (IPv4 Type 3,
+            Code 4) — or ICMPv6 <em>Packet Too Big</em> (Type 2) — that <strong>reports the next-hop MTU</strong>.
+          </li>
+          <li>
+            The sender reads that reported MTU, lowers its packet size to match, and retransmits. After one or
+            two rounds it has learned the path MTU and sends everything at exactly that size — no fragmentation
+            anywhere.
+          </li>
+        </ul>
+      </primer-theorem>
+      <p>
+        This is why a healthy connection sends full-1500-byte packets on a local network but automatically drops
+        to, say, 1400 across a tunnel — PMTUD found the ceiling. TCP then advertises its
+        <primer-ref soft to="computer-science/networks/transport/tcp-in-depth">MSS</primer-ref> to keep its
+        segments under it: <primer-math>\text{MSS} = \text{MTU} - 20\,(\text{IP}) - 20\,(\text{TCP}) = 1460</primer-math>
+        on a 1500-byte link. UDP has no such helper — a UDP application must keep its own datagrams small
+        (a common safe target is ~1200 bytes for internet paths), because if it oversends, IP fragmentation with
+        all its fragility is the only thing catching it.
+      </p>
+
+      <primer-vignette title="Watch out! — the PMTUD 'black hole', and why blocking ICMP breaks big transfers">
+        <p>
+          PMTUD has a notorious failure mode. It depends <em>entirely</em> on those ICMP "Fragmentation Needed"
+          messages getting back to the sender. But nervous administrators, thinking "ICMP is just ping, and ping
+          is a security risk," <strong>block all ICMP</strong> at their firewall. Now the sequence is deadly:
+          the sender fires off a 1500-byte packet with DF set; a downstream router drops it for being too big and
+          dutifully sends the ICMP notification — which is <em>filtered before it arrives</em>. The sender hears
+          nothing, assumes the packet was merely lost, and retransmits it <em>at the same size</em>, forever.
+        </p>
+        <p>
+          The result is a <strong>PMTUD black hole</strong>: the connection completes its handshake fine (small
+          packets get through), then <em>hangs</em> the instant it tries to send a full-size packet — the classic
+          "the page starts loading then freezes" or "SSH connects but <code>ls</code> of a big directory hangs."
+          The lesson is blunt: <strong>do not blindly block all ICMP.</strong> The "Fragmentation Needed" and
+          "Packet Too Big" messages are load-bearing; without them, PMTUD silently breaks. (Modern stacks add
+          <em>PLPMTUD</em>, RFC 8899, which probes with different sizes and needs no ICMP as a fallback.)
+        </p>
+      </primer-vignette>
+
+      <primer-vignette title="Why do data centres run 9000-byte 'jumbo' frames?">
+        <p>
+          Every packet costs fixed overhead: 20+ bytes of headers, interrupts, and per-packet CPU work. On a
+          storage or backup network moving huge streams, a 1500-byte MTU means chopping a gigabyte into ~700,000
+          packets, each paying that tax. Bump the MTU to <strong>9000</strong> (a jumbo frame) and you send the
+          same data in ~117,000 packets — roughly a sixth of the per-packet overhead, noticeably less CPU, and
+          higher throughput. The catch is that <em>every</em> device on that layer-2 segment must agree on 9000,
+          or you get a mismatched-MTU mess. So jumbo frames live in controlled data-centre fabrics, not on the
+          open internet, where you can't assume the whole path supports them.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      { "mtuQuiz@1": { "instructions": "Check your grasp of MTU and fragmentation: the 1500-byte Ethernet MTU, how IPv4 fragments and reassembles, the MF/DF flags and offsets, why fragmentation is avoided, Path MTU Discovery and its black-hole failure, and the TCP MSS relationship." } }
+    </script>
+    <primer-quiz name="mtuQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/networks/network-layer/the-router-and-forwarding",
+      "computer-science/networks/link-layer/multiple-access-and-ethernet"
+    ],
+    "completedDate": "2026-07-10"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, makeStrings } from "primer";
+
+  // One long datagram bar splitting into three fragment bars with offset/MF labels.
+  registerGeometryScene("fragScene", ({ board, step, colors, sceneStrings }) => {
+    const bar = (x0, x1, y, h, col, label) => {
+      board.create("polygon", [[x0, y - h], [x1, y - h], [x1, y + h], [x0, y + h]], {
+        fillColor: col, fillOpacity: 0.22, borders: { strokeColor: colors.line, strokeWidth: 2 },
+        vertices: { visible: false }, fixed: true, highlight: false, withLines: true,
+      });
+      board.create("text", [(x0 + x1) / 2, y, label], {
+        anchorX: "middle", anchorY: "middle", fontSize: 10, strokeColor: colors.ink,
+        fixed: true, highlight: false, cssStyle: "font-weight:700; text-align:center; width:200px; display:inline-block",
+      });
+    };
+    const note = (y, s, col) =>
+      board.create("text", [0, y, s], {
+        anchorX: "middle", anchorY: "middle", fontSize: 11, strokeColor: col, color: col,
+        fixed: true, highlight: false, cssStyle: "text-align:center; width:360px; display:inline-block",
+      });
+
+    // base: original datagram, full width
+    bar(-7, 7, 4, 0.7, colors.cat[0], "");
+    board.create("text", [0, 4, sceneStrings("orig")], { anchorX: "middle", anchorY: "middle", fontSize: 11, strokeColor: colors.ink, fixed: true, highlight: false, cssStyle: "font-weight:700" });
+
+    // fragments (widths ~ proportional: 1480,1480,1040 of 4000)
+    step(sceneStrings("f1"), () => { bar(-7, -1.8, 1.5, 0.6, colors.cat[1], "Frag 1"); note(0.4, sceneStrings("f1"), colors.ink); });
+    step(sceneStrings("f2"), () => { bar(-1.8, 3.4, 0, 0.6, colors.cat[2], "Frag 2"); note(-1.1, sceneStrings("f2"), colors.ink); });
+    step(sceneStrings("f3"), () => { bar(3.4, 7, -1.5, 0.6, colors.cat[1], "Frag 3"); note(-2.6, sceneStrings("f3"), colors.ink); });
+    step(sceneStrings("reasm"), () => note(-4, sceneStrings("reasm"), colors.cat[2]));
+  }, {
+    boundingbox: [-8, 5.2, 8, -4.8],
+    keepAspect: false,
+    title: () => makeStrings("fragScene")("title"),
+  });
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("mtuQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: sceneStrings("instructions") },
+
+    { prompt: "The Maximum Transmission Unit (MTU) is…",
+      options: [
+        { text: "the largest IP packet a link's frame can carry — 1500 bytes on classic Ethernet", correct: true },
+        { text: "the total bandwidth of a link in Mbps", correct: false },
+        { text: "the number of hops a packet may take", correct: false },
+        { text: "the size of the TCP receive window", correct: false },
+      ] },
+
+    { prompt: "When an IPv4 packet is larger than the outgoing link's MTU, IPv4…",
+      options: [
+        { text: "fragments it into smaller pieces that each fit the MTU", correct: true },
+        { text: "compresses it to fit", correct: false },
+        { text: "sends it anyway and hopes", correct: false },
+        { text: "converts it to UDP", correct: false },
+      ] },
+
+    { prompt: "Where does reassembly of IPv4 fragments happen?",
+      options: [
+        { text: "only at the final destination host", correct: true },
+        { text: "at every router along the path", correct: false },
+        { text: "at the first router after the source", correct: false },
+        { text: "at the DNS server", correct: false },
+      ] },
+
+    { prompt: "The 'More Fragments' (MF) flag is…",
+      options: [
+        { text: "1 on every fragment except the last, so the receiver knows when it has them all", correct: true },
+        { text: "set only on the first fragment", correct: false },
+        { text: "the same as the Don't Fragment bit", correct: false },
+        { text: "a checksum over the fragment", correct: false },
+      ] },
+
+    { prompt: "Which field lets the receiver know that several fragments belong to the same original packet?",
+      options: [
+        { text: "the Identification field (identical on all fragments of one datagram)", correct: true },
+        { text: "the TTL", correct: false },
+        { text: "the source port", correct: false },
+        { text: "the checksum", correct: false },
+      ] },
+
+    { prompt: "Why is fragmentation something engineers try to avoid?",
+      options: [
+        { text: "losing any one fragment discards the whole datagram, and many middleboxes drop fragments", correct: true },
+        { text: "it encrypts the data too strongly", correct: false },
+        { text: "it makes packets travel slower than light", correct: false },
+        { text: "it always doubles the bandwidth used", correct: false },
+      ] },
+
+    { prompt: "Path MTU Discovery (PMTUD) works by…",
+      options: [
+        { text: "setting the DF bit so an over-MTU router drops the packet and returns an ICMP message reporting the smaller MTU", correct: true },
+        { text: "pinging every router to ask its MTU", correct: false },
+        { text: "reading the MTU from DNS", correct: false },
+        { text: "always sending 1500-byte packets and never adjusting", correct: false },
+      ] },
+
+    { prompt: "The DF (Don't Fragment) bit tells routers to…",
+      options: [
+        { text: "drop (not fragment) an over-MTU packet, so PMTUD can learn the path MTU", correct: true },
+        { text: "fragment the packet as many times as needed", correct: false },
+        { text: "double the fragment size", correct: false },
+        { text: "ignore the MTU entirely", correct: false },
+      ] },
+
+    { prompt: "A 'PMTUD black hole' occurs when…",
+      options: [
+        { text: "a firewall blocks the ICMP 'Fragmentation Needed' messages, so the sender never learns to shrink its packets and big transfers hang", correct: true },
+        { text: "the destination runs out of disk space", correct: false },
+        { text: "the MTU is set to exactly 1500", correct: false },
+        { text: "two routers have the same MTU", correct: false },
+      ] },
+
+    { prompt: "How did IPv6 change fragmentation?",
+      options: [
+        { text: "routers never fragment; only the source may, and it sends ICMPv6 'Packet Too Big' instead", correct: true },
+        { text: "it removed MTUs entirely", correct: false },
+        { text: "every router now fragments aggressively", correct: false },
+        { text: "fragments are encrypted", correct: false },
+      ] },
+
+    { prompt: "On a standard 1500-byte Ethernet link, the TCP Maximum Segment Size (MSS) is…",
+      options: [
+        { text: "1460 bytes (1500 − 20 IP − 20 TCP)", correct: true },
+        { text: "1500 bytes", correct: false },
+        { text: "512 bytes", correct: false },
+        { text: "9000 bytes", correct: false },
+      ] },
+
+    { prompt: "On a link with MTU ${mtu}, the TCP MSS (subtracting a 20-byte IP and 20-byte TCP header) is…",
+      variables: "mtu=[1280:1500]",
+      answer: "mtu - 40" },
+
+    { prompt: "Fragmenting ${d} bytes of data over a 1500-byte MTU (1480 data bytes per fragment) needs how many fragments?",
+      variables: "d=[1600:5900]",
+      answer: "ceil(d / 1480)" },
+
+    { prompt: "The IPv4 fragment offset is measured in units of…",
+      options: [
+        { text: "8 bytes", correct: true },
+        { text: "1 byte", correct: false },
+        { text: "1500 bytes", correct: false },
+        { text: "bits", correct: false },
+      ] },
+
+    { prompt: "Data-centre 'jumbo frames' use a 9000-byte MTU mainly to…",
+      options: [
+        { text: "cut per-packet overhead and CPU cost on high-throughput transfers", correct: true },
+        { text: "make packets travel farther", correct: false },
+        { text: "encrypt data more strongly", correct: false },
+        { text: "work better across the open internet", correct: false },
+      ] },
+  ]);
+</script>
