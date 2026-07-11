@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Constraints, Contacts and Friction</primer-title>
+
+    <primer-card>
+      <p>
+        Drop a wooden crate onto a floor in a game and it just… sits there. Boring? It shouldn't be. Nothing
+        in the physics engine <em>knows</em> what a floor is. Gravity is still tugging the crate downward at
+        every single frame, trying to shove it straight through the ground. The reason it rests, flat and
+        calm, is that the engine is doing hidden, frantic bookkeeping — computing exactly the right pushes,
+        thousands of times a second, so that the crate is stopped precisely at the surface, tilts back if you
+        lean it, and doesn't slide off a gentle slope. That bookkeeping is the world of <strong>constraints,
+        contacts and friction</strong>.
+      </p>
+      <p>
+        This is the machinery that holds a ragdoll's limbs onto its joints, keeps a stack of boxes from
+        sinking into each other, lets a car's wheels grip a road, and stops a resting object from jittering
+        itself to death. It's the quiet other half of rigid-body simulation — the first half being
+        <primer-ref todo to="computer-science/computer-animation/physics-rigid/impulse-based-collision-response">impulse-based response</primer-ref>
+        for things that bang together. Here we tackle the harder, subtler problem: things that must stay
+        <em>together</em>, or stay <em>apart</em>, frame after frame.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A constraint is a rule about allowed motion</h2>
+      <p>
+        A <strong>constraint</strong> is a restriction on how bodies are permitted to move. We write it as a
+        function of the positions that must stay zero:
+      </p>
+      <primer-math display>C(x) = 0.</primer-math>
+      <p>
+        For a hinge that pins two bodies at a shared point, <primer-math>C</primer-math> might be "the gap
+        between the two pin points"; keeping <primer-math>C = 0</primer-math> keeps them pinned. But solving
+        physics at the <em>position</em> level is awkward — positions are what we're trying to compute. The
+        trick that runs almost every engine is to work one derivative down, at the <strong>velocity</strong>
+        level. Differentiate <primer-math>C(x) = 0</primer-math> with respect to time (chain rule):
+      </p>
+      <primer-math display>\dot C = \frac{\partial C}{\partial x}\,\dot x = J\,v = 0.</primer-math>
+      <p>
+        Here <primer-math>v = \dot x</primer-math> is the stacked velocity of the bodies and
+        <primer-math>J = \partial C / \partial x</primer-math> is the <strong>Jacobian</strong> of the
+        constraint — a matrix whose rows say <em>which combinations of velocity the constraint forbids</em>.
+        The equation <primer-math>Jv = 0</primer-math> reads: "the velocity is not allowed to have any
+        component that would change <primer-math>C</primer-math>." The solver's whole job is to find
+        constraint forces (or impulses) that push <primer-math>v</primer-math> back onto the allowed set
+        whenever the naked, unconstrained motion would violate it.
+      </p>
+      <primer-theorem name="Velocity-level constraints">
+        <ul>
+          <li>A constraint is a rule <primer-math>C(x) = 0</primer-math> on positions.</li>
+          <li>Differentiated in time it becomes <primer-math>J v = 0</primer-math>: the <strong>Jacobian</strong>
+            <primer-math>J</primer-math> times the velocity must vanish.</li>
+          <li>Each row of <primer-math>J</primer-math> is one forbidden direction of relative motion; the
+            constraint force acts along that same direction.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two flavours: equality (joints) and inequality (contacts)</h2>
+      <p>
+        The single most important distinction is whether the constraint is an <strong>equality</strong> or an
+        <strong>inequality</strong>.
+      </p>
+      <primer-theorem name="Equality vs inequality constraints">
+        <ul>
+          <li><strong>Equality — joints.</strong> <primer-math>C(x) = 0</primer-math> must hold exactly, both
+            ways. A hinge, ball-and-socket, or slider joint <em>removes</em> some relative degrees of freedom
+            and locks them shut. The bodies can neither pull apart nor push together along the constrained
+            direction — the force can point either way.</li>
+          <li><strong>Inequality — contacts.</strong> <primer-math>C(x) \ge 0</primer-math> — a one-sided
+            rule. Non-penetration says the gap between two surfaces may be positive (separated) or zero
+            (touching) but never negative (overlapping). Crucially the contact force can only
+            <strong>push</strong>, never pull: a floor holds you up, it never sucks you down.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        A ball-and-socket joint fixes 3 translational DOFs (the two anchor points must coincide) but leaves
+        all rotation free — a shoulder. A hinge additionally locks 2 rotational DOFs, leaving a single spin
+        axis — a door or an elbow. A slider (prismatic joint) leaves exactly one translational DOF — a
+        drawer. Each is just a different choice of which rows go into <primer-math>J</primer-math>.
+      </p>
+      <p>
+        Contacts are harder precisely because of the one-sidedness. At the velocity level a resting contact
+        demands the <strong>normal velocity</strong> stay non-negative,
+        <primer-math>J_n v \ge 0</primer-math> (the surfaces may separate but not approach), and the normal
+        impulse <primer-math>\lambda_n \ge 0</primer-math> may only push. And they are linked: if the bodies
+        are separating, the push must be zero; if there is a push, the bodies must be exactly touching. That
+        "one or the other is zero" coupling is a <em>complementarity</em> condition — the source of all the
+        difficulty, which we'll meet again shortly.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "boxStack": {
+          "title": "A resting stack: contact manifolds and normals",
+          "ground": "ground",
+          "manifold": "4-point contact manifold",
+          "normal": "contact normal n",
+          "friction": "friction acts along the surface (tangent)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The contact manifold: why one point tips and four hold flat</h2>
+      <p>
+        Consider the humble worked example: a box resting on the ground. When the box's flat bottom face
+        meets the flat floor, the true contact is an <em>area</em>, not a point. But a solver works with a
+        finite set of points, so the collision system reduces that face-to-face touch to a small
+        <strong>contact manifold</strong> — typically the <strong>4 corners</strong> of the overlapping
+        rectangle, each a contact point with its own outward normal <primer-math>n</primer-math> and its own
+        non-penetration constraint.
+      </p>
+      <primer-geometry
+        scene="boxStack"
+        caption="A resting box (and a second stacked on top). Each face-face rest generates a manifold of ~4 contact points; arrows show the upward contact normals n. Friction impulses act along the surface, perpendicular to n."
+      ></primer-geometry>
+      <p>
+        Why four? Imagine the engine kept only <strong>one</strong> contact point, say under the box's
+        centre. That single upward push balances gravity vertically — but it applies <em>no torque</em> to
+        resist tipping. The tiniest sideways nudge, or even floating-point noise, gives the box a rotation
+        that the lone contact cannot oppose, and it <strong>teeters and rolls</strong> like a plank balanced
+        on a pencil. With four contacts spread to the corners, a tip lifts one side: the contacts on the
+        <em>far</em> side press harder (their non-penetration constraints fight the downward corner), the
+        net of the four pushes produces a restoring torque, and the box settles <strong>flat</strong>. A
+        stable rest needs a manifold wide enough to generate the righting torque — points, plural, spread
+        across the contact area.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Coulomb friction: the friction cone</h2>
+      <p>
+        Non-penetration handles the <em>normal</em> direction. Friction handles the <strong>tangential</strong>
+        one — the sliding along the surface. The classical model is <strong>Coulomb friction</strong>: the
+        tangential friction force is bounded by a multiple of the normal force,
+      </p>
+      <primer-math display>\lVert f_t \rVert \;\le\; \mu\, f_n,</primer-math>
+      <p>
+        where <primer-math>\mu</primer-math> is the coefficient of friction. Geometrically this carves out a
+        <strong>friction cone</strong>: the total contact force
+        <primer-math>(f_n, f_t)</primer-math> must lie inside a cone whose half-angle is
+        <primer-math>\arctan\mu</primer-math> around the normal. Two regimes live inside this rule:
+      </p>
+      <primer-theorem name="Coulomb friction (static vs kinetic)">
+        <ul>
+          <li><strong>Static (stick).</strong> While
+            <primer-math>\lVert f_t \rVert &lt; \mu f_n</primer-math> — strictly inside the cone — the contact
+            point does not slide; friction supplies exactly the force needed to keep the relative tangential
+            velocity at zero.</li>
+          <li><strong>Kinetic (slip).</strong> Once the demand hits the boundary
+            <primer-math>\lVert f_t \rVert = \mu f_n</primer-math>, the surfaces slide; friction is capped at
+            the cone edge and opposes the sliding direction.</li>
+          <li>Friction is an <strong>inequality</strong>: <primer-math>f_t</primer-math> is bounded by
+            <primer-math>\mu f_n</primer-math>, and the bound scales with the normal force — press harder,
+            grip harder.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The circular friction cone couples the two tangent directions in a way that's expensive to solve
+        exactly, so real-time engines usually <strong>linearise</strong> it into a <strong>friction
+        pyramid</strong> — a box (or a polygonal prism) that approximates the cone with a few flat faces.
+        That turns the friction limit into simple per-axis clamps <primer-math>|f_{t}| \le \mu f_n</primer-math>
+        the solver can enforce with a projection, at the cost of making friction very slightly
+        direction-dependent (a hair stronger along the pyramid's diagonals).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Solving many constraints at once: the LCP and sequential impulses</h2>
+      <p>
+        A stack of boxes on a floor might have dozens of contacts, each with a non-penetration inequality and
+        two friction limits, all coupled — pushing one contact changes the load on its neighbours. Written
+        out, the normal-contact problem has exactly the complementarity structure we noticed earlier and forms
+        a <strong>Linear Complementarity Problem (LCP)</strong>:
+      </p>
+      <primer-math display>J v \ge 0, \qquad \lambda \ge 0, \qquad (Jv)^\top \lambda = 0.</primer-math>
+      <p>
+        Read the three pieces together: the surfaces may only separate (<primer-math>Jv \ge 0</primer-math>),
+        the contact impulse may only push (<primer-math>\lambda \ge 0</primer-math>), and for each contact
+        <em>at least one</em> of the two is zero (either it's separating with no force, or in contact with a
+        force). Add friction and it becomes a <strong>mixed LCP</strong> (equalities for joints, inequalities
+        for contacts, box bounds for friction).
+      </p>
+      <p>
+        Solving a big LCP exactly every frame is too slow for real time. The workhorse instead is an
+        <strong>iterative</strong> method: <strong>Projected Gauss–Seidel</strong>, known in the game-physics
+        world as <strong>sequential impulses</strong>. Walk through the constraints one at a time; for each,
+        compute the impulse that would satisfy <em>that</em> constraint in isolation, apply it immediately so
+        later constraints see the updated velocities, and <strong>project</strong> the result back into its
+        legal range — clamp the normal impulse to <primer-math>\lambda_n \ge 0</primer-math>, and clamp the
+        friction impulse into <primer-math>[-\mu\lambda_n,\, \mu\lambda_n]</primer-math>. Sweep the whole list
+        repeatedly; each pass nudges every constraint closer to satisfied, and after a handful of iterations
+        the whole coupled system has <strong>converged</strong> to a consistent set of impulses.
+      </p>
+      <primer-theorem name="Projected Gauss–Seidel / sequential impulses">
+        <ul>
+          <li>Process constraints one by one, applying each impulse immediately so the next constraint sees
+            fresh velocities.</li>
+          <li><strong>Project</strong> each impulse into its feasible set: normal <primer-math>\ge 0</primer-math>,
+            friction clamped to <primer-math>\pm\mu\lambda_n</primer-math>.</li>
+          <li><strong>Iterate</strong> the sweep several times per frame; the coupled solution emerges as the
+            iterations converge.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two housekeeping tricks: stabilisation and warm-starting</h2>
+      <p>
+        Working purely at the velocity level has a flaw: it only stops things from <em>getting worse</em>. If
+        a box has already sunk a little into the floor (from a big timestep, or an accumulated error), keeping
+        <primer-math>Jv = 0</primer-math> just freezes it there — the penetration never heals, and joints
+        slowly <strong>drift</strong> apart. The fix is <strong>Baumgarte stabilisation</strong>: feed a small
+        fraction of the position error back into the velocity target, so instead of aiming for
+        <primer-math>Jv = 0</primer-math> the solver aims for
+      </p>
+      <primer-math display>J v = -\frac{\beta}{\Delta t}\, C(x),</primer-math>
+      <p>
+        a gentle bias velocity (with <primer-math>0 &lt; \beta \le 1</primer-math>) that pushes the residual
+        penetration back out over the next few frames. Modern engines often use a related "split impulse" or
+        soft-constraint variant to avoid feeding that correction energy into the real velocity, but the idea
+        is the same: nudge positions back to <primer-math>C = 0</primer-math> without letting the drift build.
+      </p>
+      <p>
+        The second trick is <strong>warm-starting</strong>. A resting stack barely changes from one frame to
+        the next, so the impulses it needed last frame are an excellent first guess for this frame. Storing
+        each contact's accumulated impulse and <em>reapplying</em> it before iterating means the solver starts
+        already close to the answer — a stack that would take dozens of iterations to settle from scratch holds
+        rock-steady with only a few, because it remembers how it was standing.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why can a ragdoll's arm never quite be perfectly rigid?">
+      <p>
+        A joint constraint is enforced by an <em>iterative</em> solver that runs a fixed, small number of
+        passes per frame — it converges <em>towards</em> <primer-math>C = 0</primer-math> but essentially
+        never reaches it exactly. So a heavily loaded joint (a ragdoll hanging by one wrist, a long chain of
+        links) will always show a tiny bit of <strong>stretch</strong>: the constraint is a spring that's very
+        stiff but not infinitely so. More iterations tighten it; so does splitting a long chain's solve or
+        using a direct solver for the joints. This is also why physics engines expose an "iteration count" or
+        "solver quality" knob — it's literally how many Gauss–Seidel sweeps you're willing to pay for. Turn it
+        down and chains go rubbery; turn it up and the CPU groans.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Stacks need iteration, enough contacts, and a clamped friction cone">
+      <p>
+        Three closely-related traps sink beginner rigid-body code:
+      </p>
+      <p>
+        <strong>1. One impulse pass is not enough.</strong> Because the contacts are coupled, a single
+        sweep over them under-solves the stack — the bottom box gets pushed up, but by the time you've
+        processed it the boxes above have already been resolved against stale velocities. The visible result
+        is a stack that <strong>jitters, sinks, or slowly collapses</strong>. You <em>must</em> iterate the
+        projected Gauss–Seidel sweep several times per frame (and warm-start) for a tall stack to stand still.
+      </p>
+      <p>
+        <strong>2. Too few contact points let a resting object wobble.</strong> Reduce a flat face-face rest to
+        a single point and the object has no torque resisting tip — it teeters. A resting object needs a
+        contact <strong>manifold</strong> of enough points, spread across the contact area, to be stable.
+      </p>
+      <p>
+        <strong>3. Friction is an inequality — clamp it.</strong> The single most common friction bug is
+        treating it like an equality and applying whatever tangential impulse "kills" the sliding velocity.
+        That can apply more force than the surface can supply, gluing objects to walls or letting them climb
+        slopes they should slide down. You must <strong>clamp the tangential impulse to
+        <primer-math>\pm\mu\lambda_n</primer-math></strong> — the friction cone is a limit, not a target.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "constraintsQuiz@1": {
+          "intro": "Constraints C(x)=0 → Jv=0; joints are equalities, contacts inequalities; friction |f_t|≤μf_n; solve the (mixed) LCP by iterating projected Gauss–Seidel. Fresh questions each time.",
+          "velLevelQ": "Differentiating a constraint C(x)=0 in time gives which velocity-level condition?",
+          "velLevelRight": "$Jv = 0$ — the Jacobian times the velocity vanishes",
+          "velLevelW1": "$C(v) = 0$ — the constraint of the velocity",
+          "velLevelW2": "$v = 0$ — the body must be at rest",
+          "velLevelW3": "$J = 0$ — the Jacobian vanishes",
+          "jacQ": "In $Jv=0$, what does each row of the Jacobian $J$ represent?",
+          "jacRight": "one forbidden direction of relative motion",
+          "jacW1": "the mass of one body",
+          "jacW2": "the colour of the contact",
+          "jacW3": "the timestep length",
+          "jointTypeQ": "A hinge, ball-and-socket, or slider joint is which kind of constraint?",
+          "jointTypeRight": "an equality constraint, $C(x)=0$, that removes relative DOFs",
+          "jointTypeW1": "an inequality constraint that objects may separate on",
+          "jointTypeW2": "a friction constraint bounded by μ",
+          "jointTypeW3": "not a constraint at all — a force field",
+          "contactTypeQ": "Non-penetration (a contact) is which kind of constraint?",
+          "contactTypeRight": "an inequality, $C(x)\\ge 0$ — surfaces may separate but not overlap",
+          "contactTypeW1": "an equality that locks the surfaces together permanently",
+          "contactTypeW2": "a friction cone with no normal component",
+          "contactTypeW3": "an equality that lets surfaces interpenetrate freely",
+          "normalPushQ": "The normal contact force (impulse) is restricted so that it can only…",
+          "normalPushRight": "push (repel), never pull — $\\lambda_n \\ge 0$",
+          "normalPushW1": "pull the surfaces together",
+          "normalPushW2": "act tangent to the surface",
+          "normalPushW3": "be any sign at all",
+          "manifoldQ": "Why does a solver keep a manifold of ~4 contact points for a box resting flat on the ground?",
+          "manifoldRight": "so the spread contacts produce a restoring torque and the box rests flat instead of tipping",
+          "manifoldW1": "to make the box heavier",
+          "manifoldW2": "to change the box's colour on contact",
+          "manifoldW3": "one point is always enough; four is wasteful",
+          "onePointQ": "If a face-face rest were reduced to a single contact point, what happens?",
+          "onePointRight": "the object teeters/tips — one point applies no righting torque",
+          "onePointW1": "it rests perfectly flat and stable",
+          "onePointW2": "it falls through the floor",
+          "onePointW3": "friction disappears entirely",
+          "coulombQ": "Coulomb friction bounds the tangential force by…",
+          "coulombRight": "$\\lVert f_t\\rVert \\le \\mu f_n$ — μ times the normal force",
+          "coulombW1": "$\\lVert f_t\\rVert = f_n$ always",
+          "coulombW2": "the object's velocity squared",
+          "coulombW3": "an unbounded value",
+          "coneQ": "The friction cone (or its linearised pyramid) expresses that friction is…",
+          "coneRight": "an inequality — the tangential impulse is clamped to $\\pm\\mu\\lambda_n$",
+          "coneW1": "an equality — always exactly $\\mu\\lambda_n$",
+          "coneW2": "independent of the normal force",
+          "coneW3": "only ever zero",
+          "lcpQ": "The coupled normal-contact problem ($Jv\\ge0$, $\\lambda\\ge0$, complementary) is a…",
+          "lcpRight": "Linear Complementarity Problem (LCP)",
+          "lcpW1": "a single linear equation with a unique closed form",
+          "lcpW2": "a rendering pass",
+          "lcpW3": "a texture-lookup table",
+          "pgsQ": "The practical real-time solver for many simultaneous contacts is…",
+          "pgsRight": "projected Gauss–Seidel / sequential impulses, iterated to convergence",
+          "pgsW1": "a single direct matrix inverse, once per frame",
+          "pgsW2": "a depth-buffer comparison",
+          "pgsW3": "ignoring all but one contact",
+          "iterateQ": "A tall stack of boxes jitters and sinks. The most likely cause is…",
+          "iterateRight": "too few solver iterations — a single impulse pass under-solves coupled contacts",
+          "iterateW1": "too many contact points",
+          "iterateW2": "the boxes are too colourful",
+          "iterateW3": "gravity is switched off",
+          "baumgarteQ": "Baumgarte / position stabilisation exists to…",
+          "baumgarteRight": "remove drift — heal residual penetration/joint error at the position level",
+          "baumgarteW1": "make the simulation run slower on purpose",
+          "baumgarteW2": "add random noise to the stack",
+          "baumgarteW3": "disable friction",
+          "warmQ": "Warm-starting a stack means…",
+          "warmRight": "reusing last frame's accumulated impulses as this frame's initial guess",
+          "warmW1": "heating the objects until they melt",
+          "warmW2": "starting every frame's solve from zero impulse",
+          "warmW3": "removing all contacts before solving",
+          "projectQ": "The 'projected' in projected Gauss–Seidel refers to…",
+          "projectRight": "clamping each impulse back into its feasible set (normal ≥ 0, friction in ±μλₙ)",
+          "projectW1": "casting a shadow of the object",
+          "projectW2": "a camera projection matrix",
+          "projectW3": "projecting the mesh onto a texture",
+          "muCompQ": "A contact carries a normal impulse λₙ = {n} N·s with friction coefficient μ = 0.{m}. What is the largest tangential (friction) impulse allowed, μ·λₙ, in N·s?",
+          "sepCompQ": "Complementarity for a contact says at least one of the two quantities is zero. If the normal impulse λₙ is {p} (positive), the normal (approach) velocity must be…"
+        }
+      }
+    </script>
+
+    <primer-quiz name="constraintsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  { "prerequisites": ["computer-science/computer-animation/computer-animation"] }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Static box-stack figure: two stacked boxes on the ground, contact manifolds as dots,
+          upward normals as arrows, friction tangent arrows. No steps → shows fully on load. ---- */
+  const bs = makeStrings("boxStack");
+  registerGeometryScene(
+    "boxStack",
+    ({ board, colors, sceneStrings }) => {
+      // Ground line.
+      board.create("segment", [[-1, 0], [9, 0]], { strokeColor: colors.line, strokeWidth: 2 });
+      board.create("text", [7.4, -0.55, () => sceneStrings("ground")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.ink,
+      });
+
+      const box = (x0, y0, w, h, c) => {
+        board.create("polygon",
+          [[x0, y0], [x0 + w, y0], [x0 + w, y0 + h], [x0, y0 + h]],
+          { borders: { strokeColor: c, strokeWidth: 2 }, fillColor: c, fillOpacity: 0.12, vertices: { visible: false }, fixed: true, highlight: false });
+      };
+
+      // Bottom box (on ground) and top box (stacked).
+      box(1, 0, 4, 2.4, colors.cat[0]);
+      box(1.6, 2.4, 2.8, 2.0, colors.cat[1]);
+
+      // Contact manifold dots at the bottom box's base corners + two interior points.
+      const dot = (x, y) => board.create("point", [x, y], {
+        size: 3, strokeColor: colors.ink, fillColor: colors.ink, fixed: true, name: "", highlight: false,
+      });
+      const groundXs = [1, 2.33, 3.67, 5];
+      groundXs.forEach((x) => dot(x, 0));
+      // Contact manifold between the two boxes.
+      const midXs = [1.6, 2.53, 3.47, 4.4];
+      midXs.forEach((x) => dot(x, 2.4));
+
+      // Upward normals at the ground contacts.
+      groundXs.forEach((x) => {
+        board.create("arrow", [[x, 0], [x, 1.05]], { strokeColor: colors.cat[2] ?? colors.line, strokeWidth: 2 });
+      });
+      // A normal between the boxes too.
+      board.create("arrow", [[3, 2.4], [3, 3.2]], { strokeColor: colors.cat[2] ?? colors.line, strokeWidth: 2 });
+
+      // Friction (tangent) arrow along the ground.
+      board.create("arrow", [[5.6, 0.0], [6.9, 0.0]], { strokeColor: colors.ink, strokeWidth: 2, dash: 2 });
+
+      // Labels.
+      board.create("text", [5.2, 1.35, () => sceneStrings("normal")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.ink,
+      });
+      board.create("text", [-0.9, 0.5, () => sceneStrings("manifold")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.ink,
+      });
+      board.create("text", [5.6, -0.55, () => sceneStrings("friction")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.ink,
+      });
+    },
+    { boundingbox: [-1.5, 5, 9.5, -1.2], keepAspect: false, title: () => bs("title") },
+  );
+
+  registerQuiz("constraintsQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("velLevelQ"), options: [
+      { text: () => sceneStrings("velLevelRight"), correct: true },
+      { text: () => sceneStrings("velLevelW1"), correct: false },
+      { text: () => sceneStrings("velLevelW2"), correct: false },
+      { text: () => sceneStrings("velLevelW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("jacQ"), options: [
+      { text: () => sceneStrings("jacRight"), correct: true },
+      { text: () => sceneStrings("jacW1"), correct: false },
+      { text: () => sceneStrings("jacW2"), correct: false },
+      { text: () => sceneStrings("jacW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("jointTypeQ"), options: [
+      { text: () => sceneStrings("jointTypeRight"), correct: true },
+      { text: () => sceneStrings("jointTypeW1"), correct: false },
+      { text: () => sceneStrings("jointTypeW2"), correct: false },
+      { text: () => sceneStrings("jointTypeW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("contactTypeQ"), options: [
+      { text: () => sceneStrings("contactTypeRight"), correct: true },
+      { text: () => sceneStrings("contactTypeW1"), correct: false },
+      { text: () => sceneStrings("contactTypeW2"), correct: false },
+      { text: () => sceneStrings("contactTypeW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("normalPushQ"), options: [
+      { text: () => sceneStrings("normalPushRight"), correct: true },
+      { text: () => sceneStrings("normalPushW1"), correct: false },
+      { text: () => sceneStrings("normalPushW2"), correct: false },
+      { text: () => sceneStrings("normalPushW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("manifoldQ"), options: [
+      { text: () => sceneStrings("manifoldRight"), correct: true },
+      { text: () => sceneStrings("manifoldW1"), correct: false },
+      { text: () => sceneStrings("manifoldW2"), correct: false },
+      { text: () => sceneStrings("manifoldW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("onePointQ"), options: [
+      { text: () => sceneStrings("onePointRight"), correct: true },
+      { text: () => sceneStrings("onePointW1"), correct: false },
+      { text: () => sceneStrings("onePointW2"), correct: false },
+      { text: () => sceneStrings("onePointW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("coulombQ"), options: [
+      { text: () => sceneStrings("coulombRight"), correct: true },
+      { text: () => sceneStrings("coulombW1"), correct: false },
+      { text: () => sceneStrings("coulombW2"), correct: false },
+      { text: () => sceneStrings("coulombW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("coneQ"), options: [
+      { text: () => sceneStrings("coneRight"), correct: true },
+      { text: () => sceneStrings("coneW1"), correct: false },
+      { text: () => sceneStrings("coneW2"), correct: false },
+      { text: () => sceneStrings("coneW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("lcpQ"), options: [
+      { text: () => sceneStrings("lcpRight"), correct: true },
+      { text: () => sceneStrings("lcpW1"), correct: false },
+      { text: () => sceneStrings("lcpW2"), correct: false },
+      { text: () => sceneStrings("lcpW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("pgsQ"), options: [
+      { text: () => sceneStrings("pgsRight"), correct: true },
+      { text: () => sceneStrings("pgsW1"), correct: false },
+      { text: () => sceneStrings("pgsW2"), correct: false },
+      { text: () => sceneStrings("pgsW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("iterateQ"), options: [
+      { text: () => sceneStrings("iterateRight"), correct: true },
+      { text: () => sceneStrings("iterateW1"), correct: false },
+      { text: () => sceneStrings("iterateW2"), correct: false },
+      { text: () => sceneStrings("iterateW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("baumgarteQ"), options: [
+      { text: () => sceneStrings("baumgarteRight"), correct: true },
+      { text: () => sceneStrings("baumgarteW1"), correct: false },
+      { text: () => sceneStrings("baumgarteW2"), correct: false },
+      { text: () => sceneStrings("baumgarteW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("warmQ"), options: [
+      { text: () => sceneStrings("warmRight"), correct: true },
+      { text: () => sceneStrings("warmW1"), correct: false },
+      { text: () => sceneStrings("warmW2"), correct: false },
+      { text: () => sceneStrings("warmW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("projectQ"), options: [
+      { text: () => sceneStrings("projectRight"), correct: true },
+      { text: () => sceneStrings("projectW1"), correct: false },
+      { text: () => sceneStrings("projectW2"), correct: false },
+      { text: () => sceneStrings("projectW3"), correct: false },
+    ] },
+    { prompt: (v) => sceneStrings("muCompQ", v), variables: "n=[2:9] m=[2:8]",
+      answer: (v) => (v.n * (v.m / 10)) },
+    { prompt: (v) => sceneStrings("sepCompQ", v), variables: "p=[1:9]",
+      options: [
+        { text: "zero — the surfaces are exactly touching (in contact)", correct: true },
+        { text: "positive — the surfaces must be separating", correct: false },
+        { text: "negative — the surfaces are interpenetrating", correct: false },
+        { text: "equal to μ times the impulse", correct: false },
+      ] },
+  ]);
+</script>

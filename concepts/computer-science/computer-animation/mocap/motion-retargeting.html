@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Motion Retargeting</primer-title>
+
+    <primer-card>
+      <p>
+        You spend a day in a motion-capture volume recording your best actor — a tall, long-legged performer
+        — walking, waving, leaning a hand on their hip. The take is gorgeous. Now the director says: put that
+        exact performance on <strong>Gnug the goblin</strong>, who is half the height with stubby legs and long
+        arms. You press play, and the magic evaporates. Gnug's feet skate across the floor like he's on ice; on
+        the next shot they sink ankle-deep into it. The hand that so naturally settled on the actor's hip now
+        hovers a fist's width out in empty air. The two hands that clasped in front now overlap and clip
+        through each other.
+      </p>
+      <p>
+        Nothing is <em>wrong</em> with the mocap. The problem is that the recording is a performance for one
+        body being replayed on a different body. Fixing that — carrying a performance faithfully from the
+        actor's skeleton onto a differently-proportioned character — is <strong>motion retargeting</strong>,
+        and it is one of the load-bearing pillars of every game and film pipeline that reuses captured or
+        hand-animated motion.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What a mocap clip actually stores</h2>
+      <p>
+        This is the crux, so let's be precise. A mocap clip is <strong>not</strong> a movie of world-space
+        positions frozen in stone. What the solver hands you is, for every frame, a <strong>root
+        transform</strong> (where the hips are and which way they face in the world) plus a
+        <strong>joint rotation</strong> for every joint down the skeleton — the shoulder's angle relative to
+        the chest, the elbow's angle relative to the upper arm, and so on down the chain.
+      </p>
+      <p>
+        World-space positions of the hands and feet are then <em>computed</em> by forward kinematics: start at
+        the root, and walk down each chain applying rotation then bone-length offset, rotation then
+        offset, joint by joint. Write a joint's world transform <primer-math>M_i</primer-math> as the product
+        down its chain from the root:
+      </p>
+      <primer-math display>M_i \;=\; M_{\text{root}}\,\prod_{j\,\in\,\text{chain}(i)} R_j\,T_j,</primer-math>
+      <p>
+        where <primer-math>R_j</primer-math> is joint <primer-math>j</primer-math>'s rotation (the part the
+        clip stores) and <primer-math>T_j</primer-math> is the fixed translation by that
+        <strong>bone's length</strong> (a property of the <em>skeleton</em>, not the clip). The angles are the
+        actor's; the bone lengths belong to whichever skeleton you feed them into. Copy the actor's angles onto
+        longer or shorter bones and the world-space endpoints — the feet, the hands — land somewhere else
+        entirely. That single sentence is the whole retargeting problem in a nutshell.
+      </p>
+      <primer-theorem name="The retargeting problem">
+        <ul>
+          <li>A clip stores <strong>joint rotations</strong> (plus a root transform), <em>not</em> world-space
+            positions.</li>
+          <li>World-space endpoints are <strong>rotations composed with bone lengths</strong> — so the same
+            rotations on a different-length skeleton produce different endpoint positions.</li>
+          <li>Retargeting must therefore repair the things that live in <strong>world space</strong> —
+            <strong>contacts</strong> (a foot on the floor, a hand on a hip) and <strong>semantics</strong>
+            (hands that were meant to meet) — which raw angle-copying breaks.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two things break: contacts and semantics</h2>
+      <p>
+        It helps to name exactly what goes wrong, because the two failure kinds want different fixes.
+      </p>
+      <ul>
+        <li><strong>Contacts</strong> are the places where the body touches the world or itself. A planted foot
+          on the ground, a hand pressed on a table, a fist resting on a hip. Get the bone lengths wrong and a
+          planted foot either <em>sinks through the floor</em> (target legs shorter than the actor's) or
+          <em>floats above it</em> (target legs longer). During a walk this shows up as the dreaded
+          <strong>foot slide</strong> (or "foot skate"): the foot that should be locked to the ground while
+          the body passes over it instead drifts, because the stride length the angles encode no longer
+          matches the character's leg length.</li>
+        <li><strong>Semantics</strong> are the <em>meaning</em> of a pose that isn't about the floor: two hands
+          that clasp, a hand that lands on the hip, fingertips that touch the chin. These are relationships
+          between body parts, and they, too, are world-space (well, character-space) positions that
+          angle-copying quietly wrecks.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two broad approaches</h2>
+      <p>
+        There are two fundamentally different ways to move a performance onto a new skeleton, and understanding
+        the trade-off between them is the heart of this topic.
+      </p>
+      <primer-theorem name="Copy angles vs. preserve positions">
+        <ul>
+          <li><strong>(1) Copy joint angles.</strong> Map each source joint to its target counterpart and copy
+            the rotation <primer-math>R_j</primer-math> straight across. This <strong>preserves the actor's
+            style</strong> perfectly — every bend and lean is exactly as performed — but it does
+            <strong>nothing</strong> to protect world-space contacts, so on different proportions feet slide,
+            sink or float and clasped hands miss.</li>
+          <li><strong>(2) Preserve end-effector positions.</strong> Decide where the hands and feet
+            <em>should</em> be in the target's world (feet on the ground, hand on the target's hip) and use
+            <primer-ref todo to="computer-science/computer-animation/rigging/inverse-kinematics">inverse
+            kinematics</primer-ref> to solve the joint angles that put them there. This
+            <strong>nails the contacts</strong> — but every angle IK changes is an angle that is no longer the
+            actor's, so some of the performance's <strong>style is lost</strong>.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Neither pure approach is the answer. Angle-copying alone gives you sliding feet; pure IK alone gives
+        you clean feet but a stiff, de-styled performance where the character no longer moves like your actor.
+        Real pipelines <strong>blend the two</strong>: copy angles as the base to keep the style, then run IK
+        <em>only where it matters</em> — on the contact frames — to snap feet and hands back where they belong.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The standard pipeline</h2>
+      <p>
+        Almost every retargeting tool, from a game engine's humanoid retargeter to a film-grade solver,
+        follows the same four movements.
+      </p>
+      <ol>
+        <li><strong>Map the skeletons (bone correspondence).</strong> Build a dictionary that says "source
+          left-upper-arm ↔ target left-upper-arm", and so on for every bone. Humanoid rigs use a shared naming
+          convention (a "humanoid avatar") so this map is mostly automatic; custom rigs need it by hand.</li>
+        <li><strong>Reconcile rest poses.</strong> The actor might be captured in a T-pose (arms straight out)
+          while the character is authored in an A-pose (arms angled down). Copying raw local rotations across
+          two different rest poses shears the arms. The fix is to copy the rotation <em>relative to each
+          skeleton's own rest pose</em>: strip the source's rest offset before copying, then re-apply the
+          target's. Angles then mean the same thing on both bodies.</li>
+        <li><strong>Copy the rotations.</strong> With the map and rest-pose reconciliation in place, copy each
+          joint's rotation from source to target, frame by frame. After this step you have a full-length
+          performance in the actor's style — and, on different proportions, broken contacts.</li>
+        <li><strong>IK passes to restore contacts, with scale compensation.</strong> Detect the contact frames
+          (which feet are planted, where hands should touch), then IK-solve the leg and arm chains to pin those
+          endpoints back to the floor or the hip. Alongside this, rescale the <strong>root motion</strong> by
+          the <strong>hip-height ratio</strong> so the character's stride matches its own leg length instead of
+          the actor's.</li>
+      </ol>
+    </primer-card>
+
+    <primer-card>
+      <h2>Scale compensation: the numbers</h2>
+      <p>
+        The single most useful ratio in retargeting is the <strong>hip-height ratio</strong> (equivalently,
+        the leg-length ratio). If the actor's hip sits at height <primer-math>h_s</primer-math> when standing
+        and the character's at <primer-math>h_t</primer-math>, define
+      </p>
+      <primer-math display>\sigma \;=\; \frac{h_t}{h_s}.</primer-math>
+      <p>
+        Multiply the root's horizontal translation (and hence the per-step stride) by
+        <primer-math>\sigma</primer-math> and the character now covers ground in proportion to its own legs.
+        Skip this and a short character replaying a tall actor's root motion will <em>overshoot</em> — the root
+        glides further than the legs can carry it, and every planted foot must slide to keep up. Scaling the
+        root by <primer-math>\sigma</primer-math> removes the bulk of the slide before IK even runs; the IK
+        pass then cleans up whatever residual remains on the contact frames.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "twoSkel": {
+          "title": "Same walk pose on a tall vs. short skeleton — feet planted after IK",
+          "tallLabel": "Actor (tall)",
+          "shortLabel": "Character (short)",
+          "floorLabel": "floor (contact plane)",
+          "plantLabel": "feet locked to floor by IK"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The same pose on two bodies</h2>
+      <p>
+        Below, the identical set of joint angles is applied to a tall skeleton (the actor, left) and a short
+        one (the character, right). Both have had their planted feet <strong>IK-locked to the same floor
+        line</strong>: notice the ankles sit exactly on the contact plane in both panels even though the leg
+        bones differ in length. Without the IK lock, the short character's feet — driven by the tall actor's
+        hip height — would hang above this line. The upper body keeps the actor's lean and arm carriage (style
+        preserved); only the leg chain was re-solved to honour the contact.
+      </p>
+      <primer-geometry
+        scene="twoSkel"
+        caption="Two-panel skeleton diagram: the same joint angles on a tall skeleton (left) and a short skeleton (right), both with feet IK-locked to a shared floor line."
+      ></primer-geometry>
+      <p>
+        This is the picture to keep in your head: the pose's <em>shape</em> (the angles) is shared, but the
+        <em>contact</em> (feet on the floor) is enforced separately on each body. Retargeting is the machinery
+        that keeps both true at once.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: a tall actor's walk on a short character</h2>
+      <p>
+        Suppose the actor stands with a hip height of <primer-math>h_s = 1.00\,\text{m}</primer-math> and a
+        comfortable walking stride (hip travel per step) of <primer-math>0.80\,\text{m}</primer-math>. The
+        character is shorter, with hip height <primer-math>h_t = 0.60\,\text{m}</primer-math>.
+      </p>
+      <p>
+        <strong>Naïve angle copy.</strong> Copy every joint rotation, including the root's horizontal
+        translation, straight across. Each step, the character's root advances the actor's full
+        <primer-math>0.80\,\text{m}</primer-math> — but its legs can only reach so far, so the planted foot must
+        <strong>slide forward about</strong>
+        <primer-math>0.80 - 0.60\cdot\tfrac{0.80}{1.00} = 0.80 - 0.48 = 0.32\,\text{m}</primer-math> per step to
+        keep up. That is a gross, skating slide: the feet are clearly not gripping the ground.
+      </p>
+      <p>
+        <strong>Scale-compensated root.</strong> Apply <primer-math>\sigma = h_t/h_s = 0.60</primer-math> to
+        the root translation. The stride shrinks to
+        <primer-math>0.80 \times 0.60 = 0.48\,\text{m}</primer-math> — matched to the character's own legs. Most
+        of the slide vanishes immediately.
+      </p>
+      <p>
+        <strong>IK foot-lock on contact frames.</strong> For each frame where a foot is flagged as planted, IK
+        pins that ankle to its ground position from the moment of contact until lift-off, so the residual
+        creep goes to zero and the foot reads as truly gripping. Meanwhile the spine, arms and head still carry
+        the actor's copied angles, so the character keeps the performance's swagger. Sliding fixed, style kept —
+        that's a good retarget.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Extra joints, missing joints, and odd rest poses</h2>
+      <p>
+        Skeletons rarely match one-for-one, and the bone-correspondence step has to cope.
+      </p>
+      <ul>
+        <li><strong>Extra joints on the target</strong> (a tail, a third spine bone, a longer neck chain): they
+          have no source to copy from. Leave them at their rest pose, drive them procedurally
+          (a wagging tail), or distribute a mapped joint's rotation across several target bones so a long chain
+          bends smoothly.</li>
+        <li><strong>Missing joints on the target</strong> (the actor has three spine joints, the character
+          one): fold the source rotations together — compose the missing chain's rotations into the single
+          target joint so the overall bend survives even if the fine subdivision doesn't.</li>
+        <li><strong>Different rest poses</strong> (T-pose source vs. A-pose target): always copy rotations
+          <em>relative to each skeleton's rest pose</em>, as in the pipeline's step 2, never as raw local
+          values — otherwise a limb that was straight in the source ends up bent in the target by exactly the
+          rest-pose difference.</li>
+      </ul>
+    </primer-card>
+
+    <primer-vignette title="Why not just author every character from scratch and skip retargeting?">
+      <p>
+        Money and consistency. A modern game might have hundreds of characters — humans, dwarves, ogres,
+        children — sharing thousands of animations: idles, walks, runs, combat moves, emotes. Capturing or
+        hand-keying every clip afresh for every body shape would be astronomically expensive and would make the
+        library impossible to keep coherent (fix the "tired walk" once and every character should inherit the
+        fix). Retargeting lets one <strong>shared animation library</strong> drive an entire cast: author the
+        motion once on a reference skeleton, then retarget it onto everyone. The whole humanoid-animation
+        economy of game engines rests on it.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Angle-only and position-only are both traps">
+      <p>
+        Two opposite mistakes bite beginners. <strong>Angle-only retargeting</strong> (copy the rotations and
+        stop) feels tempting because it perfectly preserves the actor's style — but it is
+        <em>blind to world-space contacts</em>. On any character whose proportions differ from the actor's, the
+        feet slide across the floor or clip straight through it, and clasped hands drift apart. It looks fine on
+        the actor's own skeleton and only breaks when proportions change, so it sneaks past casual review.
+      </p>
+      <p>
+        The over-correction is <strong>position-only retargeting</strong> — solve <em>everything</em> with IK
+        to hit exact endpoint targets. Now the contacts are perfect, but you have thrown away the joint angles
+        that carried the performance: the result is stiff, generic, and no longer moves like your actor. The
+        elbow that swung with a particular flourish is now just wherever IK put it.
+      </p>
+      <p>
+        The professional answer is neither extreme. <strong>Blend both:</strong> copy angles everywhere to keep
+        the style, and <strong>IK-correct only the contact frames</strong> — the moments a foot is planted or a
+        hand must touch — leaving the free-flight frames on the copied angles. Contacts fixed, style intact.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "retargetingQuiz@1": {
+          "intro": "A clip stores joint angles, not world positions; on different proportions that breaks contacts and semantics. Copy angles for style, IK-correct contacts. Fresh questions each time.",
+          "storeQ": "A motion-capture clip fundamentally stores…",
+          "storeRight": "joint rotations (plus a root transform), not world-space positions",
+          "storeW1": "the world-space positions of every joint, frozen per frame",
+          "storeW2": "a video of the actor from four angles",
+          "storeW3": "the character's bone lengths",
+          "whyBreakQ": "Why does copying an actor's joint angles onto a differently-proportioned character break contacts?",
+          "whyBreakRight": "world endpoints are angles composed with bone lengths, so different bones move the feet/hands elsewhere",
+          "whyBreakW1": "the angles get corrupted during copying",
+          "whyBreakW2": "joint rotations are stored at too low a frame rate",
+          "whyBreakW3": "the floor plane moves when the character changes",
+          "app1Q": "Copying joint angles straight across (approach 1) has which trade-off?",
+          "app1Right": "preserves the actor's style but breaks world-space contacts on different proportions",
+          "app1W1": "guarantees feet stay on the ground but loses all style",
+          "app1W2": "changes the bone lengths to match the actor",
+          "app1W3": "has no downside on any character",
+          "app2Q": "Preserving end-effector positions with IK (approach 2) has which trade-off?",
+          "app2Right": "keeps feet/hands on their targets but changes some poses, losing some style",
+          "app2W1": "keeps the actor's style perfectly and never moves any joint",
+          "app2W2": "only works if the skeletons are identical",
+          "app2W3": "removes the need for a bone correspondence map",
+          "blendQ": "What do real pipelines do to get both clean contacts and the actor's style?",
+          "blendRight": "copy angles for style, then IK-correct only the contact frames",
+          "blendW1": "solve every joint on every frame with IK",
+          "blendW2": "never use IK at all",
+          "blendW3": "capture a fresh performance for each character",
+          "slideQ": "During a walk, a planted foot that drifts because stride no longer matches leg length is called…",
+          "slideRight": "foot slide (foot skate)",
+          "slideW1": "motion blur",
+          "slideW2": "gimbal lock",
+          "slideW3": "keyframe drift",
+          "sinkQ": "If the target character's legs are shorter than the actor's, a naively-copied planted foot tends to…",
+          "sinkRight": "sink through / drift because the hip is driven too high and stride too long",
+          "sinkW1": "always float far above the floor and never touch it",
+          "sinkW2": "stay perfectly locked with no correction needed",
+          "sinkW3": "change the character's bone lengths automatically",
+          "sigmaDefQ": "The hip-height (scale) ratio $\\sigma$ used for root-motion compensation is defined as…",
+          "sigmaDefRight": "$\\sigma = h_t / h_s$ — target hip height over source hip height",
+          "sigmaDefW1": "$\\sigma = h_s / h_t$ — source over target, applied to angles",
+          "sigmaDefW2": "the actor's stride length in metres",
+          "sigmaDefW3": "the number of joints in the skeleton",
+          "restQ": "The actor is captured in a T-pose but the character is authored in an A-pose. To copy rotations correctly you should…",
+          "restRight": "copy each rotation relative to each skeleton's own rest pose",
+          "restW1": "copy the raw local rotations unchanged",
+          "restW2": "delete the arm joints entirely",
+          "restW3": "scale the bone lengths to remove the difference",
+          "missingQ": "The source has three spine joints; the target has one. A reasonable handling is to…",
+          "missingRight": "compose (fold) the three source rotations into the single target joint",
+          "missingW1": "leave the target spine at rest and ignore the source spine",
+          "missingW2": "add two extra spine joints to the character at runtime",
+          "missingW3": "refuse to retarget entirely",
+          "corrQ": "The very first step of the standard retargeting pipeline is to…",
+          "corrRight": "build a source→target bone correspondence (skeleton map)",
+          "corrW1": "render the final frames",
+          "corrW2": "delete the root motion",
+          "corrW3": "add motion blur to the contacts",
+          "strideQ": "Actor stride $= {a}/10$ m, actor hip height $1$ m, character hip height ${b}/10$ m. Give the scale-compensated stride ${a}/10 \\times {b}/10$ (metres, 2 dp).",
+          "sigmaCompQ": "Compute the scale ratio $\\sigma = h_t/h_s$ with $h_t = {p}/10$ m and $h_s = 1$ m (2 dp).",
+          "styleQ": "Which part of the retargeted performance carries the actor's 'style' (their lean, arm swing, flourish)?",
+          "styleRight": "the copied joint angles on the non-contact parts of the body",
+          "styleW1": "the floor contact plane",
+          "styleW2": "the render resolution",
+          "styleW3": "the bone lengths of the character"
+        }
+      }
+    </script>
+
+    <primer-quiz name="retargetingQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/computer-animation/computer-animation"]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Two-panel skeleton: same joint angles on a tall (left) and short (right) skeleton, both with
+          feet IK-locked to a shared floor line. Static base content (no steps) → shows fully on load. ---- */
+  const tsStr = makeStrings("twoSkel");
+  registerGeometryScene(
+    "twoSkel",
+    ({ board, colors, sceneStrings }) => {
+      const floorY = 0;
+
+      // Build one skeleton at horizontal offset ox, with an overall leg/torso scale s, but the SAME joint
+      // angles, and feet pinned to floorY (the IK lock). We choose bone lengths and solve so both ankles sit
+      // exactly on the floor line.
+      const drawSkeleton = (ox, s, catIdx, labelKey, xLabelAt) => {
+        const c = colors.cat[catIdx];
+        // Bone lengths (scaled). Legs are two segments (thigh, shin); torso, head, arms (upper, fore).
+        const thigh = 1.1 * s, shin = 1.1 * s, torso = 1.4 * s, head = 0.5 * s;
+        const upperArm = 0.9 * s, foreArm = 0.9 * s;
+
+        // Same joint angles for both bodies (the shared pose). Feet planted on the floor.
+        // Hips positioned so that straight-ish legs place both ankles on the floor line.
+        const stanceLeg = thigh + shin;            // vertical leg reach when legs are near-straight
+        const hipX = ox, hipY = floorY + stanceLeg; // hip height follows THIS skeleton's own legs → feet on floor
+
+        const P = (x, y, name) =>
+          board.create("point", [x, y, name], {
+            size: 2, strokeColor: c, fillColor: c, fixed: true, name: "", highlight: false,
+          });
+        const bone = (a, b) =>
+          board.create("segment", [a, b], { strokeColor: c, strokeWidth: 3, fixed: true, highlight: false });
+
+        // Legs: a slight stride so it reads as a walk pose, feet on floor.
+        const hip = P(hipX, hipY);
+        const kneeL = P(hipX - 0.35 * s, floorY + shin);
+        const footL = P(hipX - 0.55 * s, floorY);
+        const kneeR = P(hipX + 0.35 * s, floorY + shin);
+        const footR = P(hipX + 0.55 * s, floorY);
+        bone(hip, kneeL); bone(kneeL, footL);
+        bone(hip, kneeR); bone(kneeR, footR);
+
+        // Torso + head.
+        const neck = P(hipX + 0.1 * s, hipY + torso);      // slight forward lean → the actor's "style"
+        const top = P(hipX + 0.16 * s, hipY + torso + head);
+        bone(hip, neck); bone(neck, top);
+
+        // Arms: one hand resting toward the hip (a semantic contact), one swinging.
+        const shoulderX = hipX + 0.1 * s, shoulderY = hipY + torso;
+        const elbowA = P(shoulderX - 0.5 * s, shoulderY - 0.55 * s);
+        const handA = P(hipX - 0.05 * s, hipY + 0.15 * s); // near the hip
+        bone(neck, elbowA); bone(elbowA, handA);
+        const elbowB = P(shoulderX + 0.55 * s, shoulderY - 0.5 * s);
+        const handB = P(shoulderX + 0.75 * s, shoulderY - 1.0 * s);
+        bone(neck, elbowB); bone(elbowB, handB);
+
+        // Panel label under the feet.
+        board.create("text", [xLabelAt, floorY - 0.55, () => sceneStrings(labelKey)], {
+          anchorX: "middle", fontSize: 13, strokeColor: c, cssStyle: "font-weight:700",
+        });
+      };
+
+      // Shared floor line across both panels.
+      board.create("line", [[-4.6, floorY], [4.6, floorY]], {
+        strokeColor: colors.line, strokeWidth: 1.5, straightFirst: false, straightLast: false, fixed: true, highlight: false,
+      });
+      board.create("text", [-4.4, floorY + 0.18, () => sceneStrings("floorLabel")], {
+        anchorX: "left", fontSize: 11, strokeColor: colors.ink,
+      });
+
+      drawSkeleton(-2.4, 1.0, 0, "tallLabel", -2.3);   // tall actor, left
+      drawSkeleton(2.4, 0.62, 1, "shortLabel", 2.4);   // short character, right
+
+      // Caption noting the IK lock.
+      board.create("text", [0, floorY - 1.15, () => sceneStrings("plantLabel")], {
+        anchorX: "middle", fontSize: 12, strokeColor: colors.ink, cssStyle: "font-style:italic",
+      });
+    },
+    { boundingbox: [-5, 5.2, 5, -1.8], keepAspect: true, title: () => tsStr("title") },
+  );
+
+  registerQuiz("retargetingQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("storeQ"), options: [
+      { text: () => sceneStrings("storeRight"), correct: true },
+      { text: () => sceneStrings("storeW1"), correct: false },
+      { text: () => sceneStrings("storeW2"), correct: false },
+      { text: () => sceneStrings("storeW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("whyBreakQ"), options: [
+      { text: () => sceneStrings("whyBreakRight"), correct: true },
+      { text: () => sceneStrings("whyBreakW1"), correct: false },
+      { text: () => sceneStrings("whyBreakW2"), correct: false },
+      { text: () => sceneStrings("whyBreakW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("app1Q"), options: [
+      { text: () => sceneStrings("app1Right"), correct: true },
+      { text: () => sceneStrings("app1W1"), correct: false },
+      { text: () => sceneStrings("app1W2"), correct: false },
+      { text: () => sceneStrings("app1W3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("app2Q"), options: [
+      { text: () => sceneStrings("app2Right"), correct: true },
+      { text: () => sceneStrings("app2W1"), correct: false },
+      { text: () => sceneStrings("app2W2"), correct: false },
+      { text: () => sceneStrings("app2W3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("blendQ"), options: [
+      { text: () => sceneStrings("blendRight"), correct: true },
+      { text: () => sceneStrings("blendW1"), correct: false },
+      { text: () => sceneStrings("blendW2"), correct: false },
+      { text: () => sceneStrings("blendW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("slideQ"), options: [
+      { text: () => sceneStrings("slideRight"), correct: true },
+      { text: () => sceneStrings("slideW1"), correct: false },
+      { text: () => sceneStrings("slideW2"), correct: false },
+      { text: () => sceneStrings("slideW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("sinkQ"), options: [
+      { text: () => sceneStrings("sinkRight"), correct: true },
+      { text: () => sceneStrings("sinkW1"), correct: false },
+      { text: () => sceneStrings("sinkW2"), correct: false },
+      { text: () => sceneStrings("sinkW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("sigmaDefQ"), options: [
+      { text: () => sceneStrings("sigmaDefRight"), correct: true },
+      { text: () => sceneStrings("sigmaDefW1"), correct: false },
+      { text: () => sceneStrings("sigmaDefW2"), correct: false },
+      { text: () => sceneStrings("sigmaDefW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("restQ"), options: [
+      { text: () => sceneStrings("restRight"), correct: true },
+      { text: () => sceneStrings("restW1"), correct: false },
+      { text: () => sceneStrings("restW2"), correct: false },
+      { text: () => sceneStrings("restW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("missingQ"), options: [
+      { text: () => sceneStrings("missingRight"), correct: true },
+      { text: () => sceneStrings("missingW1"), correct: false },
+      { text: () => sceneStrings("missingW2"), correct: false },
+      { text: () => sceneStrings("missingW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("corrQ"), options: [
+      { text: () => sceneStrings("corrRight"), correct: true },
+      { text: () => sceneStrings("corrW1"), correct: false },
+      { text: () => sceneStrings("corrW2"), correct: false },
+      { text: () => sceneStrings("corrW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("styleQ"), options: [
+      { text: () => sceneStrings("styleRight"), correct: true },
+      { text: () => sceneStrings("styleW1"), correct: false },
+      { text: () => sceneStrings("styleW2"), correct: false },
+      { text: () => sceneStrings("styleW3"), correct: false },
+    ] },
+    { prompt: (v) => sceneStrings("strideQ", v), variables: "a=[6:9] b=[4:7]", answer: (v) => (v.a / 10) * (v.b / 10) },
+    { prompt: (v) => sceneStrings("sigmaCompQ", v), variables: "p=[4:9]", answer: (v) => v.p / 10 },
+  ]);
+</script>

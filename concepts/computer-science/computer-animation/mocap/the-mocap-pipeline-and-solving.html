@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>The Mocap Pipeline and Solving</primer-title>
+
+    <primer-card>
+      <p>
+        A motion-capture stage delivers something surprisingly useless: for every frame, a flickering
+        <strong>cloud of anonymous 3-D dots</strong>. The cameras saw bright reflective markers and
+        triangulated where each dot floated in space — but they don't know that <em>this</em> dot is a left
+        knee and <em>that</em> one is the right shoulder, some dots vanished behind an arm for half a second,
+        and a stray reflection off a watch spawned a ghost point that never should have existed. Raw mocap is
+        not an animation. It is <strong>evidence</strong>.
+      </p>
+      <p>
+        This page walks the <strong>solving pipeline</strong> — the chain of steps that turns that noisy dot
+        cloud into a clean, retargetable clip of <strong>joint-angle curves</strong> that a rigged character
+        can actually play back. Before the dots ever arrive you need
+        <primer-ref todo to="computer-science/computer-animation/mocap/motion-capture-systems">motion capture systems</primer-ref>
+        to record them; here we assume the capture happened and ask the harder question: <em>now what?</em>
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The pipeline at a glance</h2>
+      <p>
+        Solving is a fixed sequence of stages. Each one hands cleaner data to the next, and skipping any of
+        them shows up as garbage later — a foot that slides, an elbow that pops, a spine that shivers.
+      </p>
+      <primer-theorem name="The mocap solving pipeline">
+        <ul>
+          <li><strong>Calibrate & reference</strong> — capture a <em>T-pose</em> (or A-pose) and a
+            range-of-motion take so the software learns each marker's fixed offset from the bone it rides on,
+            and learns the actor's limb lengths.</li>
+          <li><strong>Label</strong> — assign every anonymous 3-D dot to its named body location (LSHO,
+            RKNE, …), automatically where possible, by hand where the auto-labeller is unsure.</li>
+          <li><strong>Clean</strong> — gap-fill occluded markers, denoise jitter, delete ghost markers, and
+            remove spikes.</li>
+          <li><strong>Solve</strong> — fit the actor's <em>skeleton</em> to the labelled marker cloud each
+            frame, an IK-like optimisation recovering the joint transforms.</li>
+          <li><strong>Retime & polish</strong> — resample to the target frame rate, then fix foot-skate and
+            contacts by locking planted feet.</li>
+          <li><strong>Export</strong> — write out joint-angle (rotation) curves per bone, ready to retarget.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Calibration and the reference pose</h2>
+      <p>
+        Everything downstream leans on calibration. The actor stands in a known <strong>T-pose</strong> —
+        arms out, legs straight — for a beat. In that pose the software knows roughly where each named bone
+        <em>should</em> be, so it can measure how far each marker sits from the bone it's taped to. Those
+        <strong>marker offsets</strong> — a marker is glued to skin a couple of centimetres off the bone —
+        become fixed constants used by the solve on every later frame. A <strong>range-of-motion</strong>
+        take (the actor cycling every joint through its extremes) then nails down limb lengths and joint
+        limits. Get calibration wrong and the whole clip inherits the error, silently.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Labelling: naming the dots</h2>
+      <p>
+        The cameras output unlabelled trajectories — dot #47 in one frame may be dot #12 in the next. The
+        <strong>labeller</strong> assigns each dot to a named marker slot (<code>LSHO</code>, <code>RANK</code>,
+        <code>C7</code>, …) using the reference marker layout and continuity between frames: a marker can't
+        teleport, so the dot nearest to where <code>LSHO</code> was last frame is probably <code>LSHO</code>
+        now. Auto-labelling handles the easy majority; the artist steps in when markers cross, occlude, or
+        swap — a common failure is two nearby markers <strong>trading identities</strong> as the actor's
+        wrists cross, which the solve would read as a limb suddenly snapping to the wrong side.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Cleaning: from evidence to signal</h2>
+      <p>
+        Cleaning is four distinct chores, each fixing a different sin of the raw capture:
+      </p>
+      <primer-theorem name="The four cleaning tasks">
+        <ul>
+          <li><strong>Gap-filling</strong> — when a marker is <em>occluded</em> (hidden behind a limb or
+            prop) its trajectory has a hole; fill it by interpolation, or predict it from a rigid-body
+            neighbour that stayed visible.</li>
+          <li><strong>Denoising</strong> — smooth high-frequency jitter (sub-millimetre camera noise) that
+            would otherwise read as a buzzing tremor, without smearing genuine fast motion.</li>
+          <li><strong>Ghost removal</strong> — delete spurious points from stray reflections (jewellery,
+            wet floor) that belong to no real marker.</li>
+          <li><strong>Spike removal</strong> — kill single-frame teleports where a marker's position jumps
+            impossibly far and snaps back.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The chart below shows the most common of these, a gap-fill: one marker's height <primer-math>y(t)</primer-math>
+        over time, with a stretch of frames dropped out by occlusion (the raw trace), and the smooth
+        interpolated reconstruction laid over the hole.
+      </p>
+
+      <script type="application/json" class="scene-strings">
+        {
+          "gapFill": {
+            "title": "Gap-filling an occluded marker's trajectory",
+            "raw": "raw (occluded gap)",
+            "filled": "interpolated fill"
+          }
+        }
+      </script>
+
+      <primer-chart
+        scene="gapFill"
+        caption="One marker's vertical position over time. The raw trajectory (faint) drops out during an occlusion; the interpolated fill (bold) reconstructs the missing arc smoothly."
+      ></primer-chart>
+    </primer-card>
+
+    <primer-card>
+      <h2>The solve: fitting a skeleton to the cloud</h2>
+      <p>
+        With labelled, clean markers in hand, the <strong>solve</strong> answers one question per frame:
+        <em>what pose of the actor's skeleton best explains where all the markers are right now?</em> The
+        skeleton is a tree of bones with joint transforms (mostly rotations, one root translation). From
+        calibration we know each marker's <strong>offset</strong> from its parent bone, so given a candidate
+        pose we can predict where every marker <em>ought</em> to be. The solve searches over the joint
+        transforms to make those predictions match the measured markers as closely as possible — an
+        optimisation very much like <strong>inverse kinematics</strong>, but driven by dozens of marker
+        targets at once.
+      </p>
+      <primer-theorem name="The solve as least-squares fit">
+        For each frame, find the joint transforms <primer-math>\theta</primer-math> minimising the total
+        squared distance between predicted and measured marker positions:
+        <primer-math display>\theta^\star = \arg\min_{\theta}\; \sum_{i=1}^{M} \big\lVert\, p_i(\theta) - m_i \,\big\rVert^2</primer-math>
+        where <primer-math>m_i</primer-math> is the measured position of marker <primer-math>i</primer-math>
+        and <primer-math>p_i(\theta)</primer-math> is where the skeleton in pose <primer-math>\theta</primer-math>
+        places that marker (bone transform composed with the calibrated offset).
+      </primer-theorem>
+      <p>
+        Because there are more markers than joint degrees of freedom, the fit is <strong>over-determined</strong> —
+        no pose matches every marker perfectly, so we settle for the least-squares best. That redundancy is a
+        feature: it averages out residual noise and survives a marker or two dropping out.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: solving the pelvis from three back markers</h2>
+      <p>
+        The pelvis is usually tracked by a small rigid cluster — say three markers on the lower back that
+        don't move relative to each other. Call their calibrated <em>reference</em> positions (in the
+        pelvis's own frame, learned from the T-pose)
+        <primer-math>r_1, r_2, r_3</primer-math>, and their <em>measured</em> world positions this frame
+        <primer-math>m_1, m_2, m_3</primer-math>. Because the cluster is rigid, some rotation
+        <primer-math>R</primer-math> and translation <primer-math>t</primer-math> should carry the reference
+        points onto the measured ones. We want the <primer-math>(R, t)</primer-math> — the pelvis transform —
+        minimising
+      </p>
+      <primer-math display>E(R, t) = \sum_{i=1}^{3} \big\lVert\, R\,r_i + t - m_i \,\big\rVert^2, \qquad R^\top R = I,\ \det R = 1.</primer-math>
+      <p>
+        This is the classic <strong>rigid-alignment</strong> (Procrustes / Kabsch) problem, and it has a
+        clean recipe:
+      </p>
+      <ol>
+        <li>Compute the two centroids
+          <primer-math>\bar r = \tfrac{1}{3}\sum_i r_i</primer-math> and
+          <primer-math>\bar m = \tfrac{1}{3}\sum_i m_i</primer-math>, and centre both sets:
+          <primer-math>r_i' = r_i - \bar r</primer-math>,
+          <primer-math>m_i' = m_i - \bar m</primer-math>.</li>
+        <li>Form the cross-covariance
+          <primer-math>H = \sum_i r_i'\, m_i'^{\top}</primer-math> and take its SVD
+          <primer-math>H = U \Sigma V^\top</primer-math>.</li>
+        <li>The best rotation is
+          <primer-math>R = V\,\mathrm{diag}(1, 1, \det(VU^\top))\,U^\top</primer-math> (the
+          <primer-math>\det</primer-math> term forbids an accidental reflection).</li>
+        <li>Recover the translation from the centroids:
+          <primer-math>t = \bar m - R\,\bar r</primer-math>.</li>
+      </ol>
+      <p>
+        That <primer-math>(R, t)</primer-math> <em>is</em> the pelvis pose for this frame — the root of the
+        whole skeleton — obtained by minimising squared marker error over just three points. Repeat per
+        frame and you have the pelvis's motion curve; the full-body solve does the same idea for every joint
+        at once, chained down the skeleton tree.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Retiming and the final export</h2>
+      <p>
+        Capture often runs at an odd or high rate — 120, 240 fps — while the shot needs 24 or 30. The solved
+        motion is <strong>resampled</strong> to the target frame rate by interpolating the joint curves (not
+        the raw markers). Finally the clip is exported as <strong>joint-angle curves</strong>: one rotation
+        channel per bone over time, a compact representation any rigged character can consume and
+        <em>retarget</em> onto a differently-proportioned skeleton. The dot cloud is gone; what remains is
+        clean, editable animation.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why not just glue the markers straight onto the character?">
+      <p>
+        Because markers ride on <em>skin</em>, not bone. Skin slides, jiggles and bulges as muscles flex, so
+        a marker's world path is the bone's motion <em>plus</em> a wobble of soft-tissue artefact. Bolting a
+        joint directly to a marker would import all that wobble. The whole point of the skeleton solve is to
+        recover the <strong>rigid bone motion underneath</strong> — by fitting many markers per limb, the
+        soft-tissue slop averages out and you get the clean joint rotation the skin was only hinting at. It
+        also lets you <strong>retarget</strong>: a skeleton of joint angles maps onto any character, whereas
+        raw marker positions are locked to one actor's exact proportions.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Foot skate turns actors into ice-skaters">
+      <p>
+        The most notorious mocap artefact is <strong>foot skate</strong> (or "foot sliding"). When a foot is
+        planted on the ground, it should be <em>perfectly still</em> — but tiny errors in the solve, in
+        marker noise, or in retargeting onto a character whose legs are a different length nudge the solved
+        foot a few millimetres every frame. Played back, those nudges accumulate into a visible
+        <strong>glide across the floor</strong>: the character looks like it's skating on ice, and once you
+        notice it you can't unsee it.
+      </p>
+      <p>
+        The fix is <strong>contact detection plus constraint</strong>. Detect the frames where the foot is
+        genuinely planted (low foot height, near-zero foot velocity), then <strong>IK-lock</strong> that foot
+        to a fixed ground position for the whole plant, letting inverse kinematics bend the knee and hip to
+        keep the rest of the leg attached. The planted foot stops moving, the skate vanishes, and the weight
+        of the step reads correctly. Never ship a walk cycle without checking the feet.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "mocapPipelineQuiz@1": {
+          "intro": "The mocap pipeline: calibrate → label → clean → solve → retime → export. The solve is a least-squares skeleton fit; watch for foot skate. Fresh questions each time."
+        }
+      }
+    </script>
+
+    <primer-quiz name="mocapPipelineQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/computer-animation/computer-animation"]
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Gap-fill chart: a marker's height y(t). The raw trace drops to NaN across an occlusion window;
+          the interpolated fill draws the smooth arc through the hole. Static (no sliders). ---- */
+  const gf = makeStrings("gapFill");
+  const trueArc = (t) => 1.4 + 0.9 * Math.sin(0.9 * t) - 0.04 * t * t; // the "real" motion
+  const gapLo = 3.2, gapHi = 6.1;                                      // occlusion window
+  registerCharts(
+    [
+      {
+        name: "gapFill",
+        f: [
+          (x) => (x > gapLo && x < gapHi ? NaN : trueArc(x)), // raw: hole during occlusion
+          (x) => trueArc(x),                                  // interpolated fill (full arc)
+        ],
+        line: (colors, i) =>
+          i === 0
+            ? { strokeColor: colors.line, strokeWidth: 4, strokeOpacity: 0.35 }
+            : { strokeColor: colors.cat[0], strokeWidth: 2, dash: 2 },
+        legend: [() => gf("raw"), () => gf("filled")],
+      },
+    ],
+    { id: "gapFill", xmin: 0, xmax: 10, ymin: 0, ymax: 3, xticks: 2, yticks: 1, xaxisname: "time (frames)", yaxisname: "marker height y", title: () => gf("title") },
+  );
+
+  registerQuiz("mocapPipelineQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: "What does a raw mocap capture actually deliver, before any processing?", options: [
+      { text: "A cloud of anonymous, unlabelled 3-D points per frame", correct: true },
+      { text: "Finished joint-angle animation curves", correct: false },
+      { text: "A fully rigged character mesh", correct: false },
+      { text: "A single averaged position for the whole actor", correct: false },
+    ] },
+    { prompt: "Why is a calibration T-pose (and range-of-motion take) captured first?", options: [
+      { text: "To learn each marker's fixed offset from its bone and the actor's limb lengths", correct: true },
+      { text: "To set the render resolution of the final clip", correct: false },
+      { text: "To choose the background colour of the shot", correct: false },
+      { text: "To decide how many cameras to switch off", correct: false },
+    ] },
+    { prompt: "What does the 'labelling' stage do?", options: [
+      { text: "Assigns each anonymous 3-D dot to its named body location (e.g. LSHO, RKNE)", correct: true },
+      { text: "Smooths out high-frequency jitter in the markers", correct: false },
+      { text: "Converts joint angles into a video file", correct: false },
+      { text: "Fits the skeleton to the marker cloud", correct: false },
+    ] },
+    { prompt: "A marker is hidden behind the actor's arm for a stretch of frames. Cleaning fixes this by…", options: [
+      { text: "Gap-filling the missing trajectory via interpolation or prediction from a rigid neighbour", correct: true },
+      { text: "Deleting the entire marker for the whole take", correct: false },
+      { text: "Doubling the frame rate", correct: false },
+      { text: "Renaming every other marker", correct: false },
+    ] },
+    { prompt: "A stray reflection off the actor's watch creates an extra point that tracks nothing real. This is a…", options: [
+      { text: "Ghost marker, removed during cleaning", correct: true },
+      { text: "Correctly labelled elbow marker", correct: false },
+      { text: "Foot-skate artefact", correct: false },
+      { text: "Retiming error", correct: false },
+    ] },
+    { prompt: "What is the 'solve' in the mocap pipeline?", options: [
+      { text: "Fitting the actor's skeleton to the marker cloud each frame, an IK-like optimisation", correct: true },
+      { text: "Choosing which markers to tape on the actor", correct: false },
+      { text: "Compressing the final video for delivery", correct: false },
+      { text: "Painting textures onto the character", correct: false },
+    ] },
+    { prompt: "The solve minimises, over the joint transforms $\\theta$, the sum of…", options: [
+      { text: "Squared distances between predicted marker positions $p_i(\\theta)$ and measured ones $m_i$", correct: true },
+      { text: "The lengths of all the bones", correct: false },
+      { text: "The number of cameras used", correct: false },
+      { text: "The frame rate times the take duration", correct: false },
+    ] },
+    { prompt: "Recovering the pelvis transform $(R,t)$ from three rigid back markers is an instance of which problem?", options: [
+      { text: "Rigid alignment / Procrustes (Kabsch) fit — least-squares over the point pairs", correct: true },
+      { text: "Sorting the markers alphabetically by name", correct: false },
+      { text: "Fourier analysis of the audio track", correct: false },
+      { text: "Ray-tracing the reflections", correct: false },
+    ] },
+    { prompt: "In the rigid-alignment recipe, what is the translation $t$ once the rotation $R$ is known?", options: [
+      { text: "$t = \\bar m - R\\,\\bar r$, from the two centroids", correct: true },
+      { text: "$t = 0$ always", correct: false },
+      { text: "$t = R + \\bar m$", correct: false },
+      { text: "$t$ is the average bone length", correct: false },
+    ] },
+    { prompt: "Capture ran at 240 fps but the shot needs 30 fps. What handles this?", options: [
+      { text: "Retiming / resampling the solved joint curves to the target frame rate", correct: true },
+      { text: "Re-labelling every marker", correct: false },
+      { text: "Re-running calibration at 30 fps", correct: false },
+      { text: "Deleting three quarters of the bones", correct: false },
+    ] },
+    { prompt: "What is 'foot skate'?", options: [
+      { text: "A planted foot sliding across the floor from small solve or retarget errors", correct: true },
+      { text: "A marker changing colour over time", correct: false },
+      { text: "The actor literally wearing skates", correct: false },
+      { text: "A camera falling out of calibration", correct: false },
+    ] },
+    { prompt: "The standard fix for foot skate is to…", options: [
+      { text: "Detect ground contacts and IK-lock the planted foot to a fixed position", correct: true },
+      { text: "Increase the render resolution", correct: false },
+      { text: "Add more markers to the head", correct: false },
+      { text: "Play the whole clip in reverse", correct: false },
+    ] },
+    { prompt: "In what form is the finished clip exported for retargeting onto other characters?", options: [
+      { text: "Joint-angle (rotation) curves — one channel per bone over time", correct: true },
+      { text: "The raw 3-D marker positions", correct: false },
+      { text: "A flat image sequence only", correct: false },
+      { text: "A list of camera serial numbers", correct: false },
+    ] },
+    { prompt: "Why fit a skeleton at all instead of gluing joints straight to markers?", options: [
+      { text: "Markers ride on skin (soft-tissue wobble); the solve recovers the rigid bone motion and enables retargeting", correct: true },
+      { text: "Markers are too expensive to keep", correct: false },
+      { text: "Skeletons render faster than points", correct: false },
+      { text: "Joints cannot be stored in a file", correct: false },
+    ] },
+  ]);
+</script>

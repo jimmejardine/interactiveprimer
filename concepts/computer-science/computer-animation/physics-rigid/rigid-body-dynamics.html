@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Rigid-Body Dynamics</primer-title>
+
+    <primer-card>
+      <p>
+        A bouncing particle only ever answers one question: <em>where am I?</em> A tumbling crate, a spun
+        coin, a thrown wrench — these answer a second one too: <em>which way am I facing?</em> A
+        <strong>rigid body</strong> is a solid object whose every point keeps a fixed distance from every
+        other point: it cannot squash, stretch or bend. That rigidity is a gift to the simulator, because it
+        means the whole object's motion collapses into just two things — the journey of a single point (the
+        <strong>centre of mass</strong>) and the <strong>orientation</strong> the body is turned to. Track
+        those two, and you know where every atom of the object is.
+      </p>
+      <p>
+        This page builds the simulator's core loop for solids: the <strong>state</strong> a rigid body
+        carries, the <strong>Newton–Euler equations</strong> that push that state forward, and the one
+        genuinely new subtlety — integrating <em>orientation</em>, which is not a position and must not be
+        treated like one. It builds on
+        <primer-ref to="physics/classical-mechanics/rigid-body-motion">rigid-body motion</primer-ref> and the
+        particle simulators of
+        <primer-ref to="computer-science/computer-animation/computer-animation">computer animation</primer-ref>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The state of a rigid body</h2>
+      <p>
+        A particle's whole world is a position and a velocity. A rigid body doubles that: it needs a
+        <strong>linear</strong> part (how the body drifts through space) <em>and</em> an
+        <strong>angular</strong> part (how it spins). The complete state is four quantities:
+      </p>
+      <primer-theorem name="Rigid-body state">
+        <ul>
+          <li><strong>Position</strong> <primer-math>\mathbf{x}</primer-math> — the location of the
+            <em>centre of mass</em> (COM), the special point that moves as if all the mass sat there.</li>
+          <li><strong>Orientation</strong> <primer-math>\mathbf{q}</primer-math> — how the body is turned,
+            stored as a <em>unit quaternion</em> (or a <primer-math>3\times 3</primer-math> rotation
+            matrix).</li>
+          <li><strong>Linear velocity</strong> <primer-math>\mathbf{v}</primer-math> — how fast the COM
+            moves (equivalently the linear momentum <primer-math>\mathbf{P} = m\mathbf{v}</primer-math>).</li>
+          <li><strong>Angular velocity</strong> <primer-math>\boldsymbol{\omega}</primer-math> — the axis and
+            rate of spin (equivalently the angular momentum <primer-math>\mathbf{L}</primer-math>, related by
+            the <primer-ref todo to="computer-science/computer-animation/physics-rigid/the-inertia-tensor-and-angular-velocity">the inertia tensor</primer-ref>
+            <primer-math>I</primer-math> through <primer-math>\mathbf{L} = I\boldsymbol{\omega}</primer-math>).</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The first two, <primer-math>(\mathbf{x}, \mathbf{q})</primer-math>, are the <em>configuration</em> —
+        they say precisely where every point of the object is right now. The last two,
+        <primer-math>(\mathbf{v}, \boldsymbol{\omega})</primer-math>, are how that configuration is changing.
+        Everything the simulator does is push these four forward one small time-step at a time.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why a point and a turn are enough</h2>
+      <p>
+        Here is the fact that makes solids cheap to simulate. Because the body is rigid, the world-space
+        position of <em>any</em> point <primer-math>\mathbf{r}_{\text{body}}</primer-math> fixed in the object
+        is completely determined by the COM position and the orientation:
+      </p>
+      <primer-math display>\mathbf{p}_{\text{world}} \;=\; \mathbf{x} \;+\; R(\mathbf{q})\,\mathbf{r}_{\text{body}},</primer-math>
+      <p>
+        where <primer-math>R(\mathbf{q})</primer-math> is the rotation matrix built from the orientation. Turn
+        the object (change <primer-math>\mathbf{q}</primer-math>) and every point swings around the COM
+        together; slide the object (change <primer-math>\mathbf{x}</primer-math>) and every point shifts by the
+        same vector. You never store the millions of vertices' motions individually — a corner of a crate and
+        its opposite corner share the very same <primer-math>(\mathbf{x}, \mathbf{q})</primer-math>. That is
+        the whole payoff of rigidity: six numbers of configuration (three for
+        <primer-math>\mathbf{x}</primer-math>, three of freedom in <primer-math>\mathbf{q}</primer-math>) stand
+        in for the entire body.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The Newton–Euler equations</h2>
+      <p>
+        Two laws advance the two halves of the state. The <strong>linear</strong> half is plain Newton: the
+        net force accelerates the centre of mass, and nothing else. The <strong>angular</strong> half is
+        Euler's law: the net <em>torque</em> changes the angular momentum.
+      </p>
+      <primer-theorem name="Newton–Euler equations of motion">
+        <ul>
+          <li><strong>Translation (Newton):</strong>
+            <primer-math>\mathbf{F} = m\mathbf{a} = \dot{\mathbf{P}}</primer-math> — the total force moves the
+            COM exactly as if the body were a point of mass <primer-math>m</primer-math>.</li>
+          <li><strong>Rotation (Euler):</strong>
+            <primer-math>\boldsymbol{\tau} = \dot{\mathbf{L}}</primer-math> — the total torque about the COM is
+            the rate of change of angular momentum.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The beautiful thing is how they split. For the <em>position</em> you can forget the shape entirely —
+        summing forces and dividing by mass gives the COM acceleration, identical to a particle simulator.
+        The <em>orientation</em> is driven by a separate accumulator, torque, which lives in its own channel.
+        In a step the simulator does, in effect:
+      </p>
+      <primer-code lang="typescript">
+type Body = {
+  x: Vec3; q: Quat;        // configuration: COM position, orientation
+  v: Vec3; omega: Vec3;    // velocities: linear, angular
+  m: number; invI: Mat3;   // mass, inverse inertia (world space)
+};
+
+function step(b: Body, force: Vec3, torque: Vec3, dt: number): void {
+  // Linear half — pure Newton, shape-independent.
+  const a = scale(force, 1 / b.m);          // a = F / m
+  b.v = add(b.v, scale(a, dt));
+  b.x = add(b.x, scale(b.v, dt));
+
+  // Angular half — Euler.  omega = invI * L
+  const angAcc = mul(b.invI, torque);       // dω/dt from torque
+  b.omega = add(b.omega, scale(angAcc, dt));
+  b.q = integrateOrientation(b.q, b.omega, dt);  // NOT q += omega*dt !
+}
+      </primer-code>
+      <p>
+        Everything above the divider is a particle. Everything below it is what makes a solid a solid — and
+        that last line, <code>integrateOrientation</code>, hides the one real trap, which we unpack next.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Forces AND torques: where a push lands matters</h2>
+      <p>
+        A particle only cares <em>how hard</em> you push it. A rigid body also cares <em>where</em>. Apply a
+        force <primer-math>\mathbf{F}</primer-math> at a point offset <primer-math>\mathbf{r}</primer-math>
+        from the centre of mass, and it does two jobs at once: it adds to the force total (translating the
+        COM) <em>and</em> it produces a <strong>torque</strong> about the COM given by the cross product
+      </p>
+      <primer-math display>\boldsymbol{\tau} \;=\; \mathbf{r} \times \mathbf{F}.</primer-math>
+      <p>
+        So the simulator keeps <em>two</em> running sums each frame: a force accumulator and a torque
+        accumulator. Every contact, thruster or hit contributes to both.
+      </p>
+      <primer-code lang="typescript">
+function applyForceAtPoint(b: Body, force: Vec3, worldPoint: Vec3): void {
+  b.forceAccum = add(b.forceAccum, force);           // always translates the COM
+  const r = sub(worldPoint, b.x);                    // offset from centre of mass
+  b.torqueAccum = add(b.torqueAccum, cross(r, force)); // τ = r × F
+}
+      </primer-code>
+      <p>
+        Two special cases make the geometry click. A force aimed straight <em>through</em> the COM has
+        <primer-math>\mathbf{r} \parallel \mathbf{F}</primer-math>, so
+        <primer-math>\mathbf{r} \times \mathbf{F} = \mathbf{0}</primer-math> — pure translation, no spin. And
+        the reason gravity never spins a free body is exactly this: gravity pulls on every particle, but its
+        net effect acts <em>at</em> the COM, so its offset is zero. A push at the rim, by contrast, has a big
+        perpendicular <primer-math>\mathbf{r}</primer-math> and spins the body hard.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "offsetHit": {
+          "title": "Off-centre impulse: bigger offset r → more spin",
+          "com": "centre of mass",
+          "hit": "impulse J",
+          "roff": "offset r",
+          "spinLabel": "resulting spin ω"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Feel the offset</h2>
+      <p>
+        Below, a square box is struck by a fixed upward impulse. Drag the <strong>offset</strong> slider to
+        move the strike point away from the centre of mass along the bottom edge. At zero offset the box
+        simply rises — no rotation. As the offset grows, the same impulse delivers more torque
+        (<primer-math>\tau = r \times F</primer-math> grows with <primer-math>r</primer-math>), and the box is
+        drawn turned by a correspondingly larger angle. Notice the impulse arrow never changes length: only
+        <em>where</em> it lands does, and that alone conjures the spin.
+      </p>
+      <primer-geometry
+        scene="offsetHit"
+        caption="A box hit by a fixed upward impulse. Increasing the offset r of the strike point from the centre of mass produces proportionally more rotation (torque τ = r × F), while the translation stays the same."
+      ></primer-geometry>
+      <primer-chart-sliders name="offsetCtl"></primer-chart-sliders>
+      <p>
+        This is the whole reason off-centre hits feel alive: a single number, the offset, silently converts a
+        straight shove into a shove-plus-spin.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: a shove at the edge of a box</h2>
+      <p>
+        Take a flat box of mass <primer-math>m = 2\ \text{kg}</primer-math> lying in the plane, its COM at the
+        origin. Its right edge is at <primer-math>x = 0.5\ \text{m}</primer-math>. We push straight
+        <em>up</em> with force <primer-math>\mathbf{F} = (0,\, 10,\, 0)\ \text{N}</primer-math>, applied at the
+        top-right corner <primer-math>\mathbf{r} = (0.5,\, 0.3,\, 0)\ \text{m}</primer-math> measured from the
+        COM. Split the effect into its two jobs.
+      </p>
+      <p>
+        <strong>Translation of the COM.</strong> The location is irrelevant here — only the force total
+        matters:
+      </p>
+      <primer-math display>\mathbf{a} \;=\; \frac{\mathbf{F}}{m} \;=\; \frac{(0,\,10,\,0)}{2} \;=\; (0,\,5,\,0)\ \text{m/s}^2.</primer-math>
+      <p>
+        The whole box's centre accelerates upward at <primer-math>5\ \text{m/s}^2</primer-math>, exactly as a
+        <primer-math>2\ \text{kg}</primer-math> particle would.
+      </p>
+      <p>
+        <strong>Spin about the COM.</strong> Now the offset earns its keep. The torque is the cross product
+        of the offset with the force. With <primer-math>\mathbf{r} = (0.5, 0.3, 0)</primer-math> and
+        <primer-math>\mathbf{F} = (0, 10, 0)</primer-math>, only the <primer-math>z</primer-math> component
+        survives:
+      </p>
+      <primer-math display>\boldsymbol{\tau} \;=\; \mathbf{r}\times\mathbf{F} \;=\; \big(r_x F_y - r_y F_x\big)\,\hat{\mathbf{z}} \;=\; (0.5)(10) - (0.3)(0) \;=\; 5\ \text{N·m}\ \hat{\mathbf{z}}.</primer-math>
+      <p>
+        A positive <primer-math>z</primer-math>-torque means an <em>anticlockwise</em> spin: the pushed-up
+        right corner rotates the box counter-clockwise as it rises. The same upward shove delivered at the
+        centre (<primer-math>r_x = 0</primer-math>) would give
+        <primer-math>\boldsymbol{\tau} = \mathbf{0}</primer-math> — pure lift, no turn. The
+        <primer-math>5\ \text{N·m}</primer-math> of torque, fed through
+        <primer-math>\dot{\boldsymbol{\omega}} = I^{-1}\boldsymbol{\tau}</primer-math>, is precisely the spin
+        that the offset bought us. <strong>Same force, different place, entirely different motion.</strong>
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Integrating orientation — the quaternion derivative</h2>
+      <p>
+        Position integrates trivially: <primer-math>\mathbf{x} \mathrel{+}= \mathbf{v}\,\Delta t</primer-math>.
+        Orientation does not — you cannot just add "angle times time" to a quaternion, because a quaternion
+        lives on the unit sphere, not on a flat line. The correct rule relates the angular velocity to the
+        <em>rate of change of the quaternion</em>. Writing <primer-math>\boldsymbol{\omega}</primer-math> as a
+        <strong>pure quaternion</strong> <primer-math>\omega = (0,\, \boldsymbol{\omega})</primer-math> (zero
+        scalar part), the quaternion derivative is
+      </p>
+      <primer-math display>\dot{\mathbf{q}} \;=\; \tfrac{1}{2}\,\omega\,\mathbf{q},</primer-math>
+      <p>
+        a quaternion multiplication. You then take a small step and, crucially,
+        <strong>re-normalise</strong> so the quaternion stays a unit quaternion (a valid rotation):
+      </p>
+      <primer-code lang="typescript">
+function integrateOrientation(q: Quat, omega: Vec3, dt: number): Quat {
+  const wq: Quat = { w: 0, x: omega.x, y: omega.y, z: omega.z }; // ω as a pure quaternion
+  const qDot = scaleQ(mulQ(wq, q), 0.5);   // q̇ = ½ ω q
+  const qNew = addQ(q, scaleQ(qDot, dt));  // q ← q + q̇ Δt
+  return normalize(qNew);                  // RE-NORMALISE — keep it a unit quaternion
+}
+      </primer-code>
+      <p>
+        The re-normalisation matters because the additive step nudges the quaternion slightly <em>off</em> the
+        unit sphere every frame; without a re-normalise those tiny errors accumulate and the rotation matrix
+        it produces starts to shear and scale the model. One cheap normalise per step keeps the orientation
+        honest.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! Orientation is not a position — integrate the quaternion and re-normalise">
+      <p>
+        The two commonest ways to wreck a rigid-body simulator both come from forgetting that rotation is
+        special. First: <strong>do not treat orientation like a position.</strong> Adding
+        <primer-math>\boldsymbol{\omega}\,\Delta t</primer-math> straight onto three Euler angles seems to work
+        for a frame or two, then drifts, and eventually hits <strong>gimbal lock</strong> — two of the axes
+        line up and a whole degree of freedom silently vanishes, freezing the spin. Euler angles are a
+        display convenience, not an integration variable. Store the orientation as a quaternion (or matrix),
+        advance it with the quaternion derivative <primer-math>\dot{\mathbf{q}} = \tfrac12\,\omega\mathbf{q}</primer-math>,
+        and <strong>re-normalise every step</strong> — skip the normalise and the quaternion slowly leaves the
+        unit sphere, turning your rotations into skews.
+      </p>
+      <p>
+        Second: <strong>torque comes from off-centre forces.</strong> A force's <em>magnitude</em> alone tells
+        you the COM translation, but never the spin. The spin depends on <em>where</em> the force is applied —
+        the offset <primer-math>\mathbf{r}</primer-math> in <primer-math>\boldsymbol{\tau} = \mathbf{r}\times\mathbf{F}</primer-math>.
+        Forget to accumulate torque and every object slides around like a frictionless puck that can never
+        rotate, no matter how you clip it at the corner. Accumulate <em>both</em> a force sum and a torque sum
+        each frame.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Why does a dropped phone always seem to land face-down?">
+      <p>
+        Part folklore, part physics. Because gravity acts at the centre of mass it exerts <em>no</em> torque,
+        so a phone only tumbles if it was already spinning when it left your hand — which, having slipped off a
+        fingertip at the edge (a nice off-centre <primer-math>\mathbf{r}\times\mathbf{F}</primer-math>!), it
+        usually is. There is also a deeper twist: a phone is a thin slab whose three principal moments of
+        inertia are all different, and the <strong>intermediate-axis theorem</strong> (the "tennis-racket
+        theorem") says spin about the middle axis is unstable, so a real tumble flips chaotically. Add the
+        typical drop height giving just about half a rotation, and face-down becomes the depressingly likely
+        outcome. The full inertia story is
+        <primer-ref todo to="computer-science/computer-animation/physics-rigid/the-inertia-tensor-and-angular-velocity">the inertia tensor</primer-ref>.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "rigidBodyQuiz@1": {
+          "intro": "Rigid-body state = position + orientation + linear & angular velocity; Newton–Euler advances it; τ = r × F; integrate q via q̇ = ½ ω q then re-normalise. Fresh questions each time.",
+          "stateQ": "The complete state of a rigid body needs how many kinds of quantity?",
+          "stateRight": "four — position, orientation, linear velocity and angular velocity",
+          "stateW1": "two — position and linear velocity, as for a particle",
+          "stateW2": "one — just the orientation quaternion",
+          "stateW3": "six — one per vertex of the mesh",
+          "comQ": "For a rigid body, the linear equation $F = ma$ governs the motion of…",
+          "comRight": "the centre of mass",
+          "comW1": "every vertex independently",
+          "comW2": "the corner nearest the force",
+          "comW3": "the orientation quaternion",
+          "eulerQ": "Euler's rotational law states that the net torque equals…",
+          "eulerRight": "the rate of change of angular momentum, $\\tau = \\dot L$",
+          "eulerW1": "the linear momentum, $\\tau = P$",
+          "eulerW2": "mass times linear acceleration",
+          "eulerW3": "the position of the centre of mass",
+          "torqueQ": "A force $F$ applied at offset $r$ from the centre of mass produces a torque of…",
+          "torqueRight": "$r \\times F$ (a cross product)",
+          "torqueW1": "$r \\cdot F$ (a dot product)",
+          "torqueW2": "$F / r$",
+          "torqueW3": "$r + F$",
+          "throughComQ": "A force aimed straight through the centre of mass produces…",
+          "throughComRight": "no torque — pure translation, because $r$ and $F$ are parallel",
+          "throughComW1": "maximum torque",
+          "throughComW2": "a torque equal to the force magnitude",
+          "throughComW3": "gimbal lock",
+          "gravityQ": "Why does gravity alone never make a free rigid body spin?",
+          "gravityRight": "its net effect acts at the centre of mass, so the offset — and the torque — is zero",
+          "gravityW1": "gravity is too weak to cause rotation",
+          "gravityW2": "gravity always cancels any existing spin",
+          "gravityW3": "gravity only affects the orientation, not the position",
+          "qdotQ": "The correct way to advance a body's orientation quaternion is…",
+          "qdotRight": "integrate $\\dot q = \\tfrac12\\,\\omega q$ (ω as a pure quaternion), then re-normalise",
+          "qdotW1": "add $\\omega\\,\\Delta t$ to three Euler angles each step",
+          "qdotW2": "multiply the quaternion by the mass each step",
+          "qdotW3": "leave it fixed — orientation cannot be integrated",
+          "renormQ": "Why must you re-normalise the quaternion after each integration step?",
+          "renormRight": "the additive step nudges it off the unit sphere; without it, rotations drift into skew/scale",
+          "renormW1": "to convert it back into Euler angles for display",
+          "renormW2": "to change the body's mass",
+          "renormW3": "you don't — normalising breaks the rotation",
+          "gimbalQ": "Integrating orientation by adding ω·Δt to Euler angles risks…",
+          "gimbalRight": "drift and gimbal lock — a lost degree of freedom",
+          "gimbalW1": "the body becoming too heavy",
+          "gimbalW2": "perfectly accurate rotation with no downside",
+          "gimbalW3": "the centre of mass drifting sideways",
+          "rigidQ": "Why are the COM position and orientation enough to place every point of a rigid body?",
+          "rigidRight": "rigidity fixes all inter-point distances, so $p = x + R(q)\\,r_{body}$ for every point",
+          "rigidW1": "because rigid bodies have only one point",
+          "rigidW2": "because orientation alone determines position",
+          "rigidW3": "it isn't — you must store each vertex's velocity",
+          "accumQ": "Each frame a rigid-body simulator must accumulate…",
+          "accumRight": "both a force sum (for translation) and a torque sum (for rotation)",
+          "accumW1": "only a force sum",
+          "accumW2": "only a torque sum",
+          "accumW3": "neither — it stores positions directly",
+          "offsetQ": "Two identical forces hit a box, one at the centre and one at a corner. Compared to the centre hit, the corner hit gives…",
+          "offsetRight": "the same COM translation but additional spin",
+          "offsetW1": "less translation and no spin",
+          "offsetW2": "identical motion — location doesn't matter",
+          "offsetW3": "spin only, with no translation",
+          "torqueCompQ": "A force $F=(0,{f},0)$ N acts at offset $r=({rx},0,0)$ m from the COM. Compute the z-torque $r_x F_y$ in N·m.",
+          "accelCompQ": "A box of mass {m} kg feels a net force of {fnet} N. Compute its COM acceleration $F/m$ in m/s² (3 dp)."
+        }
+      }
+    </script>
+
+    <primer-quiz name="rigidBodyQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "physics/classical-mechanics/rigid-body-motion",
+      "computer-science/computer-animation/computer-animation"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerChartSliders, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Off-centre impulse figure: a box struck by a fixed upward impulse at a draggable offset r.
+          Bigger offset → the box is drawn rotated by a larger angle (more torque = r × F). Points +
+          segments + a rotation; curves static. Rebuilds on slider change. ---- */
+  const ohStr = makeStrings("offsetHit");
+  registerChartSliders("offsetCtl", [
+    { name: "r", label: () => ohStr("roff"), min: 0, max: 1.6, step: 0.1, value: 0.9, anchors: [0, 0.4, 0.8, 1.2, 1.6] },
+  ]);
+
+  registerGeometryScene(
+    "offsetHit",
+    ({ board, colors, sliders, sceneStrings }) => {
+      const rOff = sliders?.r ?? 0.9;
+
+      // Spin angle grows with the offset (illustrative: τ ∝ r).
+      const ang = rOff * 0.55; // radians the box is drawn turned by
+
+      const cx = 0, cy = 0;          // centre of mass
+      const half = 1.2;              // half-size of the square box
+      const cosA = Math.cos(ang), sinA = Math.sin(ang);
+      const rot = (px, py) => [cx + px * cosA - py * sinA, cy + px * sinA + py * cosA];
+
+      // Rotated box corners.
+      const corners = [
+        rot(-half, -half), rot(half, -half), rot(half, half), rot(-half, half),
+      ].map((c) => board.create("point", c, { visible: false, fixed: true, name: "" }));
+      board.create("polygon", corners, {
+        borders: { strokeColor: colors.cat[0], strokeWidth: 2 },
+        fillColor: colors.cat[0], fillOpacity: 0.12, vertices: { visible: false }, highlight: false, fixed: true,
+      });
+
+      // Centre of mass marker.
+      board.create("point", [cx, cy], {
+        size: 4, strokeColor: colors.ink, fillColor: colors.ink, fixed: true, name: "", highlight: false,
+      });
+      board.create("text", [cx + 0.15, cy - 0.35, () => sceneStrings("com")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.ink,
+      });
+
+      // Strike point along the (rotated) bottom edge, offset rOff from centre.
+      const strike = rot(rOff, -half);
+      // Impulse arrow: fixed length, pointing "up" in the box's local frame.
+      const tip = rot(rOff, -half + 1.1);
+      board.create("arrow", [strike, tip], { strokeColor: colors.cat[1], strokeWidth: 3, lastArrow: { type: 2, size: 6 } });
+      board.create("text", [tip[0] + 0.1, tip[1] + 0.1, () => sceneStrings("hit")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.cat[1], cssStyle: "font-weight:700",
+      });
+
+      // Offset segment from COM to strike point.
+      board.create("segment", [[cx, cy], strike], { strokeColor: colors.line, strokeWidth: 1.5, dash: 2 });
+      const mid = [(cx + strike[0]) / 2, (cy + strike[1]) / 2];
+      board.create("text", [mid[0], mid[1] - 0.3, () => sceneStrings("roff")], {
+        anchorX: "middle", fontSize: 12, strokeColor: colors.line,
+      });
+
+      // Spin annotation, sized by the offset (bigger arc = more spin).
+      board.create("text", [-2.7, 2.5, () => sceneStrings("spinLabel")], {
+        anchorX: "left", fontSize: 13, strokeColor: colors.cat[0], cssStyle: "font-weight:700",
+      });
+    },
+    {
+      boundingbox: [-3, 3, 3, -3],
+      keepAspect: true,
+      title: () => ohStr("title"),
+      sliders: "offsetCtl",
+    },
+  );
+
+  registerQuiz("rigidBodyQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("stateQ"), options: [
+      { text: () => sceneStrings("stateRight"), correct: true },
+      { text: () => sceneStrings("stateW1"), correct: false },
+      { text: () => sceneStrings("stateW2"), correct: false },
+      { text: () => sceneStrings("stateW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("comQ"), options: [
+      { text: () => sceneStrings("comRight"), correct: true },
+      { text: () => sceneStrings("comW1"), correct: false },
+      { text: () => sceneStrings("comW2"), correct: false },
+      { text: () => sceneStrings("comW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("eulerQ"), options: [
+      { text: () => sceneStrings("eulerRight"), correct: true },
+      { text: () => sceneStrings("eulerW1"), correct: false },
+      { text: () => sceneStrings("eulerW2"), correct: false },
+      { text: () => sceneStrings("eulerW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("torqueQ"), options: [
+      { text: () => sceneStrings("torqueRight"), correct: true },
+      { text: () => sceneStrings("torqueW1"), correct: false },
+      { text: () => sceneStrings("torqueW2"), correct: false },
+      { text: () => sceneStrings("torqueW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("throughComQ"), options: [
+      { text: () => sceneStrings("throughComRight"), correct: true },
+      { text: () => sceneStrings("throughComW1"), correct: false },
+      { text: () => sceneStrings("throughComW2"), correct: false },
+      { text: () => sceneStrings("throughComW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("gravityQ"), options: [
+      { text: () => sceneStrings("gravityRight"), correct: true },
+      { text: () => sceneStrings("gravityW1"), correct: false },
+      { text: () => sceneStrings("gravityW2"), correct: false },
+      { text: () => sceneStrings("gravityW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("qdotQ"), options: [
+      { text: () => sceneStrings("qdotRight"), correct: true },
+      { text: () => sceneStrings("qdotW1"), correct: false },
+      { text: () => sceneStrings("qdotW2"), correct: false },
+      { text: () => sceneStrings("qdotW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("renormQ"), options: [
+      { text: () => sceneStrings("renormRight"), correct: true },
+      { text: () => sceneStrings("renormW1"), correct: false },
+      { text: () => sceneStrings("renormW2"), correct: false },
+      { text: () => sceneStrings("renormW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("gimbalQ"), options: [
+      { text: () => sceneStrings("gimbalRight"), correct: true },
+      { text: () => sceneStrings("gimbalW1"), correct: false },
+      { text: () => sceneStrings("gimbalW2"), correct: false },
+      { text: () => sceneStrings("gimbalW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("rigidQ"), options: [
+      { text: () => sceneStrings("rigidRight"), correct: true },
+      { text: () => sceneStrings("rigidW1"), correct: false },
+      { text: () => sceneStrings("rigidW2"), correct: false },
+      { text: () => sceneStrings("rigidW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("accumQ"), options: [
+      { text: () => sceneStrings("accumRight"), correct: true },
+      { text: () => sceneStrings("accumW1"), correct: false },
+      { text: () => sceneStrings("accumW2"), correct: false },
+      { text: () => sceneStrings("accumW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("offsetQ"), options: [
+      { text: () => sceneStrings("offsetRight"), correct: true },
+      { text: () => sceneStrings("offsetW1"), correct: false },
+      { text: () => sceneStrings("offsetW2"), correct: false },
+      { text: () => sceneStrings("offsetW3"), correct: false },
+    ] },
+    { prompt: (v) => sceneStrings("torqueCompQ", v), variables: "f=[4:12] rx=[1:5]", answer: (v) => v.rx * v.f },
+    { prompt: (v) => sceneStrings("accelCompQ", v), variables: "m=[2:5] fnet=[6:40]", answer: (v) => v.fnet / v.m },
+  ]);
+</script>

@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Mesh Data Structures (Half-Edge)</primer-title>
+
+    <primer-card>
+      <p>
+        A character's face in a modern film is a polygon mesh of tens of thousands of vertices, and every
+        frame the rig has to ask questions <em>about neighbours</em>: <em>which faces touch this vertex?</em>
+        (for skinning weights), <em>which edges border this face?</em> (for subdivision), <em>which vertices
+        surround this one?</em> (for smoothing). Those are the queries that
+        <primer-ref todo to="computer-science/computer-animation/curves/subdivision-surfaces">subdivision</primer-ref>,
+        <primer-ref todo to="computer-science/computer-animation/rigging/skinning-and-skeletal-deformation">skinning</primer-ref>
+        and mesh editing fire millions of times. Ask them of the wrong data structure and your tool crawls;
+        ask them of a <strong>half-edge</strong> mesh and each one is a handful of pointer hops.
+      </p>
+      <p>
+        This page is about how a mesh is <em>stored</em>. We start with the obvious way — a list of vertices
+        and a list of faces — see exactly why it makes adjacency queries slow, then build the half-edge
+        (doubly-connected edge list) structure that makes local traversal <primer-math>O(1)</primer-math>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The naive way: vertices + faces ("polygon soup")</h2>
+      <p>
+        The simplest storage is two arrays. A <strong>vertex list</strong> holds the positions,
+        <primer-math>(x, y, z)</primer-math> per vertex; a <strong>face index list</strong> holds, per face,
+        the indices of its corner vertices. This is exactly what an OBJ file or a raw triangle buffer is:
+      </p>
+      <primer-code lang="typescript">
+const vertices: [number, number, number][] = [
+  [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+];
+// each face lists the vertex indices around it
+const faces: number[][] = [
+  [0, 1, 2],   // triangle A
+  [0, 2, 3],   // triangle B
+];
+      </primer-code>
+      <p>
+        It is compact and perfect for <em>drawing</em> — the GPU wants precisely this. But it stores geometry,
+        not <strong>connectivity</strong>. Ask "which faces touch vertex 0?" and there is no pointer to
+        follow: you must scan <em>every face</em> and test whether it mentions index 0. That is an
+        <primer-math>O(F)</primer-math> sweep of the whole mesh for one local question — and the one-ring of a
+        vertex is a query deformation code needs constantly. This unindexed pile is affectionately called
+        <strong>polygon soup</strong>: all the triangles are there, but nothing knows who its neighbours are.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The half-edge idea: split every edge in two</h2>
+      <p>
+        The fix is to store the connectivity explicitly, and the elegant way to do it is the
+        <strong>half-edge</strong> structure (also called the <strong>doubly-connected edge list</strong>, or
+        DCEL). The key move: take every edge shared by two faces and split it into <strong>two directed
+        half-edges</strong>, one for each side, pointing in <em>opposite</em> directions. Each half-edge
+        belongs to exactly one face and runs along one boundary of it.
+      </p>
+      <primer-theorem name="The half-edge record">
+        Each half-edge stores four references:
+        <ul>
+          <li><strong>vertex</strong> — the vertex this half-edge points <em>to</em> (its head/origin
+            convention must be fixed; here: the vertex it points to);</li>
+          <li><strong>twin</strong> — the opposite half-edge, running the same edge the other way on the
+            neighbouring face;</li>
+          <li><strong>next</strong> — the following half-edge <em>around the same face</em> (walking the face
+            in a consistent orientation);</li>
+          <li><strong>face</strong> — the single face this half-edge borders.</li>
+        </ul>
+        A vertex stores <em>one</em> outgoing half-edge; a face stores <em>one</em> of its half-edges. That is
+        the whole structure.
+      </primer-theorem>
+      <primer-code lang="typescript">
+interface HalfEdge {
+  vertex: Vertex;      // the vertex this half-edge points to
+  twin: HalfEdge;      // opposite half-edge (other side of the edge)
+  next: HalfEdge;      // next half-edge around this face
+  face: Face;          // the face this half-edge borders
+}
+interface Vertex { position: [number, number, number]; halfEdge: HalfEdge; }
+interface Face   { halfEdge: HalfEdge; }
+      </primer-code>
+      <p>
+        Notice there is no explicit "list of neighbours" anywhere — the neighbours are <em>reachable</em> by
+        following pointers, and because every pointer is <primer-math>O(1)</primer-math>, so is every local
+        walk. Some variants also store a <code>prev</code> pointer (handy but derivable by following
+        <code>next</code> around the face).
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "heMesh": {
+          "title": "Two triangles sharing an edge — a twin pair of half-edges",
+          "shared": "shared edge",
+          "heAB": "half-edge (face A)",
+          "heBA": "twin (face B)",
+          "faceA": "face A",
+          "faceB": "face B"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>A picture: the twin pair</h2>
+      <p>
+        Below are two triangles sharing one edge. That shared edge is stored as <strong>two half-edges</strong>
+        drawn as arrows pointing <em>opposite</em> ways: the upper arrow belongs to face A and runs one
+        direction; its <strong>twin</strong> belongs to face B and runs the other. Follow either arrow's
+        <code>next</code> and you walk around <em>its own</em> face; jump across via <code>twin</code> and you
+        step onto the neighbour. The arrows are offset slightly off the true edge so you can see both.
+      </p>
+      <primer-geometry
+        scene="heMesh"
+        caption="Two triangles sharing an edge. The shared edge is stored as a twin pair of half-edges (arrows pointing opposite ways): one borders face A, its twin borders face B."
+      ></primer-geometry>
+      <p>
+        This is the whole trick made visible: an undirected edge becomes an oriented <em>boundary segment</em>
+        of each face, and the two segments know about each other through <code>twin</code>. Orientation is
+        consistent — every face is wound the same way (say counter-clockwise seen from outside), so a twin
+        pair always disagrees on direction. That consistency is what makes the traversals below work.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: the two traversals that matter</h2>
+      <p>
+        <strong>1. Walk every edge of a face.</strong> Start at any half-edge of the face and keep following
+        <code>next</code>. Because <code>next</code> stays on the same face and cycles, you return to the
+        start after visiting each border exactly once:
+      </p>
+      <primer-code lang="typescript">
+function faceHalfEdges(start: HalfEdge): HalfEdge[] {
+  const result: HalfEdge[] = [];
+  let h = start;
+  do {
+    result.push(h);
+    h = h.next;        // step to the next edge around this face
+  } while (h !== start);
+  return result;       // e.g. 3 half-edges for a triangle
+}
+      </primer-code>
+      <p>
+        <strong>2. Visit every face around a vertex (its one-ring).</strong> This is the query the naive
+        structure could not answer cheaply. Around a vertex you alternate <code>twin</code> then
+        <code>next</code> (or <code>next.twin</code>, depending on your origin convention) to pivot from one
+        incident face to the next, sweeping around the vertex like the spokes of a fan:
+      </p>
+      <primer-code lang="typescript">
+// visit each face touching the origin vertex of `start`
+function facesAroundVertex(start: HalfEdge): Face[] {
+  const faces: Face[] = [];
+  let h = start;
+  do {
+    faces.push(h.face);
+    h = h.twin.next;   // twin crosses the edge; next pivots to the neighbouring face
+  } while (h !== start);
+  return faces;
+}
+      </primer-code>
+      <p>
+        Each iteration is two pointer hops, and the loop runs once per incident face — so the cost is
+        proportional to the <em>local</em> valence of the vertex (typically 4–6), not to the size of the whole
+        mesh. That <primer-math>O(\text{valence})</primer-math> one-ring walk is exactly what a subdivision
+        mask, a Laplacian smoothing step, or a skinning-weight computation needs at every vertex.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why not just store, per vertex, a plain list of its neighbours?">
+      <p>
+        You could — it is called an adjacency list, and it answers "who are my neighbours?" in
+        <primer-math>O(1)</primer-math> too. But it throws away <em>order</em> and <em>faces</em>. A
+        subdivision or smoothing mask needs the one-ring in <strong>rotational order</strong> (neighbour after
+        neighbour as you sweep around), and needs to know the <em>faces</em> between them, not just the
+        vertices. The half-edge keeps geometry, topology and orientation in one connected fabric, so it
+        answers face-queries, edge-queries and ordered-vertex-queries all from the same pointers. That is why
+        mesh-editing kernels (OpenMesh, CGAL, Blender's BMesh) are built on half-edge or its cousins rather
+        than a bare adjacency list.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Half-edge assumes an orientable manifold mesh">
+      <p>
+        The whole structure rests on an assumption: the mesh is an <strong>orientable 2-manifold</strong>.
+        That means every edge is shared by <em>at most two</em> faces, and all faces are wound consistently
+        so twin pairs point opposite ways. Break that and the pointers break:
+      </p>
+      <ul>
+        <li>A <strong>non-manifold edge</strong> shared by three or more faces has no single well-defined
+          <code>twin</code> — which of the other faces is "the" opposite side?</li>
+        <li>An <strong>inconsistent orientation</strong> (a face wound the wrong way) makes a twin pair point
+          the <em>same</em> direction, and your <code>twin.next</code> walk sweeps the wrong way or loops
+          forever.</li>
+        <li>A <strong>non-manifold vertex</strong> (two cones joined at a single point) has no single fan to
+          sweep, so the one-ring walk never closes.</li>
+      </ul>
+      <p>
+        <strong>Boundaries are fine</strong> — an edge on the mesh border simply has a <code>twin</code> whose
+        <code>face</code> is a special "hole"/null face (or the twin is marked as boundary), so the walk still
+        works. But genuine non-manifold geometry and bad winding must be <strong>cleaned first</strong>: merge
+        or split the offending edges, and unify the orientation, before you build the half-edge structure.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Cousins: winged-edge and quad-edge</h2>
+      <p>
+        Half-edge is the most common choice, but it has relatives that make the same "store the connectivity"
+        bargain differently:
+      </p>
+      <ul>
+        <li><strong>Winged-edge</strong> — the classic (Baumgart, 1975). Each <em>edge</em> is the primary
+          record and stores its two endpoints, its two faces, and the four "wing" edges next to it (clockwise
+          and counter-clockwise on each face). Powerful but fiddly: many traversals need a runtime
+          <em>if</em>-test to decide which wing to follow, because an edge does not know its own orientation
+          the way a half-edge does.</li>
+        <li><strong>Quad-edge</strong> — Guibas &amp; Stolfi (1985). Stores a mesh and its
+          <strong>dual</strong> simultaneously in one structure, which makes it elegant for algorithms that
+          walk both (Delaunay triangulation, Voronoi diagrams). More general and more memory per edge.</li>
+      </ul>
+      <p>
+        For animation — deformation, subdivision, editing — half-edge's directed, orientation-carrying edges
+        make the one-ring and face walks branch-free, which is why it dominates in practice.
+      </p>
+    </primer-card>
+
+    <primer-quiz name="halfEdgeQuiz@1"></primer-quiz>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "halfEdgeQuiz@1": {
+          "intro": "Half-edge = a doubly-connected edge list: each edge split into two opposite half-edges storing next, twin, vertex and face — giving O(1) local traversal on an orientable manifold. Fresh questions each time.",
+          "soupQ": "In a plain vertex-list + face-index-list ('polygon soup'), how costly is 'which faces touch this vertex?'",
+          "soupRight": "$O(F)$ — you must scan every face for that vertex index",
+          "soupW1": "$O(1)$ — a single pointer lookup",
+          "soupW2": "$O(\\log F)$ — the faces are sorted",
+          "soupW3": "it is impossible to answer at all",
+          "fourQ": "Which four references does a half-edge store?",
+          "fourRight": "vertex it points to, twin, next, and incident face",
+          "fourW1": "its length, colour, normal and material",
+          "fourW2": "the two endpoint positions and two face normals",
+          "fourW3": "a list of all neighbouring vertices",
+          "twinQ": "What is a half-edge's 'twin'?",
+          "twinRight": "the opposite half-edge on the same edge, bordering the neighbouring face",
+          "twinW1": "the next half-edge around the same face",
+          "twinW2": "the vertex it points to",
+          "twinW3": "a duplicate copy kept for backup",
+          "splitQ": "In a half-edge (DCEL) mesh, each shared edge is represented by…",
+          "splitRight": "two directed half-edges pointing in opposite directions",
+          "splitW1": "a single undirected edge record",
+          "splitW2": "one half-edge shared by both faces",
+          "splitW3": "four half-edges, one per corner",
+          "faceWalkQ": "To visit all edges of a face, you repeatedly follow which pointer?",
+          "faceWalkRight": "next (until you return to the start)",
+          "faceWalkW1": "twin (until you return to the start)",
+          "faceWalkW2": "vertex (until you return to the start)",
+          "faceWalkW3": "face (until you return to the start)",
+          "ringQ": "To sweep the faces around a vertex (its one-ring), you alternate…",
+          "ringRight": "twin and next (e.g. h = h.twin.next each step)",
+          "ringW1": "next and next only",
+          "ringW2": "vertex and face lookups",
+          "ringW3": "a full scan of the face list each step",
+          "costQ": "Sweeping a vertex's one-ring in a half-edge mesh costs…",
+          "costRight": "$O(\\text{valence})$ — proportional to the vertex's local degree",
+          "costW1": "$O(F)$ — proportional to the whole mesh",
+          "costW2": "$O(V^2)$ — every pair of vertices",
+          "costW3": "$O(1)$ regardless of how many faces meet there",
+          "manifoldQ": "What mesh property must hold for half-edge twins to be well-defined?",
+          "manifoldRight": "an orientable 2-manifold — each edge shared by at most two faces",
+          "manifoldW1": "the mesh must be a single triangle",
+          "manifoldW2": "all faces must be quads",
+          "manifoldW3": "the mesh must be perfectly flat",
+          "nonmanQ": "An edge shared by THREE faces (non-manifold) breaks half-edge because…",
+          "nonmanRight": "there is no single well-defined twin for that edge",
+          "nonmanW1": "the vertices run out of memory",
+          "nonmanW2": "three faces cannot be rendered",
+          "nonmanW3": "next pointers become unnecessary",
+          "orientQ": "If one face is wound the wrong way (inconsistent orientation), a twin pair…",
+          "orientRight": "points the same direction, so the traversal sweeps wrong or loops forever",
+          "orientW1": "simply renders in a different colour",
+          "orientW2": "is automatically corrected at draw time",
+          "orientW3": "has no effect on traversal",
+          "boundaryQ": "How does a half-edge mesh handle an edge on the mesh boundary?",
+          "boundaryRight": "its twin borders a special hole/null face (or is flagged boundary) — walks still work",
+          "boundaryW1": "boundary edges are forbidden entirely",
+          "boundaryW2": "the whole mesh must be closed with no boundary",
+          "boundaryW3": "boundary edges store four twins",
+          "whyQ": "Why is half-edge preferred over a plain adjacency list for subdivision/smoothing?",
+          "whyRight": "it keeps neighbours in rotational order and knows the faces between them",
+          "whyW1": "it uses less memory than any other structure",
+          "whyW2": "it stores vertex colours",
+          "whyW3": "it avoids storing positions at all",
+          "wingedQ": "The winged-edge structure differs from half-edge mainly because it…",
+          "wingedRight": "makes the edge the primary record and often needs an orientation if-test to traverse",
+          "wingedW1": "stores no face information at all",
+          "wingedW2": "only works on triangle meshes",
+          "wingedW3": "is identical to half-edge under another name",
+          "quadedgeQ": "The quad-edge structure is notable for…",
+          "quadedgeRight": "representing a mesh and its dual simultaneously (great for Delaunay/Voronoi)",
+          "quadedgeW1": "storing exactly four vertices per mesh",
+          "quadedgeW2": "only supporting quadrilateral faces",
+          "quadedgeW3": "dropping all connectivity to save space"
+        }
+      }
+    </script>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  { "prerequisites": ["computer-science/computer-animation/computer-animation"] }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Two triangles sharing an edge, with a twin pair of half-edges drawn as opposite arrows.
+          Static base content (no steps) so it shows fully on load. ---- */
+  const hm = makeStrings("heMesh");
+  registerGeometryScene(
+    "heMesh",
+    ({ board, colors, sceneStrings }) => {
+      // Shared edge runs vertically between P (bottom) and Q (top).
+      const P = [0, 0];
+      const Q = [0, 3];
+      const L = [-2.6, 1.5]; // apex of face A (left)
+      const R = [2.6, 1.5];  // apex of face B (right)
+
+      const vp = (xy, name) =>
+        board.create("point", xy, {
+          size: 2.5, strokeColor: colors.ink, fillColor: colors.ink, fixed: true,
+          name, label: { strokeColor: colors.ink }, highlight: false,
+        });
+      const p = vp(P, "P");
+      const q = vp(Q, "Q");
+      vp(L, "");
+      vp(R, "");
+
+      // Triangle outlines.
+      board.create("polygon", [L, P, Q], { strokeColor: colors.line, borders: { strokeColor: colors.line }, fillOpacity: 0, highlightFillOpacity: 0, vertices: { visible: false } });
+      board.create("polygon", [R, Q, P], { strokeColor: colors.line, borders: { strokeColor: colors.line }, fillOpacity: 0, highlightFillOpacity: 0, vertices: { visible: false } });
+
+      // The two half-edges of the shared edge, offset to left/right so both are visible,
+      // pointing in OPPOSITE directions (a twin pair).
+      // Face A half-edge: along the left side, pointing P -> Q (upward).
+      board.create("arrow", [[-0.35, 0.35], [-0.35, 2.65]], { strokeColor: colors.cat[0], strokeWidth: 3, lastArrow: { type: 2, size: 6 } });
+      // Face B half-edge (twin): along the right side, pointing Q -> P (downward).
+      board.create("arrow", [[0.35, 2.65], [0.35, 0.35]], { strokeColor: colors.cat[1], strokeWidth: 3, lastArrow: { type: 2, size: 6 } });
+
+      // Labels.
+      board.create("text", [0, 3.35, () => sceneStrings("shared")], { anchorX: "middle", fontSize: 13, strokeColor: colors.ink });
+      board.create("text", [-1.55, 2.15, () => sceneStrings("heAB")], { anchorX: "middle", fontSize: 12, strokeColor: colors.cat[0], cssStyle: "font-weight:700" });
+      board.create("text", [1.55, 0.85, () => sceneStrings("heBA")], { anchorX: "middle", fontSize: 12, strokeColor: colors.cat[1], cssStyle: "font-weight:700" });
+      board.create("text", [-1.7, 1.5, () => sceneStrings("faceA")], { anchorX: "middle", fontSize: 13, strokeColor: colors.ink });
+      board.create("text", [1.7, 1.5, () => sceneStrings("faceB")], { anchorX: "middle", fontSize: 13, strokeColor: colors.ink });
+    },
+    { boundingbox: [-3.4, 4, 3.4, -0.8], keepAspect: true, title: () => hm("title") },
+  );
+
+  registerQuiz("halfEdgeQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("soupQ"), options: [
+      { text: () => sceneStrings("soupRight"), correct: true },
+      { text: () => sceneStrings("soupW1"), correct: false },
+      { text: () => sceneStrings("soupW2"), correct: false },
+      { text: () => sceneStrings("soupW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fourQ"), options: [
+      { text: () => sceneStrings("fourRight"), correct: true },
+      { text: () => sceneStrings("fourW1"), correct: false },
+      { text: () => sceneStrings("fourW2"), correct: false },
+      { text: () => sceneStrings("fourW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("twinQ"), options: [
+      { text: () => sceneStrings("twinRight"), correct: true },
+      { text: () => sceneStrings("twinW1"), correct: false },
+      { text: () => sceneStrings("twinW2"), correct: false },
+      { text: () => sceneStrings("twinW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("splitQ"), options: [
+      { text: () => sceneStrings("splitRight"), correct: true },
+      { text: () => sceneStrings("splitW1"), correct: false },
+      { text: () => sceneStrings("splitW2"), correct: false },
+      { text: () => sceneStrings("splitW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("faceWalkQ"), options: [
+      { text: () => sceneStrings("faceWalkRight"), correct: true },
+      { text: () => sceneStrings("faceWalkW1"), correct: false },
+      { text: () => sceneStrings("faceWalkW2"), correct: false },
+      { text: () => sceneStrings("faceWalkW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("ringQ"), options: [
+      { text: () => sceneStrings("ringRight"), correct: true },
+      { text: () => sceneStrings("ringW1"), correct: false },
+      { text: () => sceneStrings("ringW2"), correct: false },
+      { text: () => sceneStrings("ringW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("costQ"), options: [
+      { text: () => sceneStrings("costRight"), correct: true },
+      { text: () => sceneStrings("costW1"), correct: false },
+      { text: () => sceneStrings("costW2"), correct: false },
+      { text: () => sceneStrings("costW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("manifoldQ"), options: [
+      { text: () => sceneStrings("manifoldRight"), correct: true },
+      { text: () => sceneStrings("manifoldW1"), correct: false },
+      { text: () => sceneStrings("manifoldW2"), correct: false },
+      { text: () => sceneStrings("manifoldW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("nonmanQ"), options: [
+      { text: () => sceneStrings("nonmanRight"), correct: true },
+      { text: () => sceneStrings("nonmanW1"), correct: false },
+      { text: () => sceneStrings("nonmanW2"), correct: false },
+      { text: () => sceneStrings("nonmanW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("orientQ"), options: [
+      { text: () => sceneStrings("orientRight"), correct: true },
+      { text: () => sceneStrings("orientW1"), correct: false },
+      { text: () => sceneStrings("orientW2"), correct: false },
+      { text: () => sceneStrings("orientW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("boundaryQ"), options: [
+      { text: () => sceneStrings("boundaryRight"), correct: true },
+      { text: () => sceneStrings("boundaryW1"), correct: false },
+      { text: () => sceneStrings("boundaryW2"), correct: false },
+      { text: () => sceneStrings("boundaryW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("whyQ"), options: [
+      { text: () => sceneStrings("whyRight"), correct: true },
+      { text: () => sceneStrings("whyW1"), correct: false },
+      { text: () => sceneStrings("whyW2"), correct: false },
+      { text: () => sceneStrings("whyW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("wingedQ"), options: [
+      { text: () => sceneStrings("wingedRight"), correct: true },
+      { text: () => sceneStrings("wingedW1"), correct: false },
+      { text: () => sceneStrings("wingedW2"), correct: false },
+      { text: () => sceneStrings("wingedW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("quadedgeQ"), options: [
+      { text: () => sceneStrings("quadedgeRight"), correct: true },
+      { text: () => sceneStrings("quadedgeW1"), correct: false },
+      { text: () => sceneStrings("quadedgeW2"), correct: false },
+      { text: () => sceneStrings("quadedgeW3"), correct: false },
+    ] },
+  ]);
+</script>

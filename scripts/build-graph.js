@@ -23,6 +23,7 @@
 
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseConceptMeta } from "../js/concept-meta.js";
@@ -416,21 +417,57 @@ async function writeSeoFiles(concepts) {
       `    <xhtml:link rel="alternate" hreflang="x-default" href="${enUrl}"/>`,
     ].join("\n");
 
+  const toUtc = (/** @type {string} */ iso) => new Date(iso).toISOString().replace(/\.\d{3}Z$/, "Z");
+  // The sitemap file itself (the site-root URL) is stamped with the moment it's generated.
+  const generatedAt = toUtc(new Date().toISOString());
+
+  // Each concept page's <lastmod> is the date of its last git commit — the true "last modified".
+  // One `git log` pass (newest-first) maps each concepts/… file to its most recent commit date;
+  // uncommitted/new pages (not yet in history) fall back to the file's mtime, then to now.
+  /** @type {Map<string, string>} repo-relative path → last-commit ISO date */
+  const gitDates = new Map();
+  try {
+    const out = execFileSync("git", ["-C", ROOT, "log", "--no-renames", "--format=%x01%cI", "--name-only", "--", "concepts"], {
+      encoding: "utf8",
+      maxBuffer: 1 << 30,
+    });
+    let date = null;
+    for (const line of out.split("\n")) {
+      if (line[0] === "\x01") { date = line.slice(1); continue; }
+      const p = line.trim();
+      if (date && p && !gitDates.has(p)) gitDates.set(p, date); // newest-first ⇒ first seen = last modified
+    }
+  } catch {
+    /* not a git repo / git unavailable — every page falls back to mtime (then generation time) */
+  }
+  const pageLastmod = (/** @type {string} */ id) => {
+    const rel = `concepts/${id}.html`;
+    const g = gitDates.get(rel);
+    if (g) return toUtc(g);
+    try {
+      return toUtc(statSync(join(ROOT, rel)).mtime.toISOString());
+    } catch {
+      return generatedAt;
+    }
+  };
+
   /** @type {string[]} */
-  const entries = [`  <url><loc>${origin}/</loc></url>`];
+  const entries = [`  <url><loc>${origin}/</loc><lastmod>${generatedAt}</lastmod></url>`];
   for (const c of concepts) {
     const enUrl = `${origin}/concepts/${c.id}.html`;
+    const lastmod = pageLastmod(c.id);
     const locales = Object.keys(c.titles ?? {})
       .filter((l) => l !== DEFAULT_LOCALE)
       .sort();
     if (locales.length === 0) {
-      entries.push(`  <url><loc>${enUrl}</loc></url>`);
+      entries.push(`  <url><loc>${enUrl}</loc><lastmod>${lastmod}</lastmod></url>`);
       continue;
     }
     const alt = alternates(enUrl, locales);
     // The English version plus each translated variant, all sharing the alternate set.
+    // Element order follows the sitemap schema: loc → lastmod → xhtml:link alternates.
     for (const loc of [enUrl, ...locales.map((l) => `${enUrl}?lang=${l}`)]) {
-      entries.push(`  <url>\n    <loc>${loc}</loc>\n${alt}\n  </url>`);
+      entries.push(`  <url>\n    <loc>${loc}</loc>\n    <lastmod>${lastmod}</lastmod>\n${alt}\n  </url>`);
     }
   }
 

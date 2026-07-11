@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Motion Capture Systems</primer-title>
+
+    <primer-card>
+      <p>
+        When Gollum snarls, when a football video game's players jog exactly like real athletes, when a
+        crowd of digital soldiers move with unrepeatable human sloppiness — nobody keyframed that by hand.
+        A performer <em>did</em> it, wearing a suit dotted with markers or bristling with sensors, and a
+        <strong>motion-capture</strong> ("mocap") system turned the performance into
+        <strong>animation data</strong>: a stream of numbers, one sample every few milliseconds, describing
+        where every body part was.
+      </p>
+      <p>
+        This page is about the machinery that does the recording. There are several rival technologies —
+        optical cameras, inertial sensors, and pure computer vision — and each solves the same problem with
+        a completely different trade-off between <strong>accuracy</strong>, <strong>occlusion</strong>,
+        <strong>portability</strong> and <strong>cost</strong>. Understanding those trade-offs is the whole
+        game, because the failure modes (an optical marker vanishing behind an arm; an inertial sensor slowly
+        drifting away from reality) are exactly what a downstream animator has to clean up. This lesson feeds
+        the rest of the <primer-ref todo to="computer-science/computer-animation/mocap/mocap">mocap strand</primer-ref>,
+        where we retarget, filter and blend that raw data.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What comes out: a time-series of poses</h2>
+      <primer-theorem name="The output of any mocap system">
+        <ul>
+          <li>A <strong>marker-based</strong> system outputs, for every frame, the <strong>3D position</strong>
+            <primer-math>(x, y, z)</primer-math> of each tracked marker — a point cloud that moves over time.</li>
+          <li>An <strong>inertial</strong> (sensorless-camera) system outputs, for every frame, the
+            <strong>orientation</strong> of each limb segment — a rotation per bone, which drives a skeleton
+            directly.</li>
+          <li>Either way the recording is a <strong>time-series</strong>: samples indexed by frame, taken at a
+            fixed <strong>sampling rate</strong> (commonly <primer-math>120</primer-math>–<primer-math>240</primer-math>
+            samples per second), covering a bounded region of space called the <strong>capture volume</strong>.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Marker positions and joint orientations are two views of the same performance. Positions are what a
+        camera literally sees; orientations are what a skeleton needs. A <em>solve</em> step (fitting a
+        skeleton to the marker cloud) converts one into the other — but that comes later. First, how do we get
+        the numbers at all?
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Optical, marker-based: the studio workhorse</h2>
+      <p>
+        The classic high-end setup is <strong>passive optical</strong>. The performer wears small
+        <strong>retroreflective</strong> markers — little spheres coated to bounce light straight back toward
+        its source. Each camera has a ring of <strong>infrared LEDs</strong> around its lens; the markers blaze
+        back as bright dots against a dark background, trivially easy to find in the image. Many cameras
+        (often <primer-math>8</primer-math>–<primer-math>50+</primer-math>) ring the volume and are
+        <strong>synchronized</strong> to the microsecond, all shuttering at the same instants.
+      </p>
+      <p>
+        Each camera only sees a marker as a <em>direction</em> — a 2D dot, which back in 3D space is a
+        <strong>ray</strong> from the camera's focal point outward. One camera can't tell how far along that
+        ray the marker sits. But if <strong>two</strong> calibrated cameras both see the same marker, we have
+        two rays, and the marker must lie where they cross. Recovering the 3D point from multiple rays is
+        called <strong>triangulation</strong>, and with well-calibrated cameras it is astonishingly precise —
+        <strong>sub-millimetre</strong>. The price is <strong>occlusion</strong>: a marker hidden from view
+        (an arm swinging across the chest) simply disappears, leaving a gap.
+      </p>
+      <primer-theorem name="Triangulation">
+        <ul>
+          <li>A single calibrated camera maps a 3D marker to a 2D image dot, which corresponds to a
+            <strong>ray</strong> in space through the camera centre.</li>
+          <li>Two such rays from two cameras <strong>intersect</strong> at the marker's 3D position — this
+            recovery of a point from two (or more) views is <strong>triangulation</strong>.</li>
+          <li>At least <strong>two</strong> cameras must see a marker to place it; more cameras give redundancy
+            against occlusion and average out noise.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "triangulation": {
+          "title": "Triangulating a marker from two cameras",
+          "camA": "Camera A",
+          "camB": "Camera B",
+          "marker": "marker",
+          "rayA": "ray A",
+          "rayB": "ray B"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The geometry of triangulation</h2>
+      <p>
+        Below, two calibrated cameras each see a marker as a single direction. Camera A's ray and camera B's
+        ray both pass through the marker, so the marker sits at their <strong>intersection</strong> — the one
+        3D point consistent with both views. Read it as a piece of pure geometry: two lines in a plane,
+        generally meeting at exactly one point.
+      </p>
+      <primer-geometry
+        scene="triangulation"
+        caption="Two calibrated cameras, A and B, each observe the marker along a ray. The marker's 3D position is the intersection of the two rays — this recovery is triangulation. If A is occluded, only ray B survives, and a single ray cannot fix the point."
+      ></primer-geometry>
+      <p>
+        Now imagine camera A is blocked — the performer's own shoulder gets in the way. Ray A is gone, and a
+        single ray from B is not enough: the marker could be <em>anywhere</em> along B's line. This is exactly
+        why studios use so many cameras. A <strong>third</strong> camera, viewing from a different angle, very
+        likely still sees the marker; its ray crosses B's, and the point is recovered despite A's loss. More
+        cameras means more chances that <em>some</em> pair has a clear line of sight at every instant.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: crossing two rays</h2>
+      <p>
+        Work in a horizontal slice so we can use 2D coordinates (metres). Camera A sits at
+        <primer-math>(0, 0)</primer-math> and reports the marker along a ray heading up-and-right at
+        <primer-math>45^\circ</primer-math> — direction <primer-math>(1, 1)</primer-math>, so the ray is the
+        set of points <primer-math>(t, t)</primer-math> for <primer-math>t \ge 0</primer-math>. Camera B sits
+        at <primer-math>(4, 0)</primer-math> and reports the marker up-and-left at
+        <primer-math>135^\circ</primer-math> — direction <primer-math>(-1, 1)</primer-math>, giving points
+        <primer-math>(4 - s,\, s)</primer-math>.
+      </p>
+      <p>
+        The marker is where the rays meet, so set the coordinates equal:
+      </p>
+      <primer-math display>t = 4 - s \quad\text{and}\quad t = s.</primer-math>
+      <p>
+        Substituting <primer-math>t = s</primer-math> into the first equation gives
+        <primer-math>s = 4 - s</primer-math>, so <primer-math>s = 2</primer-math> and
+        <primer-math>t = 2</primer-math>. Both rays land at <primer-math>(2, 2)</primer-math> — the marker's
+        recovered position. Two cameras, two rays, one intersection.
+      </p>
+      <p>
+        If camera A is occluded we keep only <primer-math>(4 - s,\, s)</primer-math>: an entire line of
+        possible marker positions, with no way to choose among them. A single ray fixes a
+        <em>direction</em>, never a <em>point</em> — hence the need for a second (and, against occlusion, a
+        third) camera whose ray pins down where along B's line the marker truly is.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Active optical, and going markerless</h2>
+      <p>
+        <strong>Active optical</strong> systems replace passive reflectors with <strong>pulsed LEDs</strong>
+        on the body. Because each LED can blink its own on/off pattern, the system knows <em>which</em> marker
+        is which without guessing — markers are <strong>auto-labelled</strong>, which saves a lot of cleanup
+        where passive markers get swapped or confused. The trade is added weight, batteries and wiring on the
+        performer.
+      </p>
+      <p>
+        <strong>Markerless</strong> capture drops the suit entirely. A <strong>multi-view</strong> markerless
+        rig uses several ordinary cameras plus computer vision to infer the body's pose directly from the
+        video. At the cheap, flexible extreme, a <strong>single camera</strong> with a machine-learning
+        <primer-ref todo to="computer-science/computer-animation/mocap/pose-estimation">pose estimator</primer-ref>
+        can lift a rough 3D skeleton out of ordinary footage — no studio, no markers, even from a phone. The
+        catch is <strong>accuracy</strong>: markerless output is far noisier and less precise than
+        marker-based triangulation, and it struggles with self-occlusion and unusual poses. It trades fidelity
+        for reach.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Inertial: cameras optional</h2>
+      <p>
+        An <strong>inertial</strong> suit takes a completely different route: no cameras at all. Each limb
+        segment carries an <strong>IMU</strong> (inertial measurement unit) — a tiny sensor package holding an
+        <strong>accelerometer</strong> (senses linear acceleration and, at rest, the direction of gravity), a
+        <strong>gyroscope</strong> (senses rate of rotation), and a <strong>magnetometer</strong> (senses the
+        Earth's field, a compass for heading). Fusing the three gives each segment's <strong>orientation</strong>
+        in space, and stitching the segments together via the known skeleton gives a full pose.
+      </p>
+      <p>
+        Because there is nothing to see and nothing to block, inertial capture is <strong>immune to
+        occlusion</strong>, works <strong>outdoors and on location</strong>, and is genuinely portable — you
+        can capture an actor sprinting across a field. Its weakness is <strong>drift</strong>: orientations
+        (and any position estimated by integrating acceleration twice) accumulate small sensor errors over
+        time, so the captured figure slowly wanders away from where it really is. Magnetometers also get
+        confused near steel and motors. Inertial buys freedom of movement at the cost of absolute position.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Comparing the technologies</h2>
+      <p>
+        No single system wins on every axis. Roughly:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr>
+              <th>System</th>
+              <th>Accuracy</th>
+              <th>Occlusion</th>
+              <th>Portability</th>
+              <th>Cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Optical, passive marker</td>
+              <td>Highest (sub-mm)</td>
+              <td>Prone — hidden markers leave gaps</td>
+              <td>Low — fixed studio volume</td>
+              <td>High</td>
+            </tr>
+            <tr>
+              <td>Optical, active LED</td>
+              <td>Very high, auto-labelled</td>
+              <td>Prone (like passive)</td>
+              <td>Low — studio, plus on-body power</td>
+              <td>High</td>
+            </tr>
+            <tr>
+              <td>Markerless (multi-view / ML)</td>
+              <td>Lower, noisier</td>
+              <td>Handles some; struggles with self-occlusion</td>
+              <td>High — even a single phone camera</td>
+              <td>Low</td>
+            </tr>
+            <tr>
+              <td>Inertial (IMU suit)</td>
+              <td>Good orientations; positions drift</td>
+              <td>Immune — no line of sight needed</td>
+              <td>High — go anywhere</td>
+              <td>Medium</td>
+            </tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The two dominant failure modes — optical <strong>occlusion</strong> and inertial <strong>drift</strong>
+        — are complementary, which is why serious productions increasingly run <strong>hybrid</strong> rigs:
+        inertial sensors carry the pose through occluded moments, while occasional optical fixes pin the
+        drifting figure back to absolute position. Each covers the other's weakness.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="How do they capture a snarling face or flexing fingers?">
+      <p>
+        Bodies are the easy part. <strong>Facial capture</strong> uses a dense pattern of tiny markers or
+        painted dots — dozens on the cheeks, brows and lips — filmed by a <strong>head-mounted camera</strong>
+        on a boom in front of the actor, so the face fills the frame and stays framed no matter how the head
+        turns. The markers (or, increasingly, markerless per-pixel tracking) drive the facial rig's blend
+        shapes. <strong>Hands</strong> are similar: fingers are short, they self-occlude constantly, and they
+        need many markers packed into a small area, so hand capture often uses dedicated close cameras or
+        instrumented gloves. The finer the motion, the denser the sampling — and the higher the frame rate,
+        so fast gestures don't blur between samples.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Occlusion vs drift are different diseases">
+      <p>
+        Do not confuse the two big failure modes, because they call for opposite fixes.
+        <strong>Occlusion</strong> is an <em>optical</em> problem: a marker gets hidden behind the body, so
+        for a stretch of frames its 3D position is simply <strong>missing</strong> — a gap in an otherwise
+        exact record. The cure is more camera angles and, in post, <strong>gap-filling</strong> the short
+        holes by interpolation. The surrounding data is trustworthy; only the covered instants are absent.
+      </p>
+      <p>
+        <strong>Drift</strong> is an <em>inertial</em> problem: no data is missing, but every sample is
+        slightly wrong, and the errors <strong>accumulate</strong> as the system integrates noisy sensor
+        readings over time — so the figure slowly, smoothly <strong>wanders</strong> away from reality. You
+        can't interpolate it back, because there is no good neighbour to interpolate from; you fix it by
+        periodically re-anchoring to an absolute reference (an optical fix, a known foot-on-floor contact).
+        Gaps versus wander, missing versus drifting — knowing which one you have is the difference between a
+        five-minute cleanup and a ruined take. This complementarity is precisely why hybrid systems exist.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Why 120–240 Hz, when film is only 24?">
+      <p>
+        The screen may play back at <primer-math>24</primer-math> or <primer-math>30</primer-math> frames per
+        second, but mocap is sampled far faster — <primer-math>120</primer-math> to
+        <primer-math>240\text{ Hz}</primer-math> — for two reasons. First, fast motion (a punch, a foot strike)
+        can move a marker a long way in <primer-math>1/24</primer-math> of a second; oversampling captures the
+        arc cleanly instead of aliasing it. Second, dense samples make it possible to <strong>smooth away
+        noise</strong> and reconstruct crisp motion before down-sampling to the delivery rate. There is also
+        <strong>latency</strong> to worry about: for real-time uses (virtual production, live avatars) the lag
+        between the performer moving and the data arriving must stay low, which pushes systems toward fast,
+        tightly-synchronized cameras and efficient solving.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "mocapSystemsQuiz@1": {
+          "intro": "Optical triangulates markers (sub-mm, occlusion-prone); inertial integrates IMUs to orientations (portable, drifts); markerless is cheap but noisy. Fresh questions each time.",
+          "triQ": "How is a marker's 3D position recovered in a passive optical system?",
+          "triRight": "by triangulation — intersecting the rays from two or more cameras",
+          "triW1": "by a single camera measuring the marker's distance directly",
+          "triW2": "by weighing the marker",
+          "triW3": "by integrating an accelerometer over time",
+          "minCamQ": "What is the minimum number of cameras that must see a marker to place it in 3D?",
+          "minCamRight": "two",
+          "minCamW1": "one",
+          "minCamW2": "four",
+          "minCamW3": "eight",
+          "thirdQ": "Why does a studio use many cameras rather than just two?",
+          "thirdRight": "so that when a marker is occluded from some cameras, another pair still sees it",
+          "thirdW1": "to make the markers heavier",
+          "thirdW2": "to increase battery life",
+          "thirdW3": "because triangulation needs exactly ten rays",
+          "reflectQ": "Passive optical markers are made of retroreflective material so that…",
+          "reflectRight": "they bounce the cameras' infrared light straight back as bright dots",
+          "reflectW1": "they emit their own coloured light",
+          "reflectW2": "they measure their own acceleration",
+          "reflectW3": "they store the recording internally",
+          "optAccQ": "The standout strength of passive optical marker capture is its…",
+          "optAccRight": "accuracy — sub-millimetre marker positions",
+          "optAccW1": "immunity to occlusion",
+          "optAccW2": "ability to work outdoors with no setup",
+          "optAccW3": "zero cost",
+          "optWeakQ": "The standout weakness of optical marker capture is…",
+          "optWeakRight": "occlusion — markers hidden behind the body leave gaps",
+          "optWeakW1": "drift that accumulates over time",
+          "optWeakW2": "that it cannot reach sub-millimetre accuracy",
+          "optWeakW3": "that it needs no cameras",
+          "imuQ": "An inertial (IMU) suit senses motion using which combination of sensors per segment?",
+          "imuRight": "accelerometer, gyroscope and magnetometer",
+          "imuW1": "infrared cameras and reflective markers",
+          "imuW2": "pulsed LEDs and photodiodes",
+          "imuW3": "a single GPS receiver",
+          "inertOutQ": "An inertial suit's direct output for each limb segment is its…",
+          "inertOutRight": "orientation (a rotation), integrated from the sensors",
+          "inertOutW1": "sub-millimetre absolute 3D position",
+          "inertOutW2": "colour and texture",
+          "inertOutW3": "a 2D image dot",
+          "inertStrengthQ": "A key advantage of inertial capture over optical is that it…",
+          "inertStrengthRight": "is immune to occlusion and portable — no cameras or line of sight needed",
+          "inertStrengthW1": "achieves higher absolute accuracy than optical",
+          "inertStrengthW2": "never accumulates any error",
+          "inertStrengthW3": "requires a fixed studio volume",
+          "driftQ": "'Drift' in an inertial system means…",
+          "driftRight": "sensor errors accumulate over time, so positions slowly wander from reality",
+          "driftW1": "markers vanish behind the body, leaving gaps",
+          "driftW2": "the cameras lose synchronization",
+          "driftW3": "the capture volume shrinks",
+          "hybridQ": "Why do hybrid rigs pair inertial sensors with occasional optical fixes?",
+          "hybridRight": "the two failure modes are complementary — inertial covers occlusion, optical re-anchors drift",
+          "hybridW1": "to make the suit cheaper than either alone",
+          "hybridW2": "because inertial and optical measure the same failure",
+          "hybridW3": "to lower the sampling rate",
+          "markerlessQ": "Single-camera markerless (ML pose estimation) capture is best described as…",
+          "markerlessRight": "cheap and flexible but lower accuracy than marker-based triangulation",
+          "markerlessW1": "the most accurate system available",
+          "markerlessW2": "immune to all self-occlusion",
+          "markerlessW3": "requiring a full retroreflective suit",
+          "activeQ": "Active optical systems use pulsed LEDs mainly so that markers can be…",
+          "activeRight": "auto-labelled — each LED's blink pattern identifies which marker it is",
+          "activeW1": "made lighter than passive markers",
+          "activeW2": "seen without any cameras",
+          "activeW3": "read at 24 Hz only",
+          "rateQ": "Typical mocap sampling rates are about…",
+          "rateRight": "120–240 Hz, well above the 24–30 fps of playback",
+          "rateW1": "1–2 Hz",
+          "rateW2": "exactly 24 Hz, matching film",
+          "rateW3": "millions of Hz",
+          "outputQ": "The output of any mocap system is fundamentally…",
+          "outputRight": "a time-series of marker positions or joint orientations sampled at a fixed rate",
+          "outputW1": "a single still photograph",
+          "outputW2": "a finished rendered movie file",
+          "outputW3": "a hand-drawn keyframe sequence",
+          "faceQ": "Facial capture typically films the actor with a…",
+          "faceRight": "head-mounted camera on a boom, so the densely-marked face stays framed",
+          "faceW1": "single wide shot from across the room",
+          "faceW2": "GPS receiver on the forehead",
+          "faceW3": "gyroscope glued to each eyelash",
+          "volumeQ": "The bounded region of space a mocap system can record within is called the…",
+          "volumeRight": "capture volume",
+          "volumeW1": "focal length",
+          "volumeW2": "frame buffer",
+          "volumeW3": "colour gamut",
+          "occFixQ": "The natural cleanup for a short optical occlusion gap is to…",
+          "occFixRight": "gap-fill by interpolating the marker's missing frames from its neighbours",
+          "occFixW1": "re-anchor to an absolute optical reference",
+          "occFixW2": "add a magnetometer",
+          "occFixW3": "lower the frame rate"
+        }
+      }
+    </script>
+
+    <primer-quiz name="mocapSystemsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  { "prerequisites": ["computer-science/computer-animation/computer-animation"] }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Triangulation figure: two camera points, two rays crossing at the marker. Static base content
+          (no steps) so it shows fully on load. ---- */
+  const tri = makeStrings("triangulation");
+  registerGeometryScene(
+    "triangulation",
+    ({ board, colors, sceneStrings }) => {
+      const A = [0, 0];      // camera A
+      const B = [4, 0];      // camera B
+      const M = [2, 2];      // marker (rays cross here)
+
+      // Camera A ray (direction (1,1)) and camera B ray (direction (-1,1)), drawn past the marker.
+      board.create("arrow", [A, [3, 3]], { strokeColor: colors.cat[0], strokeWidth: 2 });
+      board.create("arrow", [B, [1, 3]], { strokeColor: colors.cat[1], strokeWidth: 2 });
+
+      // Camera points.
+      board.create("point", [A[0], A[1]], { size: 4, strokeColor: colors.cat[0], fillColor: colors.cat[0], fixed: true, name: "", highlight: false });
+      board.create("point", [B[0], B[1]], { size: 4, strokeColor: colors.cat[1], fillColor: colors.cat[1], fixed: true, name: "", highlight: false });
+
+      // The marker at the intersection.
+      board.create("point", [M[0], M[1]], { size: 5, strokeColor: colors.ink, fillColor: colors.ink, fixed: true, name: "", highlight: false });
+
+      // Labels.
+      board.create("text", [A[0] - 0.1, A[1] - 0.55, () => sceneStrings("camA")], { anchorX: "left", fontSize: 14, strokeColor: colors.cat[0], cssStyle: "font-weight:700" });
+      board.create("text", [B[0] - 0.1, B[1] - 0.55, () => sceneStrings("camB")], { anchorX: "left", fontSize: 14, strokeColor: colors.cat[1], cssStyle: "font-weight:700" });
+      board.create("text", [M[0] + 0.2, M[1] + 0.15, () => sceneStrings("marker")], { anchorX: "left", fontSize: 14, strokeColor: colors.ink, cssStyle: "font-weight:700" });
+      board.create("text", [1.0, 1.4, () => sceneStrings("rayA")], { anchorX: "left", fontSize: 12, strokeColor: colors.cat[0] });
+      board.create("text", [2.7, 1.4, () => sceneStrings("rayB")], { anchorX: "left", fontSize: 12, strokeColor: colors.cat[1] });
+    },
+    { boundingbox: [-1, 3.6, 5, -1.1], keepAspect: true, title: () => tri("title") },
+  );
+
+  registerQuiz("mocapSystemsQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("triQ"), options: [
+      { text: () => sceneStrings("triRight"), correct: true },
+      { text: () => sceneStrings("triW1"), correct: false },
+      { text: () => sceneStrings("triW2"), correct: false },
+      { text: () => sceneStrings("triW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("minCamQ"), options: [
+      { text: () => sceneStrings("minCamRight"), correct: true },
+      { text: () => sceneStrings("minCamW1"), correct: false },
+      { text: () => sceneStrings("minCamW2"), correct: false },
+      { text: () => sceneStrings("minCamW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("thirdQ"), options: [
+      { text: () => sceneStrings("thirdRight"), correct: true },
+      { text: () => sceneStrings("thirdW1"), correct: false },
+      { text: () => sceneStrings("thirdW2"), correct: false },
+      { text: () => sceneStrings("thirdW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("reflectQ"), options: [
+      { text: () => sceneStrings("reflectRight"), correct: true },
+      { text: () => sceneStrings("reflectW1"), correct: false },
+      { text: () => sceneStrings("reflectW2"), correct: false },
+      { text: () => sceneStrings("reflectW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("optAccQ"), options: [
+      { text: () => sceneStrings("optAccRight"), correct: true },
+      { text: () => sceneStrings("optAccW1"), correct: false },
+      { text: () => sceneStrings("optAccW2"), correct: false },
+      { text: () => sceneStrings("optAccW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("optWeakQ"), options: [
+      { text: () => sceneStrings("optWeakRight"), correct: true },
+      { text: () => sceneStrings("optWeakW1"), correct: false },
+      { text: () => sceneStrings("optWeakW2"), correct: false },
+      { text: () => sceneStrings("optWeakW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("imuQ"), options: [
+      { text: () => sceneStrings("imuRight"), correct: true },
+      { text: () => sceneStrings("imuW1"), correct: false },
+      { text: () => sceneStrings("imuW2"), correct: false },
+      { text: () => sceneStrings("imuW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("inertOutQ"), options: [
+      { text: () => sceneStrings("inertOutRight"), correct: true },
+      { text: () => sceneStrings("inertOutW1"), correct: false },
+      { text: () => sceneStrings("inertOutW2"), correct: false },
+      { text: () => sceneStrings("inertOutW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("inertStrengthQ"), options: [
+      { text: () => sceneStrings("inertStrengthRight"), correct: true },
+      { text: () => sceneStrings("inertStrengthW1"), correct: false },
+      { text: () => sceneStrings("inertStrengthW2"), correct: false },
+      { text: () => sceneStrings("inertStrengthW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("driftQ"), options: [
+      { text: () => sceneStrings("driftRight"), correct: true },
+      { text: () => sceneStrings("driftW1"), correct: false },
+      { text: () => sceneStrings("driftW2"), correct: false },
+      { text: () => sceneStrings("driftW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("hybridQ"), options: [
+      { text: () => sceneStrings("hybridRight"), correct: true },
+      { text: () => sceneStrings("hybridW1"), correct: false },
+      { text: () => sceneStrings("hybridW2"), correct: false },
+      { text: () => sceneStrings("hybridW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("markerlessQ"), options: [
+      { text: () => sceneStrings("markerlessRight"), correct: true },
+      { text: () => sceneStrings("markerlessW1"), correct: false },
+      { text: () => sceneStrings("markerlessW2"), correct: false },
+      { text: () => sceneStrings("markerlessW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("activeQ"), options: [
+      { text: () => sceneStrings("activeRight"), correct: true },
+      { text: () => sceneStrings("activeW1"), correct: false },
+      { text: () => sceneStrings("activeW2"), correct: false },
+      { text: () => sceneStrings("activeW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("rateQ"), options: [
+      { text: () => sceneStrings("rateRight"), correct: true },
+      { text: () => sceneStrings("rateW1"), correct: false },
+      { text: () => sceneStrings("rateW2"), correct: false },
+      { text: () => sceneStrings("rateW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("outputQ"), options: [
+      { text: () => sceneStrings("outputRight"), correct: true },
+      { text: () => sceneStrings("outputW1"), correct: false },
+      { text: () => sceneStrings("outputW2"), correct: false },
+      { text: () => sceneStrings("outputW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("faceQ"), options: [
+      { text: () => sceneStrings("faceRight"), correct: true },
+      { text: () => sceneStrings("faceW1"), correct: false },
+      { text: () => sceneStrings("faceW2"), correct: false },
+      { text: () => sceneStrings("faceW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("volumeQ"), options: [
+      { text: () => sceneStrings("volumeRight"), correct: true },
+      { text: () => sceneStrings("volumeW1"), correct: false },
+      { text: () => sceneStrings("volumeW2"), correct: false },
+      { text: () => sceneStrings("volumeW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("occFixQ"), options: [
+      { text: () => sceneStrings("occFixRight"), correct: true },
+      { text: () => sceneStrings("occFixW1"), correct: false },
+      { text: () => sceneStrings("occFixW2"), correct: false },
+      { text: () => sceneStrings("occFixW3"), correct: false },
+    ] },
+  ]);
+</script>

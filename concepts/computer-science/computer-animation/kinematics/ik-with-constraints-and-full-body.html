@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>IK with Constraints and Full-Body IK</primer-title>
+
+    <primer-card>
+      <p>
+        A bare inverse-kinematics solver answers one narrow question: <em>what joint angles put this one hand
+        on that one point?</em> — and it will happily bend a knee backwards, snap an elbow inside-out, or let
+        the whole character topple over to get there. Real animation never asks IK just one question. When a
+        character reaches for a high shelf, <strong>everything</strong> participates at once: the reaching hand
+        must land on the shelf, the other hand and both feet must stay planted, the knees and elbows must fold
+        the way real ones do, the spine has to arch, and — above all — the character must not fall over.
+      </p>
+      <p>
+        This page turns a toy solver into a production one. We add <strong>joint limits</strong> so poses stay
+        anatomical, <strong>pole vectors</strong> to steer the redundant elbow, <strong>look-at</strong> aim
+        constraints for heads and eyes, <strong>multiple end-effectors</strong> solved together with a stacked,
+        prioritised Jacobian, and finally <strong>full-body IK</strong> that keeps the centre of mass balanced
+        over the feet. We close with the subtle art of <strong>blending between IK and FK</strong> without the
+        pose popping. (The single-chain machinery this builds on —
+        <primer-ref todo to="computer-science/computer-animation/kinematics/the-ik-problem">the IK problem</primer-ref>,
+        <primer-ref todo to="computer-science/computer-animation/kinematics/the-jacobian">the Jacobian</primer-ref>,
+        and <primer-ref todo to="computer-science/computer-animation/kinematics/ccd-and-fabrik">CCD and FABRIK</primer-ref>
+        — lives in the earlier lessons of this module.)
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Joint limits: keep the pose anatomical</h2>
+      <p>
+        A shoulder can swing far; a knee is a hinge that bends one way and stops near straight. If nothing tells
+        the solver this, it treats every degree of freedom as unbounded and finds mathematically valid but
+        physically grotesque poses. The fix is a <strong>joint limit</strong>: a permitted range
+        <primer-math>[\theta_{\min}, \theta_{\max}]</primer-math> for each degree of freedom (a box in joint
+        space).
+      </p>
+      <primer-theorem name="Enforcing joint limits">
+        <ul>
+          <li><strong>Projection (clamping).</strong> After each solver iteration updates the angles, clamp
+            each one back into its range: <primer-math>\theta_i \leftarrow \operatorname{clamp}(\theta_i,\;
+            \theta_{i,\min},\; \theta_{i,\max})</primer-math>. Cheap, and it composes with any iterative
+            solver (Jacobian, CCD, FABRIK).</li>
+          <li><strong>Box-constrained solve.</strong> Fold the limits directly into the step as bounds on the
+            update <primer-math>\Delta\theta</primer-math>, solving a bounded least-squares (a QP) so the
+            solver never proposes an illegal move in the first place — smoother, but costlier.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Clamping-per-iteration is the workhorse: it is one line, and because the solver re-linearises next
+        iteration it simply routes the remaining error through the joints that <em>can</em> still move. That is
+        exactly why a knee at its limit forces the reach to be taken up by the hip and spine instead — the
+        constraint doesn't fail, it <em>redistributes</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Pole vectors: choosing where the elbow points</h2>
+      <p>
+        Fix a shoulder and a wrist and the arm still has a whole circle of solutions: the elbow can swing
+        anywhere around the shoulder-to-wrist axis, tracing a cone. This leftover freedom is
+        <strong>redundancy</strong> — the two-bone chain has more configurations than the target pins down.
+        Leaving it to the solver's arbitrary preference makes elbows drift or flip between frames.
+      </p>
+      <p>
+        A <strong>pole vector</strong> (or <strong>swivel angle</strong>) resolves it by naming a point the
+        elbow should aim toward. The solver places the elbow in the plane through the shoulder, the wrist, and
+        the pole target, on the side the pole indicates. Animators keyframe the pole (or the swivel angle
+        around the axis) to keep an elbow pointing sensibly down-and-out, or to hit a specific silhouette. The
+        same idea steers a knee. Without it, a redundant IK chain is a coin toss.
+      </p>
+      <primer-vignette title="Why does the elbow suddenly flip inside-out mid-shot?">
+        <p>
+          That pop is the swivel solution jumping to the other branch. As the wrist crosses a configuration
+          where the arm is nearly straight (or the pole target passes through the shoulder-wrist axis), the
+          "which side of the axis" decision flips sign and the elbow snaps to the mirror pose. Cures: keyframe
+          the <strong>pole vector</strong> so it never grazes the axis, keep the arm from fully straightening
+          (a joint limit just short of straight preserves a defined bend plane), or interpolate the
+          <strong>swivel angle</strong> continuously rather than re-deriving the elbow side from scratch each
+          frame.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Look-at (aim) constraints</h2>
+      <p>
+        A <strong>look-at</strong> or <strong>aim</strong> constraint is orientation-only IK: it rotates a
+        joint so that one of its local axes points at a target. Point the head's forward axis at a moving
+        prop, aim each eyeball at a focus point, keep a gun barrel on a mark. Given a joint at
+        <primer-math>\mathbf{p}</primer-math> and a target <primer-math>\mathbf{t}</primer-math>, the desired
+        forward direction is simply
+      </p>
+      <primer-math display>\hat{\mathbf{f}} = \frac{\mathbf{t} - \mathbf{p}}{\lVert \mathbf{t} - \mathbf{p} \rVert},</primer-math>
+      <p>
+        and an <strong>up</strong> reference fixes the remaining roll so the head doesn't spin about its own
+        gaze. Aim constraints usually run with their own limits (an eye can only rotate so far in its socket)
+        and are often chained: the eyes aim fully, the neck takes a fraction, the chest a smaller fraction, so
+        a character turning to look uses the whole upper body — a mini full-body solve in its own right.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Many goals at once: the stacked Jacobian</h2>
+      <p>
+        Two hands on a steering wheel and both feet planted is <em>four</em> end-effector goals competing for
+        one set of joint angles. The Jacobian method extends cleanly: stack each effector's task error
+        <primer-math>\mathbf{e}_k</primer-math> and each effector's Jacobian <primer-math>J_k</primer-math>
+        into one tall system,
+      </p>
+      <primer-math display>\underbrace{\begin{bmatrix} J_1 \\ J_2 \\ \vdots \\ J_m \end{bmatrix}}_{J}\,\Delta\boldsymbol\theta \;=\; \underbrace{\begin{bmatrix} \mathbf{e}_1 \\ \mathbf{e}_2 \\ \vdots \\ \mathbf{e}_m \end{bmatrix}}_{\mathbf{e}},</primer-math>
+      <p>
+        and solve the (generally over- or under-determined) system for one joint update
+        <primer-math>\Delta\boldsymbol\theta</primer-math> that serves every goal as well as possible. Goals
+        rarely have equal say, so we attach <strong>weights</strong> and solve a weighted least-squares,
+      </p>
+      <primer-math display>\Delta\boldsymbol\theta = \arg\min_{\Delta\boldsymbol\theta} \; \lVert W(J\,\Delta\boldsymbol\theta - \mathbf{e}) \rVert^2,</primer-math>
+      <p>
+        with big weights on the goals that must not be sacrificed (feet stay planted) and smaller weights on
+        the negotiable ones (the hand gets as close as it can). Weighting says "these matter more"; it does not
+        <em>guarantee</em> the important goal — a strong enough pull elsewhere can still nudge it.
+      </p>
+      <primer-theorem name="Task-priority (nullspace) IK">
+        <ul>
+          <li>Rank the goals into strict priority levels. Solve the top task first:
+            <primer-math>\Delta\boldsymbol\theta_1 = J_1^{+}\,\mathbf{e}_1</primer-math>
+            (<primer-math>J_1^{+}</primer-math> is the pseudo-inverse).</li>
+          <li>Solve each lower task only in the <strong>null space</strong> of the ones above it, so it can
+            never disturb them: <primer-math display>\Delta\boldsymbol\theta = J_1^{+}\mathbf{e}_1 + (I - J_1^{+}J_1)\,J_2^{+}\,\mathbf{e}_2 + \cdots</primer-math></li>
+          <li>The projector <primer-math>(I - J_1^{+}J_1)</primer-math> keeps the low-priority correction
+            inside the motions that leave every higher task untouched.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Weights blur priorities into a soft trade-off; strict task-priority makes them a hard ladder — balance
+        and foot contacts on the top rungs, the reaching hand below, gaze below that.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "reachFig": {
+          "title": "Reaching a high shelf — feet planted, COM over the support polygon",
+          "target": "target (shelf)",
+          "com": "COM",
+          "support": "support polygon",
+          "plumb": "plumb line"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Full-body IK: the whole skeleton reaches</h2>
+      <p>
+        <strong>Full-body IK (FBIK)</strong> drops the idea of a single privileged root. Instead of solving one
+        arm chain from a fixed shoulder, it solves the <em>entire</em> skeleton at once against a set of goals,
+        so that when a hand reaches, the shoulder rises, the spine arches, and the hips shift — the reach is
+        shared across the body the way a real one is. Two goal types make it look alive rather than
+        mechanical:
+      </p>
+      <ul>
+        <li><strong>Contact / foot-plant goals.</strong> Effectors that pin the feet (and often the free hand)
+          to the world so they don't slide as the rest of the body moves — usually high priority.</li>
+        <li><strong>Balance.</strong> A constraint that keeps the body's <strong>centre of mass (COM)</strong>
+          horizontally above the <strong>support polygon</strong> — the convex hull of the ground contacts.
+          If the COM's ground projection leaves that polygon, the pose is one a real body could not hold
+          without toppling.</li>
+      </ul>
+      <p>
+        Drag the shelf height below and watch the whole figure cooperate: the feet stay pinned (their goals
+        win), the hips lift and the spine bends to lend the arm reach, the elbow folds within its limits, and
+        the plumb line from the COM stays inside the shaded support strip between the feet — the character
+        reaches <em>and</em> stays standing.
+      </p>
+      <primer-geometry
+        scene="reachFig"
+        caption="A stick figure reaching a shelf. Both feet are planted (their contact goals are top priority); the spine bends and hips lift to lend the arm reach; the elbow folds within its limit; and the plumb line dropped from the centre of mass stays inside the shaded support polygon between the feet, so the pose stays balanced. Drag the shelf-height slider."
+      ></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: reaching the high shelf</h2>
+      <p>
+        Trace what a full-body solver does with the pose above, goal by goal, and see how priorities settle the
+        conflicts.
+      </p>
+      <ol>
+        <li><strong>Foot-contact goals (top priority).</strong> Two effectors pin the feet to the floor. These
+          are satisfied first and everything else must live in the freedom left over — the feet will
+          <em>not</em> move to help the hand.</li>
+        <li><strong>Balance (top priority, alongside contacts).</strong> A COM goal keeps the plumb line inside
+          the foot support polygon. As the body leans toward the shelf, this goal pulls the hips <em>back</em>
+          and slightly bends the support knee, counter-weighting the reach so the character doesn't tip
+          forward.</li>
+        <li><strong>Hand-to-target (mid priority).</strong> The reaching hand's goal drives the arm — and,
+          through the shared skeleton, arches the spine and lifts that shoulder — but only using motion that
+          the null space of the contact and balance goals allows. If the shelf is within reach, the hand lands
+          exactly; if it is too high, the hand stops short rather than sacrifice balance.</li>
+        <li><strong>Joint limits and pole (throughout).</strong> The elbow folds toward its keyed pole
+          direction and clamps just short of straight; the support knee never hyper-extends. These reshape the
+          solution each iteration.</li>
+        <li><strong>Gaze (low priority).</strong> A look-at goal turns the head to the shelf, absorbed by
+          whatever neck-and-chest freedom remains after the goals above are met.</li>
+      </ol>
+      <p>
+        The <strong>conflict</strong> is real: pure hand-reach wants to throw the mass forward, while balance
+        wants it back. Because balance sits above the hand goal, the solver satisfies balance and reaches
+        <em>as far as it can</em> in the remaining freedom — which is precisely why a character reaching a
+        just-too-high shelf rises onto the balls of its feet and stretches, rather than face-planting toward
+        the target.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Blending IK and FK</h2>
+      <p>
+        A limb is rarely IK-driven for a whole shot. A hand might be hand-keyed in <strong>FK</strong> as it
+        swings freely, switch to <strong>IK</strong> to lock onto a doorknob, then return to FK as it lets go.
+        The clean way to switch is not a hard cut but a <strong>blend weight</strong>
+        <primer-math>w \in [0,1]</primer-math> that mixes the two solutions:
+      </p>
+      <primer-math display>\text{pose} = (1 - w)\,\text{pose}_{\text{FK}} + w\,\text{pose}_{\text{IK}},</primer-math>
+      <p>
+        blended per joint (as orientations, so rotations are interpolated as
+        <primer-ref soft to="computer-science/computer-animation/principles/interpolating-orientation-with-quaternions">quaternions</primer-ref>,
+        not raw Euler angles). Ramp <primer-math>w</primer-math> from 0 to 1 over several frames and the limb
+        eases from its free FK motion into the locked IK target — the grab looks intentional instead of
+        instantaneous. Reverse the ramp to release.
+      </p>
+      <primer-vignette title="Watch out! The IK/FK blend pop">
+        <p>
+          The single most common FBIK bug in a shot is the <strong>blend pop</strong>: flipping a limb from FK
+          to IK by switching <primer-math>w</primer-math> from 0 to 1 <em>on a single frame</em>. The FK pose
+          and the freshly-solved IK pose are almost never identical, so the joint <strong>snaps</strong> across
+          the gap between them in one frame — a visible jerk. The fix is not to change the poses but to
+          <strong>ramp the blend weight over several frames</strong> (e.g. a short ease from 0 to 1), so the
+          limb travels smoothly from the FK pose into the IK pose. Whenever a hand suddenly jumps as it
+          "grabs", check the blend curve first: a step where there should be a ramp is almost always the
+          culprit. The same applies on release — ramp back down, don't cut.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-vignette title="How does a game keep feet from sliding on a slope?">
+      <p>
+        Playback runs a baked walk cycle in FK, but the ground under the feet is uneven, so the animation's
+        flat-ground feet float or sink. A runtime FBIK pass fixes it: <strong>foot-contact IK goals</strong> ray-cast
+        down to find the real ground height and normal under each foot, pin the foot there, and let the solver
+        push the correction up through the ankle, knee and hip — while a balance goal keeps the pelvis sensible.
+        The animator authored the performance once; IK adapts it to terrain the animator never saw. It is the
+        same stacked-goal machinery as the shelf reach, just running sixty times a second at the player's feet.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "fullBodyIkQuiz@1": {
+          "intro": "Constraints and full-body IK: joint limits keep poses anatomical, pole vectors steer redundant elbows, stacked/prioritised Jacobians serve many goals, balance keeps the COM over the support polygon, and IK/FK blends must ramp. Fresh questions each attempt.",
+          "limitWhyQ": "What is the main purpose of a joint limit in IK?",
+          "limitWhyRight": "to keep the solved pose anatomical — e.g. stop a knee bending backwards",
+          "limitWhyW1": "to make the solver converge in exactly one iteration",
+          "limitWhyW2": "to increase the number of degrees of freedom",
+          "limitWhyW3": "to render the character faster",
+          "limitHowQ": "The cheapest common way to enforce joint limits with an iterative solver is to…",
+          "limitHowRight": "clamp (project) each angle back into its range after every iteration",
+          "limitHowW1": "delete the joint from the skeleton",
+          "limitHowW2": "run the solver once, then ignore the limits",
+          "limitHowW3": "randomise the angle whenever it exceeds the limit",
+          "poleQ": "What does a pole vector (swivel) control for a two-bone limb?",
+          "poleRight": "which direction the redundant elbow (or knee) points",
+          "poleW1": "the total length of the limb",
+          "poleW2": "the frame rate of the animation",
+          "poleW3": "the colour of the character",
+          "redundQ": "Why does a two-bone arm with a fixed shoulder and wrist still need a pole vector?",
+          "redundRight": "the solution is redundant — the elbow can swing around the shoulder-wrist axis",
+          "redundW1": "because the arm has no valid solution at all",
+          "redundW2": "because the wrist position is unknown",
+          "redundW3": "because joint limits are never used",
+          "lookatQ": "A look-at (aim) constraint does what to a joint?",
+          "lookatRight": "rotates it so a chosen local axis points at a target",
+          "lookatW1": "translates it to the target's exact position",
+          "lookatW2": "scales it up until it reaches the target",
+          "lookatW3": "deletes it if the target is too far",
+          "stackQ": "Both hands and both feet are solved together by…",
+          "stackRight": "stacking each effector's Jacobian and error into one tall system",
+          "stackW1": "solving each hand and foot in a completely separate rig",
+          "stackW2": "ignoring all but the first effector",
+          "stackW3": "raising the frame rate",
+          "weightQ": "In weighted multi-goal IK, a large weight on the foot goals means…",
+          "weightRight": "the solver prioritises keeping the feet planted over softer goals",
+          "weightW1": "the feet are ignored entirely",
+          "weightW2": "the feet move fastest",
+          "weightW3": "the feet are rendered at higher resolution",
+          "priorityQ": "In strict task-priority (nullspace) IK, a lower-priority task is solved…",
+          "priorityRight": "in the null space of the higher tasks, so it can't disturb them",
+          "priorityW1": "before the higher tasks, overriding them",
+          "priorityW2": "by deleting the higher tasks",
+          "priorityW3": "only if it has the largest weight",
+          "fbikQ": "'Full-body IK' means…",
+          "fbikRight": "solving the whole skeleton so the spine and hips also participate in a reach",
+          "fbikW1": "solving only a single isolated arm chain",
+          "fbikW2": "using FK for the entire body",
+          "fbikW3": "animating only the face",
+          "balanceQ": "The balance constraint in FBIK keeps which quantity over the support polygon?",
+          "balanceRight": "the centre of mass (its ground projection)",
+          "balanceW1": "the character's tallest joint",
+          "balanceW2": "the camera position",
+          "balanceW3": "the hand's target point",
+          "supportQ": "The support polygon of a standing character is…",
+          "supportRight": "the convex hull of its ground contacts (the feet)",
+          "supportW1": "the bounding box of the whole mesh",
+          "supportW2": "the region swept by the reaching hand",
+          "supportW3": "the camera's field of view",
+          "conflictQ": "Reaching a just-too-high shelf, the hand goal and the balance goal conflict. In prioritised FBIK the result is…",
+          "conflictRight": "balance is kept and the hand reaches only as far as the remaining freedom allows",
+          "conflictW1": "the hand always reaches, even if the character topples",
+          "conflictW2": "both goals are dropped",
+          "conflictW3": "the feet unplant to help",
+          "blendQ": "Switching a limb from FK to IK is done cleanly by…",
+          "blendRight": "ramping a blend weight from 0 to 1 over several frames",
+          "blendW1": "flipping the weight from 0 to 1 on a single frame",
+          "blendW2": "deleting the FK keys instantly",
+          "blendW3": "never using IK on that limb",
+          "popQ": "An IK/FK 'blend pop' — a one-frame snap of the limb — is caused by…",
+          "popRight": "switching the blend weight instantly instead of ramping it",
+          "popW1": "ramping the blend weight too slowly",
+          "popW2": "using quaternions for the rotations",
+          "popW3": "planting the feet with contact goals"
+        }
+      }
+    </script>
+
+    <primer-quiz name="fullBodyIkQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  { "prerequisites": ["computer-science/computer-animation/computer-animation"] }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Reaching figure: a stick character with planted feet, a shelf target driven by a slider, a
+          two-bone arm solved by 2-link IK to the shelf, and a COM plumb line over the support polygon.
+          Static base content + one slider (shelf height), so it shows fully on load. ---- */
+  const rf = makeStrings("reachFig");
+  const armA = 0.9, armB = 0.9;                 // upper arm / forearm lengths
+  const targetX = 1.35;                          // shelf horizontal position
+  const footL = -0.5, footR = 0.5;               // planted feet (support polygon on the ground)
+
+  registerGeometryScene(
+    "reachFig",
+    ({ board, colors, sliders, sceneStrings }) => {
+      const S = sliders[0];                       // shelf height, 1.6 .. 3.4
+      const u = () => (S.Value() - 1.6) / 1.8;    // normalised reach 0..1
+
+      // Body reference points (rise onto toes + lean toward the shelf as we reach higher).
+      const hipsX = () => 0.10 * u();
+      const hipsY = () => 1.25 + 0.20 * u();
+      const shX = () => hipsX() + 0.20 + 0.30 * u();
+      const shY = () => hipsY() + 0.85;
+      const targetY = () => S.Value();
+
+      // Ground line + shaded support polygon between the feet.
+      board.create("segment", [[-1.4, 0], [2.1, 0]], { strokeColor: colors.line, strokeWidth: 1, strokeOpacity: 0.5 });
+      board.create("segment", [[footL, 0], [footR, 0]], { strokeColor: colors.cat[2], strokeWidth: 8, strokeOpacity: 0.55 });
+      board.create("text", [footL, -0.28, () => sceneStrings("support")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.cat[2], cssStyle: "font-weight:700",
+      });
+
+      // Skeleton joints.
+      const lFoot = board.create("point", [footL, 0], { size: 3, strokeColor: colors.ink, fillColor: colors.ink, fixed: true, name: "", highlight: false });
+      const rFoot = board.create("point", [footR, 0], { size: 3, strokeColor: colors.ink, fillColor: colors.ink, fixed: true, name: "", highlight: false });
+      const hips = board.create("point", [hipsX, hipsY], { size: 4, strokeColor: colors.ink, fillColor: colors.ink, fixed: true, name: "", highlight: false });
+      const shoulder = board.create("point", [shX, shY], { size: 4, strokeColor: colors.ink, fillColor: colors.ink, fixed: true, name: "", highlight: false });
+
+      // The shelf target.
+      const target = board.create("point", [targetX, targetY], { size: 5, strokeColor: colors.cat[1], fillColor: colors.cat[1], fixed: true, name: "", highlight: false });
+      board.create("text", [targetX + 0.12, () => targetY() + 0.05, () => sceneStrings("target")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.cat[1], cssStyle: "font-weight:700",
+      });
+      board.create("segment", [[targetX - 0.35, targetY], [targetX + 0.55, targetY]], { strokeColor: colors.cat[1], strokeWidth: 5, strokeOpacity: 0.6 });
+
+      // Two-bone arm solved to the shelf (law of cosines); elbow placed on a fixed swivel side (pole).
+      const arm = () => {
+        const sx = shX(), sy = shY(), tx = targetX, ty = targetY();
+        let dx = tx - sx, dy = ty - sy;
+        const raw = Math.hypot(dx, dy) || 1e-6;
+        const ux = dx / raw, uy = dy / raw;
+        const d = Math.min(raw, armA + armB - 1e-3);
+        const cosA = Math.min(1, Math.max(-1, (armA * armA + d * d - armB * armB) / (2 * armA * d)));
+        const alpha = Math.acos(cosA);
+        const ca = Math.cos(-alpha), sa = Math.sin(-alpha);   // rotate toward the -alpha (elbow-down) branch
+        const rx = ux * ca - uy * sa, ry = ux * sa + uy * ca;
+        return { ex: sx + armA * rx, ey: sy + armA * ry, hx: sx + d * ux, hy: sy + d * uy };
+      };
+      const elbow = board.create("point", [() => arm().ex, () => arm().ey], { size: 4, strokeColor: colors.cat[0], fillColor: colors.cat[0], fixed: true, name: "", highlight: false });
+      const hand = board.create("point", [() => arm().hx, () => arm().hy], { size: 4, strokeColor: colors.cat[0], fillColor: colors.cat[0], fixed: true, name: "", highlight: false });
+
+      // Bones.
+      board.create("segment", [hips, lFoot], { strokeColor: colors.line, strokeWidth: 4 });
+      board.create("segment", [hips, rFoot], { strokeColor: colors.line, strokeWidth: 4 });
+      board.create("segment", [hips, shoulder], { strokeColor: colors.line, strokeWidth: 4 });   // spine
+      board.create("segment", [shoulder, elbow], { strokeColor: colors.cat[0], strokeWidth: 4 });
+      board.create("segment", [elbow, hand], { strokeColor: colors.cat[0], strokeWidth: 4 });
+
+      // Head with a look-at line to the shelf.
+      const headX = () => shX() + 0.06, headY = () => shY() + 0.42;
+      board.create("circle", [[headX, headY], 0.22], { strokeColor: colors.line, strokeWidth: 3, fillColor: colors.bg, fillOpacity: 1 });
+      board.create("segment", [[headX, headY], [targetX, targetY]], { strokeColor: colors.cat[1], strokeWidth: 1, dash: 2, strokeOpacity: 0.5 });
+
+      // Centre of mass + plumb line to the ground (stays inside the support polygon → balanced).
+      const comX = () => 0.5 * hipsX() + 0.3 * shX();
+      const comY = () => 0.55 * hipsY() + 0.45 * shY();
+      const com = board.create("point", [comX, comY], { size: 5, strokeColor: colors.cat[2], fillColor: colors.cat[2], fixed: true, name: "", highlight: false, face: "cross" });
+      board.create("segment", [com, [comX, 0]], { strokeColor: colors.cat[2], strokeWidth: 1.5, dash: 2 });
+      board.create("text", [() => comX() + 0.12, comY, () => sceneStrings("com")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.cat[2], cssStyle: "font-weight:700",
+      });
+      board.create("text", [() => comX() + 0.08, 0.16, () => sceneStrings("plumb")], {
+        anchorX: "left", fontSize: 11, strokeColor: colors.cat[2],
+      });
+    },
+    {
+      boundingbox: [-1.6, 3.9, 2.3, -0.6],
+      keepAspect: true,
+      title: () => rf("title"),
+      sliders: [
+        { name: "shelf", label: "shelf height", min: 1.6, max: 3.4, step: 0.02, value: 2.6 },
+      ],
+    },
+  );
+
+  registerQuiz("fullBodyIkQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("limitWhyQ"), options: [
+      { text: () => sceneStrings("limitWhyRight"), correct: true },
+      { text: () => sceneStrings("limitWhyW1"), correct: false },
+      { text: () => sceneStrings("limitWhyW2"), correct: false },
+      { text: () => sceneStrings("limitWhyW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("limitHowQ"), options: [
+      { text: () => sceneStrings("limitHowRight"), correct: true },
+      { text: () => sceneStrings("limitHowW1"), correct: false },
+      { text: () => sceneStrings("limitHowW2"), correct: false },
+      { text: () => sceneStrings("limitHowW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("poleQ"), options: [
+      { text: () => sceneStrings("poleRight"), correct: true },
+      { text: () => sceneStrings("poleW1"), correct: false },
+      { text: () => sceneStrings("poleW2"), correct: false },
+      { text: () => sceneStrings("poleW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("redundQ"), options: [
+      { text: () => sceneStrings("redundRight"), correct: true },
+      { text: () => sceneStrings("redundW1"), correct: false },
+      { text: () => sceneStrings("redundW2"), correct: false },
+      { text: () => sceneStrings("redundW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("lookatQ"), options: [
+      { text: () => sceneStrings("lookatRight"), correct: true },
+      { text: () => sceneStrings("lookatW1"), correct: false },
+      { text: () => sceneStrings("lookatW2"), correct: false },
+      { text: () => sceneStrings("lookatW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("stackQ"), options: [
+      { text: () => sceneStrings("stackRight"), correct: true },
+      { text: () => sceneStrings("stackW1"), correct: false },
+      { text: () => sceneStrings("stackW2"), correct: false },
+      { text: () => sceneStrings("stackW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("weightQ"), options: [
+      { text: () => sceneStrings("weightRight"), correct: true },
+      { text: () => sceneStrings("weightW1"), correct: false },
+      { text: () => sceneStrings("weightW2"), correct: false },
+      { text: () => sceneStrings("weightW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("priorityQ"), options: [
+      { text: () => sceneStrings("priorityRight"), correct: true },
+      { text: () => sceneStrings("priorityW1"), correct: false },
+      { text: () => sceneStrings("priorityW2"), correct: false },
+      { text: () => sceneStrings("priorityW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("fbikQ"), options: [
+      { text: () => sceneStrings("fbikRight"), correct: true },
+      { text: () => sceneStrings("fbikW1"), correct: false },
+      { text: () => sceneStrings("fbikW2"), correct: false },
+      { text: () => sceneStrings("fbikW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("balanceQ"), options: [
+      { text: () => sceneStrings("balanceRight"), correct: true },
+      { text: () => sceneStrings("balanceW1"), correct: false },
+      { text: () => sceneStrings("balanceW2"), correct: false },
+      { text: () => sceneStrings("balanceW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("supportQ"), options: [
+      { text: () => sceneStrings("supportRight"), correct: true },
+      { text: () => sceneStrings("supportW1"), correct: false },
+      { text: () => sceneStrings("supportW2"), correct: false },
+      { text: () => sceneStrings("supportW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("conflictQ"), options: [
+      { text: () => sceneStrings("conflictRight"), correct: true },
+      { text: () => sceneStrings("conflictW1"), correct: false },
+      { text: () => sceneStrings("conflictW2"), correct: false },
+      { text: () => sceneStrings("conflictW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("blendQ"), options: [
+      { text: () => sceneStrings("blendRight"), correct: true },
+      { text: () => sceneStrings("blendW1"), correct: false },
+      { text: () => sceneStrings("blendW2"), correct: false },
+      { text: () => sceneStrings("blendW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("popQ"), options: [
+      { text: () => sceneStrings("popRight"), correct: true },
+      { text: () => sceneStrings("popW1"), correct: false },
+      { text: () => sceneStrings("popW2"), correct: false },
+      { text: () => sceneStrings("popW3"), correct: false },
+    ] },
+  ]);
+</script>

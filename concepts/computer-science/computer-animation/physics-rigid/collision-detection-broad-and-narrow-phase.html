@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Collision Detection: Broad and Narrow Phase</primer-title>
+
+    <primer-card>
+      <p>
+        Drop a thousand bouncing crates into a physics world and, before you can push a single one of them
+        apart, you have to answer one deceptively simple question: <strong>what is touching what?</strong> The
+        lazy answer is to test every crate against every other crate. With <primer-math>n = 1000</primer-math>
+        objects that is <primer-math>\binom{1000}{2} = 499{,}500</primer-math> exact overlap tests
+        <em>every single frame</em> — half a million tests sixty times a second, and it only gets worse: the
+        naive cost grows like <primer-math>O(n^2)</primer-math>, so ten thousand objects is a hundred times
+        more expensive again. No real engine can afford that.
+      </p>
+      <p>
+        The way out is to split the work into <strong>two phases</strong>. A cheap, near-linear
+        <strong>broad phase</strong> throws away the overwhelming majority of pairs that could not possibly be
+        touching, leaving a short list of <em>candidates</em>; then an exact but more expensive
+        <strong>narrow phase</strong> tests only those survivors and, for the real hits, produces the
+        <strong>contact data</strong> the response step needs. This page is about that division of labour —
+        why it exists, the acceleration structures that make the broad phase fast, and the sharp edges (like a
+        bullet passing clean through a wall) that catch the unwary.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two phases, two jobs</h2>
+      <primer-theorem name="Broad phase and narrow phase">
+        <ul>
+          <li><strong>Broad phase</strong> — cheaply and conservatively cull the
+            <primer-math>O(n^2)</primer-math> possible pairs down to a small set of <em>potentially</em>
+            colliding pairs, using loose <em>bounding volumes</em> (typically axis-aligned boxes) and a spatial
+            acceleration structure. It may report false positives, but it must <em>never</em> miss a true
+            overlap.</li>
+          <li><strong>Narrow phase</strong> — run an exact intersection test on each surviving pair
+            (sphere–sphere, box–box, or a convex test such as the
+            <primer-ref todo to="computer-science/computer-animation/physics-rigid/the-gjk-algorithm">GJK</primer-ref>
+            algorithm), and for genuine contacts compute the <strong>contact manifold</strong>: contact
+            point(s), a surface <strong>normal</strong>, and a <strong>penetration depth</strong>.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The split works because the two jobs have opposite economics. The broad-phase test is crude and cheap,
+        so you can afford to run it on <em>every</em> object. The narrow-phase test is precise and pricey, so
+        you want to run it on as few pairs as possible. Feed the cheap filter first, and the expensive test
+        only ever sees the handful of pairs that actually matter.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The broad phase must be near-linear</h2>
+      <p>
+        Here is the trap the two-phase structure is built to avoid. Suppose your broad phase itself compares
+        every object's bounding box against every other object's box. That is still
+        <primer-math>O(n^2)</primer-math> work — you have made each test cheaper, but you have not changed the
+        <em>growth rate</em>, so at large <primer-math>n</primer-math> the whole thing collapses back into the
+        quadratic wall you were trying to escape.
+      </p>
+      <p>
+        A useful broad phase must be <strong>sub-quadratic</strong> — close to
+        <primer-math>O(n \log n)</primer-math> or <primer-math>O(n)</primer-math> — so that the total cost is
+        dominated by the narrow phase acting on the few real candidates rather than by the culling itself.
+        Three families of acceleration structure achieve this:
+      </p>
+      <primer-theorem name="Broad-phase acceleration structures">
+        <ul>
+          <li><strong>Sweep-and-prune (SAP)</strong> — project every box onto each coordinate axis to get an
+            interval <primer-math>[\text{min}, \text{max}]</primer-math>, sort the endpoints along each axis,
+            then sweep through in order. Two boxes can only overlap if their projections overlap on
+            <em>every</em> axis, so you report a candidate pair only where all axes agree.</li>
+          <li><strong>Uniform grid / spatial hashing</strong> — chop space into cells of a fixed size, hash
+            each object into the cells its box touches, and only test objects that share a cell. Nearby objects
+            land in the same bucket; distant ones never meet.</li>
+          <li><strong>Bounding-volume hierarchy (BVH)</strong> — nest the bounding volumes into a tree so that
+            a parent volume encloses its children. Descend both trees together; whole branches whose parent
+            volumes miss are pruned in one comparison. Ideal for static geometry and uneven object sizes.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        These all lean on cheap <primer-ref soft to="applied-mathematics/game-development-math/collision/bounding-volumes">bounding
+        volumes</primer-ref> and <primer-ref soft to="applied-mathematics/game-development-math/collision/spatial-partitioning">spatial
+        partitioning</primer-ref> — the same game-dev toolkit reused, now in service of physics.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "sapScene": {
+          "title": "Sweep-and-prune on the x-axis: overlap only where intervals overlap",
+          "boxlabel": "AABBs in the plane",
+          "axislabel": "x-axis intervals (projections)",
+          "note": "A & B intervals overlap → candidate pair; C is disjoint → pruned"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Seeing sweep-and-prune</h2>
+      <p>
+        In the figure below, three axis-aligned bounding boxes (AABBs) sit in the plane. Beneath them, each box
+        is projected onto the <primer-math>x</primer-math>-axis as an interval. Boxes <strong>A</strong> and
+        <strong>B</strong> have <em>overlapping</em> <primer-math>x</primer-math>-intervals, so sweep-and-prune
+        keeps <primer-math>(A, B)</primer-math> as a candidate to hand to the narrow phase. Box
+        <strong>C</strong>'s interval is disjoint from the others, so every pair involving <strong>C</strong>
+        is pruned immediately — no exact test is ever run on it.
+      </p>
+      <primer-geometry
+        scene="sapScene"
+        caption="Three AABBs and their projections onto the x-axis. Overlapping intervals (A, B) become a candidate pair; the disjoint interval (C) is pruned. Real SAP requires overlap on every axis."
+      ></primer-geometry>
+      <p>
+        The trick that makes this fast is <em>sorting</em>. Sort the interval endpoints once, sweep through
+        them in order keeping a small "active set" of currently-open intervals, and you find every overlap in
+        roughly <primer-math>O(n \log n)</primer-math> for the sort plus <primer-math>O(n + k)</primer-math> for
+        the sweep, where <primer-math>k</primer-math> is the number of overlapping pairs actually reported.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: 1000 objects</h2>
+      <p>
+        Put numbers on it. With <primer-math>n = 1000</primer-math> objects the naive all-pairs approach does
+      </p>
+      <primer-math display>\binom{n}{2} = \frac{n(n-1)}{2} = \frac{1000 \cdot 999}{2} = 499{,}500 \text{ tests per frame.}</primer-math>
+      <p>
+        At 60 frames per second that is about <primer-math>30</primer-math> million exact overlap tests every
+        second — and each one might be a full convex intersection. Now suppose the objects are spread over a
+        uniform grid so that, on average, only a handful share any cell. The grid visits each object roughly
+        once and checks it against only its neighbours, giving work proportional to
+        <primer-math>n</primer-math> plus the number of genuine near-pairs — call it a few thousand candidate
+        tests instead of half a million.
+      </p>
+      <primer-theorem name="The saving">
+        <ul>
+          <li>Naive: <primer-math>\sim n^2/2 = 5 \times 10^5</primer-math> exact tests per frame.</li>
+          <li>Grid / SAP broad phase: <primer-math>\sim O(n) = 10^3</primer-math> cheap box tests, leaving only
+            the few candidate pairs for exact testing.</li>
+          <li>Roughly a <strong>hundredfold</strong> cut at <primer-math>n = 1000</primer-math>, widening
+            without bound as <primer-math>n</primer-math> grows — that gap is <em>why</em> the broad phase is
+            not optional.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The narrow phase: exact tests and contact data</h2>
+      <p>
+        Once the broad phase hands over a short candidate list, the narrow phase runs the <em>exact</em>
+        geometry. For two spheres of radii <primer-math>r_1, r_2</primer-math> at centres
+        <primer-math>c_1, c_2</primer-math> the test is a single distance comparison:
+      </p>
+      <primer-math display>\lVert c_1 - c_2 \rVert \;\le\; r_1 + r_2 \quad\Longleftrightarrow\quad \text{overlap.}</primer-math>
+      <p>
+        For two AABBs it is three interval-overlap checks, one per axis; for general convex shapes it is a
+        separating-axis or GJK-style test. But detecting the hit is only half the narrow phase's job. To
+        <em>respond</em> to the collision — push the bodies apart, apply impulses — the solver needs a
+        <strong>contact manifold</strong>:
+      </p>
+      <primer-theorem name="Contact data">
+        <ul>
+          <li><strong>Contact point</strong> — where the bodies touch (or the deepest point of overlap).</li>
+          <li><strong>Contact normal</strong> <primer-math>\hat{n}</primer-math> — the unit direction along
+            which to separate them; for two spheres, <primer-math>\hat{n} = (c_2 - c_1)/\lVert c_2 - c_1
+            \rVert</primer-math>.</li>
+          <li><strong>Penetration depth</strong> <primer-math>d</primer-math> — how far they have
+            interpenetrated; for two spheres, <primer-math>d = r_1 + r_2 - \lVert c_1 - c_2 \rVert</primer-math>.
+            Push each body back by <primer-math>d/2</primer-math> along <primer-math>\hat{n}</primer-math> and
+            they just touch.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        A boolean "yes, they overlap" is enough for a trigger volume, but a physical response is blind without
+        the normal and the depth. Producing that manifold cleanly — especially for face-to-face contact with
+        multiple contact points — is most of what makes the narrow phase intricate.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Temporal coherence: objects barely move</h2>
+      <p>
+        Here is the observation that makes real-time broad phases practical: between two consecutive frames,
+        almost nothing moves very far. A crate that was left of another crate this frame is overwhelmingly
+        likely to still be left of it next frame. So the sorted endpoint order that sweep-and-prune built last
+        frame is <em>almost</em> already correct — a few neighbours may have swapped, but the list is nearly
+        sorted.
+      </p>
+      <p>
+        Re-sorting a nearly-sorted list with <strong>insertion sort</strong> costs about
+        <primer-math>O(n)</primer-math>, not <primer-math>O(n \log n)</primer-math>, because each element only
+        drifts a slot or two. This <strong>temporal coherence</strong> — reusing last frame's structure and
+        patching the small changes — is why incremental sweep-and-prune is a workhorse of real engines, and why
+        the same idea speeds up grids (objects mostly stay in their cell) and BVH refits (boxes mostly stay
+        put).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Discrete vs continuous detection</h2>
+      <p>
+        Everything so far is <strong>discrete</strong> collision detection: sample each object's pose at frame
+        <primer-math>t</primer-math>, then again at <primer-math>t + \Delta t</primer-math>, and test the two
+        snapshots. That is fine when objects move less than their own size per step. But a small, fast object
+        can leap <em>past</em> a thin obstacle entirely: it is on one side at frame <primer-math>t</primer-math>
+        and already on the far side at <primer-math>t + \Delta t</primer-math>, and neither snapshot overlaps
+        the wall. The engine reports no collision, and the object <strong>tunnels</strong> straight through.
+      </p>
+      <p>
+        <strong>Continuous collision detection (CCD)</strong> fixes this by testing the <em>swept volume</em> —
+        the region the object sweeps out along its path between the two frames — rather than just its endpoints.
+        Instead of asking "do the two poses overlap?" it asks "does the moving shape's trajectory cross the
+        obstacle at any moment in <primer-math>[t, t+\Delta t]</primer-math>?", solving for the earliest
+        <strong>time of impact</strong>. It costs more, so engines reserve it for the objects that need it —
+        bullets, thin fast debris — and leave slow, chunky objects on cheap discrete tests.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why not just make the physics timestep tiny so nothing ever tunnels?">
+      <p>
+        You could shrink <primer-math>\Delta t</primer-math> until even a bullet only moves a millimetre per
+        step — but the cost is brutal. Halving the timestep <em>doubles</em> the number of full physics
+        updates (broad phase, narrow phase, and solver) per second of animation, and it still does not
+        <em>guarantee</em> safety: there is always some faster object or thinner wall that defeats whatever
+        fixed step you pick. Continuous detection sidesteps the whole race by reasoning about the entire
+        <em>path</em> in one test, so it catches the impact regardless of speed. Tiny timesteps buy you
+        robustness you can never quite finish paying for; swept tests buy it outright, only where you need it.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Tunnelling — the bullet through the wall">
+      <p>
+        The classic failure of discrete collision detection is <strong>tunnelling</strong>. A fast, thin
+        object — a bullet, a sword blade, a thrown knife — can pass <em>entirely</em> through a thin wall
+        between two frames because at frame <primer-math>t</primer-math> it is in front of the wall and at
+        frame <primer-math>t + \Delta t</primer-math> it is already behind it, and <em>neither snapshot
+        overlaps</em>. The broad phase never even flags the pair, the narrow phase never runs, and the bullet
+        sails through solid stone with no complaint.
+      </p>
+      <p>
+        The fix is <strong>continuous collision detection or swept-volume tests</strong> for exactly those
+        fast/thin objects: test the object's trajectory, not just its endpoints, and solve for the time of
+        impact. Do not reach for a smaller global timestep as the cure — it is expensive and never fully safe.
+        Flag your bullets as CCD objects and leave the rest discrete.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "collisionDetectionQuiz@1": {
+          "intro": "Broad phase culls pairs cheaply; narrow phase tests exactly and builds contact data. Fresh questions each time.",
+          "broadQ": "What is the job of the BROAD phase?",
+          "broadRight": "cheaply cull the O(n²) pairs down to a small set of likely-colliding candidates",
+          "broadW1": "compute exact contact points, normals and penetration depth",
+          "broadW2": "apply impulses to separate overlapping bodies",
+          "broadW3": "render the objects to the screen",
+          "narrowQ": "What does the NARROW phase produce for a genuine contact?",
+          "narrowRight": "contact data: contact point(s), a normal, and a penetration depth",
+          "narrowW1": "a sorted list of AABB endpoints",
+          "narrowW2": "the hash bucket each object falls into",
+          "narrowW3": "a bounding-volume hierarchy",
+          "naiveQ": "The naive all-pairs approach scales as…",
+          "naiveRight": "$O(n^2)$ — every object tested against every other",
+          "naiveW1": "$O(n)$ — linear in the object count",
+          "naiveW2": "$O(\\log n)$ — logarithmic",
+          "naiveW3": "$O(1)$ — constant regardless of count",
+          "sapQ": "In sweep-and-prune, two boxes are reported as a candidate pair only when…",
+          "sapRight": "their projected intervals overlap on every axis",
+          "sapW1": "they share the same colour",
+          "sapW2": "their centres are exactly equal",
+          "sapW3": "they were created in the same frame",
+          "whyBroadQ": "Why must the broad phase be near-linear rather than $O(n^2)$?",
+          "whyBroadRight": "an $O(n^2)$ broad phase collapses back into the quadratic wall it was meant to avoid",
+          "whyBroadW1": "because narrow-phase tests are always cheaper than broad-phase tests",
+          "whyBroadW2": "because objects never move between frames",
+          "whyBroadW3": "because AABBs cannot be sorted",
+          "coherenceQ": "Temporal coherence lets an engine…",
+          "coherenceRight": "reuse last frame's nearly-sorted order and patch it cheaply (insertion sort, ~O(n))",
+          "coherenceW1": "skip the narrow phase entirely",
+          "coherenceW2": "render without a GPU",
+          "coherenceW3": "guarantee no object ever tunnels",
+          "tunnelQ": "A fast, thin bullet passes through a wall with no collision reported. This is…",
+          "tunnelRight": "tunnelling — neither discrete frame's snapshot overlapped the wall",
+          "tunnelW1": "temporal coherence working as intended",
+          "tunnelW2": "a broad-phase false positive",
+          "tunnelW3": "correct behaviour for any thin object",
+          "ccdQ": "The right fix for tunnelling of fast/thin objects is…",
+          "ccdRight": "continuous collision detection / swept-volume tests that check the trajectory",
+          "ccdW1": "a larger physics timestep",
+          "ccdW2": "removing the object's bounding box",
+          "ccdW3": "skipping the broad phase for that object",
+          "gridQ": "In uniform spatial hashing, which objects get an exact narrow-phase test?",
+          "gridRight": "objects that share at least one grid cell",
+          "gridW1": "every pair of objects in the world",
+          "gridW2": "only objects with identical velocities",
+          "gridW3": "only the first and last object created",
+          "bvhQ": "A bounding-volume hierarchy prunes a whole branch when…",
+          "bvhRight": "the parent volume misses — one comparison rules out all its children",
+          "bvhW1": "any single child is tested and misses",
+          "bvhW2": "the tree is exactly balanced",
+          "bvhW3": "two leaves have the same depth",
+          "manifoldQ": "Why isn't a boolean 'yes, they overlap' enough for physical collision response?",
+          "manifoldRight": "response needs the normal and penetration depth to know which way and how far to separate",
+          "manifoldW1": "booleans cannot be stored in a physics engine",
+          "manifoldW2": "response only needs the object colours",
+          "manifoldW3": "a boolean is slower to compute than a manifold",
+          "pairsQ": "With $n={m}$ objects, how many pairs does the naive all-pairs test check? Compute $n(n-1)/2$.",
+          "sphereQ": "Two spheres have radii summing to ${rs}$ and centre distance ${dc}$. They overlap when the distance is at most the radius sum — is $\\lVert c_1-c_2\\rVert \\le r_1+r_2$? Enter the penetration depth $r_1+r_2-\\lVert c_1-c_2\\rVert$ (0 if not overlapping)."
+        }
+      }
+    </script>
+
+    <primer-quiz name="collisionDetectionQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/computer-animation/computer-animation"]
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Sweep-and-prune: three AABBs in the plane, their x-projections as intervals below.
+          A & B overlap on x (candidate); C is disjoint (pruned). Static base content so it shows on load. ---- */
+  const sapStr = makeStrings("sapScene");
+  registerGeometryScene(
+    "sapScene",
+    ({ board, colors, sceneStrings }) => {
+      // Box helper: rectangle from [xmin,ymin] to [xmax,ymax].
+      const box = (x0, y0, x1, y1, col, nm) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          borders: { strokeColor: col, strokeWidth: 2 }, fillColor: col, fillOpacity: 0.12,
+          vertices: { visible: false }, withLines: true, fixed: true, highlight: false, name: "",
+        });
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, nm], {
+          anchorX: "middle", anchorY: "middle", fontSize: 15, strokeColor: col, cssStyle: "font-weight:700",
+        });
+      };
+
+      // Three boxes in the plane (upper region).
+      box(0.5, 3.0, 3.0, 5.0, colors.cat[0], "A");
+      box(2.2, 3.4, 4.6, 5.2, colors.cat[1], "B");
+      box(6.2, 3.2, 8.4, 5.0, colors.cat[2], "C");
+
+      // Axis line for the projections.
+      board.create("segment", [[0, 1.4], [9, 1.4]], { strokeColor: colors.line, strokeWidth: 1.5 });
+
+      // Interval brackets on the x-axis (min/max of each box's x-extent).
+      const interval = (xa, xb, y, col) => {
+        board.create("segment", [[xa, y], [xb, y]], { strokeColor: col, strokeWidth: 4 });
+        board.create("segment", [[xa, y - 0.18], [xa, y + 0.18]], { strokeColor: col, strokeWidth: 3 });
+        board.create("segment", [[xb, y - 0.18], [xb, y + 0.18]], { strokeColor: col, strokeWidth: 3 });
+      };
+      interval(0.5, 3.0, 0.9, colors.cat[0]); // A: x in [0.5, 3.0]
+      interval(2.2, 4.6, 0.5, colors.cat[1]); // B: x in [2.2, 4.6] — overlaps A on [2.2, 3.0]
+      interval(6.2, 8.4, 0.1, colors.cat[2]); // C: x in [6.2, 8.4] — disjoint
+
+      // Dashed drop-lines from box x-extents down to the axis for A and B (show the overlap region).
+      const drop = (x, col) =>
+        board.create("segment", [[x, 3.0], [x, 1.0]], { strokeColor: col, strokeWidth: 1, dash: 2, strokeOpacity: 0.5 });
+      drop(2.2, colors.ink);
+      drop(3.0, colors.ink);
+
+      // Shade the x-overlap band [2.2, 3.0] where A & B agree.
+      board.create("polygon", [[2.2, 0.2], [3.0, 0.2], [3.0, 1.2], [2.2, 1.2]], {
+        borders: { visible: false }, fillColor: colors.cat[0], fillOpacity: 0.18,
+        vertices: { visible: false }, fixed: true, highlight: false, name: "",
+      });
+
+      // Labels.
+      board.create("text", [0.2, 5.7, () => sceneStrings("boxlabel")], {
+        anchorX: "left", fontSize: 13, strokeColor: colors.ink,
+      });
+      board.create("text", [0.2, 2.0, () => sceneStrings("axislabel")], {
+        anchorX: "left", fontSize: 13, strokeColor: colors.ink,
+      });
+      board.create("text", [0.2, -0.5, () => sceneStrings("note")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.line,
+      });
+    },
+    { boundingbox: [-0.6, 6.2, 9.4, -1.1], keepAspect: false, title: () => sapStr("title") },
+  );
+
+  registerQuiz("collisionDetectionQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("broadQ"), options: [
+      { text: () => sceneStrings("broadRight"), correct: true },
+      { text: () => sceneStrings("broadW1"), correct: false },
+      { text: () => sceneStrings("broadW2"), correct: false },
+      { text: () => sceneStrings("broadW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("narrowQ"), options: [
+      { text: () => sceneStrings("narrowRight"), correct: true },
+      { text: () => sceneStrings("narrowW1"), correct: false },
+      { text: () => sceneStrings("narrowW2"), correct: false },
+      { text: () => sceneStrings("narrowW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("naiveQ"), options: [
+      { text: () => sceneStrings("naiveRight"), correct: true },
+      { text: () => sceneStrings("naiveW1"), correct: false },
+      { text: () => sceneStrings("naiveW2"), correct: false },
+      { text: () => sceneStrings("naiveW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("sapQ"), options: [
+      { text: () => sceneStrings("sapRight"), correct: true },
+      { text: () => sceneStrings("sapW1"), correct: false },
+      { text: () => sceneStrings("sapW2"), correct: false },
+      { text: () => sceneStrings("sapW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("whyBroadQ"), options: [
+      { text: () => sceneStrings("whyBroadRight"), correct: true },
+      { text: () => sceneStrings("whyBroadW1"), correct: false },
+      { text: () => sceneStrings("whyBroadW2"), correct: false },
+      { text: () => sceneStrings("whyBroadW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("coherenceQ"), options: [
+      { text: () => sceneStrings("coherenceRight"), correct: true },
+      { text: () => sceneStrings("coherenceW1"), correct: false },
+      { text: () => sceneStrings("coherenceW2"), correct: false },
+      { text: () => sceneStrings("coherenceW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("tunnelQ"), options: [
+      { text: () => sceneStrings("tunnelRight"), correct: true },
+      { text: () => sceneStrings("tunnelW1"), correct: false },
+      { text: () => sceneStrings("tunnelW2"), correct: false },
+      { text: () => sceneStrings("tunnelW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("ccdQ"), options: [
+      { text: () => sceneStrings("ccdRight"), correct: true },
+      { text: () => sceneStrings("ccdW1"), correct: false },
+      { text: () => sceneStrings("ccdW2"), correct: false },
+      { text: () => sceneStrings("ccdW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("gridQ"), options: [
+      { text: () => sceneStrings("gridRight"), correct: true },
+      { text: () => sceneStrings("gridW1"), correct: false },
+      { text: () => sceneStrings("gridW2"), correct: false },
+      { text: () => sceneStrings("gridW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("bvhQ"), options: [
+      { text: () => sceneStrings("bvhRight"), correct: true },
+      { text: () => sceneStrings("bvhW1"), correct: false },
+      { text: () => sceneStrings("bvhW2"), correct: false },
+      { text: () => sceneStrings("bvhW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("manifoldQ"), options: [
+      { text: () => sceneStrings("manifoldRight"), correct: true },
+      { text: () => sceneStrings("manifoldW1"), correct: false },
+      { text: () => sceneStrings("manifoldW2"), correct: false },
+      { text: () => sceneStrings("manifoldW3"), correct: false },
+    ] },
+    { prompt: (v) => sceneStrings("pairsQ", v), variables: "m=[5:40]", answer: (v) => (v.m * (v.m - 1)) / 2 },
+    { prompt: (v) => sceneStrings("sphereQ", v), variables: "rs=[3:9] dc=[1:8]",
+      answer: (v) => Math.max(0, v.rs - v.dc) },
+  ]);
+</script>

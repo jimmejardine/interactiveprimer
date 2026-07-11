@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Particle Systems</primer-title>
+
+    <primer-card>
+      <p>
+        How do you animate fire? Not with a mesh — flame has no surface to model. It flickers, splits,
+        curls and dies, and it has no fixed shape from one frame to the next. The same is true of smoke,
+        sparks, rain, dust, a waterfall's spray, or the shimmer of movie magic. These <em>fuzzy</em>
+        phenomena defeated the polygon-and-mesh pipeline entirely — until, in 1982, Bill Reeves needed to
+        set a dead planet ablaze for the "Genesis effect" in <em>Star Trek II: The Wrath of Khan</em> and
+        reached for a completely different idea: don't model the <em>shape</em>, simulate a <strong>crowd of
+        thousands of tiny independent points</strong> and let the look <em>emerge</em>.
+      </p>
+      <p>
+        That idea — the <strong>particle system</strong> — is still the workhorse for every fuzzy effect in
+        games and film. This page teaches what a particle is, how an <em>emitter</em> births them, how each
+        one is pushed around by forces and then quietly dies, and how millions of them get drawn as glowing
+        camera-facing sprites. It builds on
+        <primer-ref to="computer-science/computer-animation/computer-animation">computer animation</primer-ref>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A particle is almost nothing</h2>
+      <p>
+        The whole trick rests on making each particle as <strong>cheap</strong> as possible, because you
+        want a great many of them. A particle is not a mesh, not an object — it is a lightweight bundle of
+        numbers: a point that carries a little <strong>state</strong>.
+      </p>
+      <primer-theorem name="Particle state">
+        <ul>
+          <li><strong>Position</strong> <primer-math>\mathbf{p}</primer-math> and <strong>velocity</strong>
+            <primer-math>\mathbf{v}</primer-math> — where it is and how fast it is moving.</li>
+          <li><strong>Mass</strong> <primer-math>m</primer-math> — how strongly forces accelerate it.</li>
+          <li><strong>Age</strong> and <strong>lifetime</strong> — how long it has lived, and how long it is
+            allowed to live before it is killed.</li>
+          <li><strong>Size</strong>, <strong>colour</strong> and <strong>opacity</strong> — its visual
+            appearance, which usually <em>changes over its life</em>.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        In code a particle is just a struct, a dozen numbers wide:
+      </p>
+      <primer-code lang="typescript">
+interface Particle {
+  pos: Vec3;      // position
+  vel: Vec3;      // velocity
+  mass: number;   // for F = m·a
+  age: number;    // seconds lived so far
+  life: number;   // seconds allowed to live
+  size: number;
+  color: Vec4;    // r, g, b, opacity
+}
+      </primer-code>
+      <p>
+        There is no geometry, no vertices, no faces. One particle on its own is invisible-dull — a single
+        dot. The magic is entirely in the <strong>numbers</strong>: put ten thousand of these together, each
+        following the same simple rules with slightly different starting conditions, and the crowd behaves
+        like fire.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Emitters: where particles are born</h2>
+      <p>
+        Particles don't exist forever, and a fire needs a steady supply of fresh ones to replace those that
+        burn out. That supply comes from an <strong>emitter</strong> — a source that <em>spawns</em> new
+        particles at some <strong>spawn rate</strong> (say 500 per second), handing each newborn its initial
+        state. Emitters come in shapes:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Emitter</th><th>Spawns particles…</th><th>Good for</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Point</td><td>all from one spot</td><td>a spark shower, a fountain jet</td></tr>
+            <tr><td>Area / disc</td><td>across a 2-D patch</td><td>rain over a region, a campfire base</td></tr>
+            <tr><td>Volume</td><td>throughout a 3-D box or sphere</td><td>dust in a room, a fog bank</td></tr>
+            <tr><td>Mesh surface</td><td>over an object's skin</td><td>a body catching fire, steam off a kettle</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The single most important thing an emitter does is <strong>randomise</strong> those initial
+        conditions. If every particle launched with the <em>identical</em> velocity, they would all move in
+        lockstep and read as one rigid clump. Instead the emitter jitters each birth: a random direction
+        inside a cone, a random speed in a range, a random lifetime, a small colour variation. That
+        scatter is exactly what gives the system its organic, <strong>stochastic</strong> look.
+      </p>
+      <primer-code lang="typescript">
+function spawn(): Particle {
+  const speed = 4 + Math.random() * 2;             // 4–6 units/s
+  const angle = (Math.random() - 0.5) * 0.4;       // narrow cone
+  return {
+    pos:  { x: 0, y: 0, z: 0 },                     // point emitter
+    vel:  { x: Math.sin(angle) * speed, y: Math.cos(angle) * speed, z: 0 },
+    mass: 1,
+    age:  0,
+    life: 1.5 + Math.random(),                      // 1.5–2.5 s
+    size: 0.2,
+    color: { x: 1, y: 0.6, z: 0.1, w: 1 },          // warm, fully opaque
+  };
+}
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The update step: integrate, age, die</h2>
+      <p>
+        Every frame (a time step <primer-math>\Delta t</primer-math>), the system walks its whole list of
+        live particles and updates each one <em>independently</em>. The update is the same three-part loop
+        for all of them:
+      </p>
+      <primer-theorem name="Per-particle update">
+        <ul>
+          <li><strong>Accumulate forces</strong> — sum every force acting on the particle (gravity, drag,
+            wind, vortices, attractors) into a total <primer-math>\mathbf{F}</primer-math>, then get
+            acceleration from <primer-math>\mathbf{a} = \mathbf{F}/m</primer-math>.</li>
+          <li><strong>Integrate</strong> — step velocity and position forward:
+            <primer-math>\mathbf{v} \mathrel{+}= \mathbf{a}\,\Delta t</primer-math>, then
+            <primer-math>\mathbf{p} \mathrel{+}= \mathbf{v}\,\Delta t</primer-math> (explicit Euler).</li>
+          <li><strong>Age and cull</strong> — add <primer-math>\Delta t</primer-math> to the age; if the age
+            exceeds the lifetime, <strong>kill</strong> the particle (recycle its slot for a new spawn).</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The forces are what give each effect its character. A short menu of the common ones:
+      </p>
+      <ul>
+        <li><strong>Gravity</strong>: a constant downward pull, <primer-math>\mathbf{F} = m\mathbf{g}</primer-math> — makes sparks arc and rain fall.</li>
+        <li><strong>Drag</strong>: a force opposing motion, <primer-math>\mathbf{F} = -k\mathbf{v}</primer-math> — makes smoke slow and billow instead of flying off forever.</li>
+        <li><strong>Wind</strong>: a steady push in some direction — bends a flame, drifts a fog.</li>
+        <li><strong>Vortices / attractors</strong>: swirl particles around an axis, or pull them toward a point — for tornadoes, magic spells, black-hole effects.</li>
+      </ul>
+      <primer-code lang="typescript">
+function update(p: Particle, dt: number): boolean {
+  const g = { x: 0, y: -9.8, z: 0 };               // gravity
+  const drag = -0.1;                               // simple linear drag
+  // total acceleration = gravity + drag/mass
+  const ax = g.x + (drag * p.vel.x) / p.mass;
+  const ay = g.y + (drag * p.vel.y) / p.mass;
+  p.vel.x += ax * dt;  p.vel.y += ay * dt;         // integrate velocity
+  p.pos.x += p.vel.x * dt;  p.pos.y += p.vel.y * dt; // integrate position
+  p.age += dt;                                     // grow older
+  p.color.w = 1 - p.age / p.life;                  // fade opacity toward 0
+  return p.age < p.life;                           // false → kill it
+}
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: one particle, one step</h2>
+      <p>
+        Let's do a single step by hand. Take a spark just launched straight up:
+        <primer-math>\mathbf{v} = (0,\,6)\ \text{m/s}</primer-math>,
+        <primer-math>\mathbf{p} = (0,\,0)</primer-math>, mass <primer-math>m = 1</primer-math>, lifetime
+        <primer-math>L = 2\ \text{s}</primer-math>, currently age <primer-math>0.9\ \text{s}</primer-math>.
+        We take one frame at <primer-math>\Delta t = 1/60 \approx 0.0167\ \text{s}</primer-math> under
+        gravity <primer-math>\mathbf{g} = (0,\,-9.8)</primer-math> (ignore drag for clarity).
+      </p>
+      <p>
+        <strong>1. Force → acceleration.</strong> The only force is gravity, so
+        <primer-math>\mathbf{a} = \mathbf{g} = (0,\,-9.8)\ \text{m/s}^2</primer-math>.
+      </p>
+      <p>
+        <strong>2. Integrate velocity.</strong>
+        <primer-math display>\mathbf{v} \leftarrow \mathbf{v} + \mathbf{a}\,\Delta t = (0,\,6) + (0,\,-9.8)(0.0167) = (0,\,5.836)\ \text{m/s}.</primer-math>
+        The upward speed has bled off a touch — gravity is winning.
+      </p>
+      <p>
+        <strong>3. Integrate position.</strong> Using the <em>new</em> velocity,
+        <primer-math display>\mathbf{p} \leftarrow \mathbf{p} + \mathbf{v}\,\Delta t = (0,\,0) + (0,\,5.836)(0.0167) = (0,\,0.0973)\ \text{m}.</primer-math>
+        The spark has climbed about <primer-math>9.7\ \text{cm}</primer-math>.
+      </p>
+      <p>
+        <strong>4. Age and fade.</strong> New age is
+        <primer-math>0.9 + 0.0167 = 0.9167\ \text{s}</primer-math>. The opacity is
+        <primer-math>1 - \text{age}/L = 1 - 0.9167/2 \approx 0.542</primer-math> — a bit past half-faded,
+        so this spark is dimming out. It is still younger than its lifetime
+        (<primer-math>0.9167 < 2</primer-math>), so it survives to the next frame. Run those four lines on
+        ten thousand particles and you have a fountain of fading sparks.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "fountain": {
+          "title": "A particle fountain under gravity — press Play",
+          "ground": "ground",
+          "emitter": "emitter"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>A fountain you can steer</h2>
+      <p>
+        Below is a tiny fountain of nine particles launched from a point emitter in a spread of directions,
+        each an independent projectile under gravity. Drag the <strong>time</strong> slider (or press
+        <strong>Play</strong>) to march the simulation forward and watch the arcs; drag <strong>launch
+        speed</strong> and <strong>gravity</strong> to reshape the spray. Fast launch + weak gravity throws a
+        tall, wide plume; slow launch + strong gravity gives a squat dribble. Every dot obeys the very same
+        two integration lines — the variety comes entirely from their differing launch directions.
+      </p>
+      <primer-geometry
+        scene="fountain"
+        caption="Nine particles launched from a point emitter, each a projectile under gravity. The time slider advances the simulation; launch-speed and gravity sliders reshape the fountain."
+      ></primer-geometry>
+    </primer-card>
+
+    <primer-vignette title="Why did Reeves need particles for the Genesis effect?">
+      <p>
+        In 1982 the Pixar-to-be team at Lucasfilm had to show a barren planet erupting into a spreading wall
+        of fire that races across its surface. There is no <em>object</em> there to model — a wall of fire is
+        pure turbulent chaos. Bill Reeves's insight, written up in his 1983 paper <em>"Particle Systems — A
+        Technique for Modeling a Class of Fuzzy Objects,"</em> was to represent the fire as thousands of
+        glowing particles thrown outward from expanding rings of emitters, each living a second or two,
+        changing colour from white-hot to red to dark as it aged, and dying. No single particle looks like
+        fire; the <strong>emergent</strong> behaviour of the whole cloud does. It was one of the first times
+        computer graphics animated something with no surface at all, and the technique it launched now
+        renders every explosion, waterfall and dust cloud you see on screen.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Rendering: billboards, blending, and life</h2>
+      <p>
+        A particle is a mathematical point, but you can't draw a point — you draw a small <strong>sprite</strong>
+        (a textured quad: a soft blob, a smoke puff, a spark streak) at the particle's position. To avoid the
+        illusion breaking when the camera moves around, the quad is a <strong>billboard</strong>: it is
+        rotated every frame to always face the camera, so you never catch it edge-on and see it vanish.
+      </p>
+      <p>
+        Two rendering choices sell the effect:
+      </p>
+      <ul>
+        <li><strong>Additive blending</strong> for anything glowing — fire, sparks, magic. Instead of
+          painting over what's behind, each sprite <em>adds</em> its light to the pixels, so overlapping
+          particles pile up into bright, saturated cores exactly the way real light does. (Smoke and dust use
+          normal alpha blending, since they <em>block</em> light rather than emit it.)</li>
+        <li><strong>Size and colour over life</strong> — the particle's appearance is animated by its
+          normalised age <primer-math>u = \text{age}/\text{lifetime} \in [0,1]</primer-math>. A smoke puff
+          grows (size ramps up with <primer-math>u</primer-math>) and fades (opacity
+          <primer-math>1-u</primer-math>); a spark cools from white through orange to red as
+          <primer-math>u</primer-math> climbs. Driving appearance off <primer-math>u</primer-math> is what
+          makes a particle look <em>born, living, and dying</em> rather than just teleporting in and out.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>Onto the GPU: millions at once</h2>
+      <p>
+        Because every particle updates <strong>independently</strong> with the identical little program,
+        particle systems are almost perfectly <em>parallel</em> — which is exactly what a GPU eats for
+        breakfast. A modern <strong>GPU particle system</strong> keeps the entire particle buffer in video
+        memory and runs the spawn / integrate / age / cull loop in a <strong>compute (or vertex) shader</strong>,
+        thousands of particles per shader invocation, all in flight at once. The particles never make a round
+        trip back to the CPU. This is what lifts the budget from a few thousand CPU particles to
+        <strong>millions</strong>: dense sandstorms, volumetric smoke, sparks by the fistful, all simulated
+        and rendered on the graphics card in real time.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! Particles usually ignore each other">
+      <p>
+        The reason particle systems are so cheap is a deliberate cheat: particles are almost always
+        <strong>independent</strong>. Each one integrates against the global force field (gravity, wind,
+        drag) but <em>does not see the other particles</em> — no collisions, no pushing, no piling up. The
+        cost of the update is then simply linear, <primer-math>O(n)</primer-math>, so you can afford
+        millions.
+      </p>
+      <p>
+        This is exactly why cheap fire, smoke, sparks and rain look right: those things really are clouds of
+        near-independent bits that pass through one another. But it is also why a naive particle system makes
+        a <em>terrible</em> pile of sand or heap of gravel — a pile only exists because grains
+        <strong>collide</strong> and rest on each other, and independent particles just fall straight through
+        the floor into an overlapping mush. The moment you need particles to interact — sand, cloth, fluid
+        with pressure, stacking — you must add <strong>inter-particle forces</strong> (collisions,
+        SPH pressure, neighbour queries), and the cost jumps toward <primer-math>O(n^2)</primer-math> (or
+        <primer-math>O(n\log n)</primer-math> with a spatial grid). Add that expense only when the effect
+        genuinely demands it — most fuzzy phenomena don't.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The big picture</h2>
+      <p>
+        A particle system is a beautiful example of <strong>emergence</strong>: no particle knows it is part
+        of a fire, yet many simple points running one three-line update produce something that convincingly
+        <em>is</em> one. The recipe never changes — an <strong>emitter</strong> randomises births, a
+        per-particle <strong>update</strong> integrates forces and ages each one, dead particles are
+        <strong>culled</strong>, and survivors are drawn as <strong>camera-facing sprites</strong> whose
+        size and colour ride their age. Swap the forces and the sprite and the same machine gives you sparks,
+        smoke, rain, dust, or magic.
+      </p>
+    </primer-card>
+
+    <primer-quiz name="particleSystemsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  { "prerequisites": ["computer-science/computer-animation/computer-animation"] }
+</script>
+
+<script type="application/json" class="scene-strings">
+  {
+    "particleSystemsQuiz@1": {
+      "intro": "Particles carry position, velocity, mass, age and appearance; emitters randomise births; each step integrates forces, ages, and culls. Fresh questions each time.",
+      "stateQ": "Which of these is NOT part of a particle's state?",
+      "stateRight": "the polygon mesh of its surface",
+      "stateW1": "position and velocity",
+      "stateW2": "age and lifetime",
+      "stateW3": "size, colour and opacity",
+      "emitterQ": "What is the job of an emitter?",
+      "emitterRight": "to spawn new particles with randomised initial conditions",
+      "emitterW1": "to render each particle as a lit polygon",
+      "emitterW2": "to detect collisions between particles",
+      "emitterW3": "to sort particles back to front",
+      "randQ": "Why does an emitter randomise each particle's initial velocity, lifetime and colour?",
+      "randRight": "so the crowd looks organic and stochastic, not a rigid lockstep clump",
+      "randW1": "to save memory per particle",
+      "randW2": "because the GPU requires random numbers",
+      "randW3": "to guarantee no two particles ever collide",
+      "updateQ": "The three parts of a per-particle update each step are…",
+      "updateRight": "accumulate forces and integrate, age the particle, then cull if its lifetime expired",
+      "updateW1": "spawn, render, then save to disk",
+      "updateW2": "collide, resolve overlap, then re-sort",
+      "updateW3": "rotate, scale, then translate the mesh",
+      "cullQ": "When is a particle killed (culled)?",
+      "cullRight": "when its age exceeds its lifetime",
+      "cullW1": "when it leaves the camera frustum",
+      "cullW2": "when it touches another particle",
+      "cullW3": "particles are never removed",
+      "billboardQ": "A particle is rendered as a 'billboard' sprite. What does that mean?",
+      "billboardRight": "a small textured quad rotated to always face the camera",
+      "billboardW1": "a fully modelled 3-D mesh with lighting",
+      "billboardW2": "a flat quad locked to the world's ground plane",
+      "billboardW3": "an advertising banner in the scene",
+      "additiveQ": "Additive blending is used for glowing effects like fire and sparks because…",
+      "additiveRight": "overlapping sprites add their light, building bright saturated cores",
+      "additiveW1": "it makes particles opaque and hides those behind",
+      "additiveW2": "it is the only blend the GPU supports",
+      "additiveW3": "it removes the need for a lifetime",
+      "independentQ": "In a typical particle system, how do particles interact with one another?",
+      "independentRight": "they don't — each is independent, which keeps the cost linear O(n)",
+      "independentW1": "every particle collides with every other every frame",
+      "independentW2": "they merge whenever they overlap",
+      "independentW3": "they exchange velocities on contact",
+      "sandQ": "Why does a naive particle system make convincing smoke but a bad pile of sand?",
+      "sandRight": "sand needs particle-particle collisions to stack; independent particles fall through each other",
+      "sandW1": "sand is too small to render as sprites",
+      "sandW2": "smoke has no gravity but sand does",
+      "sandW3": "sand cannot be given a lifetime",
+      "gpuQ": "What makes particle systems map so well onto the GPU?",
+      "gpuRight": "each particle updates independently with the same program — massively parallel",
+      "gpuW1": "particles must be processed strictly one after another",
+      "gpuW2": "the GPU renders meshes faster than points",
+      "gpuW3": "particles need no arithmetic, only memory",
+      "reevesQ": "The particle system technique is credited to Bill Reeves, who first used it for…",
+      "reevesRight": "the fiery 'Genesis effect' in Star Trek II (1982)",
+      "reevesW1": "the water in Finding Nemo",
+      "reevesW2": "the dinosaurs in Jurassic Park",
+      "reevesW3": "the character rigs in Toy Story",
+      "lifeQ": "A smoke puff's size and colour are driven by its normalised age u = age/lifetime so that it…",
+      "lifeRight": "appears to be born, grow and fade rather than pop in and out",
+      "lifeW1": "always renders at a fixed size and colour",
+      "lifeW2": "moves faster as it ages",
+      "lifeW3": "collides with the camera",
+      "velQ": "One step of explicit Euler integration updates velocity how, given acceleration a and step dt?",
+      "velRight": "v ← v + a·dt",
+      "velW1": "v ← v · a · dt",
+      "velW2": "v ← a / dt",
+      "velW3": "v ← v − dt / a",
+      "opacityQ": "A particle has age 1.5 s and lifetime {L} s. Its fade opacity 1 − age/lifetime is (3 dp)?",
+      "posQ": "A particle at height 0 with upward velocity {u} m/s takes a step dt = 0.1 s. Its new height (position += v·dt), ignoring gravity, is (m)?"
+    }
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Particle fountain: nine projectiles from a point emitter, marched by a time slider.
+          Slider-driven POINTS only (no parametric curves). ---- */
+  const fnStr = makeStrings("fountain");
+  registerGeometryScene(
+    "fountain",
+    ({ board, colors, sliders, sceneStrings }) => {
+      const [tt, speed, grav] = sliders;
+      const N = 9;
+      // Fixed spread of launch angles across a cone (radians from vertical).
+      const angles = [];
+      for (let i = 0; i < N; i++) angles.push(((i - (N - 1) / 2) / ((N - 1) / 2)) * 0.9);
+
+      // Ground line and emitter marker (base content).
+      board.create("segment", [[-6, 0], [6, 0]], { strokeColor: colors.line, strokeWidth: 1.5, strokeOpacity: 0.6 });
+      board.create("point", [0, 0], {
+        size: 4, strokeColor: colors.ink, fillColor: colors.ink, fixed: true, name: "", highlight: false,
+      });
+      board.create("text", [0.25, -0.55, () => sceneStrings("emitter")], {
+        anchorX: "left", fontSize: 12, strokeColor: colors.ink,
+      });
+
+      // One moving particle per launch angle. Position is a pure function of the time slider.
+      for (let i = 0; i < N; i++) {
+        const a = angles[i];
+        board.create("point", [
+          () => speed.Value() * Math.sin(a) * tt.Value(),
+          () => {
+            const t = tt.Value();
+            const y = speed.Value() * Math.cos(a) * t - 0.5 * grav.Value() * t * t;
+            return Math.max(0, y);
+          },
+        ], {
+          size: 4,
+          strokeColor: colors.cat[i % 2],
+          fillColor: colors.cat[i % 2],
+          fixed: true, name: "", highlight: false,
+        });
+      }
+    },
+    {
+      boundingbox: [-6.5, 8, 6.5, -1.2],
+      keepAspect: false,
+      title: () => fnStr("title"),
+      start: false,
+      sliders: [
+        { name: "t", label: "time", min: 0, max: 2.2, step: 0.02, value: 0 },
+        { name: "speed", label: "launch speed", min: 3, max: 9, step: 0.25, value: 7 },
+        { name: "grav", label: "gravity", min: 2, max: 14, step: 0.5, value: 9.8 },
+      ],
+    },
+  );
+
+  registerQuiz("particleSystemsQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("stateQ"), options: [
+      { text: () => sceneStrings("stateRight"), correct: true },
+      { text: () => sceneStrings("stateW1"), correct: false },
+      { text: () => sceneStrings("stateW2"), correct: false },
+      { text: () => sceneStrings("stateW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("emitterQ"), options: [
+      { text: () => sceneStrings("emitterRight"), correct: true },
+      { text: () => sceneStrings("emitterW1"), correct: false },
+      { text: () => sceneStrings("emitterW2"), correct: false },
+      { text: () => sceneStrings("emitterW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("randQ"), options: [
+      { text: () => sceneStrings("randRight"), correct: true },
+      { text: () => sceneStrings("randW1"), correct: false },
+      { text: () => sceneStrings("randW2"), correct: false },
+      { text: () => sceneStrings("randW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("updateQ"), options: [
+      { text: () => sceneStrings("updateRight"), correct: true },
+      { text: () => sceneStrings("updateW1"), correct: false },
+      { text: () => sceneStrings("updateW2"), correct: false },
+      { text: () => sceneStrings("updateW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("cullQ"), options: [
+      { text: () => sceneStrings("cullRight"), correct: true },
+      { text: () => sceneStrings("cullW1"), correct: false },
+      { text: () => sceneStrings("cullW2"), correct: false },
+      { text: () => sceneStrings("cullW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("billboardQ"), options: [
+      { text: () => sceneStrings("billboardRight"), correct: true },
+      { text: () => sceneStrings("billboardW1"), correct: false },
+      { text: () => sceneStrings("billboardW2"), correct: false },
+      { text: () => sceneStrings("billboardW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("additiveQ"), options: [
+      { text: () => sceneStrings("additiveRight"), correct: true },
+      { text: () => sceneStrings("additiveW1"), correct: false },
+      { text: () => sceneStrings("additiveW2"), correct: false },
+      { text: () => sceneStrings("additiveW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("independentQ"), options: [
+      { text: () => sceneStrings("independentRight"), correct: true },
+      { text: () => sceneStrings("independentW1"), correct: false },
+      { text: () => sceneStrings("independentW2"), correct: false },
+      { text: () => sceneStrings("independentW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("sandQ"), options: [
+      { text: () => sceneStrings("sandRight"), correct: true },
+      { text: () => sceneStrings("sandW1"), correct: false },
+      { text: () => sceneStrings("sandW2"), correct: false },
+      { text: () => sceneStrings("sandW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("gpuQ"), options: [
+      { text: () => sceneStrings("gpuRight"), correct: true },
+      { text: () => sceneStrings("gpuW1"), correct: false },
+      { text: () => sceneStrings("gpuW2"), correct: false },
+      { text: () => sceneStrings("gpuW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("reevesQ"), options: [
+      { text: () => sceneStrings("reevesRight"), correct: true },
+      { text: () => sceneStrings("reevesW1"), correct: false },
+      { text: () => sceneStrings("reevesW2"), correct: false },
+      { text: () => sceneStrings("reevesW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("lifeQ"), options: [
+      { text: () => sceneStrings("lifeRight"), correct: true },
+      { text: () => sceneStrings("lifeW1"), correct: false },
+      { text: () => sceneStrings("lifeW2"), correct: false },
+      { text: () => sceneStrings("lifeW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("velQ"), options: [
+      { text: () => sceneStrings("velRight"), correct: true },
+      { text: () => sceneStrings("velW1"), correct: false },
+      { text: () => sceneStrings("velW2"), correct: false },
+      { text: () => sceneStrings("velW3"), correct: false },
+    ] },
+    { prompt: (v) => sceneStrings("opacityQ", v), variables: "L=[3:6]", answer: (v) => 1 - 1.5 / v.L },
+    { prompt: (v) => sceneStrings("posQ", v), variables: "u=[4:9]", answer: (v) => v.u * 0.1 },
+  ]);
+</script>

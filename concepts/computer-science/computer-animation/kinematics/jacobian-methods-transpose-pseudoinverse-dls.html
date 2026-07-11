@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Jacobian Methods: Transpose, Pseudo-Inverse, DLS</primer-title>
+
+    <primer-card>
+      <p>
+        You have a jointed arm — a character's shoulder, elbow and wrist, or a robot's servos — and a
+        target in space you want the hand to touch. Forward kinematics answers the easy question: given the
+        joint angles <primer-math>\theta</primer-math>, where does the hand <primer-math>x</primer-math> end
+        up? <strong>Inverse kinematics (IK)</strong> asks the hard one in reverse: what angles put the hand
+        <em>there</em>? For anything past two or three joints there is no tidy formula — so we
+        <em>iterate</em>. We nudge the joints a little, look at how much closer the hand got, nudge again, and
+        repeat until the hand arrives.
+      </p>
+      <p>
+        The engine of that nudging is <primer-ref todo to="computer-science/computer-animation/kinematics/the-jacobian">the Jacobian</primer-ref>
+        <primer-math>J</primer-math> — the matrix that says how a small change in the joint angles produces a
+        small change in the hand's position:
+      </p>
+      <primer-math display>\Delta x \;=\; J\,\Delta\theta.</primer-math>
+      <p>
+        That is a simple linear equation. IK is nothing more than the art of <strong>solving it backwards</strong>
+        — finding the <primer-math>\Delta\theta</primer-math> that produces the <primer-math>\Delta x</primer-math>
+        we want — over and over. This page walks the whole family of ways to do that, from the crudest
+        (transpose) to the one every production rig actually ships (damped least squares).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The update loop</h2>
+      <p>
+        Every Jacobian IK solver is the same four-step loop, run for a handful of iterations per frame:
+      </p>
+      <primer-theorem name="The Jacobian IK iteration">
+        <ul>
+          <li><strong>Error.</strong> Measure how far the hand is from the goal:
+            <primer-math>e = x_{\text{target}} - x_{\text{current}}</primer-math>.</li>
+          <li><strong>Solve.</strong> Turn that positional error into a joint move
+            <primer-math>\Delta\theta</primer-math> using the current Jacobian
+            <primer-math>J</primer-math> — this is the step the methods disagree about.</li>
+          <li><strong>Step.</strong> Update the joints: <primer-math>\theta \leftarrow \theta + \Delta\theta</primer-math>,
+            then recompute <primer-math>x_{\text{current}}</primer-math> (and <primer-math>J</primer-math>) from
+            the new pose.</li>
+          <li><strong>Repeat</strong> until <primer-math>\lVert e \rVert</primer-math> is tiny (or you run out
+            of iterations).</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Because <primer-math>J</primer-math> is only a <em>local, linear</em> snapshot of a curved
+        relationship, no single big step lands the hand on the goal — that is why we take small steps and
+        rebuild <primer-math>J</primer-math> each time. Everything below is a different answer to the one
+        question in step two: <em>given <primer-math>e</primer-math> and <primer-math>J</primer-math>, what is
+        <primer-math>\Delta\theta</primer-math>?</em>
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Method 1 — the Jacobian transpose</h2>
+      <p>
+        The cheapest trick imaginable: don't invert anything, just multiply the error by the
+        <em>transpose</em> of the Jacobian and scale it down:
+      </p>
+      <primer-math display>\Delta\theta \;=\; \alpha\, J^{T} e,</primer-math>
+      <p>
+        with a small positive step size <primer-math>\alpha</primer-math>. This looks like a wild guess, but
+        there is a beautiful reason it works. Define the goal-distance cost
+        <primer-math>C(\theta) = \tfrac12 \lVert e \rVert^2 = \tfrac12 \lVert x_{\text{target}} - x(\theta) \rVert^2</primer-math>.
+        Its gradient with respect to the joints turns out to be exactly
+        <primer-math>\nabla C = -J^{T} e</primer-math>. So the transpose update is
+        <primer-math>\Delta\theta = -\alpha \nabla C</primer-math> — plain
+        <primer-ref soft to="mathematics/calculus/derivative/the-derivative-function">gradient descent</primer-ref>
+        rolling downhill on the squared error.
+      </p>
+      <primer-theorem name="Why the transpose always makes progress">
+        <ul>
+          <li>The step <primer-math>\Delta\theta = \alpha J^{T} e</primer-math> is the negative gradient of
+            <primer-math>\tfrac12\lVert e\rVert^2</primer-math>, so for a small enough
+            <primer-math>\alpha</primer-math> the error's magnitude <em>always</em> decreases — it can never
+            move the hand away from the goal.</li>
+          <li>It needs no matrix inverse and no
+            <primer-ref soft to="mathematics/linear-algebra/eigen/the-singular-value-decomposition">SVD</primer-ref>
+            — only a matrix–vector product, so it is dirt cheap and never divides by anything.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The catch is that gradient descent is <strong>slow and zig-zaggy</strong>. Because it only ever knows
+        the downhill direction — not how far to go — it can shuffle back and forth across a narrow valley,
+        taking many iterations to converge, and the choice of <primer-math>\alpha</primer-math> is fiddly (too
+        big and it overshoots and oscillates; too small and it crawls). It is a fine fallback and a great way
+        to <em>understand</em> IK, but rarely the production choice on its own.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Method 2 — the Moore–Penrose pseudo-inverse</h2>
+      <p>
+        If <primer-math>J</primer-math> were square and invertible we would just write
+        <primer-math>\Delta\theta = J^{-1} e</primer-math> and land the hand in one step. But a useful arm is
+        <strong>redundant</strong>: it has more joints than the task has dimensions (think of all the elbow
+        positions that keep your fingertip on the same spot), so <primer-math>J</primer-math> is a wide,
+        non-square matrix with infinitely many solutions. The <strong>Moore–Penrose pseudo-inverse</strong>
+        <primer-math>J^{+}</primer-math> picks a canonical one:
+      </p>
+      <primer-math display>\Delta\theta \;=\; J^{+} e, \qquad J^{+} = J^{T}\!\left(JJ^{T}\right)^{-1} \text{ for a full-rank wide } J.</primer-math>
+      <primer-theorem name="What the pseudo-inverse gives you">
+        <ul>
+          <li>Among all joint moves that achieve the desired hand motion, <primer-math>J^{+} e</primer-math>
+            is the <strong>least-norm</strong> one — the <em>smallest</em>
+            <primer-math>\lVert \Delta\theta \rVert</primer-math>, i.e. the laziest, most economical wiggle of
+            the joints.</li>
+          <li>When the target motion is actually reachable, it is <strong>exact</strong>: it solves
+            <primer-math>J \Delta\theta = e</primer-math> in a single step, no zig-zag.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Through the
+        <primer-ref soft to="mathematics/linear-algebra/eigen/the-singular-value-decomposition">SVD</primer-ref>
+        <primer-math>J = U\Sigma V^{T}</primer-math>, the pseudo-inverse simply <em>inverts each singular
+        value</em>: <primer-math>\sigma_i \mapsto 1/\sigma_i</primer-math>. That is elegant — and it is also the
+        seed of disaster. Near a <strong>singularity</strong> (the arm stretched straight, or folded flat) one
+        singular value <primer-math>\sigma</primer-math> shrinks toward zero, so <primer-math>1/\sigma</primer-math>
+        rockets toward infinity, and <primer-math>\Delta\theta</primer-math> explodes.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: the blow-up at a singularity</h2>
+      <p>
+        Reduce the picture to a single troublesome direction — the near-singular one — so the algebra is
+        scalar. Suppose the relevant singular value is <primer-math>\sigma = 0.05</primer-math> (we are close
+        to a singularity) and we ask the hand to move <primer-math>e = 0.10</primer-math> units along that
+        stiff direction.
+      </p>
+      <p>
+        <strong>Pseudo-inverse.</strong> It inverts the singular value:
+      </p>
+      <primer-math display>\Delta\theta_{+} \;=\; \frac{e}{\sigma} \;=\; \frac{0.10}{0.05} \;=\; 2.0 \text{ rad} \;\approx\; 115^\circ.</primer-math>
+      <p>
+        Two radians of joint rotation demanded in a single frame — the arm <strong>snaps</strong> violently,
+        overshoots, and the next frame it flails back. This is the classic IK "pop" near full extension.
+      </p>
+      <p>
+        <strong>Damped least squares</strong> (next section) replaces <primer-math>1/\sigma</primer-math> with
+        the bounded factor <primer-math>\sigma/(\sigma^2 + \lambda^2)</primer-math>. Take
+        <primer-math>\lambda = 0.10</primer-math>:
+      </p>
+      <primer-math display>\Delta\theta_{\text{DLS}} \;=\; \frac{\sigma\,e}{\sigma^2 + \lambda^2} \;=\; \frac{0.05 \times 0.10}{0.05^2 + 0.10^2} \;=\; \frac{0.005}{0.0125} \;=\; 0.40 \text{ rad} \;\approx\; 23^\circ.</primer-math>
+      <p>
+        Same Jacobian, same error — but a <strong>fifth</strong> of the joint motion, and crucially a move
+        that stays bounded no matter how small <primer-math>\sigma</primer-math> gets. The hand approaches the
+        target a touch more slowly, but the arm never snaps.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Method 3 — damped least squares (DLS / Levenberg–Marquardt)</h2>
+      <p>
+        The fix that industry converged on adds a <strong>damping</strong> term
+        <primer-math>\lambda</primer-math> inside the inverse:
+      </p>
+      <primer-math display>\Delta\theta \;=\; J^{T}\!\left(JJ^{T} + \lambda^2 I\right)^{-1} e.</primer-math>
+      <p>
+        This is exactly the <strong>Levenberg–Marquardt</strong> update from nonlinear least squares. Instead
+        of demanding the hand motion be met exactly, it minimises a blended cost
+        <primer-math>\lVert J\Delta\theta - e\rVert^2 + \lambda^2 \lVert \Delta\theta \rVert^2</primer-math>:
+        the first term wants to reach the target, the second penalises big joint moves. In SVD terms the
+        damaging map <primer-math>\sigma \mapsto 1/\sigma</primer-math> becomes the tamed
+      </p>
+      <primer-math display>\sigma \;\mapsto\; \frac{\sigma}{\sigma^2 + \lambda^2}.</primer-math>
+      <primer-theorem name="What damping buys">
+        <ul>
+          <li>For a <strong>large</strong> singular value (<primer-math>\sigma \gg \lambda</primer-math>) the
+            factor is <primer-math>\approx 1/\sigma</primer-math> — DLS behaves like the pseudo-inverse and
+            barely changes the healthy directions.</li>
+          <li>For a <strong>tiny</strong> singular value (<primer-math>\sigma \ll \lambda</primer-math>) the
+            factor is <primer-math>\approx \sigma/\lambda^2 \to 0</primer-math> — the dangerous direction is
+            gently switched off instead of blowing up. The peak of that factor is
+            <primer-math>1/(2\lambda)</primer-math>, a hard ceiling on how large the step can get.</li>
+          <li>As <primer-math>\lambda \to 0</primer-math>, DLS collapses back to the plain pseudo-inverse.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        So <primer-math>\lambda</primer-math> is a dial trading a little accuracy for a lot of stability: too
+        small and singularities still bite; too large and the solver becomes sluggish and never quite reaches
+        the target. A small non-zero <primer-math>\lambda</primer-math> (often adapted on the fly, larger near
+        singularities) is the <strong>industry-default IK solver</strong>.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "dampingLab": {
+          "title": "Step size |Δθ| vs damping λ, near a singularity",
+          "sigma": "Singular value σ (proximity to singularity)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Watch the damping tame the blow-up</h2>
+      <p>
+        Below is the scalar model from the worked example with unit error
+        (<primer-math>e = 1</primer-math>). The horizontal reference line is the
+        <strong>pseudo-inverse</strong> step <primer-math>1/\sigma</primer-math> — flat, because it ignores
+        damping entirely. The curve is the <strong>DLS</strong> step
+        <primer-math>\sigma/(\sigma^2 + \lambda^2)</primer-math> as you sweep the damping
+        <primer-math>\lambda</primer-math>. Drag the <primer-math>\sigma</primer-math> slider toward zero to
+        walk into a singularity: the pseudo-inverse line shoots off the top of the chart, while the DLS curve
+        — which meets it at <primer-math>\lambda = 0</primer-math> — bends down and stays bounded the moment
+        you give it any damping at all.
+      </p>
+      <primer-chart scene="dampingLab"></primer-chart>
+      <primer-chart-sliders name="dampGroup"></primer-chart-sliders>
+      <p>
+        The gap between the flat line and the curve at a given <primer-math>\lambda</primer-math> is precisely
+        the joint velocity that damping <em>removes</em> — the snap it prevents. Notice that when
+        <primer-math>\sigma</primer-math> is large (away from any singularity) the two are nearly on top of
+        each other: damping costs you almost nothing where you don't need it.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Nullspace projection — a second goal for free</h2>
+      <p>
+        A redundant arm has spare freedom: many joint configurations put the hand in the same place. The
+        pseudo-inverse spends none of it (least-norm), but we can use it for a <strong>secondary goal</strong>
+        — steer toward a comfortable pose, dodge a joint limit, keep the elbow up — <em>without disturbing the
+        hand</em>. The tool is the <strong>nullspace projector</strong>:
+      </p>
+      <primer-math display>\Delta\theta \;=\; J^{+} e \;+\; \left(I - J^{+} J\right) z.</primer-math>
+      <primer-theorem name="The nullspace projector">
+        <ul>
+          <li><primer-math>I - J^{+}J</primer-math> projects any vector <primer-math>z</primer-math> onto the
+            <strong>nullspace</strong> of <primer-math>J</primer-math> — the directions of joint motion that
+            produce <em>zero</em> hand motion.</li>
+          <li>So the projected term moves the joints (toward the secondary objective, e.g.
+            <primer-math>z = -\nabla(\text{comfort cost})</primer-math>) while the hand stays exactly on the
+            primary target the first term set.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        This is how a character's whole body can shift naturally while a hand stays glued to a prop, or how a
+        robot avoids its joint stops while its gripper tracks a path. Primary task first, personality in the
+        nullspace.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! Never ship a plain pseudo-inverse">
+      <p>
+        The pseudo-inverse is the textbook-perfect answer only <em>away</em> from singularities. In the wild,
+        arms constantly pass near full extension, folded joints, and aligned axes — and at each of those a
+        singular value dips toward zero, <primer-math>1/\sigma</primer-math> spikes, and the solver demands
+        <strong>unbounded joint velocities</strong>. On screen that reads as the limb violently snapping,
+        popping, or jittering frame-to-frame; on hardware it is a safety fault. The rule is simple:
+        <strong>always damp</strong>. Ship damped least squares with a small non-zero
+        <primer-math>\lambda</primer-math> (raise it as you approach a singularity), so the worst-case step is
+        capped at <primer-math>1/(2\lambda)</primer-math> instead of infinity. A plain
+        <primer-math>J^{+}</primer-math> in production is a bug waiting for a pose to trigger it.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Is the transpose really just gradient descent in disguise?">
+      <p>
+        Yes — and the identity is worth savouring. The hand-position error is
+        <primer-math>e = x_{\text{target}} - x(\theta)</primer-math>, and by the chain rule
+        <primer-math>\tfrac{\partial x}{\partial \theta} = J</primer-math>, so the gradient of
+        <primer-math>C = \tfrac12\lVert e\rVert^2</primer-math> is
+        <primer-math>\nabla_\theta C = -J^{T} e</primer-math>. Stepping downhill,
+        <primer-math>\Delta\theta = -\alpha\nabla C = \alpha J^{T} e</primer-math> — the transpose rule falls
+        straight out. That is why it can never increase the error and why it needs no inverse. It also explains
+        its personality flaw: gradient descent knows the steepest direction but not the right step length, so
+        it zig-zags down long thin valleys. The pseudo-inverse and DLS are, in effect, cleverer step-length
+        choices for the very same descent.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Where does λ² come from — why squared?">
+      <p>
+        Writing the damping as <primer-math>\lambda^2</primer-math> rather than <primer-math>\lambda</primer-math>
+        is a convention that keeps the units and the SVD tidy. Minimising
+        <primer-math>\lVert J\Delta\theta - e\rVert^2 + \lambda^2\lVert\Delta\theta\rVert^2</primer-math> gives
+        the normal equations <primer-math>(J^{T}J + \lambda^2 I)\Delta\theta = J^{T}e</primer-math>, whose
+        wide-matrix twin is <primer-math>\Delta\theta = J^{T}(JJ^{T} + \lambda^2 I)^{-1}e</primer-math>. Because
+        <primer-math>\lambda^2</primer-math> sits alongside <primer-math>\sigma^2</primer-math> in the SVD, the
+        per-direction gain is the clean <primer-math>\sigma/(\sigma^2+\lambda^2)</primer-math>, and
+        <primer-math>\lambda</primer-math> carries the same units as a singular value — so you can read it as
+        "treat any singular value below about <primer-math>\lambda</primer-math> as suspect".
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "jacobianMethodsQuiz@1": {
+          "intro": "Transpose = cheap gradient descent (α Jᵀe); pseudo-inverse = exact least-norm but blows up at singularities; DLS = Jᵀ(JJᵀ+λ²I)⁻¹e, the damped industry default. Fresh questions each time.",
+          "errQ": "In the IK update loop, the error vector $e$ is defined as…",
+          "errRight": "$x_{target} - x_{current}$ — how far the hand is from the goal",
+          "errW1": "$\\theta_{target} - \\theta_{current}$ — the joint-angle difference",
+          "errW2": "the determinant of the Jacobian",
+          "errW3": "the number of iterations remaining",
+          "loopQ": "Why does the loop rebuild the Jacobian and take small steps rather than one big solve?",
+          "loopRight": "$J$ is only a local linear approximation of a curved relationship",
+          "loopW1": "computers cannot multiply large matrices in one step",
+          "loopW2": "the Jacobian is always exactly singular",
+          "loopW3": "small steps use less memory than one big step",
+          "transFormQ": "The Jacobian-transpose update is…",
+          "transFormRight": "$\\Delta\\theta = \\alpha J^{T} e$",
+          "transFormW1": "$\\Delta\\theta = J^{-1} e$",
+          "transFormW2": "$\\Delta\\theta = J^{T}(JJ^{T}+\\lambda^2 I)^{-1} e$",
+          "transFormW3": "$\\Delta\\theta = e / \\det J$",
+          "transWhatQ": "The Jacobian transpose is secretly which optimisation method?",
+          "transWhatRight": "gradient descent on $\\tfrac12\\lVert e\\rVert^2$",
+          "transWhatW1": "Newton's method with the exact Hessian",
+          "transWhatW2": "the simplex method for linear programming",
+          "transWhatW3": "Gaussian elimination",
+          "transConQ": "The main practical drawback of the transpose method is that it…",
+          "transConRight": "converges slowly and zig-zags; the step size α is fiddly",
+          "transConW1": "requires an expensive matrix inverse every iteration",
+          "transConW2": "can move the hand away from the goal",
+          "transConW3": "only works for square Jacobians",
+          "pinvQ": "For a redundant (wide, full-rank) arm, the pseudo-inverse step $J^{+}e$ is the…",
+          "pinvRight": "least-norm solution — the smallest $\\lVert\\Delta\\theta\\rVert$ that meets the motion",
+          "pinvW1": "largest joint move that meets the motion",
+          "pinvW2": "only solution that exists",
+          "pinvW3": "same as the transpose step $\\alpha J^{T}e$",
+          "pinvSvdQ": "Via the SVD $J=U\\Sigma V^{T}$, the pseudo-inverse maps each singular value $\\sigma$ to…",
+          "pinvSvdRight": "$1/\\sigma$",
+          "pinvSvdW1": "$\\sigma^2$",
+          "pinvSvdW2": "$\\sigma/(\\sigma^2+\\lambda^2)$",
+          "pinvSvdW3": "$0$",
+          "singQ": "Near a singularity, one singular value $\\sigma \\to 0$. What does the plain pseudo-inverse do?",
+          "singRight": "$1/\\sigma$ blows up, so $\\Delta\\theta$ explodes — the arm snaps",
+          "singW1": "it automatically adds damping to stay bounded",
+          "singW2": "it produces $\\Delta\\theta = 0$ and freezes",
+          "singW3": "it switches to the transpose method",
+          "dlsFormQ": "The damped-least-squares (Levenberg–Marquardt) update is…",
+          "dlsFormRight": "$\\Delta\\theta = J^{T}(JJ^{T}+\\lambda^2 I)^{-1} e$",
+          "dlsFormW1": "$\\Delta\\theta = (JJ^{T})^{-1} e$",
+          "dlsFormW2": "$\\Delta\\theta = \\alpha J^{T} e$",
+          "dlsFormW3": "$\\Delta\\theta = J^{+} e + \\lambda I$",
+          "dlsSvdQ": "In DLS, each singular value's gain becomes…",
+          "dlsSvdRight": "$\\sigma/(\\sigma^2+\\lambda^2)$ — bounded, peaking at $1/(2\\lambda)$",
+          "dlsSvdW1": "$1/\\sigma$ — unbounded",
+          "dlsSvdW2": "$\\lambda^2/\\sigma$",
+          "dlsSvdW3": "$\\sigma^2 + \\lambda^2$",
+          "dlsTradeQ": "Increasing the damping λ in DLS…",
+          "dlsTradeRight": "trades a little accuracy for stability — bounds Δθ near singularities",
+          "dlsTradeW1": "makes the solver exact but unstable",
+          "dlsTradeW2": "has no effect away from singularities and none near them",
+          "dlsTradeW3": "removes the need to compute the Jacobian",
+          "dlsLimitQ": "As the damping $\\lambda \\to 0$, damped least squares reduces to…",
+          "dlsLimitRight": "the plain pseudo-inverse $J^{+}e$",
+          "dlsLimitW1": "the Jacobian transpose $\\alpha J^{T}e$",
+          "dlsLimitW2": "a zero step, $\\Delta\\theta = 0$",
+          "dlsLimitW3": "Newton's method",
+          "nullQ": "The projector $I - J^{+}J$ maps a vector into the nullspace of $J$, meaning those joint motions…",
+          "nullRight": "produce zero hand motion — a secondary goal without disturbing the end-effector",
+          "nullW1": "move the hand as fast as possible",
+          "nullW2": "always violate the joint limits",
+          "nullW3": "are the only motions that reach the target",
+          "defaultQ": "Which method is the everyday production default for robust IK?",
+          "defaultRight": "damped least squares (DLS) with a small non-zero λ",
+          "defaultW1": "the plain pseudo-inverse with no damping",
+          "defaultW2": "the Jacobian transpose alone",
+          "defaultW3": "solving $J^{-1}$ exactly every frame",
+          "dlsCompQ": "Scalar DLS: with error $e=1$, singular value $\\sigma={s}/100$ and damping $\\lambda={l}/100$, evaluate $\\dfrac{\\sigma}{\\sigma^2+\\lambda^2}$ to 3 decimals.",
+          "pinvCompQ": "Scalar pseudo-inverse: with error $e={e}/10$ and singular value $\\sigma={s}/100$, evaluate the step $e/\\sigma$ to 3 decimals."
+        }
+      }
+    </script>
+
+    <primer-quiz name="jacobianMethodsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "mathematics/linear-algebra/eigen/the-singular-value-decomposition",
+      "computer-science/computer-animation/computer-animation"
+    ]
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerChartSliders, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Interactive chart: step size |Δθ| vs damping λ, for a scalar near-singular model with e = 1.
+          Curve 0 = DLS gain σ/(σ²+λ²); curve 1 = pseudo-inverse gain 1/σ (flat, ignores λ). The σ slider
+          walks toward a singularity, sending the pseudo-inverse line off the top while DLS stays bounded. ---- */
+  const dl = makeStrings("dampingLab");
+  registerChartSliders("dampGroup", [
+    { name: "sigma", label: () => dl("sigma"), min: 0.1, max: 1.5, step: 0.05, value: 0.25, anchors: [0.1, 0.25, 0.5, 1.0, 1.5] },
+  ]);
+  registerCharts(
+    [
+      {
+        name: "dampingLab",
+        f: [
+          (lam, s) => s.sigma / (s.sigma * s.sigma + lam * lam), // DLS gain
+          (lam, s) => 1 / s.sigma,                               // pseudo-inverse gain (flat reference)
+        ],
+        line: (colors, i) =>
+          i === 0
+            ? { strokeColor: colors.cat[0], strokeWidth: 3 }
+            : { strokeColor: colors.cat[1], strokeWidth: 2, dash: 2 },
+        legend: ["DLS  σ/(σ²+λ²)", "pseudo-inverse  1/σ"],
+      },
+    ],
+    {
+      id: "dampingLab",
+      xmin: 0,
+      xmax: 1,
+      ymin: 0,
+      ymax: 11,
+      xticks: 0.25,
+      yticks: 2,
+      xaxisname: "damping λ",
+      yaxisname: "step size |Δθ|",
+      title: () => dl("title"),
+    },
+    "dampGroup",
+  );
+
+  registerQuiz("jacobianMethodsQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("errQ"), options: [
+      { text: () => sceneStrings("errRight"), correct: true },
+      { text: () => sceneStrings("errW1"), correct: false },
+      { text: () => sceneStrings("errW2"), correct: false },
+      { text: () => sceneStrings("errW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("loopQ"), options: [
+      { text: () => sceneStrings("loopRight"), correct: true },
+      { text: () => sceneStrings("loopW1"), correct: false },
+      { text: () => sceneStrings("loopW2"), correct: false },
+      { text: () => sceneStrings("loopW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("transFormQ"), options: [
+      { text: () => sceneStrings("transFormRight"), correct: true },
+      { text: () => sceneStrings("transFormW1"), correct: false },
+      { text: () => sceneStrings("transFormW2"), correct: false },
+      { text: () => sceneStrings("transFormW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("transWhatQ"), options: [
+      { text: () => sceneStrings("transWhatRight"), correct: true },
+      { text: () => sceneStrings("transWhatW1"), correct: false },
+      { text: () => sceneStrings("transWhatW2"), correct: false },
+      { text: () => sceneStrings("transWhatW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("transConQ"), options: [
+      { text: () => sceneStrings("transConRight"), correct: true },
+      { text: () => sceneStrings("transConW1"), correct: false },
+      { text: () => sceneStrings("transConW2"), correct: false },
+      { text: () => sceneStrings("transConW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("pinvQ"), options: [
+      { text: () => sceneStrings("pinvRight"), correct: true },
+      { text: () => sceneStrings("pinvW1"), correct: false },
+      { text: () => sceneStrings("pinvW2"), correct: false },
+      { text: () => sceneStrings("pinvW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("pinvSvdQ"), options: [
+      { text: () => sceneStrings("pinvSvdRight"), correct: true },
+      { text: () => sceneStrings("pinvSvdW1"), correct: false },
+      { text: () => sceneStrings("pinvSvdW2"), correct: false },
+      { text: () => sceneStrings("pinvSvdW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("singQ"), options: [
+      { text: () => sceneStrings("singRight"), correct: true },
+      { text: () => sceneStrings("singW1"), correct: false },
+      { text: () => sceneStrings("singW2"), correct: false },
+      { text: () => sceneStrings("singW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dlsFormQ"), options: [
+      { text: () => sceneStrings("dlsFormRight"), correct: true },
+      { text: () => sceneStrings("dlsFormW1"), correct: false },
+      { text: () => sceneStrings("dlsFormW2"), correct: false },
+      { text: () => sceneStrings("dlsFormW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dlsSvdQ"), options: [
+      { text: () => sceneStrings("dlsSvdRight"), correct: true },
+      { text: () => sceneStrings("dlsSvdW1"), correct: false },
+      { text: () => sceneStrings("dlsSvdW2"), correct: false },
+      { text: () => sceneStrings("dlsSvdW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dlsTradeQ"), options: [
+      { text: () => sceneStrings("dlsTradeRight"), correct: true },
+      { text: () => sceneStrings("dlsTradeW1"), correct: false },
+      { text: () => sceneStrings("dlsTradeW2"), correct: false },
+      { text: () => sceneStrings("dlsTradeW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("dlsLimitQ"), options: [
+      { text: () => sceneStrings("dlsLimitRight"), correct: true },
+      { text: () => sceneStrings("dlsLimitW1"), correct: false },
+      { text: () => sceneStrings("dlsLimitW2"), correct: false },
+      { text: () => sceneStrings("dlsLimitW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("nullQ"), options: [
+      { text: () => sceneStrings("nullRight"), correct: true },
+      { text: () => sceneStrings("nullW1"), correct: false },
+      { text: () => sceneStrings("nullW2"), correct: false },
+      { text: () => sceneStrings("nullW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("defaultQ"), options: [
+      { text: () => sceneStrings("defaultRight"), correct: true },
+      { text: () => sceneStrings("defaultW1"), correct: false },
+      { text: () => sceneStrings("defaultW2"), correct: false },
+      { text: () => sceneStrings("defaultW3"), correct: false },
+    ] },
+    { prompt: (v) => sceneStrings("dlsCompQ", v), variables: "s=[3:60] l=[5:40]",
+      answer: (v) => { const sig = v.s / 100, lam = v.l / 100; return sig / (sig * sig + lam * lam); } },
+    { prompt: (v) => sceneStrings("pinvCompQ", v), variables: "e=[1:9] s=[5:60]",
+      answer: (v) => (v.e / 10) / (v.s / 100) },
+  ]);
+</script>

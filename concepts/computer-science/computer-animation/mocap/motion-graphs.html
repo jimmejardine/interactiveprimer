@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/js/boot.js"></script>
+    <primer-title>Motion Graphs</primer-title>
+
+    <primer-card>
+      <p>
+        You have captured a big pile of motion: an actor in a suit dotted with markers, wandering a studio for
+        an afternoon — a walk here, a turn there, a jog, a stop, a look-around. It is gorgeous, human,
+        <em>real</em> motion. But it is also <strong>fixed</strong>: each clip plays exactly the path the actor
+        happened to take. Your game needs the character to walk to <em>that</em> door, then turn and jog to
+        <em>this</em> waypoint — a route the actor never performed. How do you get new, controllable motion out
+        of a finite library of old clips, without it ever looking synthetic?
+      </p>
+      <p>
+        The answer, from two landmark 2002 papers (Kovar, Gleicher &amp; Pighin's <em>Motion Graphs</em> and
+        Arikan &amp; Forsyth's <em>Interactive Motion Generation from Examples</em>), is to stop thinking of the
+        database as a list of clips and start thinking of it as a <strong>graph you can walk</strong>. Every
+        frame the character ever performed becomes a place you might be; wherever two moments look
+        <em>similar</em> enough, you build a bridge between them; and then <em>synthesising motion becomes
+        finding a path</em>. This page builds that idea from the ground up, works a concrete pose-distance
+        example, and shows how a graph search turns "walk to that door in three seconds" into an answer.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The core idea: motion as a graph</h2>
+      <p>
+        Lay all your captured clips end to end as strips of frames. A <strong>motion graph</strong> reinterprets
+        those strips: the <strong>edges</strong> are pieces of original, untouched motion (a run of consecutive
+        frames), and the <strong>nodes</strong> are the points <em>between</em> pieces where you are allowed to
+        jump from one clip to another. A node is a choice point; an edge is a stretch of guaranteed-real motion
+        you play through until the next choice.
+      </p>
+      <primer-theorem name="Motion graph">
+        <ul>
+          <li>A <strong>directed graph</strong> built from a motion database. <strong>Edges</strong> are
+            contiguous clips of original captured motion; <strong>nodes</strong> are frames where you may
+            transition between clips.</li>
+          <li>A <strong>transition edge</strong> connects a node to a <em>similar</em> frame in another (or the
+            same) clip — similar in <strong>pose and velocity</strong> — and is created by <strong>blending</strong>
+            a short window around the two frames so the seam is invisible.</li>
+          <li>Any <strong>walk</strong> through the graph — a sequence of edges following the arrows — spells out
+            a new, playable motion. <strong>Synthesis = graph search</strong> for a walk satisfying the user's
+            constraints.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The magic is that <em>every edge is real captured motion</em>. Nothing on an edge was invented — it is
+        exactly what the actor did. The only synthetic moments are the short blended transitions at the nodes,
+        and if we only ever place nodes where two frames genuinely match, even those are imperceptible. We get
+        endless novel routes out of finite footage, all of it still looking human.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "graphFig": {
+          "title": "A small motion graph — clips (edges) joined by transitions (nodes)",
+          "walk": "walk clip",
+          "jog": "jog clip",
+          "turn": "turn clip",
+          "trans": "transition (similar frames, blended)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>A picture of a tiny graph</h2>
+      <p>
+        Below is a toy motion graph. Each labelled node is a frame where clips can meet; the plain arrows are
+        the original clips (walk, jog, turn) playing forward through their frames; the highlighted arrow is a
+        <strong>transition edge</strong> — a bridge discovered because the frame at its tail looked very like the
+        frame at its head. A character controller lives on this graph: it plays along an edge, and at each node
+        it may continue or take a transition, weaving the short clips into arbitrarily long, varied motion.
+      </p>
+      <primer-geometry
+        scene="graphFig"
+        caption="A small motion graph: nodes are transitionable frames, plain arrows are original clips, and the highlighted arrow is a blended transition connecting two similar frames from different clips."
+      ></primer-geometry>
+      <p>
+        Read a route off it: enter the walk, at its end take the highlighted transition into the jog, run the
+        jog, loop back through the turn — you have just produced a walk-then-jog-then-turn performance the actor
+        never recorded in that order. Different constraints pick different walks through the same graph.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Where do transitions come from? A pose-distance metric</h2>
+      <p>
+        A transition is only allowed between two frames that are genuinely <em>alike</em>, so we need to measure
+        how alike two poses are. The workhorse is a <strong>pose distance</strong>: put the skeleton's joints as
+        3-D points and compare them. Write frame <primer-math>i</primer-math> as its set of joint positions
+        <primer-math>p^i_1, \dots, p^i_m</primer-math>. A first, simple distance is the sum of squared joint
+        differences:
+      </p>
+      <primer-math display>D(i, j) \;=\; \sum_{k=1}^{m} \bigl\lVert p^i_k - p^j_k \bigr\rVert^2 .</primer-math>
+      <p>
+        But raw positions are in world space, so a walk heading north and an identical walk heading east would
+        look far apart just because they sit in different places and face different ways. That is wrong: pose
+        similarity should not care <em>where</em> the character is or <em>which way</em> it faces. So before
+        comparing, we <strong>align</strong> frame <primer-math>j</primer-math> to frame <primer-math>i</primer-math>
+        with the rigid 2-D transform <primer-math>T_{\theta, x_0, z_0}</primer-math> (a rotation about the
+        vertical axis plus a ground-plane translation) that best matches them, making the metric
+        <strong>invariant to global position and heading</strong>:
+      </p>
+      <primer-math display>D(i, j) \;=\; \min_{\theta,\, x_0,\, z_0}\; \sum_{k=1}^{m} w_k \bigl\lVert p^i_k - T_{\theta, x_0, z_0}\, p^j_k \bigr\rVert^2 .</primer-math>
+      <p>
+        Two refinements matter. First, we compare over a short <strong>window</strong> of frames rather than a
+        single instant, so the motions match in <em>direction of travel</em>, not just static pose — this is
+        what folds <strong>velocity</strong> into the metric. Second, the weights <primer-math>w_k</primer-math>
+        let heavy, visually dominant joints (torso, feet) count for more than fingertips. Wherever
+        <primer-math>D(i, j)</primer-math> falls <strong>below a threshold</strong>
+        <primer-math>\tau</primer-math>, we mint a transition edge between frames <primer-math>i</primer-math>
+        and <primer-math>j</primer-math> and blend across the window.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: computing a transition</h2>
+      <p>
+        Let us do the arithmetic with a cartoon 3-joint skeleton (hip, foot, hand) to see a threshold create an
+        edge. Take two frames, already root-aligned so we can just subtract coordinates. Positions in metres:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>joint</th><th>frame A <primer-math>(x,y,z)</primer-math></th><th>frame B <primer-math>(x,y,z)</primer-math></th><th>squared diff</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>hip</td><td>(0.0, 1.0, 0.0)</td><td>(0.0, 1.0, 0.0)</td><td><primer-math>0.00</primer-math></td></tr>
+            <tr><td>foot</td><td>(0.1, 0.0, 0.2)</td><td>(0.2, 0.0, 0.2)</td><td><primer-math>0.01</primer-math></td></tr>
+            <tr><td>hand</td><td>(0.3, 1.2, 0.0)</td><td>(0.3, 1.2, 0.1)</td><td><primer-math>0.01</primer-math></td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The hip matches exactly; the foot differs by <primer-math>0.1</primer-math> m in
+        <primer-math>x</primer-math> so contributes <primer-math>0.1^2 = 0.01</primer-math>; the hand differs by
+        <primer-math>0.1</primer-math> m in <primer-math>z</primer-math> so contributes another
+        <primer-math>0.01</primer-math>. Summing:
+      </p>
+      <primer-math display>D(A, B) \;=\; 0.00 + 0.01 + 0.01 \;=\; 0.02\ \text{m}^2 .</primer-math>
+      <p>
+        With a threshold of, say, <primer-math>\tau = 0.05\ \text{m}^2</primer-math>, we have
+        <primer-math>D(A,B) = 0.02 < 0.05</primer-math>, so the poses are close enough:
+        <strong>create a transition edge</strong> from A to B and blend the window around them. Had the foot been
+        planted a stride away — differing by <primer-math>0.6</primer-math> m, contributing
+        <primer-math>0.36</primer-math> — we would get <primer-math>D = 0.37 \gg \tau</primer-math> and correctly
+        <em>refuse</em> the edge, because splicing there would show an ugly jump. The threshold is the dial that
+        trades graph connectivity against transition quality.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Synthesis is search: finding a three-second walk to a target</h2>
+      <p>
+        Now we have a graph whose walks are all valid motions. To make the character actually <em>do</em>
+        something, we search the graph for the walk that best satisfies the user's request. Constraints come in
+        several flavours:
+      </p>
+      <ul>
+        <li><strong>Follow a path</strong> — the root should trace a sketched curve on the ground.</li>
+        <li><strong>Reach a location</strong> — arrive near a target point (optionally by a deadline).</li>
+        <li><strong>Match a sketch or annotation</strong> — "walk, then wave", or a rough drawn trajectory.</li>
+      </ul>
+      <p>
+        Turn the request into a numeric <strong>cost</strong> — for "reach the door in 3 seconds", the cost of a
+        candidate walk is how far its endpoint lands from the door after
+        <primer-math>3 \times 30 = 90</primer-math> frames. Then explore walks of the right length, growing them
+        edge by edge, and keep the cheapest. A naive search branches at every node and explodes, so the papers
+        prune it with <strong>branch-and-bound</strong> (abandon any partial walk whose best-possible completion
+        already costs more than the best full walk found so far) or frame it as
+        <strong>dynamic programming</strong> over graph states. Concretely, to hit the door in three seconds you
+        enumerate walks totalling about 90 frames, score each by final distance-to-door, and prune branches that
+        have already wandered too far to recover — returning the walk whose real, blended frames land the
+        character on the doorstep on time.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why can the very same motion graph drive both a stroll and a sprint to the exit?">
+      <p>
+        Because the graph encodes <em>possibilities</em>, not a single performance — it is the search's
+        <strong>cost function</strong> that decides which walk you get. Feed in "amble roughly northward with no
+        deadline" and the cheapest walk meanders through gentle walk-and-turn edges. Feed in "be at the exit in
+        two seconds" and the very same edges are re-scored, now favouring long jog clips and punishing detours;
+        the search returns a completely different route. One graph, one search algorithm, unlimited behaviours —
+        you author the <em>goal</em>, and the pre-captured motion supplies the <em>style</em>. This separation
+        of "what to do" (constraints) from "how it looks" (the database) is exactly why motion graphs powered a
+        generation of game locomotion systems.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A low pose distance is necessary but not the whole story">
+      <p>
+        Two traps sink naive motion graphs. <strong>First:</strong> matching <em>pose</em> alone is not enough —
+        you must match <strong>velocity</strong> too. Two frames can have nearly identical joint <em>positions</em>
+        while one foot is swinging forward and the other backward; splice them and the foot visibly reverses,
+        giving a jump or a <strong>foot-slide</strong> that blending only smears rather than cures. That is why
+        the metric compares over a short <em>window</em> (so directions of motion must agree), not a single
+        instant — connecting dissimilar frames looks broken <em>even after</em> the blend.
+      </p>
+      <p>
+        <strong>Second:</strong> a graph can be full of edges yet still <strong>trap the character in a
+        dead end</strong> — a node from which no walk ever returns to the rich part of the graph, so the search
+        gets stuck or the character freezes. The fix is <strong>pruning to strong connectivity</strong>: compute
+        the largest <em>strongly connected component</em> (every node reachable from every other) and throw away
+        everything outside it. Only then is every remaining node a safe place to be, with a way onward no matter
+        what the user asks next. Skip this pruning and your beautiful graph will occasionally strand the
+        character mid-stride.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "motionGraphsQuiz@1": {
+          "intro": "A motion graph re-sequences captured clips: edges are original motion, nodes are transitions between similar frames, and synthesis is a graph search. Fresh questions each time.",
+          "edgeQ": "In a motion graph, what do the EDGES represent?",
+          "edgeRight": "pieces of original, contiguous captured motion",
+          "edgeW1": "points where you may transition between clips",
+          "edgeW2": "individual joint positions",
+          "edgeW3": "the user's constraints",
+          "nodeQ": "What do the NODES of a motion graph represent?",
+          "nodeRight": "frames where you may transition between clips",
+          "nodeW1": "whole finished animations",
+          "nodeW2": "the render resolution",
+          "nodeW3": "the actor's marker positions",
+          "transQ": "A transition edge is created between two frames when they are…",
+          "transRight": "similar in pose and velocity (pose distance below a threshold)",
+          "transW1": "far apart in the database file",
+          "transW2": "captured on the same day",
+          "transW3": "exactly identical in every joint",
+          "synthQ": "Synthesising a new controllable motion from a motion graph amounts to…",
+          "synthRight": "searching the graph for a walk that satisfies the constraints",
+          "synthW1": "re-capturing the actor",
+          "synthW2": "rendering at higher resolution",
+          "synthW3": "deleting all the transition edges",
+          "invarQ": "The pose-distance metric is made invariant to what, before comparing frames?",
+          "invarRight": "global position and heading (a rigid ground-plane alignment)",
+          "invarW1": "the number of joints",
+          "invarW2": "the frame rate",
+          "invarW3": "the character's colour",
+          "windowQ": "Why compare a short WINDOW of frames rather than a single instant?",
+          "windowRight": "so the motions match in velocity/direction, not just static pose",
+          "windowW1": "to save memory",
+          "windowW2": "because single frames cannot be aligned",
+          "windowW3": "to increase the render resolution",
+          "searchQ": "Which technique prunes the exploding graph search for a valid walk?",
+          "searchRight": "branch-and-bound / dynamic programming",
+          "searchW1": "gamma correction",
+          "searchW2": "bilinear texture filtering",
+          "searchW3": "gradient descent on pixels",
+          "connQ": "To avoid the character getting stuck in a dead end, you prune the graph to…",
+          "connRight": "its largest strongly connected component",
+          "connW1": "its shortest edge",
+          "connW2": "a single clip",
+          "connW3": "the frames with the brightest colour",
+          "slideQ": "Splicing two frames with similar positions but opposite foot velocities produces…",
+          "slideRight": "a visible jump / foot-slide even after blending",
+          "slideW1": "a perfectly smooth transition",
+          "slideW2": "a change of camera angle",
+          "slideW3": "a lower memory footprint",
+          "realQ": "Why does motion-graph output still look human despite being re-sequenced?",
+          "realRight": "every edge is real captured motion; only short seams are blended",
+          "realW1": "because a neural network invents each frame",
+          "realW2": "because physics simulates every joint",
+          "realW3": "because the frame rate is doubled",
+          "thresholdQ": "Raising the pose-distance threshold τ tends to…",
+          "thresholdRight": "add more transitions (better connectivity) but risk worse-looking seams",
+          "thresholdW1": "remove all transitions",
+          "thresholdW2": "guarantee perfect transitions everywhere",
+          "thresholdW3": "have no effect on the graph",
+          "papersQ": "Motion graphs were introduced (SIGGRAPH 2002) by…",
+          "papersRight": "Kovar/Gleicher/Pighin and, independently, Arikan/Forsyth",
+          "papersW1": "Newton and Leibniz",
+          "papersW2": "the makers of the first GPU",
+          "papersW3": "no one — they predate computer graphics",
+          "distComputeQ": "Two root-aligned frames differ only at the foot, by ${d}/10 m in one axis. The squared pose distance is (to 2 dp)…"
+        }
+      }
+    </script>
+
+    <primer-quiz name="motionGraphsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  { "prerequisites": ["computer-science/computer-animation/computer-animation"] }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  /* ---- Static motion graph: nodes (points) + directed edges (arrows). One transition highlighted.
+          No steps → renders fully on load. ---- */
+  const gf = makeStrings("graphFig");
+  registerGeometryScene(
+    "graphFig",
+    ({ board, colors, sceneStrings }) => {
+      // Nodes: transitionable frames laid out in a loose ring.
+      const P = {
+        a: board.create("point", [0, 3], { size: 4, strokeColor: colors.ink, fillColor: colors.ink, fixed: true, name: "", highlight: false }),
+        b: board.create("point", [4, 3.6], { size: 4, strokeColor: colors.ink, fillColor: colors.ink, fixed: true, name: "", highlight: false }),
+        c: board.create("point", [6.4, 0.8], { size: 4, strokeColor: colors.ink, fillColor: colors.ink, fixed: true, name: "", highlight: false }),
+        d: board.create("point", [3, -0.6], { size: 4, strokeColor: colors.ink, fillColor: colors.ink, fixed: true, name: "", highlight: false }),
+        e: board.create("point", [-0.6, 0.6], { size: 4, strokeColor: colors.ink, fillColor: colors.ink, fixed: true, name: "", highlight: false }),
+      };
+
+      const clip = (from, to) =>
+        board.create("arrow", [from, to], { strokeColor: colors.line, strokeWidth: 2.5, lastArrow: { type: 2, size: 6 } });
+
+      // Original clips (plain arrows) — the walk / jog / turn strips.
+      clip(P.a, P.b); // walk
+      clip(P.b, P.c); // jog
+      clip(P.c, P.d); // turn
+      clip(P.d, P.e); // walk back
+      clip(P.e, P.a); // loop
+
+      // The highlighted transition edge (similar frames, blended).
+      board.create("arrow", [P.b, P.d], {
+        strokeColor: colors.cat[0], strokeWidth: 3.5, dash: 2, lastArrow: { type: 2, size: 7 },
+      });
+
+      // Labels on the clips + the transition.
+      board.create("text", [1.4, 3.7, () => sceneStrings("walk")], { anchorX: "middle", fontSize: 13, strokeColor: colors.line });
+      board.create("text", [5.7, 2.5, () => sceneStrings("jog")], { anchorX: "middle", fontSize: 13, strokeColor: colors.line });
+      board.create("text", [5.3, -0.3, () => sceneStrings("turn")], { anchorX: "middle", fontSize: 13, strokeColor: colors.line });
+      board.create("text", [3.9, 1.4, () => sceneStrings("trans")], { anchorX: "middle", fontSize: 13, strokeColor: colors.cat[0], cssStyle: "font-weight:700" });
+    },
+    { boundingbox: [-2, 4.6, 8, -1.6], keepAspect: false, title: () => gf("title") },
+  );
+
+  registerQuiz("motionGraphsQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 5, preamble: () => sceneStrings("intro") },
+    { prompt: () => sceneStrings("edgeQ"), options: [
+      { text: () => sceneStrings("edgeRight"), correct: true },
+      { text: () => sceneStrings("edgeW1"), correct: false },
+      { text: () => sceneStrings("edgeW2"), correct: false },
+      { text: () => sceneStrings("edgeW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("nodeQ"), options: [
+      { text: () => sceneStrings("nodeRight"), correct: true },
+      { text: () => sceneStrings("nodeW1"), correct: false },
+      { text: () => sceneStrings("nodeW2"), correct: false },
+      { text: () => sceneStrings("nodeW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("transQ"), options: [
+      { text: () => sceneStrings("transRight"), correct: true },
+      { text: () => sceneStrings("transW1"), correct: false },
+      { text: () => sceneStrings("transW2"), correct: false },
+      { text: () => sceneStrings("transW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("synthQ"), options: [
+      { text: () => sceneStrings("synthRight"), correct: true },
+      { text: () => sceneStrings("synthW1"), correct: false },
+      { text: () => sceneStrings("synthW2"), correct: false },
+      { text: () => sceneStrings("synthW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("invarQ"), options: [
+      { text: () => sceneStrings("invarRight"), correct: true },
+      { text: () => sceneStrings("invarW1"), correct: false },
+      { text: () => sceneStrings("invarW2"), correct: false },
+      { text: () => sceneStrings("invarW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("windowQ"), options: [
+      { text: () => sceneStrings("windowRight"), correct: true },
+      { text: () => sceneStrings("windowW1"), correct: false },
+      { text: () => sceneStrings("windowW2"), correct: false },
+      { text: () => sceneStrings("windowW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("searchQ"), options: [
+      { text: () => sceneStrings("searchRight"), correct: true },
+      { text: () => sceneStrings("searchW1"), correct: false },
+      { text: () => sceneStrings("searchW2"), correct: false },
+      { text: () => sceneStrings("searchW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("connQ"), options: [
+      { text: () => sceneStrings("connRight"), correct: true },
+      { text: () => sceneStrings("connW1"), correct: false },
+      { text: () => sceneStrings("connW2"), correct: false },
+      { text: () => sceneStrings("connW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("slideQ"), options: [
+      { text: () => sceneStrings("slideRight"), correct: true },
+      { text: () => sceneStrings("slideW1"), correct: false },
+      { text: () => sceneStrings("slideW2"), correct: false },
+      { text: () => sceneStrings("slideW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("realQ"), options: [
+      { text: () => sceneStrings("realRight"), correct: true },
+      { text: () => sceneStrings("realW1"), correct: false },
+      { text: () => sceneStrings("realW2"), correct: false },
+      { text: () => sceneStrings("realW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("thresholdQ"), options: [
+      { text: () => sceneStrings("thresholdRight"), correct: true },
+      { text: () => sceneStrings("thresholdW1"), correct: false },
+      { text: () => sceneStrings("thresholdW2"), correct: false },
+      { text: () => sceneStrings("thresholdW3"), correct: false },
+    ] },
+    { prompt: () => sceneStrings("papersQ"), options: [
+      { text: () => sceneStrings("papersRight"), correct: true },
+      { text: () => sceneStrings("papersW1"), correct: false },
+      { text: () => sceneStrings("papersW2"), correct: false },
+      { text: () => sceneStrings("papersW3"), correct: false },
+    ] },
+    { prompt: (v) => sceneStrings("distComputeQ", v), variables: "d=[1:5]", answer: (v) => { const x = v.d / 10; return x * x; } },
+  ]);
+</script>
