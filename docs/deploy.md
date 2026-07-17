@@ -18,6 +18,10 @@ no server.
 2. Build settings:
    - **Build command:** `npm ci && npm run build`
    - **Build output directory:** `/` (the repo root — the site serves from root)
+   - **Node version:** ≥ 22.18 — the build scripts import the framework's `.ts` sources directly
+     via Node's type stripping (default from 22.18/23.6; Pages' default image is older). The
+     committed **`.node-version`** file pins Node 24, which Pages reads automatically; a
+     `NODE_VERSION` environment variable works too.
 3. **Custom domain:** add `interactiveprimer.com` (+ `www`). Cloudflare manages DNS/TLS once the
    zone is on Cloudflare — which also hosts the optional cloud-sync Worker (`worker/`, deployed
    separately via wrangler; see its README) and Web Analytics.
