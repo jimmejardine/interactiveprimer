@@ -2,7 +2,7 @@
  * scripts/build.mjs transpiles this to the stable root `/sw.js` the pages register. Edit THIS
  * file, never sw.js (generated).
  *
- * Registered by js/boot.js (concept pages) and the standalone pages. Scope: "/". It gives the site
+ * Registered by dist/boot.js (concept pages) and the standalone pages. Scope: "/". It gives the site
  * three offline capabilities, layered on the content-hashed build:
  *
  *   1. APP SHELL, precached eagerly on install (dist/precache.json) so any already-visited page — and
@@ -32,8 +32,8 @@ const isImmutable = (url: URL): boolean =>
 
 // Tiny stable-named things we want kept FRESH while online (revalidate in the background).
 const isStableEntry = (url: URL): boolean =>
-  url.pathname === "/js/boot.js" ||
-  url.pathname === "/js/analytics.js" ||
+  url.pathname === "/dist/boot.js" ||
+  url.pathname === "/dist/analytics.js" ||
   url.pathname === "/dist/asset-manifest.json" ||
   url.pathname === "/dist/precache.json" ||
   url.pathname.startsWith("/css/");
@@ -89,7 +89,7 @@ self.addEventListener("activate", (event: any) => {
 
 /** Serve from cache, and in the background refetch + update the cache (stale-while-revalidate).
  * The lookup falls back to a global `caches.match` so an entry precached into the SHELL cache
- * (e.g. /js/boot.js on a first, uncontrolled visit) still serves offline before the runtime
+ * (e.g. /dist/boot.js on a first, uncontrolled visit) still serves offline before the runtime
  * cache has ever stored its own copy. */
 async function staleWhileRevalidate(request: Request, cacheName: string): Promise<Response> {
   const cache = await caches.open(cacheName);

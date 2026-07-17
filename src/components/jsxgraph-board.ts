@@ -16,7 +16,7 @@ export interface ThemeColors {
 /**
  * JSXGraph's stylesheet. Lazy-fetched once into a constructable sheet and adopted into each
  * component's shadow root (a document-level <link> can't cross the shadow boundary). Best-effort:
- * the board still renders if it fails to load. Keep the version in step with js/boot.js.
+ * the board still renders if it fails to load. Keep the version in step with dist/boot.js.
  */
 const JSXGRAPH_CSS = "/dist/assets/jsxgraph.css";
 

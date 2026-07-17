@@ -1,11 +1,11 @@
 /**
  * src/boot.ts — TEMPLATE for the single tag every concept page includes:
  *
- *   <script src="/js/boot.js"></script>
+ *   <script src="/dist/boot.js"></script>
  *
- * The build (scripts/build.mjs) transpiles this to js/boot.js, replacing the one
+ * The build (scripts/build.mjs) transpiles this to dist/boot.js, replacing the one
  * `__PRIMER_BUNDLE__` placeholder with the hashed core-bundle URL (e.g.
- * /dist/bundle/primer-EIHECFBJ.js). Edit THIS file, never js/boot.js (generated).
+ * /dist/bundle/primer-EIHECFBJ.js). Edit THIS file, never dist/boot.js (generated).
  *
  * Together with the bundle it loads, it replaces the ENTIRE per-page <head>: the
  * title, the viewport meta, the CSS links, the import map, and the `import "primer"`
@@ -269,7 +269,7 @@
   // 1b) Cookieless visitor analytics (Cloudflare Web Analytics). Concept pages have no static
   //     <head>, so load the shared injector here; it's a no-op until a token is configured.
   const analytics = document.createElement("script");
-  analytics.src = "/js/analytics.js";
+  analytics.src = "/dist/analytics.js";
   analytics.defer = true;
   head.appendChild(analytics);
 

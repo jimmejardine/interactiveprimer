@@ -1,6 +1,6 @@
 // scripts/build.mjs — the framework build. Bundles js/ + its npm deps into content-hashed,
 // code-split ES modules under /dist/bundle/, emits the static CSS/font/wasm assets they need
-// under /dist/assets/, and stamps the core bundle's hashed URL into the generated js/boot.js.
+// under /dist/assets/, and stamps the core bundle's hashed URL into the generated dist/boot.js.
 // Deps come from node_modules (this REPLACES scripts/vendor.mjs + the committed /3rdparty/).
 //
 //   npm run build            production (hashed, minified)
@@ -161,18 +161,17 @@ for (const file of walkJs(r("dist/bundle"))) {
 }
 
 // ── 5) Generate the classic (non-module) browser scripts from their TypeScript sources: the
-//    stable-URL loaders js/boot.js (hashed core-bundle URL stamped in) + js/analytics.js, and the
-//    root service worker sw.js. These are plain transpiles (type strip, no bundling — none of the
-//    three imports anything); js/ and sw.js are generated-only and gitignored. ───────────────────
+//    stable-URL loaders dist/boot.js (hashed core-bundle URL stamped in) + dist/analytics.js, and
+//    the root service worker sw.js (root because a SW's scope is capped at its own path). These are
+//    plain transpiles (type strip, no bundling — none of the three imports anything). ─────────────
 const transpile = async (srcRel) => {
   const code = fs.readFileSync(r(srcRel), "utf8");
   return (await esbuild.transform(code, { loader: "ts", target: "es2022" })).code;
 };
-fs.mkdirSync(r("js"), { recursive: true });
 const bootJs = await transpile("src/boot.ts");
 if (!bootJs.includes("__PRIMER_BUNDLE__")) throw new Error("build: src/boot.ts is missing the __PRIMER_BUNDLE__ placeholder");
-fs.writeFileSync(r("js/boot.js"), bootJs.split("__PRIMER_BUNDLE__").join(coreFile));
-fs.writeFileSync(r("js/analytics.js"), await transpile("src/analytics.ts"));
+fs.writeFileSync(r("dist/boot.js"), bootJs.split("__PRIMER_BUNDLE__").join(coreFile));
+fs.writeFileSync(r("dist/analytics.js"), await transpile("src/analytics.ts"));
 fs.writeFileSync(r("sw.js"), await transpile("src/sw.ts"));
 
 // ── 6) Asset manifest (logical name → hashed URL) for tooling / the service worker. ───────────────
@@ -195,11 +194,11 @@ for (const f of walkFiles(r("dist/assets"))) {
 }
 const version = (coreFile.match(/primer-([^.]+)\.js$/) || [, "dev"])[1];
 const shell = [
-  "/js/boot.js",
+  "/dist/boot.js",
   coreFile,
   appFile,
   "/dist/asset-manifest.json",
-  "/js/analytics.js",
+  "/dist/analytics.js",
   "/css/primer.css",
   ...assetShell.sort(),
   "/offline.html",
@@ -235,7 +234,7 @@ function jsOutputsForLibs() {
 const jsOutputs = Object.keys(outputs).filter((f) => f.endsWith(".js"));
 console.log(`\n✓ core bundle: ${coreFile}`);
 console.log(`  ${jsOutputs.length} JS output(s) (core + lazy chunks); manim URL rewrites: ${rewrites}`);
-console.log(`  boot.js generated → /js/boot.js`);
+console.log(`  boot.js generated → /dist/boot.js`);
 for (const f of jsOutputs.sort()) {
   console.log(`   · /${path.relative(ROOT, r(f)).replace(/\\/g, "/")}  (${(outputs[f].bytes / 1024).toFixed(0)} KB)`);
 }

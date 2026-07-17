@@ -3,7 +3,7 @@
 The **educational content** of the Interactive Primer is licensed under CC BY-SA 4.0.
 This covers everything under `concepts/` and `i18n/`, plus the generated `dist/graph.json`.
 
-The framework **code** — `js/`, `css/`, `scripts/`, `index.html`, and the root config — is
+The framework **code** — `src/`, `css/`, `scripts/`, `index.html`, and the root config — is
 licensed separately under the GNU Affero General Public License v3.0-or-later; see `LICENSE`.
 
 When you reuse the content, attribute it as:

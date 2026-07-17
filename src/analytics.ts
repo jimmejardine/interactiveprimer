@@ -5,7 +5,7 @@
  * the real production domain — never localhost, preview deploys, forks, or mirrors.
  *
  * This is a CLASSIC (non-module) script: scripts/build.mjs transpiles it to the stable
- * `/js/analytics.js` URL the pages reference. No imports/exports allowed here.
+ * `/dist/analytics.js` URL the pages reference. No imports/exports allowed here.
  * @module
  */
 (function () {

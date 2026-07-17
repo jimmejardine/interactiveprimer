@@ -46,7 +46,7 @@ Each "smart web page" is a plain `.html` file — **content has no build step** 
 framework it loads is TypeScript in [`src/`](src/), bundled by esbuild (`npm run build`) into
 content-hashed, code-split modules under `/dist/`.
 
-- **One include per page.** A page adds a single `<script src="/js/boot.js"></script>` — a tiny
+- **One include per page.** A page adds a single `<script src="/dist/boot.js"></script>` — a tiny
   loader generated from [`src/boot.ts`](src/boot.ts) with the current bundle hash stamped in. It
   applies theme/locale before first paint, injects the CSS and a one-entry ESM **import map**
   (`"primer"` → the hashed bundle), and boots the renderer; heavy libraries load as separate lazy
@@ -85,7 +85,7 @@ content-hashed, code-split modules under `/dist/`.
 
 ```bash
 npm install        # framework dependencies (bundled at build time — no CDN at runtime)
-npm run build      # esbuild: src/ → hashed dist/ bundles + generated js/boot.js, js/analytics.js, sw.js
+npm run build      # esbuild: src/ → hashed dist/ bundles + generated dist/boot.js, dist/analytics.js, sw.js
 npm run dev        # dev build (unhashed) + static server → http://localhost:8080/
 npm run serve      # static file server only (reuse a running one; content edits need no rebuild)
 npm test           # node --test — runs the .ts sources directly (type stripping)
@@ -95,7 +95,7 @@ npm run check      # the full CI gate: typecheck + tests + graph validation + i1
 ```
 
 Only **framework** changes need a rebuild — concept pages are served as-is, so authoring stays
-edit-and-refresh. Deploys build in CI (see [`docs/deploy.md`](docs/deploy.md)); `dist/`, `js/`, and
+edit-and-refresh. Deploys build in CI (see [`docs/deploy.md`](docs/deploy.md)); `dist/` and
 `sw.js` are gitignored outputs.
 
 [`scripts/build-graph.js`](scripts/build-graph.js) walks every concept page, validates the tree, computes

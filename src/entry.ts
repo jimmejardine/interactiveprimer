@@ -7,7 +7,7 @@
  *   1. Re-export the page-scripting API (`export * from "./primer.ts"`) so a concept
  *      page's inline scene `<script type="module">import { registerGeometryScene }
  *      from "primer"</script>` resolves against the bundle (via the import map that
- *      the generated js/boot.js injects).
+ *      the generated dist/boot.js injects).
  *   2. Import `./render.ts` for its side effect (it registers the custom elements and
  *      mounts the page shell on load), so `import(PRIMER_BUNDLE)` in boot.js boots
  *      the page.

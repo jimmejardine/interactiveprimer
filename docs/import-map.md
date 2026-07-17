@@ -10,10 +10,10 @@ explains how one script tag connects the two.
 A page has **no `<head>` at all**: just its content cards, the inline `concept-meta` JSON, and
 
 ```html
-<script src="/js/boot.js"></script>
+<script src="/dist/boot.js"></script>
 ```
 
-first in the `<body>`. `/js/boot.js` is a small **generated** classic script (from
+first in the `<body>`. `/dist/boot.js` is a small **generated** classic script (from
 [`src/boot.ts`](../src/boot.ts); never edit the output) with a stable URL, so pages never change
 when the framework does. Being a classic, render-blocking script placed first, it can do
 synchronous pre-paint work and guarantee ordering:

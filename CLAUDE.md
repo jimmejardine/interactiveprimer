@@ -55,7 +55,7 @@ scripts still run and the metadata is still read.
 <html lang="en">
   <body>
     <!-- 1) The whole toolchain, in one tag. MUST be first in <body>. -->
-    <script src="/js/boot.js"></script>
+    <script src="/dist/boot.js"></script>
 
     <!-- 2) The title — its own element (translatable). -->
     <primer-title>Addition</primer-title>

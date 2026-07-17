@@ -6,9 +6,9 @@ All framework code lives here, in strict TypeScript. `scripts/build.mjs` (esbuil
   + `render.ts`, which mounts the page shell), plus code-split lazy chunks for the heavy libraries
   (manim, QuickJS-WASM, MathLive, sucrase, compute-engine).
 - `dist/bundle/app-<hash>.js` — the standalone-page bundle (entry `app.ts`; no renderer).
-- Generated classic scripts at **stable URLs**: `js/boot.js` (from `boot.ts`, bundle hash stamped
-  in — the one tag every concept page includes), `js/analytics.js` (from `analytics.ts`), and the
-  service worker `sw.js` (from `sw.ts`). `js/`, `sw.js`, and `dist/` are gitignored build outputs.
+- Generated classic scripts at **stable URLs**: `dist/boot.js` (from `boot.ts`, bundle hash stamped
+  in — the one tag every concept page includes), `dist/analytics.js` (from `analytics.ts`), and the
+  service worker `sw.js` (from `sw.ts`). `dist/` and `sw.js` are gitignored build outputs.
 
 Conventions:
 

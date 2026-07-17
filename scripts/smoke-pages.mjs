@@ -76,7 +76,7 @@ if (ids.length === 0) {
 // --- 2. Server: use an existing one (--dev / --server) or spin up a private ephemeral one ----------
 const isUp = async (b) => {
   try {
-    const r = await fetch(`${b}/js/boot.js`, { method: "HEAD" });
+    const r = await fetch(`${b}/dist/boot.js`, { method: "HEAD" });
     return r.ok || r.status === 405 || r.status === 200;
   } catch {
     return false;

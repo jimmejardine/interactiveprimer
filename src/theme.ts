@@ -5,7 +5,7 @@
  * owns selecting/persisting the theme and exposing the active visualisation palette to
  * JS (for the manim animations).
  *
- * No-flash: `data-theme` is set synchronously before first paint by js/boot.js (and the
+ * No-flash: `data-theme` is set synchronously before first paint by dist/boot.js (and the
  * inline script in index.html); `initTheme()` here simply reconciles + persists.
  * @module
  */
@@ -17,7 +17,7 @@ export type ThemeId = "light" | "dark" | "fun";
 /**
  * Available themes, in display order. `scheme` is the light/dark nature of the palette
  * (the dark mode `--primer-bg` is dark, the others light) — the single source of truth
- * for `color-scheme`, applied in {@link applyTheme} and mirrored by js/boot.js so the
+ * for `color-scheme`, applied in {@link applyTheme} and mirrored by dist/boot.js so the
  * browser's default canvas + scrollbars match the theme before css/primer.css loads.
  */
 export const THEMES: ReadonlyArray<{ id: ThemeId; label: string; scheme: "light" | "dark" }> = [

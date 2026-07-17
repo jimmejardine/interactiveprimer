@@ -2,12 +2,12 @@
 
 The site is a static site **with a framework build step**: `npm ci && npm run build` compiles the
 TypeScript framework (`src/`) into hashed bundles under `dist/`, emits the generated classic
-scripts (`js/boot.js`, `js/analytics.js`, `sw.js`), and validates + writes the knowledge graph
+scripts (`dist/boot.js`, `dist/analytics.js`, `sw.js`), and validates + writes the knowledge graph
 (`dist/graph.json`), `sitemap.xml`, and `robots.txt`. The **publish directory is the repo root
 after building** — concept pages, CSS, images, and the build outputs are all served as-is; there is
 no server.
 
-> ⚠ **The repo is source-only — `main` is no longer directly serveable.** `dist/`, `js/`, and
+> ⚠ **The repo is source-only — `main` is no longer directly serveable.** `dist/` and
 > `sw.js` are gitignored build outputs, so a host that serves the branch verbatim (the original
 > GitHub Pages setup) will 404 every framework asset. Do not point a verbatim-branch host at a
 > post-build-step commit; deploy through CI (below).
@@ -54,7 +54,7 @@ the standard apex A/AAAA set (185.199.108–111.153 / 2606:50c0:8000–8003::153
 
 ## Why an apex (root) domain is required
 
-Pages reference assets with **absolute** paths (`/js/boot.js`, `/css/primer.css`,
+Pages reference assets with **absolute** paths (`/dist/boot.js`, `/css/primer.css`,
 `/dist/graph.json`, `/concepts/...`, `/sw.js` — the service worker additionally needs scope `/`).
 These resolve only when the site is served from the domain root; a project-path URL
 (`…github.io/interactiveprimer/`) would break every absolute path.

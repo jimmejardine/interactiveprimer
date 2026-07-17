@@ -1,5 +1,5 @@
 // Ambient declaration for the bare `"primer"` specifier that every concept page's inline
-// `<script type="module">` imports (and that js/boot.js resolves at runtime via its import map).
+// `<script type="module">` imports (and that dist/boot.js resolves at runtime via its import map).
 //
 // Why this exists: tsc resolves relative imports inside src/ directly, but WebStorm does not
 // reliably apply path mappings to scripts embedded in HTML — so navigation/completion went

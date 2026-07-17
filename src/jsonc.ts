@@ -4,7 +4,7 @@
  * commas; plain `JSON.parse` rejects both. We delegate to JSON5, which allows them (it's also
  * string-aware, so a `//` inside a string value is preserved).
  *
- * `json5` resolves as a bare specifier in both environments: via the import map in js/boot.js
+ * `json5` resolves as a bare specifier in both environments: via the import map in dist/boot.js
  * in the browser, and from node_modules (a devDependency) in the Node tooling.
  * @module
  */

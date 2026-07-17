@@ -1,6 +1,6 @@
 /**
  * Lightweight per-page feedback: a "this page needs attention" flag that fires a GoatCounter
- * **event** (loaded site-wide by js/analytics.js in production). The event's `path` carries the
+ * **event** (loaded site-wide by dist/analytics.js in production). The event's `path` carries the
  * concept id, so the GoatCounter dashboard lists one row per page sorted by count — a backend-free
  * way to see which lessons need work. A localStorage gate limits a browser to one flag per page
  * per day, so the count stays meaningful rather than spammable.

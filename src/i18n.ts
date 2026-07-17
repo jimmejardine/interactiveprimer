@@ -2,7 +2,7 @@
  * Internationalization: the active locale (a user setting, like the theme in src/theme.ts),
  * the chrome-string catalogs, and the helpers pages/components use to localize.
  *
- * The locale is simply `lang` on <html>. js/boot.js (and the inline script in index.html)
+ * The locale is simply `lang` on <html>. dist/boot.js (and the inline script in index.html)
  * set it synchronously before first paint from the persisted `primer:locale`, mirroring how
  * the theme is set; `initLocale()` reconciles + persists. English is the default and the
  * fallback for any missing translation — a lesson with no overlay, or a string with no
