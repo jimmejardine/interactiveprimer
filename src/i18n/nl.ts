@@ -244,6 +244,9 @@ const nl: Record<string, string> = {
 
   // The "My Progress" dashboard (src/progress-dashboard.ts). The heading + exit button reuse
   // menu.myProgress / course.exit above.
+  "dash.docTitle": "Mijn voortgang — Interactive Primer",
+  "dash.loading": "Je voortgang wordt geladen…",
+  "dash.loadError": "Kon je voortgang niet laden.",
   "dash.status.locked": "Vergrendeld",
   "dash.status.ready": "Klaar",
   "dash.status.learning": "Bezig",

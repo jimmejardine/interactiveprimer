@@ -241,6 +241,9 @@ const es: Record<string, string> = {
   "offline.back": "Volver al Primer",
   "offline.unsupported": "El almacenamiento sin conexión no está disponible en este navegador.",
 
+  "dash.docTitle": "Mi progreso — Cartilla Interactiva",
+  "dash.loading": "Cargando tu progreso…",
+  "dash.loadError": "No se pudo cargar tu progreso.",
   "dash.status.locked": "Bloqueado",
   "dash.status.ready": "Listo",
   "dash.status.learning": "Aprendiendo",

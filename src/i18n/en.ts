@@ -247,6 +247,9 @@ const en: Record<string, string> = {
 
   // The "My Progress" dashboard (src/progress-dashboard.ts). The heading + exit button reuse
   // menu.myProgress / course.exit above.
+  "dash.docTitle": "My Progress — Interactive Primer",
+  "dash.loading": "Loading your progress…",
+  "dash.loadError": "Could not load your progress.",
   "dash.status.locked": "Locked",
   "dash.status.ready": "Ready",
   "dash.status.learning": "Learning",

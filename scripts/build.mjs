@@ -184,15 +184,17 @@ fs.writeFileSync(r("dist/prepaint.js"), stampSupported(await transpile("src/prep
 fs.writeFileSync(r("dist/analytics.js"), await transpile("src/analytics.ts"));
 fs.writeFileSync(r("sw.js"), await transpile("src/sw.ts"));
 
-// The landing page: stamp the English from en.ts into src/index.html's {{landing.*}} placeholders
-// and write the served root index.html — so the English lives ONLY in en.ts (no duplication) yet
-// ships statically (SEO + instant paint). The data-i18n* attributes swap it to es/nl at runtime.
-const indexTmpl = fs.readFileSync(r("src/index.html"), "utf8");
-const indexHtml = indexTmpl.replace(/\{\{([\w.]+)\}\}/g, (m, key) => {
-  if (!(key in enCatalog)) throw new Error(`build: src/index.html references unknown i18n key "${key}"`);
-  return enCatalog[key];
-});
-fs.writeFileSync(r("index.html"), indexHtml);
+// Standalone-page templates: stamp the English from en.ts into each src/*.html's {{key}} placeholders
+// and write the served root *.html — so the English lives ONLY in en.ts (no duplication) yet ships
+// statically (SEO + instant paint). The data-i18n* attributes swap it to es/nl at runtime. (Pages
+// not yet templated stay as plain root *.html files, untouched.)
+for (const f of fs.readdirSync(r("src")).filter((n) => n.endsWith(".html"))) {
+  const html = fs.readFileSync(r("src", f), "utf8").replace(/\{\{([\w.]+)\}\}/g, (m, key) => {
+    if (!(key in enCatalog)) throw new Error(`build: src/${f} references unknown i18n key "${key}"`);
+    return enCatalog[key];
+  });
+  fs.writeFileSync(r(f), html);
+}
 
 // ── 6) Asset manifest (logical name → hashed URL) for tooling / the service worker. ───────────────
 fs.writeFileSync(
