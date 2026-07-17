@@ -30,6 +30,19 @@ const MASTERY_LABEL_KEY = {
 };
 const masteryLabel = (status: keyof typeof MASTERY_LABEL_KEY) => t(MASTERY_LABEL_KEY[status]);
 
+/** Columns the concept list can be sorted by (the index = position in the course's spine). */
+type SortKey = "index" | "title" | "stars" | "status" | "started" | "updated";
+type ListSort = { key: SortKey; dir: 1 | -1 };
+
+/** Status sort rank — actionability first: ready → learning → review-due → locked → mastered. */
+const STATUS_RANK: Record<string, number> = {
+  ready: 0,
+  learning: 1,
+  "review-due": 2,
+  locked: 3,
+  mastered: 4,
+};
+
 /**
  * Mount the dashboard into `root`.
  */
@@ -88,6 +101,17 @@ export function mountProgressDashboard(root: HTMLElement, { byId }: { byId: Map<
 
   let graphHandle: { destroy: () => void } | null = null;
   let glittered = false;
+  // Concept-list sort, persisted across paints (confidence-change repaints the list). Default =
+  // the course's own spine order. Clicking the active column reverses it.
+  const listSort: ListSort = { key: "index", dir: 1 };
+  const onSort = (key: SortKey) => {
+    if (listSort.key === key) listSort.dir = listSort.dir === 1 ? -1 : 1;
+    else {
+      listSort.key = key;
+      listSort.dir = 1;
+    }
+    paint();
+  };
 
   const mountGraph = () => {
     graphHandle?.destroy();
@@ -130,7 +154,7 @@ export function mountProgressDashboard(root: HTMLElement, { byId }: { byId: Map<
     renderTiles(tiles, p);
     renderHeatmap(heat, p.buckets, p.streakDays);
     renderPanels(panels, p, titleOf, nextId, starsOf);
-    renderList(list, p, titleOf, byId, locale);
+    renderList(list, p, titleOf, locale, listSort, onSort);
 
     // one-shot celebration when the course is mostly mastered
     if (!glittered && p.total > 0 && p.fracMastered >= 0.999) {
@@ -291,15 +315,32 @@ function nextNudge(nextId: string | null, starsOf: (id: string) => number, title
   return `<p class="muted small">${escapeHtml(kind)}</p><a class="p-next-cta" href="/concepts/${nextId}">${escapeHtml(titleOf(nextId))} →</a>`;
 }
 
-function renderList(host: HTMLElement, p: ReturnType<typeof courseProgress>, titleOf: (id: string) => string, byId: Map<string, any>, locale: string) {
-  const rows = p.perConcept
+function renderList(host: HTMLElement, p: ReturnType<typeof courseProgress>, titleOf: (id: string) => string,
+  locale: string, sort: ListSort, onSort: (key: SortKey) => void) {
+  // Attach each concept's spine position (perConcept comes in course-member order), then sort.
+  const items = p.perConcept.map((c, i) => ({ ...c, index: i + 1, title: titleOf(c.id) }));
+  // Empty dates sort last regardless of direction (a real date always beats "never touched").
+  const dateCmp = (a: string, b: string) => (a === "" && b === "" ? 0 : a === "" ? 1 : b === "" ? -1 : a.localeCompare(b) * sort.dir);
+  const cmp: Record<SortKey, (a: (typeof items)[0], b: (typeof items)[0]) => number> = {
+    index: (a, b) => (a.index - b.index) * sort.dir,
+    title: (a, b) => a.title.localeCompare(b.title, locale) * sort.dir,
+    stars: (a, b) => (a.stars - b.stars) * sort.dir || a.index - b.index,
+    // Actionability order (ready → learning → review-due → locked → mastered); spine order tiebreak.
+    status: (a, b) => ((STATUS_RANK[a.status] ?? 9) - (STATUS_RANK[b.status] ?? 9)) * sort.dir || a.index - b.index,
+    started: (a, b) => dateCmp(a.first ?? "", b.first ?? "") || a.index - b.index,
+    updated: (a, b) => dateCmp(a.last ?? "", b.last ?? "") || a.index - b.index,
+  };
+  items.sort(cmp[sort.key]);
+
+  const rows = items
     .map((c) => {
       const tint = confidenceColor(c.id) || "var(--primer-star)";
       const stars = starRow(c.stars, tint);
       const started = c.first ? c.first.slice(0, 10) : "—";
       const updated = c.last ? c.last.slice(0, 10) : "—";
       return `<div class="row">
-        <a class="row-title" href="/concepts/${c.id}">${escapeHtml(titleOf(c.id))}</a>
+        <span class="row-index">${c.index}</span>
+        <a class="row-title" href="/concepts/${c.id}">${escapeHtml(c.title)}</a>
         <div class="row-stars">${stars}</div>
         <div class="row-status"><span class="status" data-status="${c.status}">${escapeHtml(masteryLabel(c.status))}</span></div>
         <div class="row-date" title="${escapeHtml(t("dash.col.started"))}">${started}</div>
@@ -307,9 +348,16 @@ function renderList(host: HTMLElement, p: ReturnType<typeof courseProgress>, tit
       </div>`;
     })
     .join("");
+  const arrow = sort.dir === 1 ? "▲" : "▼";
+  const th = (key: SortKey, label: string) =>
+    `<span><button type="button" class="sort-btn${sort.key === key ? " is-sorted" : ""}" data-sort="${key}">` +
+    `${escapeHtml(label)}${sort.key === key ? ` <span class="dir" aria-hidden="true">${arrow}</span>` : ""}</button></span>`;
   host.innerHTML = `<div class="card-head"><h2>${escapeHtml(t("dash.allConcepts"))}</h2><span class="muted">${p.total}</span></div>
-    <div class="row row-head"><span>${escapeHtml(t("dash.col.concept"))}</span><span>${escapeHtml(t("dash.col.confidence"))}</span><span>${escapeHtml(t("dash.col.status"))}</span><span>${escapeHtml(t("dash.col.started"))}</span><span>${escapeHtml(t("dash.col.updated"))}</span></div>
+    <div class="row row-head">${th("index", t("dash.col.index"))}${th("title", t("dash.col.concept"))}${th("stars", t("dash.col.confidence"))}${th("status", t("dash.col.status"))}${th("started", t("dash.col.started"))}${th("updated", t("dash.col.updated"))}</div>
     ${rows}`;
+  host.querySelectorAll<HTMLButtonElement>(".sort-btn").forEach((b) =>
+    b.addEventListener("click", () => onSort(b.dataset.sort as SortKey)),
+  );
 }
 
 // ---- small html helpers --------------------------------------------------------------------------

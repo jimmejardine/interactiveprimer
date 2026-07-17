@@ -255,6 +255,7 @@ const en: Record<string, string> = {
   "dash.nudgeNew": "Ready to learn — dive in:",
   "dash.nudgeContinue": "Continue where you left off:",
   "dash.allConcepts": "All concepts",
+  "dash.col.index": "#",
   "dash.col.concept": "Concept",
   "dash.col.confidence": "Confidence",
   "dash.col.status": "Status",
