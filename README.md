@@ -46,25 +46,25 @@ Each "smart web page" is a plain `.html` file that pulls in everything it needs 
 is no build step.**
 
 - **One include per page.** A page adds a single `<script src="/js/boot.js"></script>`;
-  [`js/boot.js`](js/boot.js) injects the CSS and an ESM **import map** (dependencies load straight from a
+  [`src/boot.ts`](src/boot.ts) injects the CSS and an ESM **import map** (dependencies load straight from a
   CDN) and mounts the renderer. See [`docs/import-map.md`](docs/import-map.md) for the toolchain detail.
 - **Libraries** (all pre-built ESM): **[KaTeX](https://katex.org/)** typesets mathematics;
   **[JSXGraph](https://jsxgraph.org/)** draws the interactive charts and geometry figures that carry most
   pages' visuals; **[manim-web](https://github.com/maloyan/manim-web)** renders animations; and
   programming pages run editable **TypeScript** in a sandbox (transpiled with sucrase, executed in
   QuickJS-WASM — no build, no server).
-- **Web Components** ([`js/components/`](js/components/), all registered by
-  [`js/primer.js`](js/primer.js)) give every page a consistent look. Authors write content as
+- **Web Components** ([`src/components/`](src/components/), all registered by
+  [`src/primer.ts`](src/primer.ts)) give every page a consistent look. Authors write content as
   `<primer-card>`s using `<primer-math>`, `<primer-geometry>` / `<primer-chart>` (figures & plots),
   `<primer-code>` (highlighted TypeScript, optionally runnable), `<primer-manim>`, `<primer-vignette>`
   (collapsible digressions), `<primer-theorem>` (callouts), `<primer-ref>` (concept links), and a
   randomised `<primer-quiz>`. The page shell (header, title, confidence control) and the mini-explorer /
-  "Up next" recommender are built automatically by [`js/render.js`](js/render.js) from the page's
+  "Up next" recommender are built automatically by [`src/render.ts`](src/render.ts) from the page's
   metadata.
 - **Themes** — light, dark, and a playful **fun** theme for kids. A theme is a value of `data-theme` on
   `<html>`; palettes are `--primer-*` token blocks in [`css/primer.css`](css/primer.css), so the whole UI
   re-themes via `var(...)`, and every figure re-colours through `themeColors()`. It is applied with no
-  flash by [`js/boot.js`](js/boot.js), managed by [`js/theme.js`](js/theme.js), and switched from a
+  flash by [`src/boot.ts`](src/boot.ts), managed by [`src/theme.ts`](src/theme.ts), and switched from a
   top-right hamburger menu.
 - **Typed JavaScript + JSDoc** (no `.ts` authoring): the code runs raw in the browser and in Node, yet is
   fully type-checked by `tsc` against the libraries' own type definitions.
@@ -74,8 +74,8 @@ is no build step.**
   `<primer-title>` element; the remaining graph data (prerequisites, declared level, optional curation
   dates) is an inline `<script class="concept-meta">` JSON block after `</html>` — the language-neutral
   machinery, separated from the translatable body. The knowledge-tree logic (prerequisite resolution +
-  downstream **level propagation**) lives in [`js/graph.js`](js/graph.js) / [`js/levels.js`](js/levels.js),
-  and quiz generation in [`js/quiz.js`](js/quiz.js); all are unit-tested.
+  downstream **level propagation**) lives in [`src/graph.ts`](src/graph.ts) / [`src/levels.ts`](src/levels.ts),
+  and quiz generation in [`src/quiz.ts`](src/quiz.ts); all are unit-tested.
 
 ### Building & checking
 
@@ -106,7 +106,7 @@ title goes in a `<primer-title>`, and it should teach its one idea *richly* at t
 The Interactive Primer is a free knowledge commons — copyleft, so it stays free for everyone. It is
 licensed in two complementary parts:
 
-- **Code** — the framework (`js/`, `css/`, `scripts/`, `index.html`, and root config) is licensed
+- **Code** — the framework (`src/`, `css/`, `scripts/`, `index.html`, and root config) is licensed
   under the **GNU Affero General Public License v3.0-or-later** (see [`LICENSE`](LICENSE)). Anyone
   may use, study, modify, and redistribute it; any modified version — **including one merely run on
   a server** — must make its source available under the same terms.

@@ -1,0 +1,513 @@
+/**
+ * <primer-pathway> — a small visual map of where the current concept sits in the
+ * knowledge tree, rendered at the top and bottom of every lesson (inserted by
+ * js/render.js). Three columns, centred on the current concept:
+ *
+ *   column 1: immediate predecessors (direct prerequisites)
+ *   column 2: peers above, the CURRENT concept in the centre, peers below
+ *   column 3: immediate successors (direct dependents)
+ *
+ * with lines connecting concepts that share a prerequisite edge. Every node except
+ * the current one links to that concept's page.
+ *
+ * The whole graph is loaded once from /dist/graph.json (shared across the top and
+ * bottom instances). If that fetch fails or the current concept isn't in the graph,
+ * the widget renders nothing — the lesson is unaffected. Run `npm run graph` after
+ * adding or editing concepts so the map reflects the latest tree.
+ * @module
+ */
+
+import type { ResolvedConcept } from "../types/domain.ts";
+
+import { attachShared, katexHref } from "./shared.ts";
+import { escapeHtml as esc } from "../html-entities.ts";
+import { conceptIdFromPath } from "../concept-meta.ts";
+import { neighborhood } from "../graph.ts";
+import { loadGraph } from "../graph-data.ts";
+import { t, getLocale } from "../i18n.ts";
+import { confidenceColor } from "../confidence-color.ts";
+import { createContextMenu } from "../context-menu.ts";
+import { getCurrentCourse } from "../course.ts";
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** Most nodes to show in any one column before collapsing the rest into a "+k more" chip. */
+const MAX_PER_COL = 6;
+
+/** Paint a node element from its concept's rating (clears to the default when unrated). */
+function paintNode(el: Element) {
+  (el as HTMLElement).style.background = confidenceColor(el.getAttribute("data-id") ?? "") ?? "";
+}
+
+const STYLE = `
+  :host { display: block; }
+  /* Scroll viewport: on a narrow screen the (nowrap) node pills make the 3-column grid
+     wider than the page, so we scroll the whole map horizontally instead of widening the
+     page or squashing pills. #render centres this on the current concept after layout. */
+  .scroll {
+    overflow-x: auto; overflow-y: hidden; max-width: 100%; margin: 1.25rem 0;
+    /* Room inside the clip box so a hovered node's highlight ring (box-shadow) and the current
+       node's thicker border aren't sliced off at the edges of the map. */
+    padding: 0.3rem;
+    scrollbar-width: thin; overscroll-behavior-x: contain;
+  }
+  /* The scrolled CONTENT (carries the wires overlay): width is auto, so it fills the
+     viewport and the columns compress (pills ellipsize) as it narrows. The min-width is the
+     floor below which the columns stop narrowing and the .scroll parent shows a horizontal
+     scrollbar instead — so it sets the per-column node spacing on small screens (each column
+     is ~1/3 of it). Keep it generous so phone pills don't crush; the scrollbar takes the rest.
+     (Grid tracks stay minmax(0,1fr) below, so .cols always == .pathway width and the wires
+     stay aligned.) Keep this element the wires' offset parent so #drawWires keeps aligning and
+     the wires scroll with the nodes. */
+  .pathway { position: relative; margin: 0; min-width: 32rem; }
+  .cols {
+    position: relative; z-index: 1;
+    /* minmax(0, 1fr) lets a track shrink below its pill's text so the pill can ellipsize
+       (rather than forcing the whole grid wider than the page). */
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+    align-items: center; gap: 0.5rem;
+  }
+  .col { display: flex; flex-direction: column; gap: 0.4rem; justify-content: center; }
+  .col.col1 { align-items: flex-start; }
+  .col.col2 { align-items: center; }
+  .col.col3 { align-items: flex-end; }
+
+  .node {
+    font-family: var(--primer-font-ui, sans-serif);
+    font-size: 0.8rem; line-height: 1.15;
+    max-width: 100%;
+    padding: 0.42rem 0.7rem;
+    border: 1px solid var(--primer-border, #ddd);
+    border-radius: 999px;
+    background: var(--primer-surface, #fff);
+    color: var(--primer-ink, #111);
+    text-decoration: none;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    box-shadow: var(--primer-shadow-sm, 0 1px 2px rgba(0,0,0,0.05));
+    transition: border-color .1s, box-shadow .1s, opacity .12s, transform .1s;
+  }
+  .node:not(.node--current):hover { border-color: var(--primer-accent, #46e); transform: translateY(-1px); }
+  .node--current { border: 2px solid var(--primer-accent, #46e); font-weight: 600; }
+  /* The active course's predecessor / successor of the current concept — a distinct ring colour. */
+  .node--course { border-color: var(--primer-course, #b8860b); box-shadow: 0 0 0 2px var(--primer-course, #b8860b); }
+  .more { font-size: 0.72rem; color: var(--primer-ink-soft, #667); padding: 0.15rem 0.4rem; }
+
+  /* Hover emphasis: bolder connected nodes + edges, dimmed rest. */
+  .node.is-hot { border-color: var(--primer-accent, #46e); box-shadow: 0 0 0 2px var(--primer-accent, #46e); font-weight: 600; }
+  .node.is-dim { opacity: 0.4; }
+
+  .wires {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 0; overflow: visible;
+  }
+  .wires line { stroke: var(--primer-border, #ccc); stroke-width: 1.2; stroke-opacity: 0.65; transition: stroke .1s, stroke-width .1s, opacity .12s; }
+  .wires line.is-explicit { stroke-width: 2.8; stroke-opacity: 1; } /* explicit (concept-meta) prerequisite — clearly thicker */
+  .wires line.is-course { stroke: var(--primer-course, #b8860b); stroke-width: 3; stroke-opacity: 1; } /* the active course's path — gold */
+  .wires line.is-hot { stroke: var(--primer-accent, #46e); stroke-width: 3.4; stroke-opacity: 1; }
+  .wires line.is-dim { opacity: 0.2; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .node, .wires line { transition: none; }
+    .node:not(.node--current):hover { transform: none; }
+  }
+`;
+
+export class PrimerPathway extends HTMLElement {
+  #observer: ResizeObserver | null = null;
+  #onConfidence: ((e: Event) => void) | null = null;
+  #onTheme: (() => void) | null = null;
+  /** The shared right-click / long-press context menu. */
+  #ctxMenu: { destroy: () => void } | null = null;
+  /** Removes the context-menu trigger listeners. */
+  #ctxCleanup: (() => void) | null = null;
+  /** Re-renders when the active course changes. */
+  #onCourse: ((e: Event) => void) | null = null;
+
+  async connectedCallback() {
+    const root = this.shadowRoot ?? attachShared(this);
+    let graph: { raw: any; byId: Map<string, ResolvedConcept> };
+    try {
+      const id = conceptIdFromPath();
+      if (!id) return;
+      graph = await loadGraph();
+      // The element may have been disconnected while the graph loaded.
+      if (!this.isConnected) return;
+      const hood = neighborhood(id, graph.byId);
+      if (!hood) return; // current concept not in the (possibly stale) graph
+      this.#render(root, graph.byId, hood);
+      // Re-render when the learner enters/leaves a course (recolours the course pred/succ).
+      this.#onCourse = () => this.#refresh();
+      document.addEventListener("course-change", this.#onCourse);
+    } catch (err) {
+      console.warn("primer-pathway: could not build the navigation map —", err);
+    }
+  }
+
+  /** Tear down the previous render's dynamic listeners and re-render (for a course change). */
+  async #refresh() {
+    if (this.#onConfidence) document.removeEventListener("confidence-change", this.#onConfidence);
+    if (this.#onTheme) document.removeEventListener("theme-change", this.#onTheme);
+    this.#observer?.disconnect();
+    this.#ctxCleanup?.();
+    this.#ctxMenu?.destroy();
+    const root = this.shadowRoot;
+    if (!root) return;
+    const id = conceptIdFromPath();
+    if (!id) return;
+    const graph = await loadGraph();
+    if (!this.isConnected) return;
+    const hood = neighborhood(id, graph.byId);
+    if (!hood) return;
+    this.#render(root, graph.byId, hood);
+  }
+
+  disconnectedCallback() {
+    this.#observer?.disconnect();
+    this.#observer = null;
+    if (this.#onConfidence) document.removeEventListener("confidence-change", this.#onConfidence);
+    this.#onConfidence = null;
+    if (this.#onTheme) document.removeEventListener("theme-change", this.#onTheme);
+    this.#onTheme = null;
+    if (this.#onCourse) document.removeEventListener("course-change", this.#onCourse);
+    this.#onCourse = null;
+    this.#ctxCleanup?.();
+    this.#ctxCleanup = null;
+    this.#ctxMenu?.destroy();
+    this.#ctxMenu = null;
+  }
+
+  #render(root: ShadowRoot, byId: Map<string, ResolvedConcept>, hood: NonNullable<ReturnType<typeof neighborhood>>) {
+    // Hide course nodes (course: true) from the mini map — they clutter concepts that are a course's
+    // "Begin →" target (a forward ref makes the course a prerequisite edge) — EXCEPT the learner's
+    // currently-focused course. The centre node (hood.id, the page itself) is never filtered.
+    const courseId = getCurrentCourse();
+    const visible = (nid: string) => nid === courseId || byId.get(nid)?.course !== true;
+    hood = {
+      ...hood,
+      predecessors: hood.predecessors.filter(visible),
+      successors: hood.successors.filter(visible),
+      peers: hood.peers.filter(visible),
+      edges: hood.edges.filter((e) => visible(e.a) && visible(e.b)),
+    };
+
+    // Label nodes in the active language: a node's translated title when the overlays
+    // provided one (harvested into graph.json by build-graph), else the English title.
+    const locale = getLocale();
+    /** Plain-text label (translated when available) — used for the tooltip + sorting. */
+    const title = (id: string) => {
+      const c = byId.get(id);
+      return c?.titles?.[locale] ?? c?.title ?? leaf(id);
+    };
+    // The pill's inner HTML: a concept's title markup (typeset by its <primer-math>) when it has a
+    // math title AND we're not overriding it with a translated (plain) title; else the escaped
+    // plain text. Title markup is authored/trusted, so it's injected unescaped on purpose.
+    const label = (id: string) => {
+      const c = byId.get(id);
+      if (c?.titleHtml && !c?.titles?.[locale]) return c.titleHtml;
+      return esc(title(id));
+    };
+    /** Sort ids by resolved level, then title. */
+    const byLevel = (ids: string[]) =>
+      [...ids].sort(
+        (a, b) =>
+          (byId.get(a)?.level ?? 0) - (byId.get(b)?.level ?? 0) || title(a).localeCompare(title(b)),
+      );
+
+    let col1 = byLevel(hood.predecessors);
+    let col3 = byLevel(hood.successors);
+
+    // Course overlay: when a course is active and the current concept is on its path, find the
+    // course-order predecessor/successor and surface them at the FRONT of col1/col3 (so they're not
+    // truncated), tinted with the course colour. Course order ≠ prerequisite order, so a course
+    // neighbour may not otherwise appear in these columns — hence we ensure it's present.
+    const members = courseId ? byId.get(courseId)?.courseMembers : undefined;
+    const courseHL: Set<string> = new Set();
+    /** The course's path through the current concept (drawn gold). */
+    const courseEdges: { a: string; b: string }[] = [];
+    if (members && members.length) {
+      // The course's first member IS the course page itself, so a plain index walk gives the right
+      // predecessor/successor everywhere — including the hub (i = 0 → no predecessor, first concept next).
+      const i = members.indexOf(hood.id);
+      const pred = i > 0 ? members[i - 1] : undefined;
+      const succ = i >= 0 && i < members.length - 1 ? members[i + 1] : undefined;
+      if (pred && byId.has(pred)) { courseHL.add(pred); col1 = [pred, ...col1.filter((x) => x !== pred)]; courseEdges.push({ a: pred, b: hood.id }); }
+      if (succ && byId.has(succ)) { courseHL.add(succ); col3 = [succ, ...col3.filter((x) => x !== succ)]; courseEdges.push({ a: hood.id, b: succ }); }
+    }
+
+    // Peers fill the centre column — but drop any concept already surfaced as a course predecessor or
+    // successor above, so a course neighbour that's also a peer doesn't appear twice (and the gold
+    // course wire then connects the right copy).
+    const peers = byLevel(hood.peers).filter((x) => !courseHL.has(x));
+    const above = peers.slice(0, Math.ceil(peers.length / 2));
+    const below = peers.slice(above.length);
+
+    const link = (id: string) =>
+      `<a class="node${courseHL.has(id) ? " node--course" : ""}" href="/concepts/${id}.html" data-id="${esc(id)}" title="${esc(title(id))}">${label(id)}</a>`;
+    const current = `<span class="node node--current" data-id="${esc(hood.id)}" aria-current="page" title="${esc(title(hood.id))}">${label(hood.id)}</span>`;
+
+    /** Render a column with an overflow "+k more" chip past MAX_PER_COL. */
+    const column = (cls: string, ids: string[]) => {
+      const shown = ids.slice(0, MAX_PER_COL).map(link);
+      const extra = ids.length - MAX_PER_COL;
+      if (extra > 0) shown.push(`<span class="more">${t("pathway.more", { extra })}</span>`);
+      return `<div class="col ${cls}">${shown.join("")}</div>`;
+    };
+
+    const col2 = `<div class="col col2">${[...above.map(link), current, ...below.map(link)].join("")}</div>`;
+
+    // A math title (titleHtml) typesets via <primer-math>, whose KaTeX output relies on the
+    // document-level katex.min.css — which can't cross into this shadow root. When any displayed
+    // node has a math label, clone the KaTeX <link> (already injected into <head> by boot.js) so
+    // the typeset math is styled inside the shadow boundary; no math → no extra stylesheet.
+    const katexUrl = katexHref();
+    const hasMath =
+      katexUrl &&
+      [hood.id, ...col1, ...col3, ...peers].some((id) => {
+        const c = byId.get(id);
+        return c?.titleHtml && !c?.titles?.[locale];
+      });
+    const katexLink = hasMath ? `<link rel="stylesheet" href="${katexUrl}">` : "";
+
+    root.innerHTML = `
+      ${katexLink}
+      <style>${STYLE}</style>
+      <div class="scroll">
+        <nav class="pathway" aria-label="${t("pathway.label")}">
+          <div class="cols">
+            ${column("col1", col1)}
+            ${col2}
+            ${column("col3", col3)}
+          </div>
+          <svg class="wires" aria-hidden="true"></svg>
+        </nav>
+      </div>`;
+
+    const scroll = root.querySelector(".scroll") as HTMLElement;
+    const pathway = root.querySelector(".pathway") as HTMLElement;
+    const svg = root.querySelector(".wires") as SVGSVGElement;
+    // Tag each prerequisite edge as explicit (declared in the concept-meta) vs implicit (only a
+    // `<primer-ref>` in the prose), so explicit ones can draw slightly thicker — like the full
+    // explorer. The edge is undirected, so check the explicit list of whichever end is the dependent.
+    const isExplicit = (a: string, b: string) =>
+      !!(byId.get(a)?.explicitPrerequisites?.includes(b) || byId.get(b)?.explicitPrerequisites?.includes(a));
+    // Gold-tag the active course's path. A course step may not be a prerequisite edge (course order ≠
+    // prerequisite order), so flag matching prerequisite edges AND append any that aren't drawn yet.
+    const pairKey = (a: string, b: string) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+    const coursePairs = new Set(courseEdges.map((e) => pairKey(e.a, e.b)));
+    const havePairs = new Set(hood.edges.map((e) => pairKey(e.a, e.b)));
+    const drawEdges = hood.edges.map((e) => ({ ...e, explicit: isExplicit(e.a, e.b), course: coursePairs.has(pairKey(e.a, e.b)) }));
+    for (const e of courseEdges) {
+      if (!havePairs.has(pairKey(e.a, e.b))) drawEdges.push({ a: e.a, b: e.b, explicit: false, course: true });
+    }
+    const draw = () => this.#drawWires(pathway, svg, drawEdges);
+
+    // Scroll the strip so the current concept starts centred (only meaningful when the map
+    // is wider than the viewport; on a wide screen it's already centred so this is ~0).
+    const centerOnCurrent = () => {
+      const cur = root.querySelector(".node--current") as HTMLElement | null;
+      if (!cur) return;
+      scroll.scrollLeft = Math.max(0, cur.offsetLeft + cur.offsetWidth / 2 - scroll.clientWidth / 2);
+    };
+
+    // Draw + centre after first layout; redraw wires on resize (don't re-centre, so we
+    // don't fight a learner who has scrolled). ResizeObserver fires once on observe.
+    requestAnimationFrame(() => {
+      draw();
+      centerOnCurrent();
+    });
+    this.#observer = new ResizeObserver(draw);
+    this.#observer.observe(pathway);
+
+    const nodes = [...root.querySelectorAll(".node")] as HTMLElement[];
+
+    // Colour each node from its rating, and re-colour live when the learner changes
+    // their stars on this page (primer-concept dispatches a composed confidence-change).
+    for (const el of nodes) paintNode(el);
+    this.#onConfidence = (e) => {
+      const id = (e as any).detail?.conceptId;
+      if (!id) return;
+      const el = root.querySelector(`.node[data-id="${cssEscape(id)}"]`);
+      if (el) paintNode(el);
+    };
+    document.addEventListener("confidence-change", this.#onConfidence);
+
+    // Re-paint the rating colours when the theme changes (the fills are inline styles,
+    // so unlike CSS var() they don't update themselves).
+    this.#onTheme = () => {
+      for (const el of nodes) paintNode(el);
+    };
+    document.addEventListener("theme-change", this.#onTheme);
+
+    // Hover: emphasise a node's connected nodes + edges and dim the rest.
+    const adj: Map<string, Set<string>> = new Map();
+    const linkAdj = (x: string, y: string) => {
+      let s = adj.get(x);
+      if (!s) adj.set(x, (s = new Set()));
+      s.add(y);
+    };
+    for (const { a, b } of [...hood.edges, ...courseEdges]) {
+      linkAdj(a, b);
+      linkAdj(b, a);
+    }
+    const setHot = (id: string, on: boolean) => {
+      const hot = new Set([id, ...(adj.get(id) ?? [])]);
+      for (const el of nodes) {
+        const nid = el.getAttribute("data-id") ?? "";
+        el.classList.toggle("is-hot", on && hot.has(nid));
+        el.classList.toggle("is-dim", on && !hot.has(nid));
+      }
+      for (const ln of svg.querySelectorAll("line")) {
+        const incident = ln.getAttribute("data-a") === id || ln.getAttribute("data-b") === id;
+        ln.classList.toggle("is-hot", on && incident);
+        ln.classList.toggle("is-dim", on && !incident);
+      }
+    };
+    for (const el of nodes) {
+      const id = el.getAttribute("data-id") ?? "";
+      el.addEventListener("mouseenter", () => setHot(id, true));
+      el.addEventListener("mouseleave", () => setHot(id, false));
+    }
+
+    // Right-click / long-press a node → an "Explore" popup that opens it in the full map.
+    this.#wireContextMenu(root, pathway, scroll);
+  }
+
+  /**
+   * Wire the shared context menu to the pathway's nodes: right-click (desktop) or a touch
+   * long-press opens a popup whose "Explore" item re-centres the full explorer on that concept
+   * (`/concepts.html?id=<id>`). Listeners are delegated on the `.pathway` element and torn down in
+   * disconnectedCallback via `#ctxCleanup`.
+   */
+  #wireContextMenu(root: ShadowRoot, pathway: HTMLElement, scroll: HTMLElement) {
+    const menu = createContextMenu(root, [
+      // "Open" — same as clicking the node: go to the concept's lesson page.
+      {
+        label: t("contextmenu.open"),
+        run: (id) => {
+          window.location.href = `/concepts/${id}.html`;
+        },
+      },
+      // "Explore" — open the full map centred on this concept.
+      {
+        label: t("menu.explore"),
+        run: (id) => {
+          window.location.href = `/concepts.html?id=${encodeURIComponent(id)}`;
+        },
+      },
+    ]);
+    this.#ctxMenu = menu;
+
+    let timer = 0;
+    let startX = 0, startY = 0;
+    let suppressClick = false;
+    const clearTimer = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = 0;
+      }
+    };
+    const nodeOf = (e: Event): Element | null => (e.target as Element)?.closest?.(".node") ?? null;
+
+    const onCtx = (e: MouseEvent) => {
+      const node = nodeOf(e);
+      if (!node) return;
+      e.preventDefault();
+      const id = node.getAttribute("data-id");
+      if (id) menu.open(id, e.clientX, e.clientY);
+    };
+    const onDown = (e: PointerEvent) => {
+      suppressClick = false;
+      if (e.pointerType === "mouse") return; // mouse uses the native contextmenu (right-click)
+      const node = nodeOf(e);
+      if (!node) return;
+      startX = e.clientX;
+      startY = e.clientY;
+      clearTimer();
+      timer = window.setTimeout(() => {
+        timer = 0;
+        const id = node.getAttribute("data-id");
+        if (id) {
+          suppressClick = true; // the finger-up will fire a click on the <a>; swallow it below
+          menu.open(id, startX, startY);
+        }
+      }, 500);
+    };
+    const onMove = (e: PointerEvent) => {
+      if (timer && Math.hypot(e.clientX - startX, e.clientY - startY) > 10) clearTimer();
+    };
+    const onClick = (e: Event) => {
+      if (suppressClick) {
+        e.preventDefault();
+        e.stopPropagation();
+        suppressClick = false;
+      }
+    };
+
+    pathway.addEventListener("contextmenu", onCtx);
+    pathway.addEventListener("pointerdown", onDown);
+    pathway.addEventListener("pointermove", onMove);
+    pathway.addEventListener("pointerup", clearTimer);
+    pathway.addEventListener("pointercancel", clearTimer);
+    pathway.addEventListener("click", onClick, true); // capture: beat the <a>'s navigation
+    scroll.addEventListener("scroll", clearTimer, { passive: true });
+
+    this.#ctxCleanup = () => {
+      clearTimer();
+      pathway.removeEventListener("contextmenu", onCtx);
+      pathway.removeEventListener("pointerdown", onDown);
+      pathway.removeEventListener("pointermove", onMove);
+      pathway.removeEventListener("pointerup", clearTimer);
+      pathway.removeEventListener("pointercancel", clearTimer);
+      pathway.removeEventListener("click", onClick, true);
+      scroll.removeEventListener("scroll", clearTimer);
+    };
+  }
+
+  /**
+   * Measure each node's centre and draw a line per edge into the SVG layer.
+   */
+  #drawWires(pathway: HTMLElement, svg: SVGSVGElement, edges: { a: string; b: string; explicit?: boolean; course?: boolean }[]) {
+    const box = pathway.getBoundingClientRect();
+    if (box.width === 0) return;
+    svg.setAttribute("viewBox", `0 0 ${box.width} ${box.height}`);
+
+    const centre = (id: string) => {
+      const el = pathway.querySelector(`.node[data-id="${cssEscape(id)}"]`);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: r.left - box.left + r.width / 2, y: r.top - box.top + r.height / 2 };
+    };
+
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    for (const { a, b, explicit, course } of edges) {
+      const p = centre(a);
+      const q = centre(b);
+      if (!p || !q) continue;
+      const line = document.createElementNS(SVG_NS, "line");
+      line.setAttribute("x1", String(p.x));
+      line.setAttribute("y1", String(p.y));
+      line.setAttribute("x2", String(q.x));
+      line.setAttribute("y2", String(q.y));
+      line.setAttribute("data-a", a);
+      line.setAttribute("data-b", b);
+      if (explicit) line.classList.add("is-explicit");
+      if (course) line.classList.add("is-course"); // the active course's path — gold
+      svg.appendChild(line);
+    }
+  }
+}
+
+/** Last path segment of an id (fallback label when a title is missing). */
+function leaf(id: string) {
+  return id.split("/").pop() ?? id;
+}
+
+/** Escape an id for use inside a CSS attribute selector (ids contain "/"). */
+function cssEscape(id: string) {
+  const cssAny = window.CSS as any;
+  return cssAny && typeof cssAny.escape === "function" ? cssAny.escape(id) : id.replace(/["\\]/g, "\\$&");
+}
+
+if (!customElements.get("primer-pathway")) {
+  customElements.define("primer-pathway", PrimerPathway);
+}

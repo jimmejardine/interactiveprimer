@@ -1,0 +1,253 @@
+/**
+ * The client half of optional cloud sync. Keeps this browser's localStorage progress reconciled with
+ * the per-user record held by the sync Worker (js/cloud-config.js `CLOUD_API`), reusing the existing
+ * progress machinery (js/progress.js). Auth/session lives in js/account.js; this module only moves
+ * PROGRESS in and out and paints the UI.
+ *
+ * Cost-shaped (see the design): **pull** (read) is throttled to ≤ once per 6 h per device on load
+ * (forced on first sign-in and "Sync now"); **push** (write) is coalesced to ≤ once per 15 min and
+ * only fires when something changed, sending the full local set (the Worker merges server-side, so a
+ * push can't clobber another device's untouched concepts). A dirty flag persists in localStorage so a
+ * change made just before a page navigation isn't lost — it flushes on `pagehide` or the next load.
+ *
+ * The throttle/diff logic is factored into pure, unit-tested helpers (js/cloud-sync — the `shouldPull`
+ * / `shouldPush` / `changedEntries` / `reconcileCourse` exports); the network + localStorage IO is the
+ * thin shell below.
+ * @module
+ */
+
+import { CLOUD_API, CLOUD_FLAG } from "./cloud-config.ts";
+import { allEntries } from "./confidence-store.ts";
+import { applyProgress, hasExistingProgress } from "./progress.ts";
+import { getCurrentCourse, setCurrentCourse } from "./course.ts";
+import { confirmDialog } from "./confirm-dialog.ts";
+import { t } from "./i18n.ts";
+import { safeGet, safeSet, safeRemove } from "./storage.ts";
+import {
+  PULL_TTL_MS,
+  WRITE_TTL_MS,
+  shouldPull,
+  shouldPush,
+  changedEntries,
+  reconcileCourse,
+} from "./cloud-sync-core.ts";
+import type { ProgressEntry } from "./progress-core.ts";
+
+// The pure throttle/diff helpers live in js/cloud-sync-core.js (unit-tested); re-export for the API.
+export {
+  PULL_TTL_MS,
+  WRITE_TTL_MS,
+  shouldPull,
+  shouldPush,
+  changedEntries,
+  reconcileCourse,
+} from "./cloud-sync-core.ts";
+
+// ---- localStorage bookkeeping ----------------------------------------------------------
+
+const LAST_PULL = "primer:cloud:pull";
+const LAST_PUSH = "primer:cloud:push";
+const DIRTY = "primer:cloud:dirty"; // JSON { ids: string[], course: boolean }
+
+const readNum = (k: string) => Number(safeGet(k)) || 0;
+const writeNum = (k: string, v: number) => safeSet(k, String(v));
+const readDirty = (): { ids: string[]; course: boolean } => {
+  try {
+    const raw = JSON.parse(safeGet(DIRTY) || "");
+    return { ids: Array.isArray(raw?.ids) ? raw.ids : [], course: !!raw?.course };
+  } catch {
+    return { ids: [], course: false }; // absent, unavailable, or unparseable
+  }
+};
+const writeDirty = (d: { ids: string[]; course: boolean }) => {
+  if (!d.ids.length && !d.course) safeRemove(DIRTY);
+  else safeSet(DIRTY, JSON.stringify({ ids: [...new Set(d.ids)], course: d.course }));
+};
+const dirtyCount = (d: { ids: string[]; course: boolean }) => d.ids.length + (d.course ? 1 : 0);
+
+const signedIn = () => safeGet(CLOUD_FLAG) === "1";
+
+// ---- network -----------------------------------------------------------------------------
+
+async function api(path: string, opts?: RequestInit) {
+  return fetch(`${CLOUD_API}${path}`, { credentials: "include", ...opts });
+}
+
+/** Apply a set of cloud entries into localStorage and repaint every changed surface, without our own
+ *  dirty-tracking mistaking it for a local edit. */
+function applyFromCloud(entries: ProgressEntry[], course: string, mode: "merge" | "overwrite") {
+  const before = allEntries();
+  suppressDirty = true;
+  try {
+    applyProgress(entries, mode);
+    const target = reconcileCourse(getCurrentCourse(), course);
+    if (target !== getCurrentCourse()) setCurrentCourse(target); // fires course-change (repaints menu/graph)
+  } finally {
+    suppressDirty = false;
+  }
+  const after = allEntries();
+  for (const c of changedEntries(before, after)) {
+    document.dispatchEvent(
+      new CustomEvent("confidence-change", { detail: { conceptId: c.id, value: c.stars } }),
+    );
+  }
+}
+
+let pulling = false;
+/** Pull the cloud record and merge it into local (throttled unless `force`). */
+export async function pullMerge({ force = false }: { force?: boolean } = {}) {
+  if (!signedIn() || pulling) return;
+  if (!force && !shouldPull(readNum(LAST_PULL), Date.now(), PULL_TTL_MS)) return;
+  pulling = true;
+  try {
+    const res = await api("/progress", { method: "GET" });
+    if (!res.ok) return;
+    const doc = await res.json();
+    applyFromCloud(Array.isArray(doc?.entries) ? doc.entries : [], String(doc?.course || ""), "merge");
+    writeNum(LAST_PULL, Date.now());
+  } catch {
+    /* offline / transient — try again next window */
+  } finally {
+    pulling = false;
+  }
+}
+
+let pushing = false;
+/** Push the full local set up; the Worker merges and returns the reconciled record, which we apply
+ *  back (so a push doubles as a light pull). */
+export async function pushNow({ keepalive = false }: { keepalive?: boolean } = {}) {
+  if (!signedIn() || pushing) return;
+  pushing = true;
+  try {
+    const body = JSON.stringify({ entries: allEntries(), course: getCurrentCourse() });
+    const res = await api("/progress", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body,
+      keepalive,
+    });
+    if (!res.ok) return;
+    writeDirty({ ids: [], course: false });
+    writeNum(LAST_PUSH, Date.now());
+    if (!keepalive) {
+      const doc = await res.json();
+      applyFromCloud(Array.isArray(doc?.entries) ? doc.entries : [], String(doc?.course || ""), "merge");
+    }
+  } catch {
+    /* keep the dirty flag; retry next window / load */
+  } finally {
+    pushing = false;
+  }
+}
+
+let pushTimer = 0;
+/** Push now if the write window has elapsed, else arm a timer for the remainder. */
+function schedulePush() {
+  const d = readDirty();
+  const now = Date.now();
+  if (shouldPush(dirtyCount(d), readNum(LAST_PUSH), now, WRITE_TTL_MS)) {
+    void pushNow();
+    return;
+  }
+  if (pushTimer) clearTimeout(pushTimer);
+  const wait = Math.max(0, WRITE_TTL_MS - (now - readNum(LAST_PUSH)));
+  pushTimer = window.setTimeout(() => {
+    pushTimer = 0;
+    if (dirtyCount(readDirty()) > 0) void pushNow();
+  }, wait);
+}
+
+let suppressDirty = false;
+function markConceptDirty(id: string) {
+  if (suppressDirty || !signedIn()) return;
+  const d = readDirty();
+  d.ids.push(id);
+  writeDirty(d);
+  schedulePush();
+}
+function markCourseDirty() {
+  if (suppressDirty || !signedIn()) return;
+  const d = readDirty();
+  d.course = true;
+  writeDirty(d);
+  schedulePush();
+}
+
+// ---- lifecycle ---------------------------------------------------------------------------
+
+let wired = false;
+/** Wire the change/flush listeners once (idempotent). */
+function wireListeners() {
+  if (wired) return;
+  wired = true;
+  document.addEventListener("confidence-change", (e) => {
+    const id = (e as any).detail?.conceptId;
+    if (typeof id === "string") markConceptDirty(id);
+  });
+  document.addEventListener("course-change", () => markCourseDirty());
+  // Best-effort flush of a pending push when the page is hidden/unloaded (keepalive lets it outlive
+  // the navigation); the dirty flag persists regardless, so the next load pushes if this didn't land.
+  const flush = () => {
+    if (signedIn() && dirtyCount(readDirty()) > 0) void pushNow({ keepalive: true });
+  };
+  window.addEventListener("pagehide", flush);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flush();
+  });
+}
+
+/** Called once per load by js/account.js when a session is active: wire up, throttled-pull, and push
+ *  anything still dirty from a previous page. */
+export function initSync() {
+  if (!signedIn()) return;
+  wireListeners();
+  void pullMerge();
+  if (dirtyCount(readDirty()) > 0) schedulePush();
+}
+
+/** "Sync now": flush this device's progress UP (bypassing the 15-min write debounce), then pull +
+ *  merge everything down (bypassing the 6-h read throttle). This is the immediate-sync escape hatch. */
+export async function syncNow() {
+  await pushNow();
+  await pullMerge({ force: true });
+}
+
+/**
+ * Called by js/account.js right after a successful sign-in. On an INTERACTIVE sign-in with existing
+ * local progress, ask the user whether to merge it into the account or use only the account's copy.
+ */
+export async function onSignIn({ interactive = false }: { interactive?: boolean } = {}) {
+  if (!signedIn()) return;
+  wireListeners();
+  if (interactive && hasExistingProgress()) {
+    let cloud = { entries: [] as ProgressEntry[], course: "" };
+    try {
+      const res = await api("/progress", { method: "GET" });
+      if (res.ok) {
+        const doc = await res.json();
+        cloud = { entries: Array.isArray(doc?.entries) ? doc.entries : [], course: String(doc?.course || "") };
+      }
+    } catch {
+      /* offline — treat as empty cloud; the merge below is then a no-op download */
+    }
+    const merge = await confirmDialog({
+      message: t("account.mergePrompt"),
+      confirm: t("account.merge"),
+      cancel: t("account.useCloudOnly"),
+    });
+    applyFromCloud(cloud.entries, cloud.course, merge ? "merge" : "overwrite");
+    writeNum(LAST_PULL, Date.now());
+    if (merge) await pushNow(); // send the union (this device's local-only entries) up
+  } else {
+    await pullMerge({ force: true });
+  }
+}
+
+/** Called on log out / forget-me: drop any pending push + timers (local progress is left intact). */
+export function stopSync() {
+  if (pushTimer) {
+    clearTimeout(pushTimer);
+    pushTimer = 0;
+  }
+  writeDirty({ ids: [], course: false });
+}

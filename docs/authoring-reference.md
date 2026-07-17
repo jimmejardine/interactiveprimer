@@ -20,7 +20,7 @@ trees under `concepts/*/courses/…` are the fuller pattern). Course year/stage 
 
 A learner picks a **current course** (the "Focus on this course" button under the title, or the
 **Course** hamburger menu → Exit course). It's stored per-profile (`localStorage["primer:course"]`,
-via `js/course.js`) and travels with the progress export/import (a clash on import asks which to
+via `src/course.ts`) and travels with the progress export/import (a clash on import asks which to
 keep). While a course is active: the top/bottom mini-explorer tints the course predecessor/successor
 of the current concept; the big `/concepts.html` graph collapses to the course members + their
 recursive prerequisite ancestors, with members tinted in the course colour (`--primer-course`).
@@ -80,7 +80,7 @@ so the only `primer` import is `registerManimScene`:
   sub-parts: a `NumberLine`'s `color` is the **stroke** (line + ticks) only — its number labels
   are filled text and must be coloured separately, e.g.
   `for (const l of line.getNumberLabels()) l.setColor(colors.ink);`.
-- manim-web is pinned (v0.3.22 in `js/boot.js`), so call its API **directly** — don't write
+- manim-web is pinned (v0.3.22 in `src/boot.ts`), so call its API **directly** — don't write
   feature-detection fallbacks: the exports are guaranteed present. Keep scenes simple; the component
   already shows a friendly message if a scene throws.
 
@@ -199,7 +199,7 @@ angleMark, rightAngle, extend, label, crossing, makeGraph, rng }`. Board-bound t
   axes (faint lines, arrowheads at the positive ends, tick numbers, `"x"`/`"y"` labels) that auto-span the
   board — the **same axes `registerCharts` uses**, so don't hand-roll `segment` axes + `"x"`/`"y"` text.
   Set the board's `boundingbox` (usually `keepAspect: false`); call `makeGraph()`; plot your curve. Options
-  (see js/graph-axes.js): `xName`/`yName` (`""` hides one), `xticks`/`yticks` (null = auto), `ticks` (false
+  (see src/graph-axes.ts): `xName`/`yName` (`""` hides one), `xticks`/`yticks` (null = auto), `ticks` (false
   → unticked), `arrows` (false → no arrowheads), `xUnit`/`yUnit` (`"pi"`|`"e"` → label that axis in proper
   fractions of π/e — `π/2, π, 3π/2` — instead of decimals; pin the matching `xticks` to a π multiple). E.g.
   `makeGraph({ yName: "f(x)" })` or `makeGraph({ xUnit: "pi", xticks: Math.PI/2 })`.
@@ -229,7 +229,7 @@ for a live transversal.
 
 For a figure the learner **works**, not just watches — an "apply-the-theorem" angle chase — use
 `<primer-geometry-problem name="…">` + `registerGeometryProblem(name, config)`. Problems are **generated
-by a forward-chaining theorem engine** (`js/geometry-engine/*`, pure + unit-tested): it picks a scaffold
+by a forward-chaining theorem engine** (`src/geometry-engine/*`, pure + unit-tested): it picks a scaffold
 (a parametric figure), synthesises a fresh figure with some angles **given** and others **blank** plus an
 ordered solution chain, and is **different every Refresh**. The usable theorem pool is **gated by the
 page's prerequisite-DAG closure** — a problem only chains theorems taught in the lessons leading to this
@@ -294,9 +294,9 @@ small tolerance; arrays/objects compared structurally; a numeric string like `"1
 ## `<primer-code>` internals
 
 The core (TypeScript, `run`, escaping) is in CLAUDE.md. Internals: `run` transpiles the TS with **sucrase**
-(`js/transpile.js`) then runs the JS in a **QuickJS-WASM** sandbox (`js/quickjs.js` + `js/run-js.js`), both
+(`src/transpile.ts`) then runs the JS in a **QuickJS-WASM** sandbox (`src/quickjs.ts` + `src/run-js.ts`), both
 lazy-loaded from esm.sh on first Run. The Code pane is an editable overlay editor (line-number gutter,
-horizontal scroll, Reset button). Highlighter: `js/code-highlight.js` (typescript default; js/python/sql/
+horizontal scroll, Reset button). Highlighter: `src/code-highlight.ts` (typescript default; js/python/sql/
 text). See the `runnable-code-architecture` memory for CDN gotchas.
 
 ## Quiz — advanced reference
@@ -330,7 +330,7 @@ equivalent form is accepted — factored, reordered, fractions, etc. (`(x+3)(x+4
 becomes a MathLive math editor (type `^` for an exponent). `answer` is the expected expression as a string:
 `{ prompt: () => \`${sceneStrings("expand")} $(x+3)(x+4)$\`, answer: "x^2 + 7x + 12", compare: "polynomial" }`.
 Offline it falls back to a simple expanded-polynomial comparator. Keyboard defaults to `algebra-basic`; set
-`keyboard: "<name>"` for a different per-module keyboard (see js/math-keyboards.js).
+`keyboard: "<name>"` for a different per-module keyboard (see src/math-keyboards.ts).
 
 ### Figure / chart / geometry / problem / program options
 - **Chart / geometry options** (choices are figures, not text): give an option a `chart` (a registered
@@ -343,7 +343,7 @@ Offline it falls back to a simple expanded-polynomial comparator. Keyboard defau
   (read-only) **above** the prompt. Pair a free-text geometry answer with `keyboard: "geometry-angles"`
   (digits, `°`, `+ − × ÷`, parens, `x α β θ`) or `keyboard: "geometry-lengths"` (digits, `√`, four
   operations, `x`); a numeric angle answer accepts `70`, `70°` or `70 degrees` (the `°` is stripped before
-  grading). See `js/math-keyboards.js`.
+  grading). See `src/math-keyboards.ts`.
 - **`{ problem: "name" }`** — embeds a `registerGeometryProblem` sandbox and folds its solved/unsolved
   state into the score (no options/answer).
 - **`{ program: "name" }`** — embeds a `registerProgram` sandbox and folds correct/incorrect into the score
@@ -358,7 +358,7 @@ Offline it falls back to a simple expanded-polynomial comparator. Keyboard defau
 `getQuiz`, `speak`, `cancelSpeech`, `themeColors`, `makeStrings`, `getConceptMeta`, `parseConceptMeta`,
 `BASE_LEVEL`, `maxLevel`, `formatLevel`, the theme API (`THEMES`, `getTheme`, `applyTheme`, `initTheme`),
 and the graph helpers (`resolveLevels`, `validateGraph`, …). Pinned KaTeX/manim-web/JSXGraph versions live
-in `js/boot.js`.
+in `src/boot.ts`.
 
 ## Themes & page chrome (automatic)
 
@@ -369,7 +369,7 @@ only theme-coupled JS is animations (use `themeColors()`). Levels start at 0; a 
 via `max`.
 
 `render.js` also frames each lesson automatically: the mini-explorer (`<primer-pathway>`) at the **top**,
-and an auto-generated **"Up next…"** recommendation control (`<primer-up-next>`, backed by `js/up-next.js`)
+and an auto-generated **"Up next…"** recommendation control (`<primer-up-next>`, backed by `src/up-next.ts`)
 at the **bottom**. Authors don't write or configure either.
 
 ## Localization (automatic)
@@ -378,7 +378,7 @@ The hamburger menu carries a language switcher; English is the default + fallbac
 lives in a per-locale **overlay** at `i18n/<locale>/<id>.html`. An overlay is just the **translatable top
 part**: a translated `<primer-title>`, the translated cards, and the `scene-strings` — **no `concept-meta`
 and no module scripts** (those are canonical-only). It records which English version it was translated from
-in a single trailing **`<!-- sourceHash: … -->` comment after `</html>`**. `js/render.js` fetches and swaps
+in a single trailing **`<!-- sourceHash: … -->` comment after `</html>`**. `src/render.ts` fetches and swaps
 the overlay in when the locale isn't English. `npm run i18n:check` flags stale/missing overlays (and prints
 the hash to stamp into that comment).
 
@@ -387,8 +387,8 @@ both the canonical page and its overlays — so the strings travel with the pros
 per scene/chart/quiz namespace; `makeStrings` merges them.
 
 The active locale is resolved + persisted (`localStorage["primer:locale"]`) in three in-step places: the
-synchronous pre-paint scripts in `js/boot.js` and `index.html`, and the shared post-paint `initLocale()` in
-`js/i18n.js`. Two URL entry points:
+synchronous pre-paint scripts in `src/boot.ts` and `index.html`, and the shared post-paint `initLocale()` in
+`src/i18n.ts`. Two URL entry points:
 - **`?lang=<locale>`** — a shareable "open in this language" link: it wins over storage/browser, is
   **persisted**, then stripped from the URL so a later menu switch can't snap back.
 - **Direct visit to an overlay URL** (`/i18n/<locale>/<id>.html`) — `boot.js` redirects to the canonical
@@ -399,7 +399,7 @@ synchronous pre-paint scripts in `js/boot.js` and `index.html`, and the shared p
 The Primer is for "ages 5 to 105," so lessons must work with a keyboard, a screen reader, and
 reduced-motion / high-zoom settings. Most machinery is already wired (real semantic controls, a global
 skip link + `.sr-only` utility, a `:focus-visible` ring, a `prefers-reduced-motion` reset in
-`css/primer.css`, focus-trapped modals via `js/focus-trap.js`), so authoring correctly is mostly about
+`css/primer.css`, focus-trapped modals via `src/focus-trap.ts`), so authoring correctly is mostly about
 **not breaking** these. There's **no automated a11y gate** — this is the checklist. The public
 **accessibility statement** lives at `accessibility.html`; keep its "known limitations" list honest.
 
@@ -408,14 +408,14 @@ skip link + `.sr-only` utility, a `:focus-visible` ring, a `prefers-reduced-moti
   `focusable="false"` on SVG).
 - **Colour is never the only signal.** The confidence ramp, quiz correct/incorrect, course tint, etc. must
   each pair colour with text/shape/ARIA state (see the confidence stars' `aria-pressed` + live-region
-  readout in `js/components/primer-concept.js`). Use only `--primer-*` tokens; new token pairs (text on a
+  readout in `src/components/primer-concept.ts`). Use only `--primer-*` tokens; new token pairs (text on a
   fill) must clear **WCAG AA 4.5:1** in all three themes.
 - **Give figures a text alternative.** Author a real `alt` on `<img>` (`""` if decorative); a
   `<primer-manim>`/`<primer-chart>`/`<primer-geometry>` should carry a `caption` (and manim narration via
   `speak`) describing what it shows.
 - **Respect reduced motion.** Any bespoke animation/transition must be gated behind
   `@media (prefers-reduced-motion: reduce)` (a new component shadow sheet needs its own block — see
-  `js/components/shared.js`).
+  `src/components/shared.ts`).
 - **Keyboard + focus.** Every interactive element must be reachable and operable by keyboard with a visible
   focus ring, and modal surfaces must trap focus and restore it on close (`trapFocus`).
 - **Localize a11y text too.** Route `aria-label`/status strings through `t(...)` (chrome) or `sceneStrings`

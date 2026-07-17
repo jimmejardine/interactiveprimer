@@ -59,7 +59,7 @@ fs.rmSync(r("dist/assets"), { recursive: true, force: true });
 
 // ── 1) Bundle the framework (core + lazy chunks) ──────────────────────────────────────────────────
 const result = await esbuild.build({
-  entryPoints: { primer: r("js/entry.js"), app: r("src/app.js") }, // → dist/bundle/{primer,app}-<hash>.js
+  entryPoints: { primer: r("src/entry.ts"), app: r("src/app.ts") }, // → dist/bundle/{primer,app}-<hash>.js
   outdir: r("dist/bundle"),
   bundle: true,
   format: "esm",
@@ -74,8 +74,6 @@ const result = await esbuild.build({
   logLevel: "info",
   metafile: true,
   loader: { ".wasm": "file", ".ttf": "file", ".woff": "file", ".woff2": "file" },
-  // render.js's `import "primer"` collapses into this same bundle (one singleton).
-  alias: { primer: r("js/primer.js") },
   plugins: [stubNode],
 });
 
@@ -85,8 +83,8 @@ let coreFile = null;
 let appFile = null;
 for (const [file, meta] of Object.entries(outputs)) {
   const ep = meta.entryPoint && meta.entryPoint.replace(/\\/g, "/");
-  if (ep && ep.endsWith("js/entry.js")) coreFile = "/" + path.relative(ROOT, r(file)).replace(/\\/g, "/");
-  if (ep && ep.endsWith("src/app.js")) appFile = "/" + path.relative(ROOT, r(file)).replace(/\\/g, "/");
+  if (ep && ep.endsWith("src/entry.ts")) coreFile = "/" + path.relative(ROOT, r(file)).replace(/\\/g, "/");
+  if (ep && ep.endsWith("src/app.ts")) appFile = "/" + path.relative(ROOT, r(file)).replace(/\\/g, "/");
 }
 if (!coreFile) throw new Error("build: could not find core entry output in metafile");
 if (!appFile) throw new Error("build: could not find app entry output in metafile");
@@ -162,10 +160,20 @@ for (const file of walkJs(r("dist/bundle"))) {
   if (changed) fs.writeFileSync(file, code);
 }
 
-// ── 5) Generate js/boot.js from src/boot.js, stamping the hashed core-bundle URL. ─────────────────
-const bootSrc = fs.readFileSync(r("src/boot.js"), "utf8");
-if (!bootSrc.includes("__PRIMER_BUNDLE__")) throw new Error("build: src/boot.js is missing the __PRIMER_BUNDLE__ placeholder");
-fs.writeFileSync(r("js/boot.js"), bootSrc.split("__PRIMER_BUNDLE__").join(coreFile));
+// ── 5) Generate the classic (non-module) browser scripts from their TypeScript sources: the
+//    stable-URL loaders js/boot.js (hashed core-bundle URL stamped in) + js/analytics.js, and the
+//    root service worker sw.js. These are plain transpiles (type strip, no bundling — none of the
+//    three imports anything); js/ and sw.js are generated-only and gitignored. ───────────────────
+const transpile = async (srcRel) => {
+  const code = fs.readFileSync(r(srcRel), "utf8");
+  return (await esbuild.transform(code, { loader: "ts", target: "es2022" })).code;
+};
+fs.mkdirSync(r("js"), { recursive: true });
+const bootJs = await transpile("src/boot.ts");
+if (!bootJs.includes("__PRIMER_BUNDLE__")) throw new Error("build: src/boot.ts is missing the __PRIMER_BUNDLE__ placeholder");
+fs.writeFileSync(r("js/boot.js"), bootJs.split("__PRIMER_BUNDLE__").join(coreFile));
+fs.writeFileSync(r("js/analytics.js"), await transpile("src/analytics.ts"));
+fs.writeFileSync(r("sw.js"), await transpile("src/sw.ts"));
 
 // ── 6) Asset manifest (logical name → hashed URL) for tooling / the service worker. ───────────────
 fs.writeFileSync(

@@ -10,14 +10,14 @@
  *     overlays — plus a scene-version retention check (an overlay must only pin scenes the
  *     English page still registers).
  *
- *  2. CHROME — the UI string catalogs (js/i18n/<locale>.js) vs js/i18n/en.js (the source of
- *     truth), at PER-KEY granularity. Each locale carries a sidecar js/i18n/<locale>.hashes.json
+ *  2. CHROME — the UI string catalogs (src/i18n/<locale>.ts) vs src/i18n/en.ts (the source of
+ *     truth), at PER-KEY granularity. Each locale carries a sidecar src/i18n/<locale>.hashes.json
  *     recording the English hash each key was translated from; we report stale / missing /
  *     orphan keys.
  *
  * Usage:
  *   node scripts/i18n-check.js              # check; non-zero exit if any ERROR-level issue
- *   node scripts/i18n-check.js --update es  # (re)stamp js/i18n/es.hashes.json from English
+ *   node scripts/i18n-check.js --update es  # (re)stamp src/i18n/es.hashes.json from English
  *
  * Severity: STALE/ORPHAN/broken-scene-pin are ERRORS (something existing is inconsistent and
  * must be fixed); MISSING is a WARNING (not yet translated — expected during a rollout), so
@@ -29,16 +29,16 @@ import { readFile, writeFile, readdir } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
-import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
-import enCatalog from "../js/i18n/en.js";
-import { parseJsonc } from "../js/jsonc.js";
-import { parseVariables } from "../js/quiz-vars.js";
-import { placeholderNames, expressionPlaceholders } from "../js/scene-string-lint.js";
+import { LOCALES, DEFAULT_LOCALE } from "../src/i18n.ts";
+import enCatalog from "../src/i18n/en.ts";
+import { parseJsonc } from "../src/jsonc.ts";
+import { parseVariables } from "../src/quiz-vars.ts";
+import { placeholderNames, expressionPlaceholders } from "../src/scene-string-lint.ts";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CONCEPTS_DIR = join(ROOT, "concepts");
 const I18N_DIR = join(ROOT, "i18n");
-const CATALOG_DIR = join(ROOT, "js", "i18n");
+const CATALOG_DIR = join(ROOT, "src", "i18n");
 
 /** Short, stable content hash. @param {string} s @returns {string} */
 const hash = (s) => createHash("sha256").update(s).digest("hex").slice(0, 16);
@@ -233,7 +233,7 @@ async function checkSceneStrings(problems) {
 
 /** Load a locale's chrome catalog (the default export). @param {string} locale */
 async function loadCatalog(locale) {
-  const url = pathToFileURL(join(CATALOG_DIR, `${locale}.js`)).href;
+  const url = pathToFileURL(join(CATALOG_DIR, `${locale}.ts`)).href;
   return /** @type {Record<string, string>} */ ((await import(url)).default);
 }
 
@@ -261,7 +261,7 @@ async function checkChrome(problems) {
     try {
       cat = await loadCatalog(locale);
     } catch {
-      problems.push({ sev: "warn", msg: `chrome [${locale}] MISSING catalog js/i18n/${locale}.js` });
+      problems.push({ sev: "warn", msg: `chrome [${locale}] MISSING catalog src/i18n/${locale}.ts` });
       continue;
     }
     const stored = await loadHashes(locale);
@@ -345,7 +345,7 @@ async function checkLessons(problems) {
   }
 }
 
-/** Re-stamp js/i18n/<locale>.hashes.json from the current English hashes. @param {string} locale */
+/** Re-stamp src/i18n/<locale>.hashes.json from the current English hashes. @param {string} locale */
 async function update(locale) {
   if (locale === DEFAULT_LOCALE) {
     console.error(`Nothing to bless for the default locale "${DEFAULT_LOCALE}".`);
@@ -355,7 +355,7 @@ async function update(locale) {
   try {
     cat = await loadCatalog(locale);
   } catch {
-    console.error(`No catalog js/i18n/${locale}.js to bless.`);
+    console.error(`No catalog src/i18n/${locale}.ts to bless.`);
     process.exit(1);
   }
   /** @type {Record<string, string>} */
@@ -364,7 +364,7 @@ async function update(locale) {
     if (k in enCatalog) out[k] = hash(enCatalog[k]);
   }
   await writeFile(join(CATALOG_DIR, `${locale}.hashes.json`), JSON.stringify(out, null, 2) + "\n", "utf8");
-  console.log(`Stamped js/i18n/${locale}.hashes.json (${Object.keys(out).length} keys).`);
+  console.log(`Stamped src/i18n/${locale}.hashes.json (${Object.keys(out).length} keys).`);
 }
 
 async function main() {

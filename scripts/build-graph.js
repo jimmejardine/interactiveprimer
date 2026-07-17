@@ -26,23 +26,23 @@ import { statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseConceptMeta } from "../js/concept-meta.js";
-import { buildStaleRows, formatStaleRow } from "../js/stale-report.js";
-import { extractConceptRefs, extractForwardRefs, extractSoftRefs, extractTodoRefs, extractCourseMembers } from "../js/concept-refs.js";
-import { decodeEntities } from "../js/html-entities.js";
+import { parseConceptMeta } from "../src/concept-meta.ts";
+import { buildStaleRows, formatStaleRow } from "../src/stale-report.ts";
+import { extractConceptRefs, extractForwardRefs, extractSoftRefs, extractTodoRefs, extractCourseMembers } from "../src/concept-refs.ts";
+import { decodeEntities } from "../src/html-entities.ts";
 import {
   validateGraph,
   indexConcepts,
   buildDependents,
   attachOrphans,
   pruneCoursesFromCourseMembers,
-} from "../js/graph.js";
-import { LOCALES, DEFAULT_LOCALE } from "../js/i18n.js";
-import { parseJsonc } from "../js/jsonc.js";
+} from "../src/graph.ts";
+import { LOCALES, DEFAULT_LOCALE } from "../src/i18n.ts";
+import { parseJsonc } from "../src/jsonc.ts";
 
-/** @typedef {import("../js/types/domain.js").Concept} Concept */
-/** @typedef {import("../js/types/domain.js").ResolvedConcept} ResolvedConcept */
-/** @typedef {import("../js/types/domain.js").Diagnostic} Diagnostic */
+/** @typedef {import("../src/types/domain.ts").Concept} Concept */
+/** @typedef {import("../src/types/domain.ts").ResolvedConcept} ResolvedConcept */
+/** @typedef {import("../src/types/domain.ts").Diagnostic} Diagnostic */
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CONCEPTS_DIR = join(ROOT, "concepts");
