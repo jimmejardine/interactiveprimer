@@ -5,9 +5,9 @@
  * Every theorem an angle-chase uses is encoded uniformly as a relation `Σ coef·value(key) = constant`
  * — vertical angles (`a − b = 0`), angles on a line (`a + b = 180`), the triangle sum
  * (`a + b + c = 180`), and so on. Carrying the math as one linear shape lets the forward-chainer
- * (js/geometry-engine/chain.js) solve any relation with a single unknown, regardless of which theorem
+ * (src/geometry-engine/chain.ts) solve any relation with a single unknown, regardless of which theorem
  * it came from. Each relation is tagged with the **`conceptId`** of the lesson that teaches it, which
- * is how the prerequisite-DAG gating (js/geometry-engine/learned.js) decides whether a learner may use
+ * is how the prerequisite-DAG gating (src/geometry-engine/learned.ts) decides whether a learner may use
  * it, and with a **`justifyKey`** the UI localises into the step's explanation.
  *
  * Pure + DOM-free, hence unit-tested.

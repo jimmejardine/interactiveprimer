@@ -2,7 +2,7 @@
  * <primer-menu> — a fixed top-right hamburger button that opens a small drill-down menu.
  * The root lists three sections — Theme (Light / Dark / Fun), Language, and Progress
  * (save / restore) — and each opens a sub-view with the choices and a back header. It is
- * mounted once per page (by js/render.js on concept pages, and by index.html on the landing).
+ * mounted once per page (by src/render.ts on concept pages, and by index.html on the landing).
  *
  * Its own labels are localized via i18n's `t(...)`; the language options use each locale's
  * endonym (e.g. "Español"), which is conventionally not translated.

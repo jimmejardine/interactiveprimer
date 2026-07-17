@@ -17,7 +17,7 @@
  *   </main>
  *
  * Internationalization: every lesson lives at ONE canonical URL (the English page). When the
- * active locale (a user setting; see js/i18n.js) is not English, this module fetches a
+ * active locale (a user setting; see src/i18n.ts) is not English, this module fetches a
  * translation overlay at `/i18n/<locale>/<id>.html` and swaps in its translated content +
  * `scene-strings`, reusing the canonical page's (language-independent) inline scene JS. If no
  * overlay exists, it falls back to English so the lesson is never blocked.
@@ -202,7 +202,7 @@ async function hasOverlay(id: string, locale: string): Promise<boolean> {
  * caller falls back to English). Swaps the canonical content out of the DOM and appends the
  * overlay's `scene-strings` block tagged `data-locale`, KEEPING the English block as the
  * fallback source so the reused scene JS narrates in the target language and falls back to
- * English per-key (see js/scene-strings.js `makeStrings`).
+ * English per-key (see src/scene-strings.ts `makeStrings`).
  */
 async function applyOverlay(
   id: string,

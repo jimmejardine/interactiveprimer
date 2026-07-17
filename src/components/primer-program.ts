@@ -15,8 +15,8 @@
  *   </script>
  *
  * Each attempt (and each **New input**) draws a fresh INPUT from the config's `variables` + `input`, and
- * a reference `ANSWER` from `solution`. The learner's TypeScript is wrapped (js/quiz-program.js), the
- * whole thing transpiled (sucrase, js/transpile.js) and run in the QuickJS sandbox (js/run-js.js); the
+ * a reference `ANSWER` from `solution`. The learner's TypeScript is wrapped (src/quiz-program.ts), the
+ * whole thing transpiled (sucrase, src/transpile.ts) and run in the QuickJS sandbox (src/run-js.ts); the
  * reported `ANSWER` is deep-compared to the reference (numbers with tolerance; arrays/objects
  * structurally). Embedded in a `<primer-quiz>` (a `{ program: "name" }` question) it exposes an async
  * `check()` and hides its own Check/New-input so the quiz's "Check answers" drives it.
@@ -107,7 +107,7 @@ export class PrimerProgram extends HTMLElement {
         .assign code { font-family: var(--primer-font-mono, ui-monospace, Menlo, Consolas, monospace); }
 
         /* editor chrome (toolbar/gutter/editor/output + token colours) shared with <primer-code> —
-           see js/components/code-editor-css.js */
+           see src/components/code-editor-css.ts */
         ${CODE_EDITOR_CSS}
         /* program-specific extras, layered over the shared chrome */
         .runner.right { box-shadow: inset 0 0 0 2px var(--primer-ok, #1a8f3c); }

@@ -1,6 +1,6 @@
 /**
  * Confidence-rating maths — pure, DOM-free, so it's unit-testable. Used by
- * js/components/primer-concept.js to fold a quiz result into the star rating.
+ * src/components/primer-concept.ts to fold a quiz result into the star rating.
  * @module
  */
 

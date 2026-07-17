@@ -1,7 +1,7 @@
 /**
  * <primer-chart-sliders name="…"> — a standalone slider panel that drives a whole chart SERIES.
  *
- * The slider group is defined in JS with `registerChartSliders(name, defs)` (js/charts.js); this
+ * The slider group is defined in JS with `registerChartSliders(name, defs)` (src/charts.ts); this
  * element just marks WHERE on the page the panel renders. Every `<primer-chart>` whose
  * `registerCharts(..., name)` named the same group re-plots together as the learner drags. Placement
  * only — no board, no JSXGraph, no theme rebuild (the controls restyle via CSS custom properties).

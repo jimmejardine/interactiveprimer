@@ -67,7 +67,7 @@ export function applyStepVisibility(steps: Waypoint[], current: number): void {
 }
 
 /* ------------------------------------------------------------------ */
-/* Pure math for the geometry TOOLS (js/geometry-tools.js binds these to a board). */
+/* Pure math for the geometry TOOLS (src/geometry-tools.ts binds these to a board). */
 /* ------------------------------------------------------------------ */
 
 export type Vec = [number, number];

@@ -1,12 +1,12 @@
 /**
  * <primer-up-next> — the "Up next…" control at the BOTTOM of every concept page (inserted by
- * js/render.js, replacing what used to be a second copy of the mini-explorer). It recommends where
- * to go next, computed by the pure `computeUpNext` (js/up-next.js) from:
+ * src/render.ts, replacing what used to be a second copy of the mini-explorer). It recommends where
+ * to go next, computed by the pure `computeUpNext` (src/up-next.ts) from:
  *
- *   • the reader's focused course (js/course.js) — a "(skipped)" catch-up link for the earliest
+ *   • the reader's focused course (src/course.ts) — a "(skipped)" catch-up link for the earliest
  *     genuinely-earlier unstarred member, and a "(next concept)" link for the first unstarred
  *     member after the current one;
- *   • the graph's direct successors (js/graph.js `neighborhood`) — up to three unstarred concepts
+ *   • the graph's direct successors (src/graph.ts `neighborhood`) — up to three unstarred concepts
  *     closest in difficulty level.
  *
  * When nothing qualifies (e.g. no course and every nearby successor is already starred) it falls

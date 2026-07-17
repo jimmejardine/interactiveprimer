@@ -5,9 +5,9 @@
  * score, and **restore** reads one back — either **merging** it into the local scores
  * (per concept, the more-recently-updated score wins) or **overwriting** them wholesale.
  *
- * The merge/validate core is pure (DOM-free) and now lives in js/progress-core.js — shared with the
+ * The merge/validate core is pure (DOM-free) and now lives in src/progress-core.ts — shared with the
  * optional cloud-sync Worker so both reconcile snapshots identically — and is re-exported here for
- * existing importers. The save/restore/clear IO goes through js/confidence-store.js and js/course.js.
+ * existing importers. The save/restore/clear IO goes through src/confidence-store.ts and src/course.ts.
  * @module
  */
 
@@ -17,7 +17,7 @@ import { mergeProgress, validateImport, FILE_TYPE, FILE_VERSION } from "./progre
 import type { ProgressEntry } from "./progress-core.ts";
 
 // Re-export the pure core so existing importers (tests, the menu, cloud-sync) keep getting these
-// from js/progress.js.
+// from src/progress.ts.
 export { mergeProgress, validateImport, FILE_TYPE, FILE_VERSION };
 
 export type { ProgressEntry } from "./progress-core.ts";

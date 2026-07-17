@@ -1,6 +1,6 @@
 /**
  * Pure, DOM-free helpers for cloud sync: the read/write throttle decisions, the post-pull diff, and
- * the course reconcile. Split out of js/cloud-sync.js so they unit-test in node:test without the
+ * the course reconcile. Split out of src/cloud-sync.ts so they unit-test in node:test without the
  * browser dependencies (localStorage/document/i18n) the rest of that module pulls in.
  * @module
  */

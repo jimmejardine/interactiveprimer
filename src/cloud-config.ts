@@ -8,7 +8,7 @@
 export const CLOUD_API = "/api";
 
 /** localStorage flag: "1" while a cloud session is active on this device (the httpOnly cookie is the
- *  real credential; this is just a UI/sync hint JS can read). Owned by js/account.js. */
+ *  real credential; this is just a UI/sync hint JS can read). Owned by src/account.ts. */
 export const CLOUD_FLAG = "primer:cloud";
 
 /** localStorage key holding the user's OWN email, for the "Logged in as …" display only. Never sent

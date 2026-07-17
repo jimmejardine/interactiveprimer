@@ -8,7 +8,7 @@
  * manim-web namespace, the localized `sceneStrings`, and the `speak` / `cancelSpeech` /
  * `themeColors` helpers — so a scene's only `primer` import is `registerManimScene` and it
  * destructures what it wants. (The toolkit is assembled by `<primer-manim>`; see
- * js/components/primer-manim.js.)
+ * src/components/primer-manim.ts.)
  *
  * The other registries here (charts, 3D charts, geometry scenes/problems, programs, quizzes) follow
  * the same register/get shape, built by the private {@link makeRegistry} factory. Each of those
@@ -63,14 +63,14 @@ export interface ManimSceneToolkit {
   /**
    * Scene-scoped localized strings: `sceneStrings(key, vars?)` resolves the key locale → English →
    * a `"$$scene.key$$"` placeholder, then interpolates any `{name}` placeholders from `vars`
-   * (see js/scene-strings.js).
+   * (see src/scene-strings.ts).
    */
   sceneStrings: (key: string, vars?: Record<string, string | number>) => string;
-  /** Narrate text aloud in the active locale's voice (see js/speech.js). */
+  /** Narrate text aloud in the active locale's voice (see src/speech.ts). */
   speak: (text: string, opts?: { rate?: number; pitch?: number; lang?: string }) => Promise<void>;
   /** Stop any in-progress/queued narration. */
   cancelSpeech: () => void;
-  /** The live theme palette (see js/theme.js). */
+  /** The live theme palette (see src/theme.ts). */
   themeColors: (count?: number) => { bg: string; ink: string; line: string; cat: string[] };
 }
 
@@ -140,7 +140,7 @@ export function getChart(name: string): ChartBuilder | undefined {
  * `board.update()` whenever the sliders change. The toolkit is `{ view, JXG, board, colors,
  * sliders }`: `view` the themed View3D (author calls `view.create('point3d' | 'line3d' | 'curve3d' |
  * 'functiongraph3d' | 'scatter3d', …)`), `colors` the resolved palette, `board` the underlying 2D
- * board, `sliders` the live values of the `opts.sliders` group. See js/components/primer-chart-3d.js.
+ * board, `sliders` the live values of the `opts.sliders` group. See src/components/primer-chart-3d.ts.
  */
 export type Chart3dBuilder = (toolkit: {
   view: any;
@@ -198,18 +198,18 @@ export function get3dChart(name: string): Chart3dEntry | undefined {
  * A geometry-scene builder, used by <primer-geometry>. It draws a figure (lines, angles, polygons,
  * Greek-letter text) into a JSXGraph board, declaring ordered "waypoints" via `step(caption, fn)` so the
  * figure can be played forwards/backwards. Like a manim scene it receives a single TOOLKIT object — see
- * js/components/primer-geometry.js for assembly.
+ * src/components/primer-geometry.ts for assembly.
  * @param toolkit  `{ board, JXG, step, sliders, colors, sceneStrings, parallelMark,
  *   crossing, makeGraph, tickMark, angleMark, rightAngle, extend, label, rng }` — the drawing tools
- *   (js/geometry-tools.js): `parallelMark`/`crossing` (parallel + crossing-angle marks), `tickMark`
+ *   (src/geometry-tools.ts): `parallelMark`/`crossing` (parallel + crossing-angle marks), `tickMark`
  *   (equal-length side hatches), `angleMark` (equal-angle arcs + label), `rightAngle` (the square),
  *   `extend` (an auxiliary/extension line), `label` (themed given/unknown text). `board` the JSXGraph
  *   board, `colors` the resolved `themeColors()`
  *   palette, `step` the waypoint collector, `sliders` live values of the `opts.sliders` group,
- *   `sceneStrings(key, vars?)` the scene-scoped localized strings (js/scene-strings.js), `parallelMark` /
+ *   `sceneStrings(key, vars?)` the scene-scoped localized strings (src/scene-strings.ts), `parallelMark` /
  *   `crossing` the drawing tools, `makeGraph(opts?)` which draws standardized Cartesian axes
  *   (themed lines, arrowheads, tick numbers, "x"/"y" labels) auto-spanning the board — the same axes the
- *   `registerCharts` charts use (js/geometry-tools.js, js/graph-axes.js) — and `rng` a seeded random
+ *   `registerCharts` charts use (src/geometry-tools.ts, src/graph-axes.ts) — and `rng` a seeded random
  *   (`rng()` → [0,1), `rng.int(lo,hi)`, `rng.pick(arr)`) to use INSTEAD of `Math.random()` for a
  *   `random: true` scene, so the Refresh button gives a fresh, internally-coherent example.
  */
@@ -270,7 +270,7 @@ export function getGeometryScene(name: string): GeometryEntry | undefined {
  * A geometry-PROBLEM config, used by `<primer-geometry-problem name="…">` — the interactive figure
  * where the learner fills quantities in **on the diagram** (boxes sit on the angles/sides). Two sources:
  *
- *  - **`generate`** (the theorem engine, js/geometry-engine/*): picks a scaffold, gates the theorem pool
+ *  - **`generate`** (the theorem engine, src/geometry-engine/*): picks a scaffold, gates the theorem pool
  *    by the page's prerequisite DAG, and synthesises a fresh angle chase + ordered solution chain each
  *    Refresh; the toolbar offers construction tools and Check walks the chain.
  *  - **`authored`**: YOU draw the figure and declare the fill-in blanks. The `build(toolkit)` runs each
@@ -331,7 +331,7 @@ export function getGeometryProblem(name: string): GeometryProblemConfig | undefi
  * A "write a program" exercise, used by `<primer-program name="…">` (standalone, or embedded in a
  * `<primer-quiz>` as a `{ program: "name" }` question). Each attempt draws a fresh random INPUT: the
  * learner writes TypeScript that reads the global `INPUT` and assigns the global `ANSWER`, which is run
- * in the QuickJS sandbox and graded against the reference `solution`. See js/components/primer-program.js.
+ * in the QuickJS sandbox and graded against the reference `solution`. See src/components/primer-program.ts.
  */
 export interface ProgramConfig {
   /**
@@ -340,7 +340,7 @@ export interface ProgramConfig {
    */
   prompt?: string | (() => string);
   /**
-   * Optional `variables` spec (see js/quiz-vars.js) drawn each attempt;
+   * Optional `variables` spec (see src/quiz-vars.ts) drawn each attempt;
    * the bindings are passed to `input`/`solution` so the INPUT can scale with them.
    */
   variables?: string;
@@ -386,7 +386,7 @@ export function getProgram(name: string): ProgramConfig | undefined {
  * prose locale → English → a `"$$name.key$$"` placeholder. Route translatable prose through
  * `sceneStrings`; keep language-neutral math as inline literals. A question's `prompt`, an option's
  * `text`, and a free-text `answer` may each be a plain value OR a function of the drawn variable
- * bindings (e.g. `answer: (b) => b.a + b.b`). See js/components/primer-quiz.js for assembly.
+ * bindings (e.g. `answer: (b) => b.a + b.b`). See src/components/primer-quiz.ts for assembly.
  *
  * The OPTIONAL first item may be a config object `{ num_questions, preamble }` (a {@link QuizConfig},
  * recognized by lacking both `options` and `answer`): it sets how many questions to draw (default 5)

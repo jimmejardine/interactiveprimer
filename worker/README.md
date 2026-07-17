@@ -5,7 +5,7 @@ deploy** from the (build-less) static site: a single Cloudflare **module Worker*
 backed by one **KV namespace**, sending sign-in codes via **Resend**.
 
 The Worker reuses the site's own merge logic — it imports `mergeProgress` from
-`../../js/progress-core.js`, so a `PUT /api/progress` reconciles two snapshots exactly the way the
+`../../src/progress-core.ts`, so a `PUT /api/progress` reconciles two snapshots exactly the way the
 browser does. `wrangler`/esbuild bundles that relative import; do not copy the file.
 
 ## How it works

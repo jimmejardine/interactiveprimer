@@ -1,9 +1,9 @@
 /**
- * Spanish chrome strings. Mirrors js/i18n/en.js key-for-key (en is the source of truth);
+ * Spanish chrome strings. Mirrors src/i18n/en.ts key-for-key (en is the source of truth);
  * `{var}` placeholders and leading glyphs (↑ ▶ ⏸ ↻) are preserved. Holds NO lesson prose
  * and NO scene narration — those live in the per-locale overlay HTML under /i18n/es/.
  *
- * After editing these, run `npm run i18n:bless -- es` to re-stamp js/i18n/es.hashes.json
+ * After editing these, run `npm run i18n:bless -- es` to re-stamp src/i18n/es.hashes.json
  * so `npm run i18n:check` knows these translations are up to date.
  * @module
  */

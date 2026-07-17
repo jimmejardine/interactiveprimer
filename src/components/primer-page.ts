@@ -3,7 +3,7 @@
  *
  * It renders no header or footer: prerequisites and navigation are surfaced by the
  * knowledge graph / pathway widget, and the declared level sits beside the concept title
- * (see js/components/primer-concept.js).
+ * (see src/components/primer-concept.ts).
  * @module
  */
 

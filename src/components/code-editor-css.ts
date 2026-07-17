@@ -1,6 +1,6 @@
 /**
- * The shared code-editor chrome styles used by both `<primer-code run>` (js/components/primer-code.js)
- * and `<primer-program>` (js/components/primer-program.js): the `.runner` frame, the `.bar` toolbar and
+ * The shared code-editor chrome styles used by both `<primer-code run>` (src/components/primer-code.ts)
+ * and `<primer-program>` (src/components/primer-program.ts): the `.runner` frame, the `.bar` toolbar and
  * its buttons, the line-number `.gutter` + transparent-`textarea`-over-highlighted-`pre` editor, the
  * syntax-token colour classes, and the always-visible `.output` pane. Each component interpolates this
  * string into its shadow `<style>` and layers its own extras after it (primer-program adds Check/New-input

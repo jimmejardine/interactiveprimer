@@ -12,7 +12,7 @@
  *
  * Localization is automatic: with no explicit `lang`, narration uses the ACTIVE locale's voice
  * (via `bcp47()`), so a scene author just writes `speak(text)` and it is pronounced in the
- * current language. (This module therefore depends on js/i18n.js.)
+ * current language. (This module therefore depends on src/i18n.ts.)
  * @module
  */
 

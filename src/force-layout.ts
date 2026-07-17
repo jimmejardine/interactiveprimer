@@ -1,6 +1,6 @@
 /**
  * A tiny spring-electrical force simulation for laying out the concept DAG — pure and DOM-free,
- * so it's unit-testable. The renderer (js/concept-graph.js) drives it on requestAnimationFrame
+ * so it's unit-testable. The renderer (src/concept-graph.ts) drives it on requestAnimationFrame
  * and paints the positions; this module only does the maths.
  *
  * Model: nodes repel each other (electrical), edges pull their endpoints together (springs), a

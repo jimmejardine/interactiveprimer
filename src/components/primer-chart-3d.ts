@@ -1,7 +1,7 @@
 /**
  * <primer-chart-3d scene="name"> — mounts a registered 3D chart, rendered with JSXGraph's **View3D**
  * (a 3D scene projected to SVG — no WebGL, no context cap, themed like every other figure). The
- * scene is authored with `register3dChart(name, builder, opts)` (js/scenes.js): the builder receives
+ * scene is authored with `register3dChart(name, builder, opts)` (src/scenes.ts): the builder receives
  * a toolkit `{ view, JXG, board, colors, sliders }` and draws with `view.create('point3d' | 'line3d'
  * | 'curve3d' | 'functiongraph3d' | …)`, reading live slider values in functional coordinates so the
  * figure re-plots on `board.update()`.

@@ -2,7 +2,7 @@
  * <primer-chart scene="name"> — mounts a registered CHART (a plotted function on axes), rendered
  * with JSXGraph (SVG). A chart can come from two authoring paths:
  *
- *   - HIGH-LEVEL `registerCharts(...)` (js/charts.js): the markup is just
+ *   - HIGH-LEVEL `registerCharts(...)` (src/charts.ts): the markup is just
  *     `<primer-chart scene="name"></primer-chart>`. The component pulls the chart's TITLE and any
  *     shared SLIDERS from the registered definition. Sliders may be shared across a whole series
  *     (driven by a `<primer-chart-sliders>` panel elsewhere) or inline to a single chart (rendered
@@ -12,7 +12,7 @@
  *     the legacy path — the component renders the params as sliders and calls the builder's
  *     `update(params)` directly. Still fully supported; inline params take precedence over a group.
  *
- * The builder (see js/scenes.js `registerChart`) creates its JSXGraph board ONCE and returns an
+ * The builder (see src/scenes.ts `registerChart`) creates its JSXGraph board ONCE and returns an
  * `update`; we call it initially, on every control change, and again after a theme change (a
  * rebuild, so axis/curve colours refresh). JSXGraph is imported lazily, so a page with no chart pays
  * nothing. JSXGraph renders SVG — no WebGL context cap — so a page can carry as many charts as it
@@ -42,7 +42,7 @@ export interface ChartParam {
   value?: number;
   /**
    * "Interesting" values drawn as labelled ticks; dragging the slider
-   * near one snaps onto it (see js/chart-snap.js). Out-of-range values are ignored.
+   * near one snaps onto it (see src/chart-snap.ts). Out-of-range values are ignored.
    */
   anchors?: number[];
 }

@@ -1,13 +1,13 @@
 /**
  * Pure, DOM-free core of the progress model: the conflict-resolution merge, import validation, and
- * the shared constants/typedef. Extracted from js/progress.js so BOTH the browser (js/progress.js
+ * the shared constants/typedef. Extracted from src/progress.ts so BOTH the browser (src/progress.ts
  * re-exports everything here) AND the Cloudflare sync Worker (which does the same server-side merge
  * on PUT) share a single source of truth for how two progress snapshots reconcile. This module
  * imports nothing, so it loads cleanly inside a Worker.
  * @module
  */
 
-/** Stars at full mastery — must match js/confidence-store.js / js/components/primer-concept.js. */
+/** Stars at full mastery — must match src/confidence-store.ts / src/components/primer-concept.ts. */
 export const MAX_STARS = 10;
 
 /** Marker + version stamped into an exported file / cloud doc, so a restore can sanity-check it. */

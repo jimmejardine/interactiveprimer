@@ -1,9 +1,9 @@
 /**
  * Renders the whole concept DAG as an SVG force-directed graph and wires up interaction
- * (drag-to-rearrange, pan, zoom, click-to-open). The layout maths live in js/force-layout.js;
+ * (drag-to-rearrange, pan, zoom, click-to-open). The layout maths live in src/force-layout.ts;
  * this module is the DOM/SVG/rAF/pointer shell. Colours come from the theme (themeColors) and the
  * learner's confidence (confidenceColor), and re-paint on `theme-change` / `confidence-change` —
- * mirroring js/components/primer-pathway.js.
+ * mirroring src/components/primer-pathway.ts.
  * @module
  */
 

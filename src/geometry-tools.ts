@@ -1,12 +1,12 @@
 /**
  * Board-bound drawing TOOLS handed to a geometry builder in its toolkit (see
- * js/components/primer-geometry.js). They bake away two patterns that recur across geometry figures:
+ * src/components/primer-geometry.ts). They bake away two patterns that recur across geometry figures:
  *
  *   - `parallelMark(x, y, opts)` — the "these lines are parallel" arrowhead/chevron marks.
  *   - `crossing(vertex, dirA, dirB)` — the four angles where two lines cross: number them and/or fill
  *     (highlight) any of them, addressed by screen corner ("ul"/"ur"/"ll"/"lr").
  *
- * The geometry MATH lives in js/geometry.js (pure, unit-tested); this module just binds it to a board
+ * The geometry MATH lives in src/geometry.ts (pure, unit-tested); this module just binds it to a board
  * and `themeColors()` so a builder calls `parallelMark(…)` / `crossing(…)` without threading `board`.
  * @module
  */

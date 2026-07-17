@@ -3,7 +3,7 @@
  * with the active course's ordered members (js/course + the graph) into a live, visually rich
  * dashboard: a course switcher, the "living constellation" (the confidence-coloured concept graph),
  * XP + mastery stat tiles, a spaced-review / knowledge-frontier pair of panels, an activity heatmap,
- * and a per-concept list. All numbers come from the pure core js/progress-stats.js.
+ * and a per-concept list. All numbers come from the pure core src/progress-stats.ts.
  *
  * Reacts live to `course-change` (rebuild + remount the graph) and `confidence-change` (recompute the
  * data panels; the graph repaints itself). DOM-only; no new persistence.

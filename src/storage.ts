@@ -4,7 +4,7 @@
  * exhaustion, or storage disabled by policy — and the Primer treats persistence as strictly
  * best-effort, so each helper swallows the failure: reads report "nothing stored" (`null`) and
  * writes/removals silently no-op. Key iteration (`localStorage.length` / `key(i)`) is NOT
- * covered here — the rare module that scans keys (js/confidence-store.js) guards its own loop.
+ * covered here — the rare module that scans keys (src/confidence-store.ts) guards its own loop.
  * @module
  */
 

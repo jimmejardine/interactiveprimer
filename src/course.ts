@@ -5,8 +5,8 @@
  * `applied-mathematics/game-development-math/game-development-math`), or "" for none.
  *
  * Persisted to localStorage and broadcast via a `course-change` event so the explorers, the menu
- * and the page header update live — mirroring js/theme.js. It is also written into / read from the
- * progress export (see js/progress.js).
+ * and the page header update live — mirroring src/theme.ts. It is also written into / read from the
+ * progress export (see src/progress.ts).
  * @module
  */
 

@@ -1,9 +1,9 @@
 /**
  * Optional cloud account state: a passwordless **6-character emailed passcode** sign-in against the
- * sync Worker (js/cloud-config.js `CLOUD_API`). Modelled on js/course.js / js/theme.js — it owns the
+ * sync Worker (src/cloud-config.ts `CLOUD_API`). Modelled on src/course.ts / src/theme.ts — it owns the
  * signed-in flag + the user's own email (for display only), and broadcasts an `auth-change` event so
  * the Progress menu re-renders. The real credential is the Worker's httpOnly session cookie, which JS
- * can't read; the localStorage flag is just a hint. Sync itself lives in js/cloud-sync.js.
+ * can't read; the localStorage flag is just a hint. Sync itself lives in src/cloud-sync.ts.
  *
  * GDPR: the email is sent only on the sign-in requests and is never stored server-side (the server
  * keys everything by `uid = HMAC(email)`); this device keeps the email locally purely to show

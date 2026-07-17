@@ -1,7 +1,7 @@
 /**
  * <primer-pathway> — a small visual map of where the current concept sits in the
  * knowledge tree, rendered at the top and bottom of every lesson (inserted by
- * js/render.js). Three columns, centred on the current concept:
+ * src/render.ts). Three columns, centred on the current concept:
  *
  *   column 1: immediate predecessors (direct prerequisites)
  *   column 2: peers above, the CURRENT concept in the centre, peers below

@@ -1,6 +1,6 @@
 /**
  * The forward-chainer: the heart of the geometry theorem engine. Given the figure's tagged linear
- * relations (js/geometry-engine/rules.js), a set of KNOWN angle values (the givens), and the set of
+ * relations (src/geometry-engine/rules.ts), a set of KNOWN angle values (the givens), and the set of
  * **allowed** `conceptId`s (the prerequisite-DAG-gated theorem pool), it repeatedly applies any
  * allowed relation that has exactly one unknown angle — solving for that angle — until nothing new can
  * be derived (a fixpoint). Each derivation records its provenance (the rule + premises) so the

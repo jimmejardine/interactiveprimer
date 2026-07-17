@@ -8,10 +8,10 @@
  * a legacy bare number (`"5"`) is treated as an **undated** score (`first`/`last` === ""),
  * which loses every merge tie to a dated value.
  *
- * This is the one place that knows the storage shape; both js/components/primer-concept.js
- * (the star control) and js/confidence-color.js (the pathway/ref colouring) go through it.
+ * This is the one place that knows the storage shape; both src/components/primer-concept.ts
+ * (the star control) and src/confidence-color.ts (the pathway/ref colouring) go through it.
  * DOM-aware (touches localStorage), hence its own module separate from the pure maths in
- * js/confidence.js.
+ * src/confidence.ts.
  * @module
  */
 
@@ -21,7 +21,7 @@ import { safeGet, safeSet, safeRemove } from "./storage.ts";
 /** Confidence storage key prefix. */
 export const CONFIDENCE_PREFIX = "primer:confidence:";
 
-// `MAX_STARS` lives in the shared pure core (js/progress-core.js); re-export it here so existing
+// `MAX_STARS` lives in the shared pure core (src/progress-core.ts); re-export it here so existing
 // `import { MAX_STARS } from "./confidence-store.ts"` call-sites keep working unchanged.
 export { MAX_STARS };
 
@@ -40,7 +40,7 @@ export function todayISO() {
  * The current instant as a full millisecond ISO string, e.g. `2026-07-07T09:15:03.123Z`. Stamped as
  * a score's `last`, so two edits to the same concept on the same day still order correctly when
  * merging across devices — a date-only `last` sorts before any same-day instant, so the precise one
- * wins the tie. Compared as an opaque string by mergeProgress (js/progress-core.js).
+ * wins the tie. Compared as an opaque string by mergeProgress (src/progress-core.ts).
  */
 export function nowISO() {
   return new Date().toISOString();

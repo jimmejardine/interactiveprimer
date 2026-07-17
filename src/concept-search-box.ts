@@ -1,7 +1,7 @@
 /**
  * A reusable concept-name search box: a text input plus a ranked dropdown (powered by the pure
- * `searchConcepts`). The full-screen explorer (js/concept-graph.js) and the per-lesson pathway
- * (js/components/primer-pathway.js) mount the SAME box, so search behaves identically everywhere —
+ * `searchConcepts`). The full-screen explorer (src/concept-graph.ts) and the per-lesson pathway
+ * (src/components/primer-pathway.ts) mount the SAME box, so search behaves identically everywhere —
  * each just supplies the concept list, a navigation callback, and where to mount.
  *
  * Styles live in `SEARCH_BOX_CSS`; inject them into a document `<head>` (light DOM) or a shadow

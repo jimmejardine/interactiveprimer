@@ -3,11 +3,11 @@
 // Optional, privacy-light sync of a learner's star ratings across devices. Auth is passwordless:
 // the learner enters their email, receives a 6-character one-time code, and gets a signed session
 // cookie back. Progress is stored per user in Workers KV and reconciled on write with the SAME
-// merge the browser uses (imported from the site's js/progress-core.js — one source of truth for
+// merge the browser uses (imported from the site’s src/progress-core.ts — one source of truth for
 // how two snapshots reconcile). There is NO build step for the site; this Worker is a separate
 // deploy (wrangler bundles this relative import).
 
-import { mergeProgress, MAX_STARS } from "../../js/progress-core.js";
+import { mergeProgress, MAX_STARS } from "../../src/progress-core.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Tunables
@@ -341,7 +341,7 @@ async function sendCode(env, email, code) {
 /**
  * Stored form → entry array. scores: { id: [stars, first, last] }.
  * @param {Record<string, [number, string, string]>} scores
- * @returns {import("../../js/progress-core.js").ProgressEntry[]}
+ * @returns {import("../../src/progress-core.ts").ProgressEntry[]}
  */
 function fromScores(scores) {
   if (!scores || typeof scores !== "object") return [];
@@ -355,7 +355,7 @@ function fromScores(scores) {
 
 /**
  * Entry array → stored form.
- * @param {import("../../js/progress-core.js").ProgressEntry[]} entries
+ * @param {import("../../src/progress-core.ts").ProgressEntry[]} entries
  * @returns {Record<string, [number, string, string]>}
  */
 function toScores(entries) {
@@ -368,7 +368,7 @@ function toScores(entries) {
  * Sanitize an incoming entries array: keep only well-formed { id, stars, first, last }, clamp
  * stars to 0..MAX_STARS, drop the rest. Never throws.
  * @param {any} arr
- * @returns {import("../../js/progress-core.js").ProgressEntry[]}
+ * @returns {import("../../src/progress-core.ts").ProgressEntry[]}
  */
 function sanitizeEntries(arr) {
   if (!Array.isArray(arr)) return [];

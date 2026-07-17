@@ -2,8 +2,8 @@
  * Confidence → colour. Maps a concept's self-attested star rating to a RED→YELLOW→GREEN
  * fill: the rating is read from localStorage and the saturation/lightness come from the
  * active theme, so the ramp stays legible in every theme. Shared by the pathway map
- * (js/components/primer-pathway.js) and the inline <primer-ref> dot so they shade
- * identically. DOM-aware (unlike the pure maths in js/confidence.js), hence its own module.
+ * (src/components/primer-pathway.ts) and the inline <primer-ref> dot so they shade
+ * identically. DOM-aware (unlike the pure maths in src/confidence.ts), hence its own module.
  * @module
  */
 

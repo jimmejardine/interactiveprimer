@@ -14,7 +14,7 @@
  *
  * The board/axes/curve STYLING here is lifted from the original per-page helper (the trig page) so
  * migrated charts look identical. Every colour comes from `themeColors()` at build time (re-read on a
- * theme rebuild), never hardcoded. The low-level `registerChart` path (js/scenes.js) still works for
+ * theme rebuild), never hardcoded. The low-level `registerChart` path (src/scenes.ts) still works for
  * one-off boards.
  * @module
  */
@@ -33,7 +33,7 @@ export interface SliderDef {
   name: string;
   /**
    * A literal, or a thunk resolved when the panel
-   * renders — pass `() => strings("amplitude")` (see js/scene-strings.js `makeStrings`) to localize.
+   * renders — pass `() => strings("amplitude")` (see src/scene-strings.ts `makeStrings`) to localize.
    */
   label?: string | (() => string);
   /** Slider only. */
@@ -336,7 +336,7 @@ function makeChartBoard(
     grid: false,
   });
   // Axes via the shared helper so charts and geometry graph diagrams look identical (see
-  // js/graph-axes.js). `ticksDistance` null → JSXGraph auto-spacing; a number pins a fixed spacing.
+  // src/graph-axes.ts). `ticksDistance` null → JSXGraph auto-spacing; a number pins a fixed spacing.
   drawAxes(board, colors, { xName, yName, xticks, yticks, xUnit, yUnit });
   return { board, colors, domain: [xmin, xmax] };
 }

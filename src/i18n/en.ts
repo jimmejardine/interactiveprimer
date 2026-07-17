@@ -189,7 +189,7 @@ const en: Record<string, string> = {
   "course.keep": "Keep current",
   "course.importClash": "The imported progress is from the course “{course}”. Switch to it?",
   "course.filtered": "Course:",
-  // Offline course download (js/offline.js + the button on a course page; see js/components/primer-concept.js).
+  // Offline course download (src/offline.ts + the button on a course page; see src/components/primer-concept.ts).
   "course.download": "⬇ Download for offline",
   "course.downloadConfirm": "Download this course ({count} pages) for offline use?",
   "course.downloading": "Downloading… {done}/{total}",
@@ -220,7 +220,7 @@ const en: Record<string, string> = {
   "offline.back": "Back to the Primer",
   "offline.unsupported": "Offline storage isn't available in this browser.",
 
-  // The "My Progress" dashboard (js/progress-dashboard.js). The heading + exit button reuse
+  // The "My Progress" dashboard (src/progress-dashboard.ts). The heading + exit button reuse
   // menu.myProgress / course.exit above.
   "dash.status.locked": "Locked",
   "dash.status.ready": "Ready",

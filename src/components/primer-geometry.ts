@@ -16,7 +16,7 @@
  *
  * The builder gets a manim-style toolkit `{ board, JXG, step, sliders, colors, sceneStrings,
  * parallelMark, crossing }`. It creates EVERY element up front; each `step(caption, fn)` tags what it drew (see
- * js/geometry.js). The timeline reveals steps by a `i < current` threshold, so forward/back/jump are
+ * src/geometry.ts). The timeline reveals steps by a `i < current` threshold, so forward/back/jump are
  * idempotent. Step reveals fade in (JSXGraph `transitionDuration`).
  *
  * Interactivity is the timeline plus optional **external sliders**: pass `opts.sliders = "groupName"`

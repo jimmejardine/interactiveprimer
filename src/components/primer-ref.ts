@@ -14,14 +14,14 @@
  *
  * After the words it appends a small ⧉ glyph (a monochrome text character, so it takes a
  * colour) tinted with the target concept's confidence shading — the very same
- * RED→YELLOW→GREEN star ramp the pathway nodes use (see js/confidence-color.js) — so a
+ * RED→YELLOW→GREEN star ramp the pathway nodes use (see src/confidence-color.ts) — so a
  * reference shows, at a glance, how well you know where it leads. Unrated, it falls back to
  * the default ink colour. It repaints live when the rating or theme changes.
  *
  * The `to` ids are a machine-readable record of cross-references: like `prerequisites`,
  * they can later be harvested, and build-graph could flag a `to` that names no concept.
  *
- * The optional `forward` / `soft` attributes only affect the GRAPH BUILD (js/concept-refs.js),
+ * The optional `forward` / `soft` attributes only affect the GRAPH BUILD (src/concept-refs.ts),
  * not this control — it renders the same styled link + confidence dot regardless. `forward`
  * reverses the harvested edge (this page becomes a prerequisite of the target); `soft` harvests
  * no edge at all (a plain "see also" between concepts with no learning dependency).

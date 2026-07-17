@@ -1,6 +1,6 @@
 /**
  * Lazy loader for the **QuickJS-WASM** sandbox (`quickjs-emscripten-core` + an inline-WASM singlefile
- * browser variant), from a CDN on first use — the cached-promise pattern used by js/mathfield.js. The
+ * browser variant), from a CDN on first use — the cached-promise pattern used by src/mathfield.ts. The
  * singlefile variant embeds the WASM (one request, no separate `.wasm` to resolve), so it fits the
  * no-build/pinned-CDN site. Guest code runs inside the WASM interpreter: no DOM, no network, no `eval`.
  * @module

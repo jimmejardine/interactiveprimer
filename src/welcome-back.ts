@@ -4,8 +4,8 @@
  * "Search concepts" box) -- "You're x / y concepts through <course>. Want to pick up with <next
  * concept>?" -- offering to jump straight to the next concept.
  *
- * "The course" is the learner's explicitly focused course (`primer:course`, see js/course.js); a
- * concept counts as done once it has a confidence score (stars > 0, see js/confidence-store.js). The
+ * "The course" is the learner's explicitly focused course (`primer:course`, see src/course.ts); a
+ * concept counts as done once it has a confidence score (stars > 0, see src/confidence-store.ts). The
  * banner shows whenever a course is focused and not yet complete (done < total) -- including a fresh
  * course with nothing done yet -- on every visit (there is no persistent dismissal; "No thanks" just
  * closes it for the current view). It is invoked from index.html's inline module and re-uses the

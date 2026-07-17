@@ -2,7 +2,7 @@
  * Parametric FIGURE constructors. Each scaffold takes a seeded `rng`, picks nice integer angle
  * parameters, and builds a concrete, consistent figure: named points with exact coordinates (for
  * rendering), the figure's angles each with its ground-truth integer value (for clean answers), and
- * the set of tagged linear relations (js/geometry-engine/rules.js) that hold in it — the theorems an
+ * the set of tagged linear relations (src/geometry-engine/rules.ts) that hold in it — the theorems an
  * angle-chase through this figure may use. Because the values come from integer parameters and the
  * coordinates realise them exactly, every figure is non-degenerate and self-consistent by
  * construction (a test asserts every emitted relation holds for the true values).

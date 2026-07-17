@@ -20,7 +20,7 @@
  * OOP/FP).
  *
  * The **`run`** attribute (JS/TS only) adds Code/Output tabs + a Run button: it transpiles the TS to JS
- * (sucrase, js/transpile.js) and runs it in a sandboxed QuickJS-WASM engine (js/quickjs.js + js/run-js.js),
+ * (sucrase, src/transpile.ts) and runs it in a sandboxed QuickJS-WASM engine (src/quickjs.ts + src/run-js.ts),
  * both lazy-loaded on first Run, and shows the captured `console` output (no DOM/network; a ~1 s timeout
  * kills infinite loops).
  *
@@ -65,7 +65,7 @@ export class PrimerCode extends HTMLElement {
         code { font-family: var(--primer-font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
           font-size: 0.9rem; line-height: 1.55; white-space: pre; tab-size: 4; }
         /* the runnable editor chrome (toolbar/gutter/editor/output + token colours) is shared with
-           <primer-program> — see js/components/code-editor-css.js */
+           <primer-program> — see src/components/code-editor-css.ts */
         ${CODE_EDITOR_CSS}
       </style>
       <div class="wrap">

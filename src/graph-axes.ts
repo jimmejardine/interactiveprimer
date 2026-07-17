@@ -1,7 +1,7 @@
 /**
- * The ONE place graph axes are styled — shared by the high-level charts (js/charts.js
+ * The ONE place graph axes are styled — shared by the high-level charts (src/charts.ts
  * `makeChartBoard`) and by the `makeGraph` toolkit helper handed to geometry builders
- * (js/geometry-tools.js) — so every plotted graph in the Primer has identical axes.
+ * (src/geometry-tools.ts) — so every plotted graph in the Primer has identical axes.
  *
  * It draws two themed JSXGraph `axis` elements through the origin. A JSXGraph axis auto-spans the
  * board's bounding box and re-fits on resize, so the caller passes NO endpoints or label

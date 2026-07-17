@@ -1,7 +1,7 @@
 /**
  * The client half of optional cloud sync. Keeps this browser's localStorage progress reconciled with
- * the per-user record held by the sync Worker (js/cloud-config.js `CLOUD_API`), reusing the existing
- * progress machinery (js/progress.js). Auth/session lives in js/account.js; this module only moves
+ * the per-user record held by the sync Worker (src/cloud-config.ts `CLOUD_API`), reusing the existing
+ * progress machinery (src/progress.ts). Auth/session lives in src/account.ts; this module only moves
  * PROGRESS in and out and paints the UI.
  *
  * Cost-shaped (see the design): **pull** (read) is throttled to ≤ once per 6 h per device on load
@@ -33,7 +33,7 @@ import {
 } from "./cloud-sync-core.ts";
 import type { ProgressEntry } from "./progress-core.ts";
 
-// The pure throttle/diff helpers live in js/cloud-sync-core.js (unit-tested); re-export for the API.
+// The pure throttle/diff helpers live in src/cloud-sync-core.ts (unit-tested); re-export for the API.
 export {
   PULL_TTL_MS,
   WRITE_TTL_MS,
@@ -196,7 +196,7 @@ function wireListeners() {
   });
 }
 
-/** Called once per load by js/account.js when a session is active: wire up, throttled-pull, and push
+/** Called once per load by src/account.ts when a session is active: wire up, throttled-pull, and push
  *  anything still dirty from a previous page. */
 export function initSync() {
   if (!signedIn()) return;
@@ -213,7 +213,7 @@ export async function syncNow() {
 }
 
 /**
- * Called by js/account.js right after a successful sign-in. On an INTERACTIVE sign-in with existing
+ * Called by src/account.ts right after a successful sign-in. On an INTERACTIVE sign-in with existing
  * local progress, ask the user whether to merge it into the account or use only the account's copy.
  */
 export async function onSignIn({ interactive = false }: { interactive?: boolean } = {}) {

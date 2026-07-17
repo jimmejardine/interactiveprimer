@@ -1,6 +1,6 @@
 /**
  * Lazy TypeScript → JavaScript transpile via **sucrase**, loaded from a CDN on first use (matches the
- * site's pinned-CDN + cached-promise pattern in js/mathfield.js / js/compute-engine.js). Type-stripping
+ * site's pinned-CDN + cached-promise pattern in src/mathfield.ts / src/compute-engine.ts). Type-stripping
  * only — no type-checking, no bundling. Used by the runnable `<primer-code>` to turn a TS snippet into
  * runnable JS before the QuickJS sandbox executes it.
  * @module

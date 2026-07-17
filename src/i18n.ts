@@ -1,5 +1,5 @@
 /**
- * Internationalization: the active locale (a user setting, like the theme in js/theme.js),
+ * Internationalization: the active locale (a user setting, like the theme in src/theme.ts),
  * the chrome-string catalogs, and the helpers pages/components use to localize.
  *
  * The locale is simply `lang` on <html>. js/boot.js (and the inline script in index.html)
@@ -9,7 +9,7 @@
  * translation, simply shows English.
  *
  * Lesson CONTENT is not translated here — only the framework's own chrome. Lesson prose and
- * scene narration live in per-locale overlays under /i18n/<locale>/ (see js/render.js).
+ * scene narration live in per-locale overlays under /i18n/<locale>/ (see src/render.ts).
  * @module
  */
 

@@ -1,6 +1,6 @@
 /**
  * YouTube URL parsing — pure helpers with no DOM dependency, so they're unit-testable in
- * Node and reusable. Used by js/components/primer-video.js.
+ * Node and reusable. Used by src/components/primer-video.ts.
  * @module
  */
 
