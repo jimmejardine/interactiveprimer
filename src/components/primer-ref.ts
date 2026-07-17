@@ -54,7 +54,7 @@ function ensureRefContextMenu() {
     // "Open" — same as clicking the reference: go to that concept's lesson.
     { label: t("contextmenu.open"), run: (id) => { window.location.href = `/concepts/${id}`; } },
     // "Explore" — open the full map centred on that concept.
-    { label: t("menu.explore"), run: (id) => { window.location.href = `/concepts?id=${encodeURIComponent(id)}`; } },
+    { label: t("menu.explore"), run: (id) => { window.location.href = `/explore?id=${encodeURIComponent(id)}`; } },
   ]);
 
   /** The real concept id of the <primer-ref> under an event (empty / a `todo` placeholder → null, so

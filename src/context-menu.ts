@@ -1,6 +1,6 @@
 /**
  * A tiny right-click / long-press context menu, shared by the mini explorer (`<primer-pathway>`,
- * shadow DOM) and the full explorer (`concepts.html`, light DOM). It owns the popup element,
+ * shadow DOM) and the full explorer (`explore.html`, light DOM). It owns the popup element,
  * positioning, and dismissal; each caller wires its own triggers (the node surfaces differ) and
  * supplies the items. `position: fixed` at the pointer means it works identically in either DOM.
  *

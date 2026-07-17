@@ -197,7 +197,7 @@ function showBanner({ done, total, courseId, nextId, courseTitle, nextTitle }: {
   nextBtn.textContent = t("welcome.next");
   const progBtn = document.createElement("a");
   progBtn.className = "wb-btn wb-btn-secondary";
-  progBtn.href = "/progress";
+  progBtn.href = "/course";
   progBtn.textContent = t("welcome.seeProgress");
   actions.append(nextBtn, progBtn);
 

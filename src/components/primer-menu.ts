@@ -168,8 +168,8 @@ export class PrimerMenu extends HTMLElement {
       <div class="panel" role="menu">
         <div class="menu-view view-root">
           <button type="button" class="nav" data-href="/">${t("menu.home")}</button>
-          <button type="button" class="nav" data-href="/progress">${t("menu.course")}</button>
-          <button type="button" class="nav" data-href="/concepts">${t("menu.explore")}</button>
+          <button type="button" class="nav" data-href="/course">${t("menu.course")}</button>
+          <button type="button" class="nav" data-href="/explore">${t("menu.explore")}</button>
           <button type="button" class="nav" data-target="config">${t("menu.config")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-extern="https://github.com/jimmejardine/interactiveprimer/discussions">${t("menu.feedback")}<span class="chev" aria-hidden="true">↗</span></button>
         </div>

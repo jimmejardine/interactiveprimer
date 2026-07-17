@@ -197,7 +197,7 @@ const en: Record<string, string> = {
   "course.downloadFailed": "Download failed — try again",
   "course.offlineUnsupported": "Offline isn't supported in this browser",
 
-  // The /offline download manager (shares progress.html's dashboard template).
+  // The /offline download manager (shares course.html’s dashboard template).
   "offline.title": "Offline",
   "offline.subtitle": "Your downloaded courses stay available with no internet connection.",
   "offline.statusOnline": "Online",

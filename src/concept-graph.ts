@@ -18,8 +18,8 @@ import { t } from "./i18n.ts";
 import { getCurrentCourse, setCurrentCourse } from "./course.ts";
 import { buildDependents, directNeighbors, kHopNeighborhood } from "./graph.ts";
 import { mk, clamp } from "./svg-util.ts";
-// Defines <primer-math> on this page (concepts.html doesn't load boot.js) so a node with a math
-// title can typeset inside a <foreignObject>. concepts.html supplies the KaTeX CSS + import map.
+// Defines <primer-math> on this page (explore.html doesn't load boot.js) so a node with a math
+// title can typeset inside a <foreignObject>. explore.html supplies the KaTeX CSS + import map.
 import "./components/primer-math.ts";
 
 const ENERGY_MIN = 0.04; // below this the layout is "settled" and the rAF loop pauses
@@ -173,7 +173,7 @@ export function mountConceptGraph(host: HTMLElement, { byId, locale, focusId }: 
   host.appendChild(svg);
 
   // When a course is active, name it in gold at the bottom-centre of the canvas. host is positioned
-  // (concepts.html: position:fixed), so this absolutely-positioned child anchors to it; it's cleared
+  // (explore.html: position:fixed), so this absolutely-positioned child anchors to it; it's cleared
   // with the rest of host on a course-change rebuild.
   if (activeCourse) {
     const banner = document.createElement("div");
@@ -662,7 +662,7 @@ export function mountConceptGraph(host: HTMLElement, { byId, locale, focusId }: 
     {
       label: t("menu.explore"),
       run: (id) => {
-        window.location.href = `/concepts?id=${encodeURIComponent(id)}`;
+        window.location.href = `/explore?id=${encodeURIComponent(id)}`;
       },
     },
     // "Collapse" — re-hide the neighbours this concept revealed (touch-friendly shift-click).
@@ -911,7 +911,7 @@ export function mountConceptGraph(host: HTMLElement, { byId, locale, focusId }: 
   host.appendChild(searchStack);
   const courseSearch = mountCourseSearch(searchStack, {
     byId, locale, placement: "inline",
-    onSelect: (id) => setCurrentCourse(id), // → course-change → concepts.html rebuilds to the course's spine
+    onSelect: (id) => setCurrentCourse(id), // → course-change → explore.html rebuilds to the course's spine
   });
   const searchBox = mountConceptSearch(searchStack, {
     byId, locale, placement: "inline",

@@ -375,7 +375,7 @@ export class PrimerPathway extends HTMLElement {
   /**
    * Wire the shared context menu to the pathway's nodes: right-click (desktop) or a touch
    * long-press opens a popup whose "Explore" item re-centres the full explorer on that concept
-   * (`/concepts?id=<id>`). Listeners are delegated on the `.pathway` element and torn down in
+   * (`/explore?id=<id>`). Listeners are delegated on the `.pathway` element and torn down in
    * disconnectedCallback via `#ctxCleanup`.
    */
   #wireContextMenu(root: ShadowRoot, pathway: HTMLElement, scroll: HTMLElement) {
@@ -391,7 +391,7 @@ export class PrimerPathway extends HTMLElement {
       {
         label: t("menu.explore"),
         run: (id) => {
-          window.location.href = `/concepts?id=${encodeURIComponent(id)}`;
+          window.location.href = `/explore?id=${encodeURIComponent(id)}`;
         },
       },
     ]);

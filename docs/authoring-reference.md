@@ -22,7 +22,7 @@ A learner picks a **current course** (the "Focus on this course" button under th
 **Course** hamburger menu → Exit course). It's stored per-profile (`localStorage["primer:course"]`,
 via `src/course.ts`) and travels with the progress export/import (a clash on import asks which to
 keep). While a course is active: the top/bottom mini-explorer tints the course predecessor/successor
-of the current concept; the big `/concepts.html` graph collapses to the course members + their
+of the current concept; the big `/explore` graph collapses to the course members + their
 recursive prerequisite ancestors, with members tinted in the course colour (`--primer-course`).
 
 ## `<primer-table>`

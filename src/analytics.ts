@@ -1,7 +1,7 @@
 /**
  * Cookieless visitor analytics — Cloudflare Web Analytics + GoatCounter. Both are cookieless and
  * collect no personal data, so NO EU consent banner is needed. Loaded on every page (boot.js injects
- * it on concept pages; index.html and concepts.html include it directly), but only ACTUALLY fires on
+ * it on concept pages; index.html and explore.html include it directly), but only ACTUALLY fires on
  * the real production domain — never localhost, preview deploys, forks, or mirrors.
  *
  * This is a CLASSIC (non-module) script: scripts/build.mjs transpiles it to the stable
@@ -51,7 +51,7 @@
     // A render.js page: its <primer-title> becomes document.title during render, then this fires.
     document.addEventListener("primer:rendered", fireCount);
   } else if (document.readyState === "loading") {
-    // A static page (index.html / concepts.html): the title is already in the HTML <head>.
+    // A static page (index.html / explore.html): the title is already in the HTML <head>.
     document.addEventListener("DOMContentLoaded", fireCount);
   } else {
     fireCount();

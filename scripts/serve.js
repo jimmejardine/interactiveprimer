@@ -73,9 +73,9 @@ const server = createServer(async (req, res) => {
     let resolvedPath = filePath;
     if (!info || info.isDirectory()) {
       // Cloudflare-style extensionless resolution: canonical page URLs are extensionless
-      // (`/concepts/<id>`, `/progress`), served from the underlying `.html` file. Exact file wins;
-      // otherwise try `<path>.html` — including when the bare path names a DIRECTORY (`/concepts`
-      // must serve `concepts.html`, the explorer, not the concepts/ folder), mirroring Pages.
+      // (`/concepts/<id>`, `/course`, `/explore`), served from the underlying `.html` file.
+      // Exact file wins; otherwise try `<path>.html` — including when the bare path names a
+      // DIRECTORY — mirroring Pages' precedence.
       const htmlInfo = await stat(filePath + ".html").catch(() => null);
       if (htmlInfo && !htmlInfo.isDirectory()) {
         resolvedPath = filePath + ".html";
