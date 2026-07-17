@@ -37,14 +37,21 @@ test("English-only page (no locale block) returns the English string", () => {
   assert.equal(S("start"), "Start at {a}.");
 });
 
-test("missing in both blocks yields a visible placeholder", () => {
+test("missing in both blocks yields a visible placeholder", (t) => {
+  // The fallback logs a diagnostic; mock console.error to keep the test output clean AND assert it fired.
+  const err = t.mock.method(console, "error", () => {});
   const S = makeStrings("addNumberLine@1", fakeDoc({ locale: ES, english: EN }));
   assert.equal(S("nope"), "$$addNumberLine@1.nope$$");
+  assert.equal(err.mock.callCount(), 1);
+  assert.match(err.mock.calls[0].arguments[0], /addNumberLine@1\.nope/);
 });
 
-test("an unknown scene name yields placeholders for every key", () => {
+test("an unknown scene name yields placeholders for every key", (t) => {
+  const err = t.mock.method(console, "error", () => {});
   const S = makeStrings("ghost@1", fakeDoc({ english: EN }));
   assert.equal(S("start"), "$$ghost@1.start$$");
+  assert.equal(err.mock.callCount(), 1);
+  assert.match(err.mock.calls[0].arguments[0], /ghost@1\.start/);
 });
 
 test("interpolates {vars} into the resolved string, leaving unknown placeholders intact", () => {

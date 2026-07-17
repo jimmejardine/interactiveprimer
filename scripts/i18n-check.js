@@ -267,7 +267,10 @@ async function checkChrome(problems) {
     const stored = await loadHashes(locale);
     for (const k of Object.keys(enCatalog)) {
       if (!(k in cat)) {
-        problems.push({ sev: "warn", msg: `chrome [${locale}] MISSING key "${k}"` });
+        // A UI-chrome key present in English but absent from a locale catalog IS an error — the app
+        // renders that string, so a gap ships untranslated UI. (Contrast a whole concept PAGE missing
+        // from a locale, which stays a warning: content is translated incrementally, page by page.)
+        problems.push({ sev: "error", msg: `chrome [${locale}] MISSING key "${k}"` });
       } else if (stored[k] !== enHashes[k]) {
         problems.push({
           sev: "error",
@@ -316,7 +319,9 @@ async function checkLessons(problems) {
     for (const [id, c] of canonical) {
       const ov = overlays.get(id);
       if (!ov) {
-        problems.push({ sev: "warn", msg: `lesson [${locale}] MISSING "${id}" (translate; sourceHash ${c.surfaceHash})` });
+        // A concept page not yet translated into this locale is EXPECTED — content is translated
+        // incrementally, and a locale may cover only a few courses. Not reported (would be thousands
+        // of lines). Only a translated-but-STALE overlay, or an ORPHAN overlay, is a real problem.
         continue;
       }
       if (ov.sourceHash !== c.surfaceHash) {
