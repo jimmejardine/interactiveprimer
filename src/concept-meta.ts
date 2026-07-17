@@ -111,11 +111,13 @@ export function getConceptMeta(doc: Document = document): ConceptMeta | null {
 }
 
 /**
- * Derive a concept's id from a page URL path. The canonical URL is always
- * `/concepts/<id>.html`, so the id is implied by the path — it is no longer stored in the
- * concept-meta block. Returns "" if the path isn't a concept URL.
+ * Derive a concept's id from a page URL path. The canonical URL is the extensionless
+ * `/concepts/<id>` (Cloudflare serves the underlying `<id>.html` there), so the id is implied by
+ * the path — it is no longer stored in the concept-meta block. A legacy `.html`/`.htm` suffix is
+ * accepted and stripped (old links 308-redirect on prod, but the local dev server serves them
+ * directly). Returns "" if the path isn't a concept URL.
  */
 export function conceptIdFromPath(pathname: string = location.pathname): string {
-  const m = pathname.match(/\/concepts\/(.+?)\.html?$/i);
+  const m = pathname.match(/\/concepts\/(.+?)(?:\.html?)?$/i);
   return m ? m[1] : "";
 }

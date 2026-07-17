@@ -6,7 +6,7 @@
  *   see <primer-ref to="geometry/parallel-lines"></primer-ref>   <!-- title from the graph -->
  *
  * Like <primer-card>/<primer-theorem> it stays in the light DOM: on connect it wraps its
- * own contents in an <a class="concept-ref" href="/concepts/<id>.html"> (so the link is
+ * own contents in an <a class="concept-ref" href="/concepts/<id>"> (so the link is
  * styled by css/primer.css, where slotted content is styled). If the author gave no text,
  * the anchor is filled with the target concept's title, resolved from the shared graph
  * (dist/graph.json) and shown in the active locale — the same title lookup the pathway map
@@ -52,9 +52,9 @@ function ensureRefContextMenu() {
 
   const menu = createContextMenu(document.body, [
     // "Open" — same as clicking the reference: go to that concept's lesson.
-    { label: t("contextmenu.open"), run: (id) => { window.location.href = `/concepts/${id}.html`; } },
+    { label: t("contextmenu.open"), run: (id) => { window.location.href = `/concepts/${id}`; } },
     // "Explore" — open the full map centred on that concept.
-    { label: t("menu.explore"), run: (id) => { window.location.href = `/concepts.html?id=${encodeURIComponent(id)}`; } },
+    { label: t("menu.explore"), run: (id) => { window.location.href = `/concepts?id=${encodeURIComponent(id)}`; } },
   ]);
 
   /** The real concept id of the <primer-ref> under an event (empty / a `todo` placeholder → null, so
@@ -133,7 +133,7 @@ export class PrimerRef extends HTMLElement {
 
     const a = document.createElement("a");
     a.className = "concept-ref";
-    a.setAttribute("href", id ? `/concepts/${id}.html` : "#");
+    a.setAttribute("href", id ? `/concepts/${id}` : "#");
     // Move the author's inline content (text, <primer-math>, …) into the anchor.
     while (this.firstChild) a.appendChild(this.firstChild);
     this.appendChild(a);
@@ -145,7 +145,7 @@ export class PrimerRef extends HTMLElement {
     if (id) {
       const icon = document.createElement("a");
       icon.className = "concept-ref-icon";
-      icon.setAttribute("href", `/concepts/${id}.html`);
+      icon.setAttribute("href", `/concepts/${id}`);
       icon.setAttribute("aria-hidden", "true");
       icon.setAttribute("tabindex", "-1");
       icon.textContent = "⧉";

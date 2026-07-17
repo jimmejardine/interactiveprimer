@@ -168,8 +168,8 @@ export class PrimerMenu extends HTMLElement {
       <div class="panel" role="menu">
         <div class="menu-view view-root">
           <button type="button" class="nav" data-href="/">${t("menu.home")}</button>
-          <button type="button" class="nav" data-href="/progress.html">${t("menu.course")}</button>
-          <button type="button" class="nav" data-href="/concepts.html">${t("menu.explore")}</button>
+          <button type="button" class="nav" data-href="/progress">${t("menu.course")}</button>
+          <button type="button" class="nav" data-href="/concepts">${t("menu.explore")}</button>
           <button type="button" class="nav" data-target="config">${t("menu.config")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-extern="https://github.com/jimmejardine/interactiveprimer/discussions">${t("menu.feedback")}<span class="chev" aria-hidden="true">↗</span></button>
         </div>
@@ -178,7 +178,7 @@ export class PrimerMenu extends HTMLElement {
           <button type="button" class="nav" data-target="progress">${t("menu.progress")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="theme">${t("menu.theme")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="lang">${t("menu.language")}<span class="chev" aria-hidden="true">›</span></button>
-          <button type="button" class="nav" data-href="/offline.html">${t("menu.offline")}</button>
+          <button type="button" class="nav" data-href="/offline">${t("menu.offline")}</button>
         </div>
         <div class="menu-view view-theme" hidden>
           <button type="button" class="back" data-back="config"><span aria-hidden="true">‹ </span>${t("menu.theme")}</button>

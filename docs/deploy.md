@@ -38,6 +38,16 @@ to go back, Pages' *GitHub Actions* source can run the same build (`upload-pages
 `deploy-pages` after `npm ci && npm run build`), and the `CNAME`/`.nojekyll` markers still sit in
 the repo root for that eventuality.
 
+## URL scheme: extensionless
+
+Canonical page URLs are **extensionless** (`/concepts/<id>`, `/progress`, `/offline`), matching
+Cloudflare Pages' hardcoded normalization: it serves `foo.html` at `/foo` and 308-redirects
+`/foo.html` → `/foo` (not configurable). All internal links, the sitemap, and the service worker's
+cache keys use the extensionless form; legacy `.html` links keep working via that 308. The local
+dev server (`scripts/serve.js`) mirrors the resolution (exact file, else `<path>.html` — even when
+a bare path names a directory, so `/concepts` is the explorer, not the folder). Physical files
+stay `.html` on disk.
+
 ## Why an apex (root) domain is required
 
 Pages reference assets with **absolute** paths (`/dist/boot.js`, `/css/primer.css`,

@@ -28,7 +28,7 @@ export function registerServiceWorker() {
   return navigator.serviceWorker.register("/sw.js").catch(() => null);
 }
 
-const pageUrl = (id: string) => `/concepts/${id}.html`;
+const pageUrl = (id: string) => `/concepts/${id}`;
 
 /**
  * The concept ids a course download covers: its `courseMembers` + one level of each member's direct

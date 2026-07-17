@@ -119,7 +119,7 @@ let done = 0;
 
 /** Load one page, collect any JS errors. */
 async function checkPage(page, id) {
-  const url = `${base}/concepts/${id}.html`;
+  const url = `${base}/concepts/${id}`; // extensionless, as prod serves it
   const pageErrs = [];
   const onPageError = (err) => pageErrs.push(err.message);
   page.on("pageerror", onPageError);
@@ -170,7 +170,7 @@ async function checkPage(page, id) {
 // NON-HTML asset (js, css, json, fonts, wasm, images, /site.webmanifest, favicon…); the concept HTML pages
 // themselves are unique per navigation and always fetched fresh. `--no-cache` disables all of this.
 const assetCache = new Map(); // absolute url -> { contentType, body: Buffer }
-const isCacheable = (pathname) => !pathname.endsWith(".html");
+const isCacheable = (pathname) => /\.[a-z0-9]+$/.test(pathname) && !pathname.endsWith(".html"); // pages are extensionless (or .html) — never cache them
 
 async function worker() {
   const page = await browser.newPage();

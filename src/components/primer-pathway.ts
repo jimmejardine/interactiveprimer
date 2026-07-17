@@ -242,7 +242,7 @@ export class PrimerPathway extends HTMLElement {
     const below = peers.slice(above.length);
 
     const link = (id: string) =>
-      `<a class="node${courseHL.has(id) ? " node--course" : ""}" href="/concepts/${id}.html" data-id="${esc(id)}" title="${esc(title(id))}">${label(id)}</a>`;
+      `<a class="node${courseHL.has(id) ? " node--course" : ""}" href="/concepts/${id}" data-id="${esc(id)}" title="${esc(title(id))}">${label(id)}</a>`;
     const current = `<span class="node node--current" data-id="${esc(hood.id)}" aria-current="page" title="${esc(title(hood.id))}">${label(hood.id)}</span>`;
 
     /** Render a column with an overflow "+k more" chip past MAX_PER_COL. */
@@ -375,7 +375,7 @@ export class PrimerPathway extends HTMLElement {
   /**
    * Wire the shared context menu to the pathway's nodes: right-click (desktop) or a touch
    * long-press opens a popup whose "Explore" item re-centres the full explorer on that concept
-   * (`/concepts.html?id=<id>`). Listeners are delegated on the `.pathway` element and torn down in
+   * (`/concepts?id=<id>`). Listeners are delegated on the `.pathway` element and torn down in
    * disconnectedCallback via `#ctxCleanup`.
    */
   #wireContextMenu(root: ShadowRoot, pathway: HTMLElement, scroll: HTMLElement) {
@@ -384,14 +384,14 @@ export class PrimerPathway extends HTMLElement {
       {
         label: t("contextmenu.open"),
         run: (id) => {
-          window.location.href = `/concepts/${id}.html`;
+          window.location.href = `/concepts/${id}`;
         },
       },
       // "Explore" — open the full map centred on this concept.
       {
         label: t("menu.explore"),
         run: (id) => {
-          window.location.href = `/concepts.html?id=${encodeURIComponent(id)}`;
+          window.location.href = `/concepts?id=${encodeURIComponent(id)}`;
         },
       },
     ]);

@@ -201,7 +201,7 @@ const shell = [
   "/dist/analytics.js",
   "/css/primer.css",
   ...assetShell.sort(),
-  "/offline.html",
+  "/offline",
   "/site.webmanifest",
   "/images/icons/favicon.ico",
   "/images/icons/favicon-32x32.png",

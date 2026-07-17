@@ -50,9 +50,9 @@ function loadGraph(): Promise<Map<string, string[]> | null> {
   return graphPromise;
 }
 
-/** Infer the current page's concept id from `/concepts/<id>.html`. */
+/** Infer the current page's concept id from `/concepts/<id>` (legacy `.html` accepted). */
 function pageConceptId() {
-  const m = (typeof location !== "undefined" ? location.pathname : "").match(/\/concepts\/(.+?)\.html?$/);
+  const m = (typeof location !== "undefined" ? location.pathname : "").match(/\/concepts\/(.+?)(?:\.html?)?$/);
   return m ? m[1] : "";
 }
 

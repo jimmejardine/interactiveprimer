@@ -193,11 +193,11 @@ function showBanner({ done, total, courseId, nextId, courseTitle, nextTitle }: {
   actions.className = "wb-actions";
   const nextBtn = document.createElement("a");
   nextBtn.className = "wb-btn wb-btn-primary";
-  nextBtn.href = `/concepts/${nextId}.html`;
+  nextBtn.href = `/concepts/${nextId}`;
   nextBtn.textContent = t("welcome.next");
   const progBtn = document.createElement("a");
   progBtn.className = "wb-btn wb-btn-secondary";
-  progBtn.href = "/progress.html";
+  progBtn.href = "/progress";
   progBtn.textContent = t("welcome.seeProgress");
   actions.append(nextBtn, progBtn);
 

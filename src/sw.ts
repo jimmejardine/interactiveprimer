@@ -6,7 +6,7 @@
  * three offline capabilities, layered on the content-hashed build:
  *
  *   1. APP SHELL, precached eagerly on install (dist/precache.json) so any already-visited page — and
- *      the /offline.html manager — work with no network. The shell is small (boot.js + the hashed core
+ *      the /offline manager — work with no network. The shell is small (boot.js + the hashed core
  *      bundle + reading CSS/fonts); it's what a normal first visit already downloads.
  *   2. OPPORTUNISTIC FRESHNESS while online: the tiny stable entry (boot.js, manifests, css) and the
  *      often-changing dist/graph.json are stale-while-revalidate — served instantly from cache, then
@@ -131,10 +131,10 @@ async function courseContent(request: Request): Promise<Response> {
   return hit || (await network) || (await fallback(request));
 }
 
-/** Offline fallback: navigations → the cached /offline.html manager; other requests → a plain 504. */
+/** Offline fallback: navigations → the cached /offline manager; other requests → a plain 504. */
 async function fallback(request: Request): Promise<Response> {
   if (request.mode === "navigate") {
-    const offline = await caches.match("/offline.html");
+    const offline = await caches.match("/offline");
     if (offline) return offline;
   }
   return new Response("Offline — this content is not available.", {

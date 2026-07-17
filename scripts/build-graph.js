@@ -454,7 +454,7 @@ async function writeSeoFiles(concepts) {
   /** @type {string[]} */
   const entries = [`  <url><loc>${origin}/</loc><lastmod>${generatedAt}</lastmod></url>`];
   for (const c of concepts) {
-    const enUrl = `${origin}/concepts/${c.id}.html`;
+    const enUrl = `${origin}/concepts/${c.id}`; // extensionless canonical (Cloudflare serves the .html there)
     const lastmod = pageLastmod(c.id);
     const locales = Object.keys(c.titles ?? {})
       .filter((l) => l !== DEFAULT_LOCALE)

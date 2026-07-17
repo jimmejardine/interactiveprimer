@@ -655,14 +655,14 @@ export function mountConceptGraph(host: HTMLElement, { byId, locale, focusId }: 
     {
       label: t("contextmenu.open"),
       run: (id) => {
-        window.open(`/concepts/${id}.html`, "_blank", "noopener");
+        window.open(`/concepts/${id}`, "_blank", "noopener");
       },
     },
     // "Explore" — re-seed the whole map around this concept (a fresh focus view).
     {
       label: t("menu.explore"),
       run: (id) => {
-        window.location.href = `/concepts.html?id=${encodeURIComponent(id)}`;
+        window.location.href = `/concepts?id=${encodeURIComponent(id)}`;
       },
     },
     // "Collapse" — re-hide the neighbours this concept revealed (touch-friendly shift-click).
@@ -834,7 +834,7 @@ export function mountConceptGraph(host: HTMLElement, { byId, locale, focusId }: 
       if (!gesturePinched && !longPressed && travel < CLICK_PX) {
         if (tapShift) collapse(n.id);
         else if (hasHidden(n.id)) expand(n.id);
-        else window.open(`/concepts/${n.id}.html`, "_blank", "noopener");
+        else window.open(`/concepts/${n.id}`, "_blank", "noopener");
       }
       reheat();
     }

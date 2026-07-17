@@ -137,7 +137,7 @@ export class PrimerUpNext extends HTMLElement {
               ? `<span class="row-level">${esc(t("concept.level.label", { level: formatLevel(node.level) }))}</span>`
               : "";
           return (
-            `<li><a class="row" href="/concepts/${esc(it.id)}.html">` +
+            `<li><a class="row" href="/concepts/${esc(it.id)}">` +
             `<span class="row-title">${title}</span>${tag}${level}</a></li>`
           );
         })

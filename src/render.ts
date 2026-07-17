@@ -176,7 +176,7 @@ async function mountConceptSearch(body: HTMLElement, locale: string): Promise<vo
     locale,
     placement: "fixed",
     onSelect: (id: string) => {
-      window.location.href = `/concepts/${id}.html`;
+      window.location.href = `/concepts/${id}`;
     },
   });
 }

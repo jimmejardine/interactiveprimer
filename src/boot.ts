@@ -41,7 +41,8 @@
   try {
     const m = location.pathname.match(/^\/i18n\/([^/]+)\/(.+)$/);
     if (m && SUPPORTED.indexOf(m[1]) !== -1) {
-      location.replace(`/concepts/${m[2]}?lang=${m[1]}`);
+      // Strip the overlay file's .html — canonical lesson URLs are extensionless.
+      location.replace(`/concepts/${m[2].replace(/\.html?$/i, "")}?lang=${m[1]}`);
       return;
     }
   } catch (e) {

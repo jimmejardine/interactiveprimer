@@ -69,17 +69,28 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const info = await stat(filePath).catch(() => null);
+    let info = await stat(filePath).catch(() => null);
+    let resolvedPath = filePath;
     if (!info || info.isDirectory()) {
-      res.writeHead(404, { "content-type": "text/plain" });
-      res.end("404 Not Found");
-      log(res.statusCode, req.method, pathname);
-      return;
+      // Cloudflare-style extensionless resolution: canonical page URLs are extensionless
+      // (`/concepts/<id>`, `/progress`), served from the underlying `.html` file. Exact file wins;
+      // otherwise try `<path>.html` — including when the bare path names a DIRECTORY (`/concepts`
+      // must serve `concepts.html`, the explorer, not the concepts/ folder), mirroring Pages.
+      const htmlInfo = await stat(filePath + ".html").catch(() => null);
+      if (htmlInfo && !htmlInfo.isDirectory()) {
+        resolvedPath = filePath + ".html";
+        info = htmlInfo;
+      } else {
+        res.writeHead(404, { "content-type": "text/plain" });
+        res.end("404 Not Found");
+        log(res.statusCode, req.method, pathname);
+        return;
+      }
     }
 
-    const type = MIME[extname(filePath).toLowerCase()] ?? "application/octet-stream";
+    const type = MIME[extname(resolvedPath).toLowerCase()] ?? "application/octet-stream";
     res.writeHead(200, { "content-type": type, "cache-control": "no-cache" });
-    createReadStream(filePath).pipe(res);
+    createReadStream(resolvedPath).pipe(res);
     log(200, req.method, pathname);
   } catch (err) {
     res.writeHead(500, { "content-type": "text/plain" });

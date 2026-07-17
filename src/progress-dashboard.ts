@@ -264,7 +264,7 @@ function renderPanels(host: HTMLElement, p: ReturnType<typeof courseProgress>, t
   const frontier = p.frontier.slice(0, 6);
   const reviews = p.reviews.slice(0, 6);
   const linkRow = (c: any, badge: string) =>
-    `<a class="p-item" href="/concepts/${c.id}.html"><span>${escapeHtml(titleOf(c.id))}</span><span class="p-badge">${badge}</span></a>`;
+    `<a class="p-item" href="/concepts/${c.id}"><span>${escapeHtml(titleOf(c.id))}</span><span class="p-badge">${badge}</span></a>`;
 
   host.innerHTML = `
     <div class="card panel">
@@ -288,7 +288,7 @@ function renderPanels(host: HTMLElement, p: ReturnType<typeof courseProgress>, t
 function nextNudge(nextId: string | null, starsOf: (id: string) => number, titleOf: (id: string) => string) {
   if (!nextId) return `<p class="muted">${escapeHtml(t("dash.allDone"))}</p>`;
   const kind = starsOf(nextId) === 0 ? t("dash.nudgeNew") : t("dash.nudgeContinue");
-  return `<p class="muted small">${escapeHtml(kind)}</p><a class="p-next-cta" href="/concepts/${nextId}.html">${escapeHtml(titleOf(nextId))} →</a>`;
+  return `<p class="muted small">${escapeHtml(kind)}</p><a class="p-next-cta" href="/concepts/${nextId}">${escapeHtml(titleOf(nextId))} →</a>`;
 }
 
 function renderList(host: HTMLElement, p: ReturnType<typeof courseProgress>, titleOf: (id: string) => string, byId: Map<string, any>, locale: string) {
@@ -299,7 +299,7 @@ function renderList(host: HTMLElement, p: ReturnType<typeof courseProgress>, tit
       const started = c.first ? c.first.slice(0, 10) : "—";
       const updated = c.last ? c.last.slice(0, 10) : "—";
       return `<div class="row">
-        <a class="row-title" href="/concepts/${c.id}.html">${escapeHtml(titleOf(c.id))}</a>
+        <a class="row-title" href="/concepts/${c.id}">${escapeHtml(titleOf(c.id))}</a>
         <div class="row-stars">${stars}</div>
         <div class="row-status"><span class="status" data-status="${c.status}">${escapeHtml(masteryLabel(c.status))}</span></div>
         <div class="row-date" title="${escapeHtml(t("dash.col.started"))}">${started}</div>
