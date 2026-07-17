@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
 // The single source of truth for the supported-locale set (Node 24 strips the .ts types on import).
 import { LOCALE_IDS } from "../src/locales.ts";
+// The English chrome catalog — the single source for the landing page's stamped-in text (below).
+import enCatalog from "../src/i18n/en.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const r = (...p) => path.join(ROOT, ...p);
@@ -181,6 +183,16 @@ fs.writeFileSync(r("dist/boot.js"), bootJs.split("__PRIMER_BUNDLE__").join(coreF
 fs.writeFileSync(r("dist/prepaint.js"), stampSupported(await transpile("src/prepaint.ts")));
 fs.writeFileSync(r("dist/analytics.js"), await transpile("src/analytics.ts"));
 fs.writeFileSync(r("sw.js"), await transpile("src/sw.ts"));
+
+// The landing page: stamp the English from en.ts into src/index.html's {{landing.*}} placeholders
+// and write the served root index.html — so the English lives ONLY in en.ts (no duplication) yet
+// ships statically (SEO + instant paint). The data-i18n* attributes swap it to es/nl at runtime.
+const indexTmpl = fs.readFileSync(r("src/index.html"), "utf8");
+const indexHtml = indexTmpl.replace(/\{\{([\w.]+)\}\}/g, (m, key) => {
+  if (!(key in enCatalog)) throw new Error(`build: src/index.html references unknown i18n key "${key}"`);
+  return enCatalog[key];
+});
+fs.writeFileSync(r("index.html"), indexHtml);
 
 // ── 6) Asset manifest (logical name → hashed URL) for tooling / the service worker. ───────────────
 fs.writeFileSync(
