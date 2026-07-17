@@ -1,5 +1,7 @@
 # Interactive Primer - [interactiveprimer.com](https://interactiveprimer.com)
 
+[![checks](https://github.com/jimmejardine/interactiveprimer/actions/workflows/ci.yml/badge.svg)](https://github.com/jimmejardine/interactiveprimer/actions/workflows/ci.yml)
+
 ## Overview
 
 The Interactive Primer is an open-source collection of "smart web pages" that teach the whole of

@@ -12,7 +12,9 @@ no server.
 > GitHub Pages setup) will 404 every framework asset. Do not point a verbatim-branch host at a
 > post-build-step commit; deploy through CI (below).
 
-## Option A — Cloudflare Pages (intended)
+## Cloudflare Pages (the live deploy)
+
+The site **builds and serves on Cloudflare Pages**. Setup (already done; recorded for rebuilds):
 
 1. Cloudflare dashboard → **Workers & Pages → Create → Pages → Connect to Git** → pick this repo.
 2. Build settings:
@@ -27,34 +29,14 @@ no server.
    separately via wrangler; see its README) and Web Analytics.
 4. Every push to `main` then builds and publishes; PR branches get preview URLs.
 
-## Option B — GitHub Pages via Actions
+## GitHub's role: checks only
 
-Branch-serving mode cannot build, but Pages' **GitHub Actions** source can. Switch
-Settings → Pages → Source to *GitHub Actions* and add a workflow like:
-
-```yaml
-# .github/workflows/deploy.yml
-name: Deploy
-on: { push: { branches: [main] } }
-permissions: { contents: read, pages: write, id-token: write }
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    environment: { name: github-pages, url: '${{ steps.deployment.outputs.page_url }}' }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 24 }
-      - run: npm ci && npm run build
-      - uses: actions/upload-pages-artifact@v3
-        with: { path: . }
-      - id: deployment
-        uses: actions/deploy-pages@v4
-```
-
-The committed `CNAME` (custom-domain marker) and `.nojekyll` still apply. DNS for GitHub Pages is
-the standard apex A/AAAA set (185.199.108–111.153 / 2606:50c0:8000–8003::153) plus a `www` CNAME to
-`jimmejardine.github.io.`; HTTPS via the Pages "Enforce HTTPS" toggle.
+GitHub no longer deploys anything. `.github/workflows/ci.yml` runs the health gate on every push/PR
+— `npm run check` (typecheck + tests + graph + i18n) plus a production `npm run build` — and backs
+the README's **checks** badge. The original GitHub Pages deploy is retired; if the repo ever needs
+to go back, Pages' *GitHub Actions* source can run the same build (`upload-pages-artifact` +
+`deploy-pages` after `npm ci && npm run build`), and the `CNAME`/`.nojekyll` markers still sit in
+the repo root for that eventuality.
 
 ## Why an apex (root) domain is required
 
