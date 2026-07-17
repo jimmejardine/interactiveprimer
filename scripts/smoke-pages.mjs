@@ -6,7 +6,8 @@
  * fine to a naive console listener. js/report-error.js now records every such error (plus uncaught errors
  * and unhandled rejections) on `window.__primerErrors`; this script reads that after each page settles.
  *
- * All third-party libs are vendored under /3rdparty, so this runs fully offline against the local server.
+ * The framework + its deps come from the built bundle under /dist (run `npm run build` first), so this
+ * runs fully offline against the local server.
  *
  * Usage:
  *   node scripts/smoke-pages.mjs                     # every page (own private server, own asset cache)

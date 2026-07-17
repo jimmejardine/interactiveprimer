@@ -65,31 +65,56 @@ export class PrimerVideo extends HTMLElement {
 
     const start = startSeconds(src);
     const label = caption ? `${t("video.play")} — ${esc(caption)}` : t("video.play");
-    root.innerHTML = `
-      <style>${STYLE}</style>
-      <div class="wrap">
-        <div class="frame">
-          <button type="button" class="facade" aria-label="${label}"
-            style="background-image:url('https://i.ytimg.com/vi/${id}/hqdefault.jpg')">
-            <span class="play">${PLAY_SVG}</span>
-          </button>
-        </div>
-        ${caption ? `<p class="meta caption">${esc(caption)}</p>` : ""}
-      </div>`;
 
-    const frame = /** @type {HTMLElement} */ (root.querySelector(".frame"));
-    const facade = /** @type {HTMLButtonElement} */ (root.querySelector(".facade"));
-    facade.addEventListener("click", () => {
-      const iframe = document.createElement("iframe");
-      const params = `autoplay=1&rel=0${start ? `&start=${start}` : ""}`;
-      iframe.src = `https://www.youtube-nocookie.com/embed/${id}?${params}`;
-      iframe.title = title;
-      iframe.allow = "autoplay; encrypted-media; picture-in-picture; web-share; fullscreen";
-      iframe.allowFullscreen = true;
-      iframe.loading = "lazy";
-      frame.replaceChildren(iframe);
-    });
+    // YouTube's thumbnail + iframe both need the network, so offline we show a placeholder instead of a
+    // broken facade — and swap to the real player if the connection returns while the page is open.
+    const renderPlayer = () => {
+      root.innerHTML = `
+        <style>${STYLE}</style>
+        <div class="wrap">
+          <div class="frame">
+            <button type="button" class="facade" aria-label="${label}"
+              style="background-image:url('https://i.ytimg.com/vi/${id}/hqdefault.jpg')">
+              <span class="play">${PLAY_SVG}</span>
+            </button>
+          </div>
+          ${caption ? `<p class="meta caption">${esc(caption)}</p>` : ""}
+        </div>`;
+      const frame = /** @type {HTMLElement} */ (root.querySelector(".frame"));
+      const facade = /** @type {HTMLButtonElement} */ (root.querySelector(".facade"));
+      facade.addEventListener("click", () => {
+        const iframe = document.createElement("iframe");
+        const params = `autoplay=1&rel=0${start ? `&start=${start}` : ""}`;
+        iframe.src = `https://www.youtube-nocookie.com/embed/${id}?${params}`;
+        iframe.title = title;
+        iframe.allow = "autoplay; encrypted-media; picture-in-picture; web-share; fullscreen";
+        iframe.allowFullscreen = true;
+        iframe.loading = "lazy";
+        frame.replaceChildren(iframe);
+      });
+    };
+    const renderOffline = () => {
+      root.innerHTML =
+        `<style>${STYLE}</style><div class="wrap"><div class="card"><p class="meta">${t("video.offline")}</p></div>` +
+        `${caption ? `<p class="meta caption">${esc(caption)}</p>` : ""}</div>`;
+    };
+    const paint = () => (navigator.onLine ? renderPlayer() : renderOffline());
+    paint();
+    this.#onConnectivity = () => paint();
+    window.addEventListener("online", this.#onConnectivity);
+    window.addEventListener("offline", this.#onConnectivity);
   }
+
+  disconnectedCallback() {
+    if (this.#onConnectivity) {
+      window.removeEventListener("online", this.#onConnectivity);
+      window.removeEventListener("offline", this.#onConnectivity);
+      this.#onConnectivity = null;
+    }
+  }
+
+  /** @type {(() => void) | null} */
+  #onConnectivity = null;
 }
 
 if (!customElements.get("primer-video")) {

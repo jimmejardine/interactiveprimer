@@ -183,6 +183,7 @@ export class PrimerMenu extends HTMLElement {
           <button type="button" class="nav" data-target="progress">${t("menu.progress")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="theme">${t("menu.theme")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="lang">${t("menu.language")}<span class="chev" aria-hidden="true">›</span></button>
+          <button type="button" class="nav" data-href="/offline.html">${t("menu.offline")}</button>
         </div>
         <div class="menu-view view-theme" hidden>
           <button type="button" class="back" data-back="config"><span aria-hidden="true">‹ </span>${t("menu.theme")}</button>

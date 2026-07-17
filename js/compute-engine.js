@@ -8,11 +8,6 @@
  * @module
  */
 
-import { importUrl } from "./import-url.js";
-
-// Compute Engine 0.59.0 — vendored under /3rdparty/compute-engine (see scripts/vendor.mjs).
-const URL = "/3rdparty/compute-engine/compute-engine.mjs";
-
 /** @type {Promise<any> | null} */
 let pending = null;
 
@@ -23,8 +18,8 @@ let pending = null;
  */
 export function loadComputeEngine() {
   if (!pending) {
-    // Absolute CDN URL — tsc can't follow it (like loadMathLive / the manim-web import).
-    pending = importUrl(`${URL}`)
+    // @ts-ignore — static specifier; esbuild emits compute-engine as its own lazy chunk.
+    pending = import("@cortex-js/compute-engine")
       .then((mod) => (mod.ComputeEngine ? new mod.ComputeEngine() : null))
       .catch(() => null);
   }

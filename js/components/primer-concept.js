@@ -100,6 +100,18 @@ const STAR_CSS = `
   }
   .focus-course.is-active { background: transparent; color: var(--primer-ink-soft, #667); }
   .focus-course:hover { filter: brightness(0.96); }
+  /* "Download for offline" — sits beside the focus button on a course page. */
+  .download-course {
+    margin-left: 0.5rem;
+    font-family: var(--primer-font-ui, sans-serif); font-size: 0.9rem; cursor: pointer;
+    padding: 0.45rem 0.95rem; border-radius: 999px;
+    border: 1.5px solid var(--primer-border, #d9d3c6);
+    background: transparent; color: var(--primer-ink-soft, #667);
+  }
+  .download-course[hidden] { display: none; }
+  .download-course:hover:not(:disabled) { border-color: var(--primer-accent, #46e); color: var(--primer-ink, #111); }
+  .download-course:disabled { cursor: default; opacity: 0.85; }
+  .download-course.is-done { border-color: var(--primer-star, #3fb950); color: var(--primer-star, #2f9f46); }
 `;
 
 export class PrimerConcept extends HTMLElement {
@@ -146,7 +158,7 @@ export class PrimerConcept extends HTMLElement {
       <style>${STAR_CSS}</style>
       <article>
         <div class="title-row"><h1>${crest}<slot name="title">${title}</slot></h1>${levelBadge}</div>
-        <div class="course-focus" hidden><button type="button" class="focus-course"></button></div>
+        <div class="course-focus" hidden><button type="button" class="focus-course"></button><button type="button" class="download-course" hidden></button></div>
         <div class="body"><slot></slot></div>
         <section class="confidence card" aria-label="${t("concept.confidence.legend")}">
           <p class="meta" id="conf-label" style="margin-top:0;">${t("concept.confidence.prompt")}</p>
@@ -264,6 +276,14 @@ export class PrimerConcept extends HTMLElement {
       });
       this.#onCourse = refreshBtn;
       document.addEventListener("course-change", this.#onCourse);
+
+      // "Download for offline" — beside the focus button. Confirms with the page count, downloads with
+      // live progress, then flips to "Available offline". Guarded: hidden where service workers /
+      // Cache Storage aren't available. Lazy-imports offline.js so non-course pages never pay for it.
+      const dlBtn = /** @type {HTMLButtonElement} */ (root.querySelector(".download-course"));
+      if (dlBtn && "serviceWorker" in navigator && "caches" in window) {
+        void this.#wireDownload(dlBtn, id);
+      }
     }
 
     // For an implicit level, fill the (initially hidden) badge from the emitted graph.
@@ -298,6 +318,64 @@ export class PrimerConcept extends HTMLElement {
     if (!badge) return;
     badge.textContent = t("concept.level.label", { level: formatLevel(level) });
     badge.removeAttribute("hidden");
+  }
+
+  /**
+   * Wire the "Download for offline" button on a course page: reflect the already-downloaded state,
+   * then on click confirm → download with progress → flip to done. Lazy-imports offline.js.
+   * @param {HTMLButtonElement} btn
+   * @param {string} id the course id
+   */
+  async #wireDownload(btn, id) {
+    let offline;
+    try {
+      offline = await import("../offline.js");
+    } catch {
+      return; // couldn't load the manager — leave the button hidden
+    }
+    if (!this.isConnected) return;
+
+    const setDone = () => {
+      btn.textContent = t("course.downloaded");
+      btn.classList.add("is-done");
+      btn.disabled = false;
+    };
+    try {
+      if (await offline.isCourseDownloaded(id)) {
+        setDone();
+      } else {
+        btn.textContent = t("course.download");
+      }
+    } catch {
+      btn.textContent = t("course.download");
+    }
+    btn.hidden = false;
+
+    btn.addEventListener("click", async () => {
+      if (btn.classList.contains("is-done")) return; // already downloaded
+      let count = 0;
+      try {
+        count = (await offline.computeCoursePages(id)).length;
+      } catch {
+        /* fall back to a generic confirm without a count */
+      }
+      const ok = await confirmDialog({
+        message: t("course.downloadConfirm", { count: count || "…" }),
+        confirm: t("course.download"),
+        cancel: t("course.keep"),
+      });
+      if (!ok) return;
+      btn.disabled = true;
+      try {
+        await offline.downloadCourse(id, (done, total) => {
+          btn.textContent = t("course.downloading", { done, total });
+        });
+        setDone();
+      } catch {
+        btn.textContent = t("course.downloadFailed");
+        btn.disabled = false;
+      }
+    });
   }
 }
 

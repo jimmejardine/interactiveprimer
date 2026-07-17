@@ -7,11 +7,6 @@
  * @module
  */
 
-import { importUrl } from "./import-url.js";
-
-const CORE_URL = "/3rdparty/quickjs/core.mjs";
-const VARIANT_URL = "/3rdparty/quickjs/singlefile/index.mjs";
-
 /** @type {Promise<{ QuickJS: any, shouldInterruptAfterDeadline: any } | null> | null} */
 let pending = null;
 
@@ -24,8 +19,15 @@ let pending = null;
 export function getQuickJs() {
   if (!pending) {
     pending = (async () => {
-      const [core, variantMod] = await Promise.all([importUrl(`${CORE_URL}`), importUrl(`${VARIANT_URL}`)]);
-      const variant = variantMod.default ?? variantMod;
+      // Static specifiers so esbuild bundles quickjs-emscripten-core into the core chunk and the
+      // wasmfile variant into its own lazy chunk (its .wasm is emitted as a hashed asset by the build).
+      const [core, variantMod] = await Promise.all([
+        // @ts-ignore — resolved from node_modules by the bundler.
+        import("quickjs-emscripten-core"),
+        // @ts-ignore — the wasmfile variant (separate .wasm; bundleable, unlike the singlefile variant).
+        import("@jitl/quickjs-wasmfile-release-sync"),
+      ]);
+      const variant = /** @type {any} */ (variantMod.default ?? variantMod);
       const QuickJS = await core.newQuickJSWASMModuleFromVariant(variant);
       return { QuickJS, shouldInterruptAfterDeadline: core.shouldInterruptAfterDeadline };
     })().catch(() => {

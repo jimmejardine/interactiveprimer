@@ -20,7 +20,7 @@
  * component's shadow root (a document-level <link> can't cross the shadow boundary). Best-effort:
  * the board still renders if it fails to load. Keep the version in step with js/boot.js.
  */
-const JSXGRAPH_CSS = "/3rdparty/jsxgraph/jsxgraph.css";
+const JSXGRAPH_CSS = "/dist/assets/jsxgraph.css";
 
 /** @type {Promise<CSSStyleSheet | null> | null} Shared across all instances. */
 let jsxCssPromise = null;

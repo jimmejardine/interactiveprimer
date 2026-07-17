@@ -7,16 +7,13 @@
  * @module
  */
 
-import { importUrl } from "./import-url.js";
-
-const SUCRASE_URL = "/3rdparty/sucrase/sucrase.mjs";
-
 /** @type {Promise<any> | null} Cached module import (re-tried if it fails). */
 let pending = null;
 
 function loadSucrase() {
   if (!pending) {
-    pending = importUrl(/* @vite-ignore */ `${SUCRASE_URL}`).catch((e) => {
+    // @ts-ignore — static specifier; esbuild emits sucrase as its own lazy chunk.
+    pending = import("sucrase").catch((e) => {
       pending = null; // allow a retry after a transient failure
       throw e;
     });

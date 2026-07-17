@@ -114,6 +114,7 @@ export default {
 
   "video.play": "Play video",
   "video.unavailable": "Couldn't load this video.",
+  "video.offline": "This video needs an internet connection.",
 
   "pathway.label": "Concept pathway",
   "pathway.more": "+{extra} more",
@@ -129,6 +130,7 @@ export default {
   "menu.label": "Menu",
   "menu.home": "Home",
   "menu.explore": "Explore",
+  "menu.offline": "Offline",
   "menu.myProgress": "My Progress",
   "menu.config": "Config",
   "menu.collapse": "Collapse",
@@ -189,6 +191,36 @@ export default {
   "course.keep": "Keep current",
   "course.importClash": "The imported progress is from the course “{course}”. Switch to it?",
   "course.filtered": "Course:",
+  // Offline course download (js/offline.js + the button on a course page; see js/components/primer-concept.js).
+  "course.download": "⬇ Download for offline",
+  "course.downloadConfirm": "Download this course ({count} pages) for offline use?",
+  "course.downloading": "Downloading… {done}/{total}",
+  "course.downloaded": "✓ Available offline",
+  "course.downloadFailed": "Download failed — try again",
+  "course.offlineUnsupported": "Offline isn't supported in this browser",
+
+  // The /offline.html download manager (shares progress.html's dashboard template).
+  "offline.title": "Offline",
+  "offline.subtitle": "Your downloaded courses stay available with no internet connection.",
+  "offline.statusOnline": "Online",
+  "offline.statusOffline": "Offline",
+  "offline.downloaded": "Downloaded courses",
+  "offline.none": "No courses downloaded yet. Open a course and choose “Download for offline”, or pick one below.",
+  "offline.remove": "Remove",
+  "offline.removeConfirm": "Remove this downloaded course? Pages it shares with another downloaded course stay available.",
+  "offline.update": "Update",
+  "offline.updating": "Updating…",
+  "offline.more": "Download a course",
+  "offline.moreHint": "Search for a course to save for offline use.",
+  "offline.offlineHint": "You're offline — downloading a course needs a connection.",
+  "offline.storage": "Storage",
+  "offline.persisted": "Protected from automatic cleanup",
+  "offline.notPersisted": "May be cleared if the device runs low on space",
+  "offline.files": "{count} files",
+  "offline.pages": "{count} pages",
+  "offline.usage": "{used} used",
+  "offline.back": "Back to the Primer",
+  "offline.unsupported": "Offline storage isn't available in this browser.",
 
   // The "My Progress" dashboard (js/progress-dashboard.js). The heading + exit button reuse
   // menu.myProgress / course.exit above.

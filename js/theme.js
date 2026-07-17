@@ -30,8 +30,8 @@ export const THEMES = [
 
 export const STORAGE_KEY = "primer:theme";
 
-/** Fredoka display font for the fun theme — vendored under /3rdparty/fonts/ (offline). */
-const FUN_FONT_HREF = "/3rdparty/fonts/fredoka.css";
+/** Fredoka display font for the fun theme — emitted to /dist/assets/ by the build (offline). */
+const FUN_FONT_HREF = "/dist/assets/fredoka.css";
 const FUN_FONT_ID = "primer-fun-font";
 
 const VALID = new Set(THEMES.map((t) => t.id));

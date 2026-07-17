@@ -7,10 +7,8 @@
  * @module
  */
 
-import { importUrl } from "./import-url.js";
-
-// MathLive 0.110.0 — vendored under /3rdparty/mathlive (see scripts/vendor.mjs).
-const BASE = "/3rdparty/mathlive";
+// MathLive's glyph fonts are copied to this stable dir by scripts/build.mjs (from node_modules).
+const FONTS_DIR = "/dist/assets/mathlive-fonts";
 
 /** @type {Promise<boolean> | null} */
 let pending = null;
@@ -22,16 +20,15 @@ let pending = null;
  */
 export function loadMathLive() {
   if (!pending) {
-    // Absolute CDN URL — tsc can't follow it (like the manim-web dynamic import in boot.js).
-    // @ts-ignore
-    pending = import(`${BASE}/mathlive.min.mjs`)
-      .then((mod) => {
+    // @ts-ignore — static specifier; esbuild emits mathlive as its own lazy chunk.
+    pending = import("mathlive")
+      .then((/** @type {any} */ mod) => {
         const MFE = mod.MathfieldElement;
         if (MFE) {
           try {
-            // Resolve glyph fonts from the CDN, and silence MathLive's own keypress sounds
-            // (the quiz plays its own pass/fail sounds).
-            MFE.fontsDirectory = `${BASE}/fonts`;
+            // Resolve glyph fonts from the build-emitted dir, and silence MathLive's own keypress
+            // sounds (the quiz plays its own pass/fail sounds).
+            MFE.fontsDirectory = FONTS_DIR;
             MFE.soundsDirectory = null;
           } catch {
             /* best-effort config */
