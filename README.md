@@ -42,12 +42,15 @@ where its page lives under `concepts/`, and how prerequisites reference it.
 
 ## Technology
 
-Each "smart web page" is a plain `.html` file that pulls in everything it needs at load time — **there
-is no build step.**
+Each "smart web page" is a plain `.html` file — **content has no build step** (edit → refresh). The
+framework it loads is TypeScript in [`src/`](src/), bundled by esbuild (`npm run build`) into
+content-hashed, code-split modules under `/dist/`.
 
-- **One include per page.** A page adds a single `<script src="/js/boot.js"></script>`;
-  [`src/boot.ts`](src/boot.ts) injects the CSS and an ESM **import map** (dependencies load straight from a
-  CDN) and mounts the renderer. See [`docs/import-map.md`](docs/import-map.md) for the toolchain detail.
+- **One include per page.** A page adds a single `<script src="/js/boot.js"></script>` — a tiny
+  loader generated from [`src/boot.ts`](src/boot.ts) with the current bundle hash stamped in. It
+  applies theme/locale before first paint, injects the CSS and a one-entry ESM **import map**
+  (`"primer"` → the hashed bundle), and boots the renderer; heavy libraries load as separate lazy
+  chunks on first use. See [`docs/import-map.md`](docs/import-map.md) for the toolchain detail.
 - **Libraries** (all pre-built ESM): **[KaTeX](https://katex.org/)** typesets mathematics;
   **[JSXGraph](https://jsxgraph.org/)** draws the interactive charts and geometry figures that carry most
   pages' visuals; **[manim-web](https://github.com/maloyan/manim-web)** renders animations; and
@@ -66,8 +69,9 @@ is no build step.**
   re-themes via `var(...)`, and every figure re-colours through `themeColors()`. It is applied with no
   flash by [`src/boot.ts`](src/boot.ts), managed by [`src/theme.ts`](src/theme.ts), and switched from a
   top-right hamburger menu.
-- **Typed JavaScript + JSDoc** (no `.ts` authoring): the code runs raw in the browser and in Node, yet is
-  fully type-checked by `tsc` against the libraries' own type definitions.
+- **TypeScript throughout** the framework (`src/**/*.ts`, strict): esbuild bundles it for the
+  browser, and Node runs the very same sources directly (type stripping) for the tests and repo
+  scripts — one codebase, no duplicate builds. `tsc --noEmit` is the correctness gate.
 - **Localization**: English is the default and fallback; a lesson can carry per-locale translation
   overlays under `i18n/`, swapped in at load time.
 - A concept's **id** is its file path under `concepts/` (minus `.html`) and its **title** is a
@@ -79,16 +83,20 @@ is no build step.**
 
 ### Building & checking
 
-There is no compile step — the commands below are *checks*, not a build:
-
 ```bash
-npm install        # dev-only: TypeScript + library type definitions
-npm run serve      # static file server → http://localhost:8080/
-npm test           # node --test — pure logic, no transpile
-npm run typecheck  # tsc -p jsconfig.json — type-check the JSDoc-typed JS
+npm install        # framework dependencies (bundled at build time — no CDN at runtime)
+npm run build      # esbuild: src/ → hashed dist/ bundles + generated js/boot.js, js/analytics.js, sw.js
+npm run dev        # dev build (unhashed) + static server → http://localhost:8080/
+npm run serve      # static file server only (reuse a running one; content edits need no rebuild)
+npm test           # node --test — runs the .ts sources directly (type stripping)
+npm run typecheck  # tsc -p tsconfig.json — strict type-check
 npm run graph      # validate the tree + (re)write dist/graph.json
-npm run check      # the full CI gate: typecheck + tests + graph validation
+npm run check      # the full CI gate: typecheck + tests + graph validation + i18n
 ```
+
+Only **framework** changes need a rebuild — concept pages are served as-is, so authoring stays
+edit-and-refresh. Deploys build in CI (see [`docs/deploy.md`](docs/deploy.md)); `dist/`, `js/`, and
+`sw.js` are gitignored outputs.
 
 [`scripts/build-graph.js`](scripts/build-graph.js) walks every concept page, validates the tree, computes
 each concept's level, and emits `dist/graph.json` for the knowledge explorer. It **exits non-zero on any

@@ -1,143 +1,76 @@
 # The per-page toolchain (one include)
 
-Every concept page is a plain `.html` file that loads the Primer toolchain at
-runtime — **no build step**. A page has **no `<head>` at all**: just the concept
-metadata, the content cards, and one script tag. Everything the head used to hold —
-the title, viewport, stylesheets, the
-[import map](https://developer.mozilla.org/docs/Web/HTML/Element/script/type/importmap),
-custom-element registration, and the page shell — is handled by
-[`/js/boot.js`](../js/boot.js). (The charset comes from the server's
-`Content-Type: text/html; charset=utf-8` header.)
+Every concept page is a plain `.html` file — **content needs no build step** (edit → refresh). The
+*framework* it loads, however, is built: TypeScript in `src/` is bundled by esbuild
+(`scripts/build.mjs`) into content-hashed, code-split ES modules under `/dist/bundle/`. This page
+explains how one script tag connects the two.
 
-## Authoring a page
+## The one tag
+
+A page has **no `<head>` at all**: just its content cards, the inline `concept-meta` JSON, and
 
 ```html
-<!doctype html>
-<html lang="en">
-  <body>
-    <!-- 1) The whole toolchain, in one tag — always first in the body. -->
-    <script src="/js/boot.js"></script>
-
-    <!-- 2) The concept's metadata (see below). -->
-    <script type="application/json" class="concept-meta">
-      {
-        "id": "arithmetic/addition",
-        "title": "Addition",
-        "prerequisites": ["arithmetic/counting"]
-      }
-    </script>
-
-    <!-- 3) The content, as one or more cards. -->
-    <primer-card>
-      <p>Addition combines two amounts into one total …</p>
-      <primer-math display>a + b = c</primer-math>
-    </primer-card>
-  </body>
-</html>
+<script src="/js/boot.js"></script>
 ```
 
-`boot.js` injects the viewport, the CSS, and the import map, and loads the renderer.
-The renderer reads the `concept-meta` block, sets the document title, and wraps your
-cards in the page shell (the title with its level badge to the right; a self-attested
-confidence control; and a footer). Prerequisites are not shown on the page — the
-knowledge graph surfaces them. You write only the metadata and the cards — no
-`<head>`, no `<primer-page>`/`<primer-concept>` wrappers.
+first in the `<body>`. `/js/boot.js` is a small **generated** classic script (from
+[`src/boot.ts`](../src/boot.ts); never edit the output) with a stable URL, so pages never change
+when the framework does. Being a classic, render-blocking script placed first, it can do
+synchronous pre-paint work and guarantee ordering:
 
-## The metadata block
+1. **Pre-paint state** — sets `data-theme` and `<html lang>` synchronously (saved choice / OS
+   preference / `?lang=`), so there is no flash of the wrong theme or language; installs the
+   `window.__primerErrors` bucket the smoke harness reads; anti-FOUC reveal gating.
+2. **Head injection** — viewport, icons/PWA meta, the reading font, `css/primer.css`, KaTeX's CSS
+   (from `/dist/assets/`), and the analytics loader.
+3. **The import map** — a single entry resolving the bare specifier inline scene scripts use:
 
-Every page must include a **metadata block** — the single source of truth for the
-concept's place in the knowledge tree. Its `id` must equal the page's path under
-`concepts/` (without `.html`):
+   ```json
+   { "imports": { "primer": "/dist/bundle/primer-<hash>.js" } }
+   ```
 
-```html
-<script type="application/json" class="concept-meta">
-  {
-    "id": "arithmetic/addition",
-    "title": "Addition",
-    "prerequisites": ["arithmetic/counting"],
-    "declaredLevel": 2.5
-  }
-</script>
-```
+   The hash is **stamped into boot.js at build time** (esbuild's metafile → a placeholder
+   replacement), so the map always points at the current immutable bundle. Because boot.js runs
+   before any content is parsed, the map exists before any `import … from "primer"` resolves.
+4. **Boot** — `import()`s the hashed bundle directly (not via the map, so it can't race it). The
+   bundle self-boots: it registers every custom element and mounts the page shell.
+5. **Offline** — registers the service worker (`/sw.js`, generated from `src/sw.ts`) after `load`.
 
-`prerequisites` defaults to `[]`, `declaredLevel` is optional (levels start at 0 and
-propagate downstream). The tree has a single root (the page with id `root`); a page with no
-prerequisite is auto-attached to the `orphans` maintenance node during the build, which hangs
-off `root`. Two further optional
-fields aid curation and are surfaced by the graph tool: `completedDate` and
-`needsReviewDate`, each an ISO `YYYY-MM-DD` string. The page's Web Components and the
-[`scripts/build-graph.js`](../scripts/build-graph.js) validator both read this block.
+## The bundle architecture
 
-## Inside the body
+- **Core bundle** `primer-<hash>.js` — the renderer, all components, KaTeX, JSXGraph; everything a
+  typical page needs, in one request.
+- **Lazy chunks** — the heavy, rarely-used libraries stay behind dynamic `import()` boundaries in
+  their loaders, so esbuild emits them as separate hashed chunks fetched on first use: manim(+
+  MathJax), QuickJS-WASM (runnable code), MathLive (math input), sucrase (TS transpile),
+  compute-engine (symbolic grading).
+- **App bundle** `app-<hash>.js` — for the standalone pages (index / concepts / progress /
+  offline), which have their own `<head>` and import it via `dist/asset-manifest.json` instead of
+  using boot.js.
+- Content-hashed names make every bundle immutable/cache-forever; a deploy changes the hashes and
+  boot.js's stamped URL, which is the whole cache-busting story (the service worker piggybacks on
+  it).
 
-Author content as one or more `<primer-card>` cards. Inside a card you can use the
-Primer custom elements: `<primer-math>`, `<primer-manim>`, `<primer-quiz>`.
-
-A quiz's question bank is built in JS by `registerQuiz(name, builder)` (an inline module
-script, like a manim scene) and referenced by `<primer-quiz name="…">`. `count` questions are
-chosen at random and options shuffled; prompts/option text may contain inline math wrapped in
-`$…$`. Translatable prose comes from a `scene-strings` block (keyed by the quiz name) via the
-builder's `sceneStrings("key")`; language-neutral maths stays inline — so a translation overlay
-carries only the strings, never the bank:
+Inside a page, an inline scene script therefore just writes:
 
 ```html
-<primer-quiz name="addingQuiz@1" count="3"></primer-quiz>
-<script type="application/json" class="scene-strings">
-  { "addingQuiz@1": { "sumWords": "What is the sum?" } }
-</script>
 <script type="module">
-  import { registerQuiz } from "primer";
-  registerQuiz("addingQuiz@1", ({ sceneStrings }) => [
-    { prompt: () => sceneStrings("sumWords"),
-      options: [ { text: "$5$", correct: true }, { text: "$6$", correct: false } ] },
-  ]);
+  import { registerGeometryScene } from "primer";
+  registerGeometryScene("myFigure", ({ board, colors, step }) => { /* … */ });
 </script>
 ```
 
-A page that shows an animation registers a manim-web scene with one inline module
-script, then references it from a `<primer-manim scene="…">`. Because `boot.js` is
-first in the body, the import map is already present, so the scene's bare `"primer"`
-import just works:
-
-```html
-<primer-card>
-  <primer-manim scene="addNumberLine" caption="Counting on"></primer-manim>
-</primer-card>
-
-<script type="module">
-  import { registerManimScene } from "primer";
-  registerManimScene("addNumberLine", async ({ scene, manim }) => { /* … */ });
-</script>
-```
-
-The builder receives a single `toolkit` object — `{ scene, manim, sceneStrings, speak,
-cancelSpeech, themeColors }` — so `registerManimScene` is the only `primer` import a
-scene needs. The `scene` is already built on the stage (with the theme backdrop), so a scene
-just calls `scene.play(...)`. It can narrate aloud with the injected `speak(text)`, which uses
-the browser's built-in speech and resolves when the phrase finishes — so it can be awaited in
-lockstep with `scene.play(...)`. Speech only starts on the Play click (per browser autoplay
-rules) and is silently skipped where unsupported; replaying cancels any in-progress narration.
-
-```js
-import { registerManimScene } from "primer";
-registerManimScene("countOne", async ({ scene, manim, speak }) => {
-  await Promise.all([scene.play(/* … */), speak("one")]);
-});
-```
+`src/types/primer.d.ts` declares the `"primer"` module ambiently so IDEs type these inline blocks.
 
 ## Notes
 
-- **Versions are pinned in one place** — [`js/boot.js`](../js/boot.js) holds the
-  pinned `katex` and `manim-web` versions. Bump them there; pages never mention them.
-- **Self-hosting later** is a drop-in change: copy the pinned bundles under
-  `/vendor/` and point the URLs in `js/boot.js` there. No page changes required.
-- **`boot.js` is a classic, render-blocking script on purpose.** Put it first in the
-  body. It injects the import map synchronously where it sits, so being first
-  guarantees the map is in the DOM before the concept-meta block, the cards, or any
-  inline scene module (`import … from "primer"`) is parsed. It also sets `data-theme`
-  on `<html>` synchronously (from the saved choice or the OS preference) so there is no
-  flash of the wrong theme, and mounts the top-right theme menu — pages author nothing
-  theme-related.
-- **Type-checking** the JS (`npm run typecheck`, i.e. `tsc --noEmit`) reads KaTeX's
-  and manim-web's bundled `.d.ts` files, so you get full IntelliSense and checking
-  against their APIs even though we author plain `.js`.
+- **Authoring** is documented in [`/CLAUDE.md`](../CLAUDE.md) (lean core) and
+  [`authoring-reference.md`](authoring-reference.md) (full API) — not here. Note the modern page
+  skeleton: no authored `id`/`title` in `concept-meta` (path + `<primer-title>` carry them), and
+  machinery sits after `</html>`.
+- **Dependency versions** are pinned in `package.json` and resolved from `node_modules` at build
+  time — no CDN at runtime, the site is fully self-contained (and offline-capable).
+- **Why boot.js survives the bundler**: a bundled `type=module` script can neither run before first
+  paint (theme/locale would flash) nor inject an import map synchronously. The classic-script
+  loader is irreducible — so it's kept tiny, generated, and revalidate-always while everything else
+  is hashed and immutable.

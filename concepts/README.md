@@ -15,4 +15,4 @@ Conventions (full authoring guide: `/CLAUDE.md`, deep reference: `/docs/authorin
 - `course: true` pages are curated paths whose members are harvested from their `<primer-ref>`s.
 - `people/<surname>.html` are biographies.
 
-Content here is CC BY-NC-SA 4.0 (see the root README's licence section).
+Content here is CC BY-SA 4.0 (see the root README's licence section).

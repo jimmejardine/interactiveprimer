@@ -1,73 +1,79 @@
-# Deploying to interactiveprimer.com (GitHub Pages)
+# Deploying interactiveprimer.com
 
-The site is a **no-build static site**: GitHub Pages serves the repository root verbatim. There is no
-server and no build step — Pages serves exactly what is committed on **`main`**.
+The site is a static site **with a framework build step**: `npm ci && npm run build` compiles the
+TypeScript framework (`src/`) into hashed bundles under `dist/`, emits the generated classic
+scripts (`js/boot.js`, `js/analytics.js`, `sw.js`), and validates + writes the knowledge graph
+(`dist/graph.json`), `sitemap.xml`, and `robots.txt`. The **publish directory is the repo root
+after building** — concept pages, CSS, images, and the build outputs are all served as-is; there is
+no server.
 
-## One-time setup
+> ⚠ **The repo is source-only — `main` is no longer directly serveable.** `dist/`, `js/`, and
+> `sw.js` are gitignored build outputs, so a host that serves the branch verbatim (the original
+> GitHub Pages setup) will 404 every framework asset. Do not point a verbatim-branch host at a
+> post-build-step commit; deploy through CI (below).
 
-### 1. Repository (already in this repo)
+## Option A — Cloudflare Pages (intended)
 
-- **`CNAME`** (repo root) — contains `interactiveprimer.com`; this is the custom-domain marker Pages reads.
-- **`.nojekyll`** (repo root) — disables Jekyll so every file is served as-is.
+1. Cloudflare dashboard → **Workers & Pages → Create → Pages → Connect to Git** → pick this repo.
+2. Build settings:
+   - **Build command:** `npm ci && npm run build`
+   - **Build output directory:** `/` (the repo root — the site serves from root)
+3. **Custom domain:** add `interactiveprimer.com` (+ `www`). Cloudflare manages DNS/TLS once the
+   zone is on Cloudflare — which also hosts the optional cloud-sync Worker (`worker/`, deployed
+   separately via wrangler; see its README) and Web Analytics.
+4. Every push to `main` then builds and publishes; PR branches get preview URLs.
 
-### 2. Enable Pages
+## Option B — GitHub Pages via Actions
 
-GitHub → **Settings → Pages → Build and deployment**:
+Branch-serving mode cannot build, but Pages' **GitHub Actions** source can. Switch
+Settings → Pages → Source to *GitHub Actions* and add a workflow like:
 
-- **Source:** Deploy from a branch
-- **Branch:** `main`, folder **`/ (root)`** → Save
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy
+on: { push: { branches: [main] } }
+permissions: { contents: read, pages: write, id-token: write }
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: { name: github-pages, url: '${{ steps.deployment.outputs.page_url }}' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: npm ci && npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: . }
+      - id: deployment
+        uses: actions/deploy-pages@v4
+```
 
-(Equivalent via CLI: `gh api repos/jimmejardine/interactiveprimer/pages -X POST -f source.branch=main -f source.path=/`.)
-
-The **Custom domain** field is satisfied by the committed `CNAME`; GitHub runs a DNS check against it.
-
-### 3. DNS (at the domain registrar for interactiveprimer.com)
-
-| Type | Host | Value |
-|---|---|---|
-| A | `@` (apex) | `185.199.108.153` |
-| A | `@` | `185.199.109.153` |
-| A | `@` | `185.199.110.153` |
-| A | `@` | `185.199.111.153` |
-| AAAA | `@` | `2606:50c0:8000::153` |
-| AAAA | `@` | `2606:50c0:8001::153` |
-| AAAA | `@` | `2606:50c0:8002::153` |
-| AAAA | `@` | `2606:50c0:8003::153` |
-| CNAME | `www` | `jimmejardine.github.io.` |
-
-(If the registrar supports `ALIAS`/`ANAME`/flattened CNAME at the apex, that can replace the A/AAAA
-records.) GitHub auto-redirects `www` ↔ apex once both are configured.
-
-### 4. HTTPS
-
-After DNS propagates and the "DNS check successful" banner appears in Settings → Pages, tick
-**Enforce HTTPS** (the free Let's Encrypt certificate provisions automatically — usually minutes).
+The committed `CNAME` (custom-domain marker) and `.nojekyll` still apply. DNS for GitHub Pages is
+the standard apex A/AAAA set (185.199.108–111.153 / 2606:50c0:8000–8003::153) plus a `www` CNAME to
+`jimmejardine.github.io.`; HTTPS via the Pages "Enforce HTTPS" toggle.
 
 ## Why an apex (root) domain is required
 
-Pages and the concept pages reference assets with **absolute** paths (`/js/boot.js`, `/css/primer.css`,
-`/dist/graph.json`, `/concepts/...`). These resolve only when the site is served from the domain root,
-which the apex custom domain provides. A project-path URL (`jimmejardine.github.io/interactiveprimer/`)
-would break every absolute path.
+Pages reference assets with **absolute** paths (`/js/boot.js`, `/css/primer.css`,
+`/dist/graph.json`, `/concepts/...`, `/sw.js` — the service worker additionally needs scope `/`).
+These resolve only when the site is served from the domain root; a project-path URL
+(`…github.io/interactiveprimer/`) would break every absolute path.
 
 ## Keeping the live site current
 
-There is no build step on the server, so anything generated locally must be **committed**:
-
-- After adding or editing concepts, run **`npm run graph`** and commit the updated **`dist/graph.json`**
-  (the navigation pathway fetches it at runtime; a stale file means a stale/incomplete map).
-- `npm run graph` also (re)writes **`sitemap.xml`** and **`robots.txt`** at the repo root — commit
-  them too, so search engines see every concept URL.
-- New concept pages, quizzes, and animations are just committed `.html`/`.js` — they go live on the
-  next push to `main`.
+CI builds on every push, so **nothing generated needs committing** — `dist/graph.json`,
+`sitemap.xml`, `robots.txt`, and all bundles are rebuilt per deploy. Authors just push content;
+`npm run check` (typecheck + tests + graph validation + i18n) is the pre-merge gate. Content-hashed
+bundle names bust caches automatically, and the service worker refreshes its precached shell on the
+next online visit.
 
 ## SEO
 
 The site is indexed as a **JS-rendered SPA**: concept pages carry no static `<head>`, so the title,
-`<meta name="description">`, `<link rel="canonical">`, and a LearningResource JSON-LD are injected by
-`js/render.js` at render time. Googlebot runs JavaScript, so it indexes the rendered page (title +
-lesson prose). Discovery comes from the autogenerated **`/sitemap.xml`** (submit it once in Google
-Search Console).
+`<meta name="description">`, `<link rel="canonical">`, and a LearningResource JSON-LD are injected
+by `src/render.ts` at render time. Googlebot runs JavaScript, so it indexes the rendered page
+(title + lesson prose). Discovery comes from the autogenerated **`/sitemap.xml`** (submit it once
+in Google Search Console).
 
 Known limits (by design — see the SEO discussion):
 - **Social-link previews** (Facebook/Slack/iMessage/Twitter) only work on the **homepage**, which has
@@ -76,6 +82,6 @@ Known limits (by design — see the SEO discussion):
   surface as rich results.
 - **Translations** aren't separately indexed (locale is a client-side preference at one URL).
 
-To go further later: bake static `<head>`s into pages at `npm run graph` time (for social cards on
-every page), add `?lang=` URLs + `hreflang` (to index translations), and emit `schema.org/Quiz`
-JSON-LD (for quiz rich results).
+To go further later: bake static `<head>`s into pages at build time (for social cards on every
+page), add `?lang=` URLs + `hreflang` (to index translations), and emit `schema.org/Quiz` JSON-LD
+(for quiz rich results).

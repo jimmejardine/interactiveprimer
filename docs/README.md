@@ -4,11 +4,11 @@
   elements (manim, 3-D charts, geometry problems, program exercises, video, courses), the geometry
   toolkit, localization contract, and the accessibility checklist. `/CLAUDE.md` is the lean core;
   this is the long tail it links to.
-- **`deploy.md`** — ⚠ STALE: describes the original no-build GitHub Pages deploy. The site now has
-  a framework build (`npm run build` → `dist/` + generated `js/` + `sw.js`) and is intended to be
-  built in CI (Cloudflare Pages, `npm ci && npm run build`). Needs rewriting before the next
-  deploy-process change.
-- **`import-map.md`** — ⚠ STALE: describes the pre-build per-page import-map toolchain (multiple
-  bare specifiers → vendored `/3rdparty/`). Since the esbuild build step, boot.js injects a
-  one-entry map (`primer` → the hashed bundle). Kept for history; the current architecture is
-  described in the root README and `src/README.md`.
+- **`deploy.md`** — how interactiveprimer.com deploys: the site now requires `npm ci && npm run
+  build` (the repo is source-only; `dist/`, `js/`, `sw.js` are build outputs), so deploys go
+  through CI — Cloudflare Pages (intended) or GitHub Pages via an Actions build. Includes the
+  do-not-serve-`main`-verbatim warning, DNS, and the SEO notes.
+- **`import-map.md`** — the per-page toolchain: how the one `<script src="/js/boot.js">` tag (a
+  generated classic script with the bundle hash stamped in) injects the one-entry import map
+  (`primer` → the hashed core bundle), boots the framework, and how the core/lazy/app bundles are
+  split.
