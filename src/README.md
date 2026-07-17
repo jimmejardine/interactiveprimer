@@ -7,8 +7,13 @@ All framework code lives here, in strict TypeScript. `scripts/build.mjs` (esbuil
   (manim, QuickJS-WASM, MathLive, sucrase, compute-engine).
 - `dist/bundle/app-<hash>.js` — the standalone-page bundle (entry `app.ts`; no renderer).
 - Generated classic scripts at **stable URLs**: `dist/boot.js` (from `boot.ts`, bundle hash stamped
-  in — the one tag every concept page includes), `dist/analytics.js` (from `analytics.ts`), and the
-  service worker `sw.js` (from `sw.ts`). `dist/` and `sw.js` are gitignored build outputs.
+  in — the one tag every concept page includes), `dist/prepaint.js` (from `prepaint.ts` — the shared
+  synchronous theme+locale set-up every standalone app-shell page includes in its `<head>`, so that
+  boilerplate lives in ONE place), `dist/analytics.js` (from `analytics.ts`), and the service worker
+  `sw.js` (from `sw.ts`). `dist/` and `sw.js` are gitignored build outputs.
+- **Adding a locale** = edit `locales.ts` (the dependency-free single source of the supported-locale
+  set: id + label) and add its catalog in `i18n/` (+ wire it into `i18n.ts`'s `CATALOGS`). The build
+  stamps `locales.ts`'s id list into boot.js/prepaint.js's `SUPPORTED` — no hardcoded arrays to chase.
 
 Conventions:
 

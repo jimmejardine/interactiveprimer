@@ -15,15 +15,13 @@
 
 import en from "./i18n/en.ts";
 import es from "./i18n/es.ts";
+import nl from "./i18n/nl.ts";
+import { LOCALES, type LocaleId } from "./locales.ts";
 import { safeGet, safeSet } from "./storage.ts";
 
-export type LocaleId = "en" | "es";
-
-/** Supported locales, in display order. `en` is the default + fallback. Labels are endonyms. */
-export const LOCALES: ReadonlyArray<{ id: LocaleId; label: string }> = [
-  { id: "en", label: "English" },
-  { id: "es", label: "Español" },
-];
+// The locale set lives in the dependency-free ./locales.ts (single source of truth, also read by
+// the build to stamp the pre-paint scripts). Re-export so existing importers keep using i18n.ts.
+export { LOCALES, type LocaleId };
 
 export const STORAGE_KEY = "primer:locale";
 
@@ -31,10 +29,10 @@ export const STORAGE_KEY = "primer:locale";
 export const DEFAULT_LOCALE = "en";
 
 /** Chrome-string catalogs by locale (`en` is the source of truth + fallback). */
-const CATALOGS: Record<string, Record<string, string>> = { en, es };
+const CATALOGS: Record<string, Record<string, string>> = { en, es, nl };
 
 /** BCP-47 language tags for speech synthesis, by locale. */
-const BCP47: Record<string, string> = { en: "en-US", es: "es-ES" };
+const BCP47: Record<string, string> = { en: "en-US", es: "es-ES", nl: "nl-NL" };
 
 const VALID = new Set(LOCALES.map((l) => l.id));
 

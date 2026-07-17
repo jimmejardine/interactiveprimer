@@ -33,6 +33,7 @@ const isImmutable = (url: URL): boolean =>
 // Tiny stable-named things we want kept FRESH while online (revalidate in the background).
 const isStableEntry = (url: URL): boolean =>
   url.pathname === "/dist/boot.js" ||
+  url.pathname === "/dist/prepaint.js" ||
   url.pathname === "/dist/analytics.js" ||
   url.pathname === "/dist/asset-manifest.json" ||
   url.pathname === "/dist/precache.json" ||

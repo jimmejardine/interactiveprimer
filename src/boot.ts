@@ -29,9 +29,10 @@
  */
 
 (function boot() {
-  // Supported locales — the single list this script keys off (kept in step with LOCALES in
-  // src/i18n.ts). Declared first because the overlay-redirect below already needs it.
-  const SUPPORTED = ["en", "es"];
+  // Supported locales — `["__SUPPORTED_LOCALES__"]` is replaced by scripts/build.mjs with the real
+  // id list from src/locales.ts (the single source of truth), so this never drifts. Declared first
+  // because the overlay-redirect below already needs it.
+  const SUPPORTED = ["__SUPPORTED_LOCALES__"];
 
   // Translation overlays (i18n/<locale>/<id>.html) are normally FETCHED as data by render.ts,
   // never served as a page — but they now carry this same boot.js so a DIRECT visit isn't a

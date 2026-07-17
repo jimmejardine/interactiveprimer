@@ -11,6 +11,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
+// The single source of truth for the supported-locale set (Node 24 strips the .ts types on import).
+import { LOCALE_IDS } from "../src/locales.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const r = (...p) => path.join(ROOT, ...p);
@@ -168,9 +170,15 @@ const transpile = async (srcRel) => {
   const code = fs.readFileSync(r(srcRel), "utf8");
   return (await esbuild.transform(code, { loader: "ts", target: "es2022" })).code;
 };
-const bootJs = await transpile("src/boot.ts");
+// Stamp the supported-locale list (from src/locales.ts) into the `["__SUPPORTED_LOCALES__"]`
+// placeholder — so boot.js + prepaint.js share ONE locale set, editable in one place.
+const supportedList = LOCALE_IDS.map((id) => JSON.stringify(id)).join(", ");
+const stampSupported = (code) => code.split('"__SUPPORTED_LOCALES__"').join(supportedList);
+
+let bootJs = stampSupported(await transpile("src/boot.ts"));
 if (!bootJs.includes("__PRIMER_BUNDLE__")) throw new Error("build: src/boot.ts is missing the __PRIMER_BUNDLE__ placeholder");
 fs.writeFileSync(r("dist/boot.js"), bootJs.split("__PRIMER_BUNDLE__").join(coreFile));
+fs.writeFileSync(r("dist/prepaint.js"), stampSupported(await transpile("src/prepaint.ts")));
 fs.writeFileSync(r("dist/analytics.js"), await transpile("src/analytics.ts"));
 fs.writeFileSync(r("sw.js"), await transpile("src/sw.ts"));
 
@@ -195,6 +203,7 @@ for (const f of walkFiles(r("dist/assets"))) {
 const version = (coreFile.match(/primer-([^.]+)\.js$/) || [, "dev"])[1];
 const shell = [
   "/dist/boot.js",
+  "/dist/prepaint.js",
   coreFile,
   appFile,
   "/dist/asset-manifest.json",

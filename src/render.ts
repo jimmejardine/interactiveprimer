@@ -28,7 +28,7 @@ import "./primer.ts";
 import type { ConceptMeta } from "./types/domain.ts";
 import { getConceptMeta, conceptIdFromPath } from "./concept-meta.ts";
 import { initTheme } from "./theme.ts";
-import { initLocale, getLocale, DEFAULT_LOCALE, t } from "./i18n.ts";
+import { initLocale, getLocale, DEFAULT_LOCALE, t, type LocaleId } from "./i18n.ts";
 import { loadGraph } from "./graph-data.ts";
 import { mountConceptSearch as mountConceptSearchBox, SEARCH_BOX_CSS } from "./concept-search-box.ts";
 import { runProgressMigration } from "./progress-migration.ts";
@@ -76,6 +76,10 @@ async function render(): Promise<void> {
   // concept that has an overlay) so we only fetch when a translation is actually there —
   // avoiding a noisy 404 in the console for the (common) untranslated case.
   const locale = getLocale();
+  // The language of the rendered CONTENT (not the chrome): the chosen locale only when a real
+  // overlay is applied, else English. Drives the SEO canonical/hreflang + the content's own `lang`,
+  // so an untranslated page canonicalises to its clean English URL even though the chrome is localized.
+  let contentLocale: LocaleId = DEFAULT_LOCALE;
   if (id && locale !== DEFAULT_LOCALE) {
     const applied = (await hasOverlay(id, locale))
       ? await applyOverlay(id, locale, content)
@@ -84,9 +88,16 @@ async function render(): Promise<void> {
       content = applied.content;
       pageTitle = applied.title ?? pageTitle;
       if (applied.titleEl) titleEl = applied.titleEl; // slot the translated title (may carry math)
+      contentLocale = locale; // this rendering shows the translated content
     } else {
-      // No translation for this concept → render the whole page in English.
-      document.documentElement.lang = DEFAULT_LOCALE;
+      // The lesson CONTENT isn't translated into this locale, but the CHROME still is: KEEP
+      // <html lang> as the chosen locale so getLocale()/t() render the whole UI (confidence prompt,
+      // pathway, "Up next", menus, quiz) in it. The untranslated prose is itself English, so mark
+      // just the content + title with lang="en" — assistive tech then pronounces the English text
+      // correctly under the Dutch/Spanish chrome (nearest-ancestor lang wins). <html lang> is not
+      // reset.
+      for (const el of content) el.setAttribute("lang", DEFAULT_LOCALE);
+      titleEl?.setAttribute("lang", DEFAULT_LOCALE);
     }
   }
 
@@ -104,7 +115,7 @@ async function render(): Promise<void> {
 
   // SEO metadata. Concept pages carry no static <head>, so inject it here; crawlers that
   // render JS (e.g. Googlebot) index the result. See README → SEO.
-  injectSeo(pageTitle ?? "", firstText(content), getLocale(), meta?.declaredLevel, altLocales);
+  injectSeo(pageTitle ?? "", firstText(content), contentLocale, meta?.declaredLevel, altLocales);
 
   if (content.length === 0) return;
 
