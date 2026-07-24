@@ -150,7 +150,8 @@ export function mountProgressDashboard(root: HTMLElement, { byId }: { byId: Map<
     const starsOf = (id: string) => entriesById.get(id)?.stars ?? 0;
     const nextId = pickNextConcept(members, byId, starsOf); // shared with the "/" resume banner
 
-    courseCap.innerHTML = `: ${escapeHtml(titleOf(course.id))}`;
+    // The course name links to the course's own overview page.
+    courseCap.innerHTML = `: <a href="/concepts/${escapeHtml(course.id)}">${escapeHtml(titleOf(course.id))}</a>`;
     renderTiles(tiles, p);
     renderHeatmap(heat, p.buckets, p.streakDays);
     renderPanels(panels, p, titleOf, nextId, starsOf);

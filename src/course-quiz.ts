@@ -232,7 +232,7 @@ export async function mountCourseQuiz(root: HTMLElement, { byId }: { byId: Map<s
   }
   const members: string[] = (course.courseMembers ?? []).slice(1);
 
-  const head = el("header", "dash-head", `<h1 class="dash-title">${esc(t("coursequiz.heading"))}<span class="dash-course">: ${esc(titleOf(courseId))}</span></h1>
+  const head = el("header", "dash-head", `<h1 class="dash-title">${esc(t("coursequiz.heading"))}<span class="dash-course">: <a href="/concepts/${esc(courseId)}">${esc(titleOf(courseId))}</a></span></h1>
     <p class="dash-sub cq-session" hidden></p>`);
   const modes = el("div", "cq-modes");
   const progress = el("p", "muted cq-progress");
