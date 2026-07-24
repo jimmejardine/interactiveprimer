@@ -1,12 +1,18 @@
 /**
- * The single accessor for a concept's self-attested confidence in localStorage.
+ * The single accessor for a concept's confidence + lifetime quiz counters in localStorage.
  *
- * A score is stored under `primer:confidence:<id>` as a JSON **`[stars, first, last]` tuple**,
- * e.g. `[5,"2026-05-01","2026-06-18"]` — `first` is when the concept was first rated and
- * `last` is when the score was most recently changed (both ISO `YYYY-MM-DD`). `last` lets the
- * save/restore feature merge two snapshots by "later date wins". Reads are backward-compatible:
- * a legacy bare number (`"5"`) is treated as an **undated** score (`first`/`last` === ""),
- * which loses every merge tie to a dated value.
+ * A score is stored under `primer:confidence:<id>` as a JSON
+ * **`[stars, first, last, answered, correct]` tuple**, e.g. `[6.67,"2026-05-01","2026-06-18",3,2]`.
+ * `first` is when the concept was first rated and `last` when it most recently changed (ISO;
+ * `last` may be a full instant). `answered`/`correct` are the LIFETIME quiz counters — every quiz
+ * answer anywhere (the lesson's own quiz or the /course-quiz stream) increments them, and
+ * quiz-derived stars are the ratio `10 × correct / max(answered, 3)` (min denominator 3, so one
+ * lucky answer gives 3.33 stars, never 10; see {@link starsFromCounters}). Stars may therefore be
+ * FRACTIONAL (stored to 2 dp); star rows simply fill ⌊stars⌋. Keeping the counters inside this one
+ * tuple means save/restore and cloud sync carry them with no new syncing machinery.
+ *
+ * Reads are backward-compatible: a legacy 3-tuple reads as counters 0/0, and a legacy bare number
+ * (`"5"`) as an undated score (which loses every merge tie to a dated value).
  *
  * This is the one place that knows the storage shape; both src/components/primer-concept.ts
  * (the star control) and src/confidence-color.ts (the pathway/ref colouring) go through it.
@@ -29,6 +35,32 @@ export interface ConfidenceEntry {
   stars: number;
   first: string;
   last: string;
+  /** Lifetime quiz answers attempted for this concept (any quiz, anywhere). */
+  answered: number;
+  /** Lifetime correct quiz answers (⊆ answered). */
+  correct: number;
+}
+
+/** Clamp + round a stars value to the stored precision (2 dp, within [0, MAX_STARS]). */
+function roundStars(stars: number): number {
+  return Math.min(MAX_STARS, Math.max(0, Math.round(stars * 100) / 100));
+}
+
+/** A non-negative integer counter, or 0 for anything malformed. */
+function toCount(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+}
+
+/**
+ * Quiz-derived stars from the lifetime counters: `10 × correct / max(answered, 3)`, clamped and
+ * 2-dp rounded. The minimum denominator of 3 stops a single lucky answer from reaching 10 stars —
+ * 1/1 → 3.33, 2/2 → 6.67, 3/3 → 10, 2/3 → 6.67. Pure, exported for tests and the course quiz.
+ */
+export function starsFromCounters(answered: number, correct: number): number {
+  const a = toCount(answered);
+  const c = Math.min(toCount(correct), a);
+  return roundStars((MAX_STARS * c) / Math.max(a, 3));
 }
 
 /** Today as an ISO `YYYY-MM-DD` string (the `first`-rated date stamped onto a new score). */
@@ -48,20 +80,25 @@ export function nowISO() {
 
 /**
  * Coerce a raw localStorage value (tuple JSON or a legacy bare number) into a clean entry.
- * Returns null when the value is absent or unparseable. Stars are clamped to [0, MAX_STARS].
- * A legacy bare number, or a tuple missing dates, yields empty `first`/`last`.
+ * Returns null when the value is absent or unparseable. Stars are clamped to [0, MAX_STARS]
+ * (fractional kept, 2 dp). A legacy bare number, or a tuple missing dates, yields empty
+ * `first`/`last`; a tuple missing counters yields `answered`/`correct` 0.
  */
 function parseEntry(raw: string | null): ConfidenceEntry | null {
   if (raw === null) return null;
   let stars;
   let first = "";
   let last = "";
+  let answered = 0;
+  let correct = 0;
   try {
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
       stars = Number(parsed[0]);
       first = typeof parsed[1] === "string" ? parsed[1] : "";
       last = typeof parsed[2] === "string" ? parsed[2] : first;
+      answered = toCount(parsed[3]);
+      correct = Math.min(toCount(parsed[4]), answered);
     } else {
       stars = Number(parsed); // legacy bare number, undated
     }
@@ -69,7 +106,7 @@ function parseEntry(raw: string | null): ConfidenceEntry | null {
     stars = Number(raw); // not even JSON — tolerate a bare numeric string
   }
   if (!Number.isFinite(stars)) return null;
-  return { stars: Math.min(MAX_STARS, Math.max(0, Math.round(stars))), first, last };
+  return { stars: roundStars(stars), first, last, answered, correct };
 }
 
 /**
@@ -81,15 +118,40 @@ export function readEntry(id: string): ConfidenceEntry | null {
 }
 
 /**
- * Persist a concept's score as a `[stars, first, last]` tuple. By default `last` is the current
- * instant (millisecond ISO) and `first` is preserved from any existing score (or set to today's
- * date on the first rating) — so a normal star change keeps the original "first rated" date. Pass
- * `first`/`last` explicitly (e.g. when restoring a backup or a cloud pull) to set both verbatim.
+ * Persist a concept's score as a `[stars, first, last, answered, correct]` tuple. By default
+ * `last` is the current instant (millisecond ISO), `first` is preserved from any existing score
+ * (or set to today's date on the first rating), and the lifetime quiz COUNTERS are preserved from
+ * the existing entry — so a manual star change never erases quiz history. Pass `first`/`last`
+ * explicitly (e.g. when restoring a backup or a cloud pull), and `counters` to set both counts
+ * verbatim (a restore/pull carrying its own).
  */
-export function writeEntry(id: string, stars: number, first?: string, last: string = nowISO()) {
-  const clamped = Math.min(MAX_STARS, Math.max(0, Math.round(stars)));
-  const firstDate = first ?? (readEntry(id)?.first || todayISO());
-  safeSet(CONFIDENCE_PREFIX + id, JSON.stringify([clamped, firstDate, last]));
+export function writeEntry(
+  id: string,
+  stars: number,
+  first?: string,
+  last: string = nowISO(),
+  counters?: { answered: number; correct: number },
+) {
+  const existing = readEntry(id);
+  const firstDate = first ?? (existing?.first || todayISO());
+  const answered = toCount(counters ? counters.answered : existing?.answered);
+  const correct = Math.min(toCount(counters ? counters.correct : existing?.correct), answered);
+  safeSet(CONFIDENCE_PREFIX + id, JSON.stringify([roundStars(stars), firstDate, last, answered, correct]));
+}
+
+/**
+ * Record quiz answers for a concept: add `answered`/`correct` to the lifetime counters and set the
+ * stars to the counter-derived value ({@link starsFromCounters}). Returns the new entry. This is
+ * THE quiz→stars path — both the lesson quiz fold (primer-concept) and the /course-quiz stream go
+ * through it. The caller dispatches `confidence-change` (this module stays event-free).
+ */
+export function recordAnswers(id: string, answered: number, correct: number): ConfidenceEntry {
+  const existing = readEntry(id);
+  const a = toCount(existing?.answered) + toCount(answered);
+  const c = Math.min(toCount(existing?.correct) + toCount(correct), a);
+  const stars = starsFromCounters(a, c);
+  writeEntry(id, stars, undefined, nowISO(), { answered: a, correct: c });
+  return { stars, first: existing?.first || todayISO(), last: nowISO(), answered: a, correct: c };
 }
 
 /**

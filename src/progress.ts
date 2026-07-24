@@ -99,7 +99,8 @@ export async function readProgressFile(file: File): Promise<{ entries: ProgressE
 export function applyProgress(entries: ProgressEntry[], mode: "merge" | "overwrite") {
   const merged = mergeProgress(allEntries(), entries, mode);
   if (mode === "overwrite") clearAll();
-  for (const e of merged) writeEntry(e.id, e.stars, e.first, e.last);
+  for (const e of merged)
+    writeEntry(e.id, e.stars, e.first, e.last, { answered: e.answered ?? 0, correct: e.correct ?? 0 });
 }
 
 /**

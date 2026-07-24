@@ -19,6 +19,10 @@ export interface ProgressEntry {
   stars: number;
   first: string;
   last: string;
+  /** Lifetime quiz answers attempted (optional — entries from before the counters era omit it). */
+  answered?: number;
+  /** Lifetime correct quiz answers (⊆ answered; optional, as above). */
+  correct?: number;
 }
 
 /**
@@ -51,6 +55,10 @@ export function mergeProgress(
       stars: winner.stars,
       first: minDate(cur.first, inc.first), // earliest first-rated date across both
       last: maxDate(cur.last, inc.last), // latest updated stamp across both
+      // The quiz counters travel with the same winner whose stars won (they're the basis of those
+      // stars — summing both sides would double-count shared history).
+      answered: winner.answered ?? 0,
+      correct: winner.correct ?? 0,
     });
   }
   return [...byId.values()];
@@ -91,11 +99,20 @@ export function validateImport(obj: any): ProgressEntry[] {
     if (!Number.isFinite(stars) || stars < 0 || stars > MAX_STARS) {
       throw new Error(`Entry "${e.id}" has an invalid score.`);
     }
+    // Counters are optional (older files omit them); malformed values coerce to 0, and `correct`
+    // can never exceed `answered`. Stars may be fractional (quiz-derived) — keep 2 dp.
+    const answered = Number.isFinite(Number(e.answered)) && Number(e.answered) > 0 ? Math.round(Number(e.answered)) : 0;
+    const correct = Math.min(
+      Number.isFinite(Number(e.correct)) && Number(e.correct) > 0 ? Math.round(Number(e.correct)) : 0,
+      answered,
+    );
     return {
       id: e.id,
-      stars: Math.round(stars),
+      stars: Math.round(stars * 100) / 100,
       first: typeof e.first === "string" ? e.first : "",
       last: typeof e.last === "string" ? e.last : "",
+      answered,
+      correct,
     };
   });
 }

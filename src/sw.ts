@@ -154,7 +154,9 @@ self.addEventListener("fetch", (event: any) => {
   else if (isStableEntry(url)) event.respondWith(staleWhileRevalidate(request, RUNTIME_CACHE));
   else if (isGraph(url)) event.respondWith(staleWhileRevalidate(request, RUNTIME_CACHE));
   else if (isCourseContent(url)) event.respondWith(courseContent(request));
-  // Everything else (navigations to app pages, misc): network-first with an offline fallback.
+  // Everything else (navigations to app pages, misc): network-first; offline, serve the page's own
+  // cached copy if we hold one (shell-precached pages like /course-quiz, or a runtime-cached visit)
+  // before falling back to the /offline manager.
   else
     event.respondWith(
       fetch(request)
@@ -164,6 +166,6 @@ self.addEventListener("fetch", (event: any) => {
           }
           return res;
         })
-        .catch(() => fallback(request)),
+        .catch(async () => (await caches.match(request)) || fallback(request)),
     );
 });

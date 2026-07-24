@@ -15,8 +15,7 @@ import { getConceptMeta, conceptIdFromPath } from "../concept-meta.ts";
 import { formatLevel, BASE_LEVEL } from "../levels.ts";
 import { loadGraph } from "../graph-data.ts";
 import { t } from "../i18n.ts";
-import { combineRating } from "../confidence.ts";
-import { readEntry, writeEntry } from "../confidence-store.ts";
+import { readEntry, writeEntry, recordAnswers } from "../confidence-store.ts";
 import { attentionEvent, flaggedToday, markFlagged } from "../feedback.ts";
 import { getCurrentCourse, setCurrentCourse, clearCourse } from "../course.ts";
 import { confirmDialog } from "../confirm-dialog.ts";
@@ -219,14 +218,14 @@ export class PrimerConcept extends HTMLElement {
       markDone();
     });
 
-    // A graded quiz folds its result into the stars: the new rating is the average of the
-    // current stars and the test percentage, or just the percentage when there are no stars
-    // (rating 0). Re-emit confidence-change so the explorer recolours, exactly like a click.
+    // A graded quiz feeds the LIFETIME counters: every answered question increments `answered`,
+    // every correct one `correct`, and the stars become the counter-derived ratio
+    // (10 × correct / max(answered, 3) — see starsFromCounters in confidence-store). Re-emit
+    // confidence-change so the explorer recolours, exactly like a click.
     this.#onQuizGraded = (e) => {
-      const fraction = (e as any).detail?.fraction;
-      if (typeof fraction !== "number") return;
-      rating = combineRating(rating, fraction, MAX_STARS);
-      writeEntry(id, rating);
+      const d = (e as any).detail;
+      if (!d || typeof d.answered !== "number" || d.answered <= 0) return;
+      rating = recordAnswers(id, d.answered, d.score ?? 0).stars;
       paint(starEls, rating);
       this.dispatchEvent(
         new CustomEvent("confidence-change", {

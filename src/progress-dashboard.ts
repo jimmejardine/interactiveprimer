@@ -304,6 +304,7 @@ function renderPanels(host: HTMLElement, p: ReturnType<typeof courseProgress>, t
     <div class="card panel panel-next">
       <div class="card-head"><h2>${escapeHtml(t("dash.nextHead"))}</h2></div>
       ${nextNudge(nextId, starsOf, titleOf)}
+      <p class="small" style="margin:0.7rem 0 0"><a class="p-item" href="/course-quiz"><span>✏ ${escapeHtml(t("menu.courseQuiz"))}</span><span class="p-badge">→</span></a></p>
     </div>`;
 }
 

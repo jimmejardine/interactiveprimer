@@ -244,6 +244,23 @@ const nl: Record<string, string> = {
 
   // The "My Progress" dashboard (src/progress-dashboard.ts). The heading + exit button reuse
   // menu.myProgress / course.exit above.
+  // The /course-quiz page (src/course-quiz.ts + src/components/primer-quiz-stream.ts).
+  "coursequiz.docTitle": "Cursusquiz — Interactive Primer",
+  "coursequiz.heading": "Cursusquiz",
+  "coursequiz.loading": "Je cursusquiz wordt voorbereid…",
+  "coursequiz.harvesting": "Vragen verzamelen… {n} / {total} lessen",
+  "coursequiz.empty": "Nog geen quizvragen gevonden in de lessen van deze cursus.",
+  "coursequiz.modeHarvest": "Ontdekken",
+  "coursequiz.modeHarvestBlurb": "ontdek wat je al weet — fouten bij nieuwe stof tellen niet mee",
+  "coursequiz.modeRecap": "Herhalen",
+  "coursequiz.modeRecapBlurb": "herhaal wat je al hebt gehad — zwakke concepten komen vaker langs",
+  "coursequiz.session": "{correct} / {answered} goed deze sessie",
+  "coursequiz.probed": "{n} van {total} concepten gepeild",
+  "coursequiz.notCounted": "nieuwe stof — telt niet mee",
+  "coursequiz.noCourseTitle": "Kies een cursus voor de quiz",
+  "coursequiz.noCourseBody": "Focus eerst op een cursus en kom dan terug — de quiz put uit al haar lessen.",
+  "menu.courseQuiz": "Cursusquiz",
+
   "dash.docTitle": "Mijn voortgang — Interactive Primer",
   "dash.loading": "Je voortgang wordt geladen…",
   "dash.loadError": "Kon je voortgang niet laden.",

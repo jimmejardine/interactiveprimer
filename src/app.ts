@@ -21,6 +21,7 @@ export { mountConceptGraph } from "./concept-graph.ts";
 export { mountProgressDashboard } from "./progress-dashboard.ts";
 export { runProgressMigration } from "./progress-migration.ts";
 export { maybeShowWelcomeBack } from "./welcome-back.ts";
+export { mountCourseQuiz } from "./course-quiz.ts";
 export * as offline from "./offline.ts";
 
 import "./components/primer-menu.ts"; // the hamburger every app-shell page mounts

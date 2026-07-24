@@ -247,6 +247,23 @@ const en: Record<string, string> = {
 
   // The "My Progress" dashboard (src/progress-dashboard.ts). The heading + exit button reuse
   // menu.myProgress / course.exit above.
+  // The /course-quiz page (src/course-quiz.ts + src/components/primer-quiz-stream.ts).
+  "coursequiz.docTitle": "Course Quiz — Interactive Primer",
+  "coursequiz.heading": "Course quiz",
+  "coursequiz.loading": "Preparing your course quiz…",
+  "coursequiz.harvesting": "Gathering questions… {n} / {total} lessons",
+  "coursequiz.empty": "No quiz questions found in this course's lessons yet.",
+  "coursequiz.modeHarvest": "Discover",
+  "coursequiz.modeHarvestBlurb": "find out what you already know — wrong answers on new material don't count",
+  "coursequiz.modeRecap": "Recap",
+  "coursequiz.modeRecapBlurb": "revisit what you've covered — weak concepts come up more often",
+  "coursequiz.session": "{correct} / {answered} correct this session",
+  "coursequiz.probed": "{n} of {total} concepts probed",
+  "coursequiz.notCounted": "new material — not counted",
+  "coursequiz.noCourseTitle": "Pick a course to quiz on",
+  "coursequiz.noCourseBody": "Focus on a course first, then come back — the quiz draws from every lesson in it.",
+  "menu.courseQuiz": "Course quiz",
+
   "dash.docTitle": "My Progress — Interactive Primer",
   "dash.loading": "Loading your progress…",
   "dash.loadError": "Could not load your progress.",

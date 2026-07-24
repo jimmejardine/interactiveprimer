@@ -241,6 +241,23 @@ const es: Record<string, string> = {
   "offline.back": "Volver al Primer",
   "offline.unsupported": "El almacenamiento sin conexión no está disponible en este navegador.",
 
+  // The /course-quiz page (src/course-quiz.ts + src/components/primer-quiz-stream.ts).
+  "coursequiz.docTitle": "Cuestionario del curso — Cartilla Interactiva",
+  "coursequiz.heading": "Cuestionario del curso",
+  "coursequiz.loading": "Preparando el cuestionario de tu curso…",
+  "coursequiz.harvesting": "Recopilando preguntas… {n} / {total} lecciones",
+  "coursequiz.empty": "Aún no hay preguntas de cuestionario en las lecciones de este curso.",
+  "coursequiz.modeHarvest": "Descubrir",
+  "coursequiz.modeHarvestBlurb": "averigua lo que ya sabes — los fallos en material nuevo no cuentan",
+  "coursequiz.modeRecap": "Repaso",
+  "coursequiz.modeRecapBlurb": "repasa lo que ya has visto — los conceptos flojos aparecen más a menudo",
+  "coursequiz.session": "{correct} / {answered} correctas en esta sesión",
+  "coursequiz.probed": "{n} de {total} conceptos sondeados",
+  "coursequiz.notCounted": "material nuevo — no cuenta",
+  "coursequiz.noCourseTitle": "Elige un curso para el cuestionario",
+  "coursequiz.noCourseBody": "Primero céntrate en un curso y vuelve — el cuestionario se nutre de todas sus lecciones.",
+  "menu.courseQuiz": "Cuestionario del curso",
+
   "dash.docTitle": "Mi progreso — Cartilla Interactiva",
   "dash.loading": "Cargando tu progreso…",
   "dash.loadError": "No se pudo cargar tu progreso.",

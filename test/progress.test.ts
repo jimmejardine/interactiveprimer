@@ -86,12 +86,40 @@ test("validateImport accepts a well-formed payload", () => {
     stars: 5,
     first: "2026-01-01",
     last: "2026-06-01",
+    answered: 0,
+    correct: 0,
   });
 });
 
 test("validateImport tolerates missing dates (→ empty strings)", () => {
   const entries = validateImport({ type: FILE_TYPE, entries: [{ id: "a", stars: 3 }] });
-  assert.deepEqual(entries[0], { id: "a", stars: 3, first: "", last: "" });
+  assert.deepEqual(entries[0], { id: "a", stars: 3, first: "", last: "", answered: 0, correct: 0 });
+});
+
+test("validateImport carries quiz counters and caps correct at answered", () => {
+  const entries = validateImport({
+    type: FILE_TYPE,
+    entries: [
+      { id: "a", stars: 6.67, first: "2026-01-01", last: "2026-06-01", answered: 3, correct: 2 },
+      { id: "b", stars: 5, answered: 2, correct: 9 }, // malformed: correct > answered
+    ],
+  });
+  assert.deepEqual({ a: entries[0].answered, c: entries[0].correct, s: entries[0].stars }, { a: 3, c: 2, s: 6.67 });
+  assert.deepEqual({ a: entries[1].answered, c: entries[1].correct }, { a: 2, c: 2 });
+});
+
+test("mergeProgress carries counters with the winner of the last-stamp comparison", () => {
+  const existing = [{ id: "x", stars: 3.33, first: "2026-01-01", last: "2026-01-01", answered: 3, correct: 1 }];
+  const incoming = [{ id: "x", stars: 8.75, first: "2026-02-01", last: "2026-03-01", answered: 8, correct: 7 }];
+  const merged = mergeProgress(existing, incoming, "merge");
+  assert.deepEqual(merged[0], {
+    id: "x",
+    stars: 8.75, // incoming won (later last) …
+    first: "2026-01-01", // … dates still span both
+    last: "2026-03-01",
+    answered: 8, // … and its counters travelled with it
+    correct: 7,
+  });
 });
 
 test("validateImport rejects a wrong type", () => {

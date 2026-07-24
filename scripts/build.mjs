@@ -221,10 +221,12 @@ const shell = [
   coreFile,
   appFile,
   "/dist/asset-manifest.json",
+  "/dist/graph.json", // the knowledge graph every app page needs; SWR keeps it fresh online
   "/dist/analytics.js",
   "/css/primer.css",
   ...assetShell.sort(),
   "/offline",
+  "/course-quiz",
   "/site.webmanifest",
   "/images/icons/favicon.ico",
   "/images/icons/favicon-32x32.png",

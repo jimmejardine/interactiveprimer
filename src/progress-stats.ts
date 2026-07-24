@@ -214,7 +214,7 @@ export function courseProgress(
     ready,
     locked,
     reviewDue,
-    xp,
+    xp: Math.round(xp), // stars may be fractional (quiz-derived) — keep the XP figure whole
     xpMax: total * MAX_STARS,
     fracMastered: total ? mastered / total : 0,
     lastActive,
