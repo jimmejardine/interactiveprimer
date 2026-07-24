@@ -118,6 +118,11 @@ export class PrimerQuizStream extends HTMLElement {
     loadComputeEngine().then((ce) => (this.#ce = ce));
   }
 
+  /** Remove every card — a fresh quiz (used when the page switches mode). */
+  clear(): void {
+    this.#root?.querySelector(".cards")?.replaceChildren();
+  }
+
   /** Append one instantly-graded question card. */
   push(q: GeneratedQuestion, meta: StreamMeta): void {
     if (!this.#root) this.connectedCallback();

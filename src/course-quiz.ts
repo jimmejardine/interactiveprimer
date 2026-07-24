@@ -282,7 +282,14 @@ export async function mountCourseQuiz(root: HTMLElement, { byId }: { byId: Map<s
       if (m === "recap" && !anySeen()) return; // nothing to recap yet
       mode = m;
       paintModes();
-      fill(); // top the stream up under the new eligibility
+      // A mode switch RESTARTS the quiz: clear the stream and the session stats, then refill
+      // under the new eligibility. (Lifetime counters/stars are untouched, of course.)
+      stream.clear();
+      sessionAnswered = 0;
+      sessionCorrect = 0;
+      probed.clear();
+      paintSession();
+      fill();
     });
     return b;
   };
