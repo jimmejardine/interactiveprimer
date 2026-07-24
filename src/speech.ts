@@ -17,25 +17,22 @@
  */
 
 import { bcp47 } from "./i18n.ts";
+import { speechSupported, getRate, getPitch, resolvePreferredVoice } from "./voice.ts";
 
 export interface SpeakOptions {
-  /** Speaking rate (0.1–10, default 1). */
+  /** Speaking rate (0.1–10). Overrides the learner's stored rate for this call. */
   rate?: number;
-  /** Voice pitch (0–2, default 1). */
+  /** Voice pitch (0–2). Overrides the learner's stored pitch for this call. */
   pitch?: number;
   /** BCP-47 language tag, e.g. "en-US". Advanced override — defaults
    *  to the active locale's tag, so scene authors normally omit it. */
   lang?: string;
+  /** A specific voiceURI to speak with. Overrides the learner's stored voice for this call. */
+  voice?: string;
 }
 
-/** Whether the Web Speech API is usable here. */
-function supported(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    "speechSynthesis" in window &&
-    typeof window.SpeechSynthesisUtterance === "function"
-  );
-}
+/** Whether the Web Speech API is usable here (defined in src/voice.ts, shared here). */
+const supported = speechSupported;
 
 // Warm up the (asynchronously-loaded) voice list as early as possible, so a voice matching
 // the requested language is usually available by the time the learner presses Play.
@@ -56,6 +53,11 @@ if (supported()) {
  * browsers — the default (OS-language) voice keeps speaking, so e.g. English narration on a
  * Dutch machine comes out with a Dutch accent. Selecting an actual matching voice fixes that.
  */
+/** An installed voice with the given voiceURI, or null if none is present. */
+function findVoice(uri: string): SpeechSynthesisVoice | null {
+  return window.speechSynthesis.getVoices().find((v) => v.voiceURI === uri) ?? null;
+}
+
 function pickVoice(lang: string): SpeechSynthesisVoice | null {
   const voices = window.speechSynthesis.getVoices();
   if (!voices || voices.length === 0) return null;
@@ -80,12 +82,17 @@ export function speak(text: string, opts: SpeakOptions = {}): Promise<void> {
 
   return new Promise((resolve) => {
     const utterance = new SpeechSynthesisUtterance(text);
-    if (opts.rate !== undefined) utterance.rate = opts.rate;
-    if (opts.pitch !== undefined) utterance.pitch = opts.pitch;
+    // Effective rate/pitch: a per-call opt (scene author intent) wins; otherwise the learner's
+    // stored preference (default 1) applies.
+    utterance.rate = opts.rate ?? getRate();
+    utterance.pitch = opts.pitch ?? getPitch();
     // Default to the active locale's voice so scene authors don't deal with lang/bcp47.
     const lang = opts.lang ?? bcp47();
     utterance.lang = lang;
-    const voice = pickVoice(lang);
+    // Voice precedence: explicit per-call voiceURI → the learner's stored voice (if it matches
+    // this language) → the locale auto-pick.
+    const voice =
+      (opts.voice ? findVoice(opts.voice) : null) ?? resolvePreferredVoice(lang) ?? pickVoice(lang);
     if (voice) utterance.voice = voice;
 
     let done = false;

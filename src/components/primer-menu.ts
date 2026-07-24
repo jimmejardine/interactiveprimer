@@ -13,6 +13,23 @@ import { attachShared } from "./shared.ts";
 import { THEMES, getTheme, applyTheme } from "../theme.ts";
 import { LOCALES, getLocale, applyLocale, t } from "../i18n.ts";
 import {
+  speechSupported,
+  listVoices,
+  getVoicePref,
+  setVoicePref,
+  getRate,
+  setRate,
+  getPitch,
+  setPitch,
+  onVoicesChanged,
+  RATE_MIN,
+  RATE_MAX,
+  PITCH_MIN,
+  PITCH_MAX,
+} from "../voice.ts";
+import { speak } from "../speech.ts";
+import { escapeHtml } from "../html-entities.ts";
+import {
   exportProgress,
   readProgressFile,
   applyProgress,
@@ -88,6 +105,19 @@ const STYLE = `
   .choices { display: flex; flex-direction: column; gap: 0.35rem; }
   .choices button { text-align: left; }
 
+  /* Voice sub-view: a scrollable list of installed voices + speed/pitch sliders. */
+  .voice-choices { max-height: 40vh; overflow-y: auto; }
+  .slider-row {
+    display: flex; align-items: center; gap: 0.5rem;
+    margin-top: 0.6rem; font-size: 0.85rem; color: var(--primer-ink, #111);
+  }
+  .slider-row span { flex: 0 0 3.5rem; }
+  .slider-row input[type="range"] { flex: 1; min-width: 0; accent-color: var(--primer-ink, #111); }
+  .slider-row output { flex: 0 0 2rem; text-align: right; color: var(--primer-ink-soft, #667); }
+  .voice-empty { color: var(--primer-ink-soft, #667); }
+  .voice-empty[hidden] { display: none; }
+  .voice-test { margin-top: 0.6rem; }
+
   .file-input { display: none; }
   .status { margin: 0.5rem 0 0; font-size: 0.8rem; color: var(--primer-ink-soft, #667); }
   .status[hidden] { display: none; }
@@ -144,6 +174,8 @@ export class PrimerMenu extends HTMLElement {
   #onKeydown: ((e: KeyboardEvent) => void) | null = null;
   #onCourseChange: (() => void) | null = null;
   #onAuthChange: (() => void) | null = null;
+  #onSpeechChange: (() => void) | null = null;
+  #offVoicesChanged: (() => void) | null = null;
 
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
@@ -159,6 +191,12 @@ export class PrimerMenu extends HTMLElement {
       (l) =>
         `<button type="button" class="lang" data-locale-id="${l.id}" aria-pressed="false">${l.label}</button>`,
     ).join("");
+
+    // The voice controls only make sense where the browser can speak — hide the whole section otherwise.
+    const speech = speechSupported();
+    const voiceNav = speech
+      ? `<button type="button" class="nav" data-target="voice">${t("menu.voice")}<span class="chev" aria-hidden="true">›</span></button>`
+      : "";
 
     root.innerHTML = `
       <style>${STYLE}</style>
@@ -179,6 +217,7 @@ export class PrimerMenu extends HTMLElement {
           <button type="button" class="nav" data-target="progress">${t("menu.progress")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="theme">${t("menu.theme")}<span class="chev" aria-hidden="true">›</span></button>
           <button type="button" class="nav" data-target="lang">${t("menu.language")}<span class="chev" aria-hidden="true">›</span></button>
+          ${voiceNav}
           <button type="button" class="nav" data-href="/offline">${t("menu.offline")}</button>
         </div>
         <div class="menu-view view-theme" hidden>
@@ -188,6 +227,22 @@ export class PrimerMenu extends HTMLElement {
         <div class="menu-view view-lang" hidden>
           <button type="button" class="back" data-back="config"><span aria-hidden="true">‹ </span>${t("menu.language")}</button>
           <div class="choices" role="group" aria-label="${t("menu.language")}">${langButtons}</div>
+        </div>
+        <div class="menu-view view-voice" hidden>
+          <button type="button" class="back" data-back="config"><span aria-hidden="true">‹ </span>${t("menu.voice")}</button>
+          <div class="choices voice-choices" role="group" aria-label="${t("menu.voice")}"></div>
+          <p class="voice-empty section-label" hidden>${t("voice.unavailable")}</p>
+          <label class="slider-row">
+            <span>${t("voice.rate")}</span>
+            <input type="range" class="rate-slider" min="${RATE_MIN}" max="${RATE_MAX}" step="0.1" aria-label="${t("voice.rate")}" />
+            <output class="rate-val"></output>
+          </label>
+          <label class="slider-row">
+            <span>${t("voice.pitch")}</span>
+            <input type="range" class="pitch-slider" min="${PITCH_MIN}" max="${PITCH_MAX}" step="0.1" aria-label="${t("voice.pitch")}" />
+            <output class="pitch-val"></output>
+          </label>
+          <div class="choices"><button type="button" class="voice-test">${t("voice.test")}</button></div>
         </div>
         <div class="menu-view view-progress" hidden>
           <button type="button" class="back" data-back="config"><span aria-hidden="true">‹ </span>${t("menu.progress")}</button>
@@ -247,11 +302,47 @@ export class PrimerMenu extends HTMLElement {
     const themeEls = [...root.querySelectorAll(".theme")] as HTMLButtonElement[];
     const langEls = [...root.querySelectorAll(".lang")] as HTMLButtonElement[];
 
+    // Voice sub-view controls (present only when speech is supported).
+    const voiceChoices = root.querySelector(".voice-choices") as HTMLElement | null;
+    const voiceEmpty = root.querySelector(".voice-empty") as HTMLElement | null;
+    const rateSlider = root.querySelector(".rate-slider") as HTMLInputElement | null;
+    const pitchSlider = root.querySelector(".pitch-slider") as HTMLInputElement | null;
+    const rateVal = root.querySelector(".rate-val") as HTMLElement | null;
+    const pitchVal = root.querySelector(".pitch-val") as HTMLElement | null;
+
+    // (Re)build the voice buttons: an "Automatic" option plus every installed voice for the
+    // current language. Called on connect and whenever the browser's voice list changes.
+    const renderVoiceButtons = () => {
+      if (!voiceChoices) return;
+      const voices = listVoices();
+      const auto = `<button type="button" class="voice-opt" data-voice-uri="" aria-pressed="false">${t("voice.auto")}</button>`;
+      const opts = voices
+        .map(
+          (v) =>
+            `<button type="button" class="voice-opt" data-voice-uri="${escapeHtml(v.voiceURI)}" aria-pressed="false">${escapeHtml(v.name)}</button>`,
+        )
+        .join("");
+      voiceChoices.innerHTML = auto + opts;
+      if (voiceEmpty) voiceEmpty.hidden = voices.length > 0;
+    };
+    if (speech) renderVoiceButtons();
+
     const reflect = () => {
       const theme = getTheme();
       for (const b of themeEls) b.setAttribute("aria-pressed", String(b.dataset.themeId === theme));
       const locale = getLocale();
       for (const b of langEls) b.setAttribute("aria-pressed", String(b.dataset.localeId === locale));
+      if (speech) {
+        const pref = getVoicePref() ?? "";
+        for (const b of voiceChoices?.querySelectorAll("button.voice-opt") ?? [])
+          b.setAttribute("aria-pressed", String((b as HTMLElement).dataset.voiceUri === pref));
+        const r = getRate();
+        const p = getPitch();
+        if (rateSlider) rateSlider.value = String(r);
+        if (pitchSlider) pitchSlider.value = String(p);
+        if (rateVal) rateVal.textContent = r.toFixed(1);
+        if (pitchVal) pitchVal.textContent = p.toFixed(1);
+      }
     };
     reflect();
 
@@ -260,6 +351,7 @@ export class PrimerMenu extends HTMLElement {
       root: root.querySelector(".view-root") as HTMLElement,
       theme: root.querySelector(".view-theme") as HTMLElement,
       lang: root.querySelector(".view-lang") as HTMLElement,
+      voice: root.querySelector(".view-voice") as HTMLElement,
       progress: root.querySelector(".view-progress") as HTMLElement,
       config: root.querySelector(".view-config") as HTMLElement,
     };
@@ -303,6 +395,25 @@ export class PrimerMenu extends HTMLElement {
     for (const b of langEls) {
       b.addEventListener("click", () => {
         applyLocale(b.dataset.localeId as LocaleId);
+      });
+    }
+
+    // --- Voice / rate / pitch (kept open so the choice can be tested) -------------------
+    if (speech && voiceChoices) {
+      // Delegated: the buttons are rebuilt on `voiceschanged`, so listen on the container.
+      voiceChoices.addEventListener("click", (e) => {
+        const btn = (e.target as HTMLElement).closest("button.voice-opt") as HTMLElement | null;
+        if (btn) setVoicePref(btn.dataset.voiceUri || null); // "" → automatic; speech-change re-reflects
+      });
+      rateSlider?.addEventListener("input", () => setRate(Number(rateSlider.value)));
+      pitchSlider?.addEventListener("input", () => setPitch(Number(pitchSlider.value)));
+      (root.querySelector(".voice-test") as HTMLButtonElement | null)?.addEventListener("click", () =>
+        void speak(t("voice.sample")),
+      );
+      // Repopulate the list once the browser's (async) voices load or change.
+      this.#offVoicesChanged = onVoicesChanged(() => {
+        renderVoiceButtons();
+        reflect();
       });
     }
 
@@ -488,6 +599,10 @@ export class PrimerMenu extends HTMLElement {
     this.#onThemeChange = () => reflect();
     document.addEventListener("theme-change", this.#onThemeChange);
 
+    // Keep the voice controls in sync when a preference changes (also our own updates).
+    this.#onSpeechChange = () => reflect();
+    document.addEventListener("speech-change", this.#onSpeechChange);
+
     // Clicking the dimmed backdrop (outside the dialog) cancels the restore.
     backdrop.addEventListener("click", (e) => {
       if (e.target === backdrop) closeDialog();
@@ -512,11 +627,14 @@ export class PrimerMenu extends HTMLElement {
 
   disconnectedCallback() {
     if (this.#onThemeChange) document.removeEventListener("theme-change", this.#onThemeChange);
+    if (this.#onSpeechChange) document.removeEventListener("speech-change", this.#onSpeechChange);
     if (this.#onKeydown) document.removeEventListener("keydown", this.#onKeydown);
     if (this.#onDocClick) document.removeEventListener("click", this.#onDocClick);
     if (this.#onCourseChange) document.removeEventListener("course-change", this.#onCourseChange);
     if (this.#onAuthChange) document.removeEventListener("auth-change", this.#onAuthChange);
+    this.#offVoicesChanged?.();
     this.#onThemeChange = this.#onKeydown = this.#onDocClick = this.#onCourseChange = this.#onAuthChange = null;
+    this.#onSpeechChange = this.#offVoicesChanged = null;
   }
 }
 
