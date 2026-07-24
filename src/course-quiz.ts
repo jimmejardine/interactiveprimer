@@ -232,14 +232,14 @@ export async function mountCourseQuiz(root: HTMLElement, { byId }: { byId: Map<s
   }
   const members: string[] = (course.courseMembers ?? []).slice(1);
 
-  const head = el("header", "dash-head", `<h1 class="dash-title">${esc(t("coursequiz.heading"))}<span class="dash-course">: <a href="/concepts/${esc(courseId)}">${esc(titleOf(courseId))}</a></span></h1>
-    <p class="dash-sub cq-session" hidden></p>`);
+  const head = el("header", "dash-head", `<h1 class="dash-title">${esc(t("coursequiz.heading"))}<span class="dash-course">: <a href="/concepts/${esc(courseId)}">${esc(titleOf(courseId))}</a></span></h1>`);
   const modes = el("div", "cq-modes");
+  const panel = el("section", "card cq-panel");
+  panel.hidden = true; // populated once the harvest completes
   const progress = el("p", "muted cq-progress");
   const streamHost = el("div", "cq-stream");
   const sentinel = el("div", "cq-sentinel");
-  root.append(head, modes, progress, streamHost, sentinel);
-  const sessionLine = head.querySelector(".cq-session") as HTMLElement;
+  root.append(head, modes, panel, progress, streamHost, sentinel);
 
   // ---- harvest all pages (sequential; progress line) ----
   const manifest = await (await fetch("/dist/asset-manifest.json")).json();
@@ -282,12 +282,14 @@ export async function mountCourseQuiz(root: HTMLElement, { byId }: { byId: Map<s
       if (m === "recap" && !anySeen()) return; // nothing to recap yet
       mode = m;
       paintModes();
-      // A mode switch RESTARTS the quiz: clear the stream and the session stats, then refill
-      // under the new eligibility. (Lifetime counters/stars are untouched, of course.)
+      // A mode switch RESTARTS the quiz: clear the stream and the session stats, re-freeze the
+      // chart's "at the start" snapshot, then refill under the new eligibility. (Lifetime
+      // counters/stars are untouched, of course.)
       stream.clear();
       sessionAnswered = 0;
       sessionCorrect = 0;
       probed.clear();
+      snapshot = distribution();
       paintSession();
       fill();
     });
@@ -303,6 +305,46 @@ export async function mountCourseQuiz(root: HTMLElement, { byId }: { byId: Map<s
   };
   paintModes();
 
+  // ---- the progress panel: session stats + the star-distribution chart ----
+  // Buckets: [never-visited, 0, 1, …, 10] — a seen concept lands on ⌊stars⌋ (3.33 → the "3" column).
+  const bucketOf = (e: ConfidenceEntry | null): number => (seen(e) ? 1 + Math.min(10, Math.floor(e!.stars)) : 0);
+  const distribution = (): number[] => {
+    const counts = new Array(12).fill(0);
+    for (const id of members) counts[bucketOf(readEntry(id))]++;
+    return counts;
+  };
+  let snapshot = distribution(); // frozen at quiz start (re-frozen when a mode switch restarts the quiz)
+
+  const bucketLabels = [t("coursequiz.chartNA"), ...Array.from({ length: 11 }, (_, i) => String(i))];
+  panel.innerHTML = `<h2>${esc(t("coursequiz.progressHead"))}</h2>
+    <p class="dash-sub cq-session"></p>
+    <div class="cq-chart" role="img" aria-label="${esc(t("coursequiz.chartAria"))}">
+      <div class="cq-bars"></div>
+      <div class="cq-labels">${bucketLabels.map((l) => `<span>${esc(l)}</span>`).join("")}</div>
+      <div class="cq-legend">
+        <span class="cq-key"><span class="cq-swatch start"></span>${esc(t("coursequiz.chartStart"))}</span>
+        <span class="cq-key"><span class="cq-swatch now"></span>${esc(t("coursequiz.chartNow"))}</span>
+      </div>
+    </div>`;
+  panel.hidden = false;
+  const sessionLine = panel.querySelector(".cq-session") as HTMLElement;
+  const bars = panel.querySelector(".cq-bars") as HTMLElement;
+
+  const paintChart = () => {
+    const now = distribution();
+    const max = Math.max(1, ...snapshot, ...now);
+    const h = (v: number) => (v === 0 ? 0 : Math.max(4, Math.round((v / max) * 76)));
+    bars.innerHTML = now
+      .map((n, i) => {
+        const s = snapshot[i];
+        return `<div class="cq-col" title="${esc(bucketLabels[i])}: ${s} → ${n}">
+          <span class="cq-bar start" style="height:${h(s)}px"></span>
+          <span class="cq-bar now" style="height:${h(n)}px"></span>
+        </div>`;
+      })
+      .join("");
+  };
+
   // ---- the stream + session stats ----
   const stream = document.createElement("primer-quiz-stream") as PrimerQuizStream;
   streamHost.appendChild(stream);
@@ -310,10 +352,12 @@ export async function mountCourseQuiz(root: HTMLElement, { byId }: { byId: Map<s
   let sessionCorrect = 0;
   const probed = new Set<string>();
   const paintSession = () => {
-    sessionLine.hidden = sessionAnswered === 0;
-    const probedLine = mode === "harvest" ? ` · ${t("coursequiz.probed", { n: probed.size, total: members.length })}` : "";
-    sessionLine.textContent = t("coursequiz.session", { correct: sessionCorrect, answered: sessionAnswered }) + probedLine;
+    sessionLine.textContent =
+      t("coursequiz.session", { correct: sessionCorrect, answered: sessionAnswered }) +
+      ` · ${t("coursequiz.probed", { n: probed.size, total: members.length })}`;
+    paintChart();
   };
+  paintSession();
 
   const pushOne = (): boolean => {
     // A constraint-heavy question can fail to instantiate — try a few samples before giving up.
