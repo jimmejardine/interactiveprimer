@@ -37,6 +37,7 @@ import { getLocale, t, DEFAULT_LOCALE } from "./i18n.ts";
 import { makeStrings } from "./scene-strings.ts";
 import { generateQuestion } from "./quiz.ts";
 import { readEntry, recordAnswers, type ConfidenceEntry } from "./confidence-store.ts";
+import { ratingColor } from "./confidence-color.ts";
 import {
   getQuiz,
   getChart, registerChart,
@@ -334,16 +335,20 @@ export async function mountCourseQuiz(root: HTMLElement, { byId }: { byId: Map<s
     const now = distribution();
     const max = Math.max(1, ...snapshot, ...now);
     const h = (v: number) => (v === 0 ? 0 : Math.max(4, Math.round((v / max) * 76)));
+    // Each star bucket's "now" bar wears the SAME red→yellow→green ramp the concepts themselves
+    // are painted with (graph nodes, pathway, ref dots); N/A — never visited — stays dark.
+    const barColor = (i: number) => (i === 0 ? "var(--primer-ink-soft, #667)" : ratingColor(i - 1));
     bars.innerHTML = now
       .map((n, i) => {
         const s = snapshot[i];
         return `<div class="cq-col" title="${esc(bucketLabels[i])}: ${s} → ${n}">
           <span class="cq-bar start" style="height:${h(s)}px"></span>
-          <span class="cq-bar now" style="height:${h(n)}px"></span>
+          <span class="cq-bar now" style="height:${h(n)}px;background:${barColor(i)}"></span>
         </div>`;
       })
       .join("");
   };
+  document.addEventListener("theme-change", paintChart); // the ramp reads theme tokens at paint time
 
   // ---- the stream + session stats ----
   const stream = document.createElement("primer-quiz-stream") as PrimerQuizStream;

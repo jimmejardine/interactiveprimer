@@ -259,7 +259,7 @@ const en: Record<string, string> = {
   "coursequiz.modeRecapBlurb": "revisit what you've covered — weak concepts come up more often",
   "coursequiz.session": "{correct} / {answered} correct this session",
   "coursequiz.probed": "{n} of {total} concepts probed",
-  "coursequiz.progressHead": "Your progress",
+  "coursequiz.progressHead": "Quiz results",
   "coursequiz.chartStart": "at the start",
   "coursequiz.chartNow": "now",
   "coursequiz.chartNA": "N/A",

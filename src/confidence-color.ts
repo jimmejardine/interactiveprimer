@@ -20,7 +20,15 @@ export { CONFIDENCE_PREFIX };
 export function confidenceColor(id: string): string | null {
   const entry = readEntry(id);
   if (entry === null) return null; // not yet rated → default look
-  const stars = Math.min(MAX_STARS, Math.max(0, entry.stars));
+  return ratingColor(entry.stars);
+}
+
+/**
+ * The same ramp from a raw star value (for callers that already hold the stars — e.g. the course
+ * quiz's star-distribution chart, whose buckets must match the concepts' colours exactly).
+ */
+export function ratingColor(rawStars: number): string {
+  const stars = Math.min(MAX_STARS, Math.max(0, rawStars));
   const hue = (stars / MAX_STARS) * 120; // 0 → red, 60 → yellow, 120 → green
   // Saturation/lightness are theme-driven so the ramp stays legible in every theme.
   const s = getComputedStyle(document.documentElement);

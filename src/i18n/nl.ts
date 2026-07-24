@@ -256,7 +256,7 @@ const nl: Record<string, string> = {
   "coursequiz.modeRecapBlurb": "herhaal wat je al hebt gehad — zwakke concepten komen vaker langs",
   "coursequiz.session": "{correct} / {answered} goed deze sessie",
   "coursequiz.probed": "{n} van {total} concepten gepeild",
-  "coursequiz.progressHead": "Jouw voortgang",
+  "coursequiz.progressHead": "Quizresultaten",
   "coursequiz.chartStart": "bij de start",
   "coursequiz.chartNow": "nu",
   "coursequiz.chartNA": "n.v.t.",

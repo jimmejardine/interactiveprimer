@@ -253,7 +253,7 @@ const es: Record<string, string> = {
   "coursequiz.modeRecapBlurb": "repasa lo que ya has visto — los conceptos flojos aparecen más a menudo",
   "coursequiz.session": "{correct} / {answered} correctas en esta sesión",
   "coursequiz.probed": "{n} de {total} conceptos sondeados",
-  "coursequiz.progressHead": "Tu progreso",
+  "coursequiz.progressHead": "Resultados del cuestionario",
   "coursequiz.chartStart": "al empezar",
   "coursequiz.chartNow": "ahora",
   "coursequiz.chartNA": "N/D",
