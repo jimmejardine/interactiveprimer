@@ -264,6 +264,8 @@ const nl: Record<string, string> = {
   "dash.docTitle": "Mijn voortgang — Interactive Primer",
   "dash.loading": "Je voortgang wordt geladen…",
   "dash.loadError": "Kon je voortgang niet laden.",
+  "dash.quizDesc": "Eén quiz over de hele cursus — ontdek wat je al weet en herhaal wat je hebt gehad.",
+  "dash.quizCta": "Start de quiz",
   "dash.status.locked": "Vergrendeld",
   "dash.status.ready": "Klaar",
   "dash.status.learning": "Bezig",

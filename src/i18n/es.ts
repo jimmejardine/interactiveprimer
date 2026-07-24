@@ -261,6 +261,8 @@ const es: Record<string, string> = {
   "dash.docTitle": "Mi progreso — Cartilla Interactiva",
   "dash.loading": "Cargando tu progreso…",
   "dash.loadError": "No se pudo cargar tu progreso.",
+  "dash.quizDesc": "Un cuestionario sobre todo el curso — descubre lo que ya sabes y repasa lo que has visto.",
+  "dash.quizCta": "Empezar el cuestionario",
   "dash.status.locked": "Bloqueado",
   "dash.status.ready": "Listo",
   "dash.status.learning": "Aprendiendo",

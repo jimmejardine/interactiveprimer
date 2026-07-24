@@ -267,6 +267,8 @@ const en: Record<string, string> = {
   "dash.docTitle": "My Progress — Interactive Primer",
   "dash.loading": "Loading your progress…",
   "dash.loadError": "Could not load your progress.",
+  "dash.quizDesc": "One quiz across the whole course — discover what you already know, and recap what you've covered.",
+  "dash.quizCta": "Start the quiz",
   "dash.status.locked": "Locked",
   "dash.status.ready": "Ready",
   "dash.status.learning": "Learning",
