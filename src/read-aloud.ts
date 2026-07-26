@@ -55,6 +55,68 @@ const BLOCK_TAGS = new Set([
   "PRIMER-CARD",
 ]);
 
+/**
+ * Turn a `<primer-math>`'s LaTeX into a spoken phrase — but ONLY for a safe arithmetic subset
+ * (numbers and a handful of operators). Returns the phrase, or `null` when the LaTeX contains
+ * anything we don't know how to pronounce (so the maths is skipped, as before). This lets a
+ * simple inline number like `$3$` be read as part of the sentence, while `$a^2+b^2=c^2$` or
+ * `$A \cap B$` are still left out rather than mispronounced.
+ */
+export function speakLatex(src: string): string | null {
+  let s = src.trim();
+  if (!s) return null;
+
+  // Fractions first (up to a few nested levels): \frac{a}{b} → "a over b".
+  for (let i = 0; i < 4; i++) {
+    const next = s.replace(/\\(?:frac|dfrac|tfrac)\{([^{}]*)\}\{([^{}]*)\}/g, " $1 over $2 ");
+    if (next === s) break;
+    s = next;
+  }
+
+  // Known commands → words (longest/most-specific first).
+  const commands: [RegExp, string][] = [
+    [/\\times|\\cdot/g, " times "],
+    [/\\div/g, " divided by "],
+    [/\\over/g, " over "],
+    [/\\pm/g, " plus or minus "],
+    [/\\leq|\\le\b/g, " less than or equal to "],
+    [/\\geq|\\ge\b/g, " greater than or equal to "],
+    [/\\neq|\\ne\b/g, " not equal to "],
+    [/\\%/g, " percent "],
+    [/\\,|\\;|\\:|\\!|\\ |\\quad|\\qquad|\\left|\\right/g, " "], // spacing/size commands
+  ];
+  for (const [re, word] of commands) s = s.replace(re, word);
+
+  // Any backslash left means an unknown command — bail out (skip the maths).
+  if (s.includes("\\")) return null;
+
+  // Bare symbols → words.
+  s = s
+    .replace(/\+/g, " plus ")
+    .replace(/-/g, " minus ")
+    .replace(/=/g, " equals ")
+    .replace(/</g, " less than ")
+    .replace(/>/g, " greater than ")
+    .replace(/%/g, " percent ")
+    .replace(/[{}()]/g, " "); // drop grouping/parentheses
+
+  s = s.replace(/\s+/g, " ").trim();
+  if (!s) return null;
+
+  // Final gate: only letters, digits, and "." "," may remain. Anything else (^, _, |, symbols
+  // from an unknown command, etc.) means we can't safely pronounce it.
+  if (!/^[0-9a-zA-Z.,\s]+$/.test(s)) return null;
+  return s;
+}
+
+/** The original LaTeX of a `<primer-math>` (its `tex` getter, or the KaTeX MathML annotation). */
+function mathSource(el: Element): string {
+  const tex = (el as { tex?: string }).tex;
+  if (typeof tex === "string" && tex.length > 0) return tex;
+  const ann = el.querySelector('annotation[encoding="application/x-tex"]');
+  return (ann?.textContent ?? el.textContent ?? "").trim();
+}
+
 /** A tree walker over `card`'s text nodes that rejects skip subtrees and the read-aloud button. */
 function textWalker(card: Element): TreeWalker {
   return document.createTreeWalker(card, NodeFilter.SHOW_TEXT, {
@@ -129,39 +191,78 @@ interface Sentence {
   range: Range;
 }
 
+/** One readable chunk: a text node, or a `<primer-math>` we can pronounce (with its spoken form). */
+type Item =
+  | { kind: "text"; node: Text; text: string }
+  | { kind: "math"; el: Element; text: string };
+
 /**
- * Extract `card`'s sentences, each paired with a DOM `Range`. Text nodes are concatenated in
- * document order (skipping math/code/widgets); a change of block ancestor forces a sentence
- * break so list items and paragraphs never merge. Each sentence's [start,end) offsets are mapped
- * back to a single `Range` (which may span inline elements — fine for highlighting).
+ * Gather the card's readable chunks in document order: text nodes plus any `<primer-math>` whose
+ * LaTeX is a pronounceable arithmetic subset (see {@link speakLatex}). Code, widgets, un-speakable
+ * maths, and the read-aloud button are skipped.
+ */
+function gatherItems(card: Element): Item[] {
+  const items: Item[] = [];
+  const recurse = (parent: Node) => {
+    for (const child of parent.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const s = child.nodeValue ?? "";
+        if (s.length > 0) items.push({ kind: "text", node: child as Text, text: s });
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        const el = child as Element;
+        if (el.tagName === "PRIMER-MATH") {
+          const spoken = speakLatex(mathSource(el));
+          // Pad so the injected phrase never glues to the neighbouring words.
+          if (spoken) items.push({ kind: "math", el, text: ` ${spoken} ` });
+        } else if (!SKIP_TAGS.has(el.tagName) && !el.classList.contains("card-readaloud")) {
+          recurse(el);
+        }
+      }
+    }
+  };
+  recurse(card);
+  return items;
+}
+
+/**
+ * Extract `card`'s sentences, each paired with a DOM `Range`. Readable chunks (text + speakable
+ * maths) are concatenated in document order; a change of block ancestor forces a sentence break so
+ * list items and paragraphs never merge. Each sentence's [start,end) offsets map back to a single
+ * `Range` (which may span inline elements — fine for highlighting).
  */
 function collectSentences(card: Element): Sentence[] {
-  const segments: { node: Text; start: number; end: number }[] = [];
+  const segments: { item: Item; start: number; end: number }[] = [];
   const breaks: number[] = []; // offsets in `full` where a block boundary occurs
   let full = "";
   let prevBlock: Element | null = null;
 
-  const w = textWalker(card);
-  for (let n = w.nextNode() as Text | null; n; n = w.nextNode() as Text | null) {
-    const s = n.nodeValue ?? "";
-    if (s.length === 0) continue;
-    const block = closestBlock(n, card);
+  for (const item of gatherItems(card)) {
+    const node = item.kind === "text" ? item.node : item.el;
+    const block = closestBlock(node, card);
     if (prevBlock && block !== prevBlock) breaks.push(full.length);
     prevBlock = block;
-    segments.push({ node: n, start: full.length, end: full.length + s.length });
-    full += s;
+    segments.push({ item, start: full.length, end: full.length + item.text.length });
+    full += item.text;
   }
   if (segments.length === 0) return [];
 
-  // A DOM point (node + local offset) for an absolute offset into `full`. `atEnd` picks the
-  // segment containing off-1 (an exclusive end position sits at the end of the previous char).
-  const point = (off: number, atEnd: boolean): { node: Text; offset: number } => {
+  // A DOM point (node + offset) for an absolute offset into `full`. `atEnd` picks the segment
+  // containing off-1 (an exclusive end sits at the end of the previous char). A math chunk maps
+  // to the position just before it (start) or just after it (end) within its parent.
+  const point = (off: number, atEnd: boolean): { node: Node; offset: number } => {
     for (const seg of segments) {
       const inside = atEnd ? off > seg.start && off <= seg.end : off >= seg.start && off < seg.end;
-      if (inside) return { node: seg.node, offset: off - seg.start };
+      if (!inside) continue;
+      if (seg.item.kind === "text") return { node: seg.item.node, offset: off - seg.start };
+      const el = seg.item.el;
+      const parent = el.parentNode as Node;
+      const idx = Array.prototype.indexOf.call(parent.childNodes, el);
+      return { node: parent, offset: atEnd ? idx + 1 : idx };
     }
     const last = segments[segments.length - 1];
-    return { node: last.node, offset: last.node.length };
+    return last.item.kind === "text"
+      ? { node: last.item.node, offset: last.item.node.length }
+      : { node: last.item.el.parentNode as Node, offset: 0 };
   };
 
   const locale = getLocale();
@@ -179,9 +280,15 @@ function collectSentences(card: Element): Sentence[] {
       const b = point(se, true);
       range.setStart(a.node, a.offset);
       range.setEnd(b.node, b.offset);
-      // Collapse whitespace (source-HTML newlines, and the gaps left by skipped math) so the
-      // utterance reads cleanly; the range still covers the real prose in the DOM.
-      sentences.push({ text: full.slice(ss, se).replace(/\s+/g, " ").trim(), range });
+      // Collapse whitespace (source newlines, and gaps left by skipped images/maths) and drop
+      // any space left before punctuation, so the utterance reads cleanly; the range still covers
+      // the real prose in the DOM.
+      const text = full
+        .slice(ss, se)
+        .replace(/\s+/g, " ")
+        .replace(/\s+([.,!?;:])/g, "$1")
+        .trim();
+      sentences.push({ text, range });
     }
   }
   return sentences;

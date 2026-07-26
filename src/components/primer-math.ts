@@ -18,6 +18,11 @@ export class PrimerMath extends HTMLElement {
   /** The original LaTeX source, captured once before KaTeX replaces our contents. */
   #tex: string | null = null;
 
+  /** The original LaTeX source (for e.g. read-aloud), even after KaTeX has re-rendered us. */
+  get tex(): string {
+    return this.#tex ?? (this.textContent ?? "").trim();
+  }
+
   connectedCallback() {
     // Capture the source on first connect; on later connects (e.g. when the renderer
     // moves this element into the page shell) our children are already KaTeX output.
