@@ -163,6 +163,8 @@ const es: Record<string, string> = {
   "menu.course": "Curso",
   "menu.save": "Guardar progreso",
   "menu.restore": "Restaurar progreso",
+  "card.readAloud": "Leer en voz alta",
+  "card.stopReading": "Detener lectura",
   "progress.restoreTitle": "Restaurar progreso",
   "progress.restorePrompt":
     "Ya tienes puntuaciones guardadas. ¿Combinar el archivo (conservando la puntuación más reciente de cada concepto) o sobrescribir todo con el archivo?",

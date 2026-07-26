@@ -71,6 +71,35 @@ function pickVoice(lang: string): SpeechSynthesisVoice | null {
 }
 
 /**
+ * Build an utterance for `text`, applying the effective rate/pitch/voice/lang (a per-call opt
+ * wins; otherwise the learner's stored preference, then the locale auto-pick). Shared by
+ * {@link speak} and {@link speakSequence}.
+ */
+function makeUtterance(text: string, opts: SpeakOptions): SpeechSynthesisUtterance {
+  const utterance = new SpeechSynthesisUtterance(text);
+  // Effective rate/pitch: a per-call opt (scene author intent) wins; otherwise the learner's
+  // stored preference (default 1) applies.
+  utterance.rate = opts.rate ?? getRate();
+  utterance.pitch = opts.pitch ?? getPitch();
+  // Default to the active locale's voice so scene authors don't deal with lang/bcp47.
+  const lang = opts.lang ?? bcp47();
+  utterance.lang = lang;
+  // Voice precedence: explicit per-call voiceURI → the learner's stored voice (if it matches
+  // this language) → the locale auto-pick.
+  const voice =
+    (opts.voice ? findVoice(opts.voice) : null) ?? resolvePreferredVoice(lang) ?? pickVoice(lang);
+  if (voice) utterance.voice = voice;
+  return utterance;
+}
+
+/** Length-scaled safety timeout: some engines never fire `onend` for short/cancelled utterances. */
+function safetyMs(text: string): number {
+  const MIN_SPEECH_MS = 1500;
+  const MS_PER_CHAR = 90;
+  return Math.max(MIN_SPEECH_MS, text.length * MS_PER_CHAR);
+}
+
+/**
  * Speak `text` aloud, resolving when it finishes. Resolves immediately (a silent no-op)
  * where speech isn't supported. The language defaults to the ACTIVE locale's BCP-47 tag
  * (`bcp47()`) — pass `opts.lang` only to override it. An installed voice for that language is
@@ -81,19 +110,7 @@ export function speak(text: string, opts: SpeakOptions = {}): Promise<void> {
   if (!supported() || !text) return Promise.resolve();
 
   return new Promise((resolve) => {
-    const utterance = new SpeechSynthesisUtterance(text);
-    // Effective rate/pitch: a per-call opt (scene author intent) wins; otherwise the learner's
-    // stored preference (default 1) applies.
-    utterance.rate = opts.rate ?? getRate();
-    utterance.pitch = opts.pitch ?? getPitch();
-    // Default to the active locale's voice so scene authors don't deal with lang/bcp47.
-    const lang = opts.lang ?? bcp47();
-    utterance.lang = lang;
-    // Voice precedence: explicit per-call voiceURI → the learner's stored voice (if it matches
-    // this language) → the locale auto-pick.
-    const voice =
-      (opts.voice ? findVoice(opts.voice) : null) ?? resolvePreferredVoice(lang) ?? pickVoice(lang);
-    if (voice) utterance.voice = voice;
+    const utterance = makeUtterance(text, opts);
 
     let done = false;
     const finish = () => {
@@ -105,16 +122,84 @@ export function speak(text: string, opts: SpeakOptions = {}): Promise<void> {
 
     utterance.onend = finish;
     utterance.onerror = finish;
-
-    // Safety net: some engines fail to fire `onend` for short or cancelled
-    // utterances, which would otherwise stall an awaiting animation loop forever.
-    // Scale the fallback with the text length (floor MIN_SPEECH_MS, ~MS_PER_CHAR per character).
-    const MIN_SPEECH_MS = 1500;
-    const MS_PER_CHAR = 90;
-    const timer = setTimeout(finish, Math.max(MIN_SPEECH_MS, text.length * MS_PER_CHAR));
+    const timer = setTimeout(finish, safetyMs(text));
 
     window.speechSynthesis.speak(utterance);
   });
+}
+
+/** A running {@link speakSequence}: `cancel()` stops it; `done` resolves when it ends (or is cancelled). */
+export interface SpeechSequence {
+  cancel(): void;
+  done: Promise<void>;
+}
+
+/** Callbacks for {@link speakSequence}, fired as each chunk starts and ends (by chunk index). */
+export interface SequenceHooks {
+  onChunkStart?(index: number): void;
+  onChunkEnd?(index: number): void;
+}
+
+/**
+ * Speak `chunks` in order, each as its OWN utterance, firing `onChunkStart(i)` as chunk `i`
+ * begins and `onChunkEnd(i)` as it ends. Speaking one chunk per utterance gives reliable
+ * per-chunk progress (for e.g. sentence highlighting) across all voices — unlike
+ * `utterance.onboundary`, which many voices (notably remote/Google ones) never fire.
+ *
+ * Returns a handle: `cancel()` stops immediately, `done` resolves when the last chunk finishes
+ * OR on cancel. A no-op (resolves at once) where speech is unsupported. Applies the learner's
+ * stored voice/rate/pitch via {@link makeUtterance}.
+ */
+export function speakSequence(chunks: string[], hooks: SequenceHooks = {}): SpeechSequence {
+  const items = chunks.filter((c) => c && c.trim().length > 0);
+  if (!supported() || items.length === 0) {
+    return { cancel: () => {}, done: Promise.resolve() };
+  }
+
+  let cancelled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let resolveDone!: () => void;
+  const done = new Promise<void>((r) => (resolveDone = r));
+
+  const finishAll = () => {
+    if (timer) clearTimeout(timer);
+    resolveDone();
+  };
+
+  const speakAt = (i: number) => {
+    if (cancelled) return;
+    if (i >= items.length) {
+      finishAll();
+      return;
+    }
+    hooks.onChunkStart?.(i);
+    const utterance = makeUtterance(items[i], {});
+
+    let advanced = false;
+    const next = () => {
+      if (advanced || cancelled) return;
+      advanced = true;
+      clearTimeout(timer);
+      hooks.onChunkEnd?.(i);
+      speakAt(i + 1);
+    };
+    utterance.onend = next;
+    utterance.onerror = next;
+    timer = setTimeout(next, safetyMs(items[i]));
+
+    window.speechSynthesis.speak(utterance);
+  };
+
+  // cancel() before the first tick still resolves `done`; guard re-entrancy with `cancelled`.
+  const cancel = () => {
+    if (cancelled) return;
+    cancelled = true;
+    if (supported()) window.speechSynthesis.cancel();
+    finishAll();
+  };
+
+  speakAt(0);
+  return { cancel, done };
 }
 
 /** Stop any in-progress and queued narration (e.g. when an animation replays). */

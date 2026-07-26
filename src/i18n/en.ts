@@ -166,6 +166,8 @@ const en: Record<string, string> = {
   "menu.course": "Course",
   "menu.save": "Save progress",
   "menu.restore": "Restore progress",
+  "card.readAloud": "Read aloud",
+  "card.stopReading": "Stop reading",
   "progress.restoreTitle": "Restore progress",
   "progress.restorePrompt":
     "You already have saved scores. Merge the file (keeping the most recent score per concept), or overwrite everything with the file?",

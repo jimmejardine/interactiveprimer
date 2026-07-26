@@ -39,7 +39,7 @@ export { registerCharts, registerChartSliders, computeRange, subscribeSliders, g
 export { THEMES, getTheme, applyTheme, initTheme, themeColors } from "./theme.ts";
 export { LOCALES, getLocale, applyLocale, t } from "./i18n.ts";
 export { getSceneStrings, makeStrings } from "./scene-strings.ts";
-export { speak, cancelSpeech } from "./speech.ts";
+export { speak, speakSequence, cancelSpeech } from "./speech.ts";
 export { parseConceptMeta, getConceptMeta } from "./concept-meta.ts";
 export { BASE_LEVEL, maxLevel, formatLevel } from "./levels.ts";
 export { resolveLevels, validateGraph } from "./graph.ts";

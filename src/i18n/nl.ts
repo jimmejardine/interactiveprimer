@@ -163,6 +163,8 @@ const nl: Record<string, string> = {
   "menu.course": "Cursus",
   "menu.save": "Voortgang opslaan",
   "menu.restore": "Voortgang herstellen",
+  "card.readAloud": "Voorlezen",
+  "card.stopReading": "Stoppen met voorlezen",
   "progress.restoreTitle": "Voortgang herstellen",
   "progress.restorePrompt":
     "Je hebt al opgeslagen scores. Wil je het bestand samenvoegen (de meest recente score per concept behouden), of alles overschrijven met het bestand?",
