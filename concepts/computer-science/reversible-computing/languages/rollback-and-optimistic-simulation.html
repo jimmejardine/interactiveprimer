@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Rollback and Optimistic Simulation</primer-title>
+
+    <primer-card>
+      <p>
+        Suppose you are simulating something huge — a continent's air traffic, a war game, the internet
+        itself — and you want to throw a thousand processors at it. The natural split: give each processor a
+        piece of the world (an airport, a battalion, a router) with its own event queue and its own
+        <strong>local virtual time</strong>. The nightmare: your airport happily simulates 3 pm… and then a
+        message arrives from a slower neighbour, an aircraft that lands at <em>2:15</em>. You have already
+        simulated a past that turns out to be wrong.
+      </p>
+      <p>
+        The timid fix is to <em>never let this happen</em>: block every processor until it is provably safe
+        to advance. The audacious fix is David Jefferson's <strong>Time Warp</strong> (1985):
+        <em>let every processor race ahead on its best guess — and when the past changes under you, undo
+        it</em>. Speculate forward; repair backward. That repair step is called <strong>rollback</strong>,
+        and it turns this lesson into the payoff of the whole module: rollback is <em>reverse execution</em>
+        deployed not to debug programs, but to unlock parallelism. Reversibility as a concurrency
+        superpower.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Time Warp in one scenario</h2>
+      <p>
+        Each logical process (LP) executes the events in its queue in timestamp order, optimistically
+        assuming no earlier event will ever show up. When one does — a <strong>straggler</strong>, a message
+        stamped in the LP's past — three things must happen:
+      </p>
+      <ol>
+        <li><strong>Roll back the state</strong> to just before the straggler's timestamp: every event
+          processed with a later timestamp is undone.</li>
+        <li><strong>Cancel the consequences.</strong> Some of those undone events <em>sent messages</em> to
+          other LPs — messages that now were never sent. For each one, the LP emits an
+          <strong>anti-message</strong>: a perfect negative copy that chases its positive twin. If the twin
+          is still sitting in the receiver's queue, the pair <em>annihilates</em>; if the receiver has already
+          processed it, the anti-message triggers a rollback <em>there</em> — cancellation cascades exactly
+          as far as the wrong speculation spread, and no further.</li>
+        <li><strong>Re-execute</strong> forward from the straggler, now in correct timestamp order.</li>
+      </ol>
+    </primer-card>
+
+    <!-- Time Warp figure: two LP timelines, a straggler, rollback + anti-message, re-execution. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "timeWarp": {
+          "title": "A straggler triggers rollback",
+          "axis": "virtual time",
+          "lpA": "LP A",
+          "lpB": "LP B",
+          "stepSpec": "LP A speculates ahead, processing its queued events up to virtual time 40 (LP B lags at 12)",
+          "stepStraggler": "LP B sends a message with timestamp 15 — a straggler, arriving in LP A's simulated past",
+          "stepRollback": "LP A rolls back: events 20, 30 and 40 are undone, and an anti-message cancels the message event 20 had sent",
+          "stepReplay": "LP A re-executes forward in correct order: 15, then 20, 30, 40 again",
+          "straggler": "straggler (t = 15)",
+          "antiMsg": "anti-message",
+          "rollback": "undo 40, 30, 20",
+          "replay": "re-execute from 15"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Watch it happen</h2>
+      <primer-geometry scene="timeWarp" caption="Two logical processes drawn as horizontal virtual-time lines. LP A has optimistically processed events at times 10, 20, 30 and 40 while LP B is only at 12. A straggler message stamped t = 15 arrives at LP A, which rolls back events 40, 30 and 20 (sending an anti-message to cancel a message event 20 had sent), then re-executes forward from 15."></primer-geometry>
+      <p>
+        And here is the same story as a running program. The event handler is deliberately
+        <em>invertible</em> (<code>count += delta</code>), so rollback can use the module's signature move —
+        run the inverse — rather than restoring a saved copy:
+      </p>
+      <primer-code run>
+        type Ev = { t: number; delta: number; sendsAt?: number };
+
+        class LP {
+          name: string;
+          count = 0;
+          lvt = 0;                                  // local virtual time
+          done: Ev[] = [];
+          constructor(name: string) { this.name = name; }
+
+          exec(e: Ev): void {
+            this.count += e.delta; this.lvt = e.t; this.done.push(e);
+            let line = "  [" + this.name + "] t=" + e.t + "  count += " + e.delta + "  -> " + this.count;
+            if (e.sendsAt !== undefined) line += "   (sends a message stamped t=" + e.sendsAt + ")";
+            console.log(line);
+          }
+
+          // REVERSE COMPUTATION: undo by running inverse handlers, newest first.
+          rollbackTo(t: number): Ev[] {
+            const undone: Ev[] = [];
+            while (this.done.length &gt; 0 &amp;&amp; this.done[this.done.length - 1].t &gt; t) {
+              const e = this.done.pop()!;
+              this.count -= e.delta;                // the inverse of count += delta
+              console.log("  [" + this.name + "] UNDO t=" + e.t + "  count -= " + e.delta + "  -> " + this.count);
+              if (e.sendsAt !== undefined)
+                console.log("  [" + this.name + "] ANTI-MESSAGE sent to cancel the message stamped t=" + e.sendsAt);
+              undone.push(e);
+            }
+            return undone.reverse();
+          }
+        }
+
+        const a = new LP("A");
+        const queue: Ev[] = [
+          { t: 10, delta: 3 },
+          { t: 20, delta: 5, sendsAt: 22 },
+          { t: 30, delta: 2 },
+          { t: 40, delta: 4 },
+        ];
+
+        console.log("phase 1 - optimistic execution:");
+        for (const e of queue) a.exec(e);
+
+        console.log("phase 2 - straggler arrives: { t: 15, delta: 7 }  (LP A is at lvt " + a.lvt + ")");
+        const straggler: Ev = { t: 15, delta: 7 };
+        const redo = a.rollbackTo(straggler.t);
+
+        console.log("phase 3 - re-execute in correct order:");
+        a.exec(straggler);
+        for (const e of redo) a.exec(e);
+
+        console.log("final count = " + a.count + "  - exactly what a sequential, in-order run gives.");
+      </primer-code>
+      <p>
+        Note what the anti-messages are in this trace: the events at 30 and 40 sent nothing, so undoing them
+        is private; but the event at 20 had a side effect on the outside world, and cancelling it needs an
+        explicit negative message. Reversibility inside the LP, anti-messages between LPs — together they
+        make speculation <em>safe</em>: any wrong guess can be perfectly unwound.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Global Virtual Time: how far back can the past reach?</h2>
+      <p>
+        If any message might drag you back to any earlier time, no result could ever be trusted and no memory
+        ever freed. Time Warp's safety rail is <strong>Global Virtual Time (GVT)</strong>: the minimum over
+        all LPs' local clocks and all messages still in flight. No straggler can ever be stamped earlier than
+        GVT — nothing in the system exists that could produce one. Everything before GVT is therefore
+        <em>committed</em>: irrevocable outputs (a printed statistic, an actual missile launch in a military
+        sim) may be released, and the checkpoints and event histories kept for possible rollback may be
+        reclaimed — a step charmingly known as <strong>fossil collection</strong>. GVT sweeps forward behind
+        the speculating frontier like a tide line: ahead of it, everything is provisional and reversible;
+        behind it, history has hardened into fact.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two ways to roll back — and when reversibility wins</h2>
+      <p>Rollback needs the LP's state as it was at the straggler's timestamp. Two ways to get it:</p>
+      <ul>
+        <li><strong>State saving:</strong> checkpoint the LP's state before every event (or every few), and
+          restore the right copy. Simple, general — and memory-hungry: a simulation with big per-LP state
+          (think a detailed router model with megabytes of tables) spends its life copying itself.</li>
+        <li><strong>Reverse computation:</strong> save (almost) nothing; undo events by executing
+          <em>inverse event handlers</em>, exactly as in the code above — the ROSS simulator made this
+          famous. Where the handler is not naturally invertible (an overwrite, a saturating counter), the
+          forward handler journals just those destroyed bits, and the inverse consumes them.</li>
+      </ul>
+      <p>
+        The tradeoff is the familiar one — copies cost space, inverses cost thought — but here it has a sharp
+        engineering answer: <strong>reverse computation wins when events make small perturbations to big
+        states</strong>. An event that nudges three counters in a megabyte-sized LP state needs a
+        three-operation inverse, versus a megabyte of checkpoint. On supercomputer-scale runs (ROSS has
+        simulated billions of events per second on millions of cores), state saving's memory traffic is the
+        bottleneck, and reverse computation is the difference between scaling and stalling. This is
+        reversible computing's most direct industrial payoff: <em>writing the inverse of your code, by hand
+        or by the inversion rules of this module, because it is faster than remembering</em>.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="The optimist–conservative war">
+      <p>
+        Parallel simulation split into two camps in the 1980s and the argument still simmers. The
+        <strong>conservative</strong> school (Chandy–Misra–Bryant) never lets an LP process an event until it
+        is provably safe — no rollbacks ever, but every LP crawls at the speed of its slowest possible
+        neighbour, and performance leans on <em>lookahead</em>: how far ahead each LP can promise not to send
+        messages. The <strong>optimistic</strong> school (Jefferson's Time Warp) lets everyone sprint and
+        pays for mistakes with rollback. Optimism wins when stragglers are rare and lookahead is poor;
+        conservatism wins when rollbacks would cascade catastrophically. Real systems hedge — throttled
+        optimism ("Moving Time Windows"), mixed protocols, adaptive switching — but the philosophical point
+        stands: <em>optimism is only possible at all because rollback exists</em>. Without a way to unwind
+        the past, guessing about it would be reckless; with reversibility, speculation becomes a strategy
+        instead of a sin. (You have seen this pattern before: modern CPUs speculate down predicted branches
+        and roll back mispredictions — Time Warp is the same gamble, at datacentre scale.)
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Rollback is not failure">
+      <p>
+        Newcomers read "the LP rolled back 4,000 events" as a bug report. It is a <em>billing statement</em>:
+        rollback is the price paid for the parallelism won by speculating. The only questions are whether the
+        price is fair — did speculation buy more progress than repair cost? — and whether it is
+        <em>correct</em>, which Time Warp guarantees: after all rollbacks, cancellations and re-executions,
+        every LP's committed history is exactly what a sequential in-order simulation would have produced.
+        A healthy Time Warp run rolls back constantly, the way a healthy CPU mispredicts branches constantly.
+        The pathology to watch for is different: cascades of rollbacks re-triggering each other faster than
+        real progress is made ("rollback thrashing"), which throttled optimism exists to prevent.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "timeWarpQuiz@1": {
+          "intro": "Time Warp: speculate forward; a straggler in the past triggers rollback, anti-messages, and re-execution.",
+          "rbWhichQ": "An LP processed events at virtual times {a}, {b} and {c}, in that order. A straggler arrives with timestamp {t} (between {a} and {b}). The rollback must undo all events from which time onwards?",
+          "antiQ": "What is an anti-message for?",
+          "anti1": "To cancel a message sent during speculation that has now been rolled back",
+          "anti2": "To acknowledge that a message was received correctly",
+          "anti3": "To slow down LPs that are running too far ahead",
+          "anti4": "To compress the event log",
+          "antiArriveQ": "An anti-message arrives, but the receiver has ALREADY processed the matching positive message. What happens?",
+          "aa1": "The receiver itself rolls back to before that message — cancellation cascades",
+          "aa2": "The anti-message is discarded; it arrived too late",
+          "aa3": "The whole simulation restarts from virtual time 0",
+          "aa4": "The receiver processes the anti-message as a normal event",
+          "gvtQ": "What does Global Virtual Time (GVT) guarantee?",
+          "gvt1": "No rollback can ever reach before GVT, so earlier states can be committed and their history reclaimed",
+          "gvt2": "All LPs are at exactly the same virtual time",
+          "gvt3": "No LP will ever need to roll back again",
+          "gvt4": "Messages are always delivered in timestamp order",
+          "tradeQ": "When does reverse computation beat state saving as the rollback mechanism?",
+          "trade1": "When events make small perturbations to large states, so inverses are cheap and checkpoints are huge",
+          "trade2": "When each event rewrites the entire state from scratch",
+          "trade3": "When memory is unlimited and copying is free",
+          "trade4": "Never — state saving is always faster",
+          "undoCountQ": "Each event handler performs count += {a}. Rolling back {k} such events by reverse computation decreases count by how much?",
+          "mechQ": "What are the two mechanisms an optimistic simulator can use to restore state on rollback?",
+          "mech1": "Saved-state checkpoints, or executing inverse event handlers (reverse computation)",
+          "mech2": "Restarting the simulation, or ignoring the straggler",
+          "mech3": "Locking, or message acknowledgements",
+          "mech4": "Garbage collection, or reference counting",
+          "stragQ": "What exactly triggers a rollback in Time Warp?",
+          "strag1": "A message arriving with a timestamp earlier than the LP's local virtual time",
+          "strag2": "Any message arriving from another LP",
+          "strag3": "An LP's event queue becoming empty",
+          "strag4": "The simulation reaching Global Virtual Time",
+          "antiCountQ": "The rolled-back events had sent {m} messages to other LPs. How many anti-messages must now be sent?",
+          "noRollQ": "A message arrives with a timestamp LATER than the LP's local virtual time. What happens?",
+          "noRoll1": "No rollback — it is enqueued and processed in timestamp order like any future event",
+          "noRoll2": "The LP rolls back to virtual time 0 to be safe",
+          "noRoll3": "The message is rejected and must be re-sent",
+          "noRoll4": "An anti-message is generated automatically",
+          "optConsQ": "How do conservative and optimistic parallel simulation differ?",
+          "oc1": "Conservative LPs block until processing an event is provably safe; optimistic LPs speculate and repair mistakes by rollback",
+          "oc2": "Conservative simulators are parallel, optimistic ones are sequential",
+          "oc3": "Optimistic simulators can produce incorrect final results",
+          "oc4": "Conservative simulators need anti-messages, optimistic ones do not",
+          "annihQ": "An anti-message finds its positive twin still unprocessed in the receiver's input queue. What happens?",
+          "ann1": "The pair annihilates — both are removed, as if the message had never been sent",
+          "ann2": "Both are processed, cancelling numerically",
+          "ann3": "The anti-message waits until the positive one is processed",
+          "ann4": "The receiver forwards both to a third LP"
+        }
+      }
+    </script>
+
+    <primer-quiz name="timeWarpQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/reversible-computing/languages/record-replay-in-practice"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Two LP timelines: speculation, straggler, rollback + anti-message, re-execution. ──
+  registerGeometryScene(
+    "timeWarp",
+    ({ board, colors, step, sceneStrings }) => {
+      const ink = colors.ink;
+      const specC = colors.cat[0], stragC = colors.cat[1], rbC = colors.cat[2], redoC = colors.cat[3];
+      const T = (x, y, txt, color, size = 13, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+      const dot = (x, y, color, face = "o", size = 2.5) =>
+        board.create("point", [x, y], { face, size, color, name: "", fixed: true, highlight: false });
+
+      // Base: two LP timelines with a shared virtual-time scale.
+      board.create("arrow", [[-2, 6], [52, 6]], { strokeColor: colors.line, strokeWidth: 2, highlight: false });
+      board.create("arrow", [[-2, 0], [52, 0]], { strokeColor: colors.line, strokeWidth: 2, highlight: false });
+      T(-4, 6, sceneStrings("lpA"), ink, 14);
+      T(-4, 0, sceneStrings("lpB"), ink, 14);
+      for (const x of [0, 10, 20, 30, 40, 50]) {
+        board.create("segment", [[x, -0.3], [x, 0.3]], { strokeColor: colors.line, strokeWidth: 1, highlight: false });
+        board.create("segment", [[x, 5.7], [x, 6.3]], { strokeColor: colors.line, strokeWidth: 1, highlight: false });
+        T(x, -1.0, String(x), ink, 11);
+      }
+      T(51, -1.9, sceneStrings("axis"), ink, 12, "right");
+
+      // Step 1: LP A speculates ahead; LP B lags.
+      step(sceneStrings("stepSpec"), () => {
+        for (const x of [10, 20, 30, 40]) dot(x, 6, specC);
+        dot(12, 0, specC);
+      });
+
+      // Step 2: the straggler — a message stamped 15 arrives in A's past.
+      step(sceneStrings("stepStraggler"), () => {
+        board.create("arrow", [[12, 0.4], [15, 5.6]], { strokeColor: stragC, strokeWidth: 2.5, highlight: false });
+        dot(15, 6, stragC, "x", 4);
+        T(9, 3.0, sceneStrings("straggler"), stragC, 12, "right");
+      });
+
+      // Step 3: rollback of 20, 30, 40 + an anti-message for the send from event 20.
+      step(sceneStrings("stepRollback"), () => {
+        board.create("arrow", [[41, 7.6], [19, 7.6]], { strokeColor: rbC, strokeWidth: 2.5, dash: 2, highlight: false });
+        T(30, 8.4, sceneStrings("rollback"), rbC, 12);
+        for (const x of [20, 30, 40]) dot(x, 6.8, rbC, "x", 3);
+        board.create("arrow", [[20, 5.6], [22, 0.4]], { strokeColor: rbC, strokeWidth: 2, dash: 3, highlight: false });
+        T(24, 3.0, sceneStrings("antiMsg"), rbC, 12, "left");
+      });
+
+      // Step 4: re-execute forward from 15 in correct order.
+      step(sceneStrings("stepReplay"), () => {
+        board.create("arrow", [[15, 4.9], [41, 4.9]], { strokeColor: redoC, strokeWidth: 2.5, highlight: false });
+        T(28, 4.1, sceneStrings("replay"), redoC, 12);
+      });
+    },
+    { boundingbox: [-9, 9.4, 54, -2.8], keepAspect: false, title: () => makeStrings("timeWarp")("title") },
+  );
+
+  registerQuiz("timeWarpQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Straggler t with a < t < b: events b and c must be undone, i.e. from time b onwards.
+      prompt: (v) => sceneStrings("rbWhichQ", v),
+      variables: "a=[3:6] b=[10:14] c=[20:25] t=[7:9]",
+      answer: "b",
+    },
+    {
+      prompt: () => sceneStrings("antiQ"),
+      options: [
+        { text: () => sceneStrings("anti1"), correct: true },
+        { text: () => sceneStrings("anti2"), correct: false },
+        { text: () => sceneStrings("anti3"), correct: false },
+        { text: () => sceneStrings("anti4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("antiArriveQ"),
+      options: [
+        { text: () => sceneStrings("aa1"), correct: true },
+        { text: () => sceneStrings("aa2"), correct: false },
+        { text: () => sceneStrings("aa3"), correct: false },
+        { text: () => sceneStrings("aa4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gvtQ"),
+      options: [
+        { text: () => sceneStrings("gvt1"), correct: true },
+        { text: () => sceneStrings("gvt2"), correct: false },
+        { text: () => sceneStrings("gvt3"), correct: false },
+        { text: () => sceneStrings("gvt4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tradeQ"),
+      options: [
+        { text: () => sceneStrings("trade1"), correct: true },
+        { text: () => sceneStrings("trade2"), correct: false },
+        { text: () => sceneStrings("trade3"), correct: false },
+        { text: () => sceneStrings("trade4"), correct: false },
+      ],
+    },
+    {
+      // Undoing k events, each count += a, decreases count by a*k.
+      prompt: (v) => sceneStrings("undoCountQ", v),
+      variables: "a=[2:9] k=[2:8]",
+      answer: "a*k",
+    },
+    {
+      prompt: () => sceneStrings("mechQ"),
+      options: [
+        { text: () => sceneStrings("mech1"), correct: true },
+        { text: () => sceneStrings("mech2"), correct: false },
+        { text: () => sceneStrings("mech3"), correct: false },
+        { text: () => sceneStrings("mech4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("stragQ"),
+      options: [
+        { text: () => sceneStrings("strag1"), correct: true },
+        { text: () => sceneStrings("strag2"), correct: false },
+        { text: () => sceneStrings("strag3"), correct: false },
+        { text: () => sceneStrings("strag4"), correct: false },
+      ],
+    },
+    {
+      // One anti-message per cancelled message.
+      prompt: (v) => sceneStrings("antiCountQ", v),
+      variables: "m=[2:9]",
+      answer: "m",
+    },
+    {
+      prompt: () => sceneStrings("noRollQ"),
+      options: [
+        { text: () => sceneStrings("noRoll1"), correct: true },
+        { text: () => sceneStrings("noRoll2"), correct: false },
+        { text: () => sceneStrings("noRoll3"), correct: false },
+        { text: () => sceneStrings("noRoll4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("optConsQ"),
+      options: [
+        { text: () => sceneStrings("oc1"), correct: true },
+        { text: () => sceneStrings("oc2"), correct: false },
+        { text: () => sceneStrings("oc3"), correct: false },
+        { text: () => sceneStrings("oc4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("annihQ"),
+      options: [
+        { text: () => sceneStrings("ann1"), correct: true },
+        { text: () => sceneStrings("ann2"), correct: false },
+        { text: () => sceneStrings("ann3"), correct: false },
+        { text: () => sceneStrings("ann4"), correct: false },
+      ],
+    },
+  ]);
+</script>

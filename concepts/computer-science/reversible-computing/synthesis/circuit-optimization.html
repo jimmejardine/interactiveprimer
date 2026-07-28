@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Reversible Circuit Optimization</primer-title>
+
+    <primer-card>
+      <p>
+        Synthesis algorithms — <primer-ref to="computer-science/reversible-computing/synthesis/transformation-based-synthesis">MMD</primer-ref>,
+        ESOP translation, ladder decompositions with their
+        <primer-ref to="computer-science/reversible-computing/synthesis/ancilla-tradeoffs-in-synthesis">ancilla
+        trade-offs</primer-ref> — hand you a <em>correct</em> circuit, not a <em>good</em> one. Their output
+        is a rough draft, full of gates that undo each other, gates that could slide past one another, and
+        little sub-patterns with cheaper equivalents. <strong>Post-synthesis optimization</strong> is the
+        editing pass: a toolbox of local rewrites that preserve the permutation while shrinking the cost
+        metrics. The three tools, in order of sophistication: <strong>cancellation</strong>,
+        <strong>commutation</strong>, and <strong>template matching</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Tool 1: cancellation</h2>
+      <p>
+        Every NCT gate is <strong>self-inverse</strong>: <primer-math>G \cdot G = I</primer-math>. So two
+        <em>identical, adjacent</em> gates annihilate — delete both, the permutation is unchanged, the gate
+        count drops by two. Synthesised circuits are full of these: MMD's row-by-row repairs and cycle
+        decomposition's sandwich bread routinely leave matching pairs face to face, especially after blocks
+        are concatenated. Cancellation is trivial to check and free to apply, which is why every optimizer
+        runs it first — and, as we will see, <em>again after every other rewrite</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Tool 2: commutation</h2>
+      <p>
+        Cancellation only fires on <em>adjacent</em> pairs, so the second tool creates adjacency: rules for
+        when two neighbouring gates may swap places without changing the circuit. The classification is a
+        pleasant exercise in thinking about who reads and who writes each wire:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Situation</th><th>Commute?</th><th>Why</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>disjoint wires</td><td><strong>always</strong></td><td>they touch different bits entirely</td></tr>
+            <tr><td>shared wire is a <em>control</em> of both</td><td><strong>yes</strong></td><td>both only read it, neither writes it</td></tr>
+            <tr><td>shared wire is the <em>target</em> of both</td><td><strong>yes</strong></td><td>two XORs onto the same bit — XOR is commutative</td></tr>
+            <tr><td>target of one is a <em>control</em> of the other</td><td><strong>no</strong> (in general)</td><td>one writes what the other reads — order changes what is read</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The classic counterexample for the last row: NOT on wire <primer-math>a</primer-math> versus CNOT
+        <primer-math>(a \to b)</primer-math>. As "NOT then CNOT" the target receives
+        <primer-math>b \oplus \bar a</primer-math>; as "CNOT then NOT" it receives
+        <primer-math>b \oplus a</primer-math>. Different functions — no swap allowed. But NOT on
+        <primer-math>b</primer-math> (the <em>target</em>) slides through the same CNOT freely: flipping the
+        target before or after XORing <primer-math>a</primer-math> onto it lands in the same place.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "templateDemo": {
+          "title": "A 4-gate template collapses to a single CNOT",
+          "stepFour": "The pattern as synthesised: Toffoli, NOT on a, the same Toffoli, NOT on a — four gates",
+          "stepOne": "Its net effect on c is c ⊕ ab ⊕ āb = c ⊕ b: the whole window is one CNOT (b → c)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Tool 3: templates and peephole rewriting</h2>
+      <p>
+        The heavyweight tool: a <strong>template</strong> is a known circuit identity — a short gate sequence
+        equal to a cheaper one. An optimizer slides a small window (a "peephole") along the cascade, matches
+        templates (using commutation to herd the participating gates together), and rewrites. Here is a
+        classic, worth working through because the algebra is two lines. Take the window: Toffoli
+        <primer-math>(a,b \to c)</primer-math>, NOT <primer-math>a</primer-math>, Toffoli
+        <primer-math>(a,b \to c)</primer-math>, NOT <primer-math>a</primer-math>. The two Toffolis together
+        XOR onto <primer-math>c</primer-math> both <primer-math>ab</primer-math> (first, with
+        <primer-math>a</primer-math> as supplied) and <primer-math>\bar a b</primer-math> (second, with
+        <primer-math>a</primer-math> flipped), while the NOTs cancel each other on wire
+        <primer-math>a</primer-math>:
+      </p>
+      <primer-math display>c \;\oplus\; ab \;\oplus\; \bar a b \;=\; c \;\oplus\; (a \oplus \bar a)\,b \;=\; c \;\oplus\; b.</primer-math>
+      <p>
+        Four gates — two of them expensive Toffolis — equal <strong>one CNOT</strong>
+        <primer-math>(b \to c)</primer-math>:
+      </p>
+      <primer-geometry scene="templateDemo" caption="Three wires a, b, c. Left: a four-gate window — Toffoli with controls a, b and target c; NOT on a; the same Toffoli again; NOT on a. Right of an equals sign: a single CNOT with control b and target c."></primer-geometry>
+      <p>
+        A template library full of identities like this (and their mirror images, and their
+        control-permuted variants) is the core of production reversible-circuit optimizers. Each rewrite can
+        expose fresh cancellations, so the passes loop until nothing fires — a <strong>fixpoint</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Try it: a tiny peephole pass</h2>
+      <p>
+        The simplest possible optimizer — cancel adjacent identical gates, repeat until stable — is a dozen
+        lines. Watch how removing one pair brings another pair together:
+      </p>
+      <primer-code run>
+        // A gate is just its name: same string = same gate.
+        const before: string[] = [
+          "TOF(a,b;c)", "CNOT(a;b)", "CNOT(a;b)", "X(c)", "X(c)", "TOF(a,b;c)",
+        ];
+
+        function cancelOnce(gates: string[]): string[] {
+          const out: string[] = [];
+          let i = 0;
+          while (i &lt; gates.length) {
+            if (i + 1 &lt; gates.length &amp;&amp; gates[i] === gates[i + 1]) {
+              i += 2;               // an identical adjacent pair annihilates
+            } else {
+              out.push(gates[i]);
+              i += 1;
+            }
+          }
+          return out;
+        }
+
+        let current = before;
+        let pass = 1;
+        while (true) {
+          const next = cancelOnce(current);
+          if (next.length === current.length) break;   // fixpoint reached
+          console.log("pass " + pass + ": " + current.length + " gates -&gt; " + next.length);
+          current = next;
+          pass += 1;
+        }
+        console.log("before: " + before.length + " gates");
+        console.log("after:  " + current.length + " gates");
+        console.log(current.length === 0 ? "the whole cascade was the identity in disguise!" : current.join(" "));
+      </primer-code>
+      <p>
+        The first pass removes the CNOT pair and the NOT pair; only then do the two Toffolis become adjacent
+        and cancel on the second pass. Six gates, net effect: nothing at all. Real optimizers interleave
+        commutation and template passes in the same loop — but the fixpoint skeleton is exactly this.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Benchmarks, and the metric that pays the bills</h2>
+      <p>
+        How do you know your optimizer is any good? The field's shared yardstick is
+        <strong>RevLib</strong> — a public library of reversible benchmark functions and circuits (adders,
+        cipher pieces, hidden-weight-bit functions…) with the best known costs on record. Publishing a
+        synthesis paper without RevLib numbers is like claiming a sprint record without a stopwatch.
+        And which metric should the optimizer chase? Increasingly, the one downstream: on fault-tolerant
+        quantum hardware the crushing expense is the <strong>T gate</strong>, with a Toffoli costing about 7
+        of them — so a rewrite that trades one Toffoli for <em>three</em> CNOTs is an excellent deal there,
+        even though the raw gate count went up. Optimization is always <em>toward a cost model</em>; change
+        the price list and the best circuit changes too.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Could an optimizer just find the best circuit?">
+      <p>
+        Why settle for peephole nibbling — why not compute the true minimum-cost circuit? Because optimal
+        reversible synthesis hits a combinatorial wall: the space of cascades grows exponentially with gate
+        count, and on <primer-math>n</primer-math> wires there are <primer-math>(2^n)!</primer-math> targets
+        to distinguish. Exhaustive/IDA*-style searches have mapped out optimal circuits for <em>all</em>
+        3-bit reversible functions (a landmark computation — worst case: 8 gates in the NCT library), and
+        there the greedy heuristics were caught being 20–40% wasteful. Beyond 4 bits, provable optimality is
+        effectively out of reach, and everything in practice is heuristics plus templates plus patience.
+        Local rewriting is not a compromise born of laziness; it is the only game in town at scale — the
+        same story as classical logic optimization, replayed in the reversible world.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Adjacent in the drawing' is not 'adjacent in effect'">
+      <p>
+        Two identical CNOTs with a stranger between them do <em>not</em> automatically cancel — first ask
+        whether the stranger commutes past one of them. If the middle gate shares only <em>controls</em> with
+        them, fine: slide it out, cancel the pair. But if it <em>writes a wire the pair reads</em> (its
+        target is their control), the swap is illegal and the pair genuinely cannot meet — deleting them
+        changes the function. The order of operations matters even for the optimizer itself: cancel first
+        and you may miss rewrites; commute blindly and you corrupt the circuit. Every rewrite must cite its
+        rule.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "revOptQuiz@1": {
+          "intro": "NCT gates are self-inverse: identical adjacent gates cancel. Swapping neighbours is legal only if no gate writes a wire the other reads.",
+          "cancelQ": "Two identical CNOTs, both with control on wire {i} and target on wire {j}, sit directly side by side. Their net effect is…",
+          "ca1": "the identity — they cancel and both can be deleted",
+          "ca2": "a single CNOT with doubled strength",
+          "ca3": "a SWAP of wires",
+          "ca4": "a Toffoli",
+          "countQ": "A cascade has {g} gates. The optimizer deletes {p} adjacent identical pairs. How many gates remain?",
+          "tcQ": "A circuit contains {k} Toffolis (NOTs and CNOTs are free in this costing, and a Toffoli is priced at 7 T gates). What is its T-count?",
+          "selfQ": "Why does G·G = I hold for every gate in the NCT library?",
+          "sf1": "Each NCT gate is its own inverse — applying the same conditional flip twice undoes it",
+          "sf2": "It holds only for NOT, not for CNOT or Toffoli",
+          "sf3": "Because NCT gates are linear functions",
+          "sf4": "It is an axiom with no reason",
+          "notTgtQ": "A NOT on wire b sits next to a CNOT with control a and target b. May they swap places?",
+          "nt1": "Yes — both write the target b with XORs, and XORs onto the same wire commute",
+          "nt2": "No — a NOT never commutes with a CNOT",
+          "nt3": "Only if wire a currently holds 0",
+          "nt4": "Only in the middle of the circuit",
+          "notCtlQ": "A NOT on wire a sits next to a CNOT with control a and target b. May they swap places?",
+          "nc1": "No — the NOT writes the wire the CNOT reads: one order gives b ⊕ a, the other b ⊕ ā",
+          "nc2": "Yes — NOTs commute with everything",
+          "nc3": "Yes — controls are never affected by NOTs",
+          "nc4": "Only if b is an ancilla",
+          "disjQ": "Two gates act on completely disjoint sets of wires. May they swap places?",
+          "dj1": "Always — they touch different bits entirely",
+          "dj2": "Never",
+          "dj3": "Only if both are Toffolis",
+          "dj4": "Only if the circuit has even depth",
+          "shareCtlQ": "Two CNOTs share the same control wire but have different targets. May they swap?",
+          "sc1": "Yes — both only read the shared wire",
+          "sc2": "No — sharing any wire forbids swapping",
+          "sc3": "Only if the targets are adjacent wires",
+          "sc4": "Only after inserting a Toffoli between them",
+          "tmplQ": "The window [Toffoli(a,b→c), NOT a, Toffoli(a,b→c), NOT a] rewrites to…",
+          "tm1": "a single CNOT (b → c): c receives ab ⊕ āb = b, and the NOTs cancel on a",
+          "tm2": "a single Toffoli",
+          "tm3": "the empty circuit",
+          "tm4": "a single NOT on c",
+          "fixQ": "Why do optimizers loop their passes until nothing changes (a fixpoint)?",
+          "fx1": "Each rewrite can bring new identical gates next to each other, exposing further cancellations",
+          "fx2": "To use up a fixed time budget",
+          "fx3": "Because one pass always makes circuits longer",
+          "fx4": "To randomise the gate order",
+          "revlibQ": "What is RevLib?",
+          "rl1": "A public library of reversible benchmark functions and circuits used to compare synthesis and optimization results",
+          "rl2": "A programming language for reversible computers",
+          "rl3": "A quantum computer vendor",
+          "rl4": "A layout tool for circuit diagrams",
+          "whyTQ": "Why does the T-count metric matter downstream of reversible synthesis?",
+          "wt1": "On fault-tolerant quantum hardware T gates dominate the cost, and each Toffoli spends about 7 of them",
+          "wt2": "T gates are the only gates classical hardware can build",
+          "wt3": "T-count equals circuit depth by definition",
+          "wt4": "RevLib refuses circuits without a T-count"
+        }
+      }
+    </script>
+
+    <primer-quiz name="revOptQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/reversible-computing/synthesis/ancilla-tradeoffs-in-synthesis"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The 4-gate window (TOF, X a, TOF, X a) and its 1-gate equivalent CNOT(b→c). ──
+  registerGeometryScene(
+    "templateDemo",
+    ({ board, colors, step, sceneStrings }) => {
+      const wire = colors.line, ink = colors.ink, gateC = colors.cat[0], newC = colors.cat[1];
+      const T = (x, y, txt, color, size = 14, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+      const seg = (p, q, color, w = 2) =>
+        board.create("segment", [p, q], { strokeColor: color, strokeWidth: w, highlight: false });
+      const dot = (x, y, color) =>
+        board.create("point", [x, y], {
+          face: "o", size: 5, fixed: true, withLabel: false, highlight: false,
+          fillColor: color, strokeColor: color,
+        });
+      const oplus = (x, y, color) => {
+        board.create("circle", [[x, y], 0.22], { strokeColor: color, strokeWidth: 2, fillOpacity: 0, highlight: false });
+        seg([x, y - 0.22], [x, y + 0.22], color);
+        seg([x - 0.22, y], [x + 0.22, y], color);
+      };
+
+      // Left circuit wires.
+      const L0 = 0.5, L1 = 4.3;
+      for (const y of [2, 1, 0]) seg([L0, y], [L1, y], wire);
+      T(L0 - 0.35, 2, "a", ink);
+      T(L0 - 0.35, 1, "b", ink);
+      T(L0 - 0.35, 0, "c", ink);
+
+      // Step 1: the four-gate window.
+      step(sceneStrings("stepFour"), () => {
+        seg([1.1, 2], [1.1, 0], gateC);
+        dot(1.1, 2, gateC);
+        dot(1.1, 1, gateC);
+        oplus(1.1, 0, gateC);
+        oplus(1.9, 2, gateC);
+        seg([2.7, 2], [2.7, 0], gateC);
+        dot(2.7, 2, gateC);
+        dot(2.7, 1, gateC);
+        oplus(2.7, 0, gateC);
+        oplus(3.5, 2, gateC);
+      });
+
+      // Step 2: equals one CNOT (b → c).
+      step(sceneStrings("stepOne"), () => {
+        T(4.9, 1, "=", ink, 20);
+        const R0 = 5.5, R1 = 7.3;
+        for (const y of [2, 1, 0]) seg([R0, y], [R1, y], wire);
+        seg([6.4, 1], [6.4, 0], newC);
+        dot(6.4, 1, newC);
+        oplus(6.4, 0, newC);
+      });
+    },
+    { boundingbox: [-0.4, 2.8, 7.8, -0.8], title: () => makeStrings("templateDemo")("title") },
+  );
+
+  registerQuiz("revOptQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("cancelQ", v),
+      variables: "i=[1:3] j=[1:3]",
+      constraints: "i != j",
+      options: [
+        { text: () => sceneStrings("ca1"), correct: true },
+        { text: () => sceneStrings("ca2"), correct: false },
+        { text: () => sceneStrings("ca3"), correct: false },
+        { text: () => sceneStrings("ca4"), correct: false },
+      ],
+    },
+    {
+      // Each cancelled pair removes 2 gates; ranges keep g − 2p positive.
+      prompt: (v) => sceneStrings("countQ", v),
+      variables: "g=[8:15] p=[1:3]",
+      answer: "g - 2 * p",
+    },
+    {
+      prompt: (v) => sceneStrings("tcQ", v),
+      variables: "k=[2:9]",
+      answer: "7 * k",
+    },
+    {
+      prompt: () => sceneStrings("selfQ"),
+      options: [
+        { text: () => sceneStrings("sf1"), correct: true },
+        { text: () => sceneStrings("sf2"), correct: false },
+        { text: () => sceneStrings("sf3"), correct: false },
+        { text: () => sceneStrings("sf4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("notTgtQ"),
+      options: [
+        { text: () => sceneStrings("nt1"), correct: true },
+        { text: () => sceneStrings("nt2"), correct: false },
+        { text: () => sceneStrings("nt3"), correct: false },
+        { text: () => sceneStrings("nt4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("notCtlQ"),
+      options: [
+        { text: () => sceneStrings("nc1"), correct: true },
+        { text: () => sceneStrings("nc2"), correct: false },
+        { text: () => sceneStrings("nc3"), correct: false },
+        { text: () => sceneStrings("nc4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("disjQ"),
+      options: [
+        { text: () => sceneStrings("dj1"), correct: true },
+        { text: () => sceneStrings("dj2"), correct: false },
+        { text: () => sceneStrings("dj3"), correct: false },
+        { text: () => sceneStrings("dj4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("shareCtlQ"),
+      options: [
+        { text: () => sceneStrings("sc1"), correct: true },
+        { text: () => sceneStrings("sc2"), correct: false },
+        { text: () => sceneStrings("sc3"), correct: false },
+        { text: () => sceneStrings("sc4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tmplQ"),
+      options: [
+        { text: () => sceneStrings("tm1"), correct: true },
+        { text: () => sceneStrings("tm2"), correct: false },
+        { text: () => sceneStrings("tm3"), correct: false },
+        { text: () => sceneStrings("tm4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fixQ"),
+      options: [
+        { text: () => sceneStrings("fx1"), correct: true },
+        { text: () => sceneStrings("fx2"), correct: false },
+        { text: () => sceneStrings("fx3"), correct: false },
+        { text: () => sceneStrings("fx4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("revlibQ"),
+      options: [
+        { text: () => sceneStrings("rl1"), correct: true },
+        { text: () => sceneStrings("rl2"), correct: false },
+        { text: () => sceneStrings("rl3"), correct: false },
+        { text: () => sceneStrings("rl4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyTQ"),
+      options: [
+        { text: () => sceneStrings("wt1"), correct: true },
+        { text: () => sceneStrings("wt2"), correct: false },
+        { text: () => sceneStrings("wt3"), correct: false },
+        { text: () => sceneStrings("wt4"), correct: false },
+      ],
+    },
+  ]);
+</script>

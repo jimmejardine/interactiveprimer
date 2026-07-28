@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Reversible Debugging</primer-title>
+
+    <primer-card>
+      <p>
+        Your program has crashed. The stack trace tells you <em>where</em> it died — but the corpse is rarely
+        the crime scene. The variable that is wrong at the crash was corrupted a thousand, or a billion,
+        instructions earlier, by a line of code that ran perfectly happily and moved on. You know this dance
+        from <primer-ref to="computer-science/programming/errors-syntax-logic-and-runtime">debugging logic
+        errors</primer-ref>: the <em>symptom</em> is in front of you; the <em>cause</em> is somewhere in the
+        past.
+      </p>
+      <p>
+        Every conventional debugger can only drive forwards. So the standard workflow is a guessing game:
+        guess where the bug might be, set a breakpoint <em>before</em> it, rerun the whole program, discover
+        you guessed too late (the damage is already done) or too early (nothing has happened yet), adjust,
+        rerun, adjust, rerun… Now imagine the debugger had a reverse gear. Run the program <strong>once</strong>,
+        to the crash. Then simply walk <em>backwards</em> from the corpse, along the actual execution, until
+        you watch the corruption happen — in reverse. This is <strong>reversible debugging</strong> (also
+        sold as time-travel debugging), and it is the killer app of everything this module has built.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The workflow, inverted</h2>
+      <p>
+        The difference is not one of convenience but of <em>direction of reasoning</em>:
+      </p>
+      <primer-table>
+        <table>
+          <tr><th></th><th>Conventional debugging</th><th>Reversible debugging</th></tr>
+          <tr><td>Starting point</td><td>a guess about the cause</td><td>the failure itself</td></tr>
+          <tr><td>Direction</td><td>forwards, hoping to arrive just before the bug</td><td>backwards, along the causal chain</td></tr>
+          <tr><td>Runs needed</td><td>many (one per guess)</td><td>one</td></tr>
+          <tr><td>Works on flaky bugs?</td><td>poorly — the bug may not reappear on rerun</td><td>yes — you interrogate the run that actually failed</td></tr>
+        </table>
+      </primer-table>
+      <p>The reverse gear comes as a small family of commands, mirroring the forward ones:</p>
+      <ul>
+        <li><strong><code>reverse-step</code></strong> — undo one statement: the program counter moves to the
+          previously executed line, and every variable regains its previous value.</li>
+        <li><strong><code>reverse-continue</code></strong> — run backwards at full speed until a breakpoint
+          or watchpoint is hit from the other side.</li>
+        <li><strong>watchpoint + <code>reverse-continue</code></strong> — the single most powerful move in
+          all of debugging: put a watchpoint on the corrupted variable and reverse-continue. Execution flows
+          backwards and stops at <em>the exact instruction that last wrote that variable</em>. "Who touched
+          this?" — answered in one command, with certainty, on the first try.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>Build one in thirty lines</h2>
+      <p>
+        The essence of a time-travel debugger fits in a code box. Take a tiny buggy program, journal every
+        write during one forward run, and then answer the "who touched this?" question by scanning the
+        journal backwards:
+      </p>
+      <primer-code run>
+        type Mem = { [name: string]: number };
+        type Line = { no: number; src: string; run: (m: Mem) =&gt; void };
+
+        // A little program with a logic bug on line 5 (the fee is charged twice).
+        const program: Line[] = [
+          { no: 1, src: "balance = 100",       run: (m) =&gt; { m.balance = 100; } },
+          { no: 2, src: "bonus = 20",          run: (m) =&gt; { m.bonus = 20; } },
+          { no: 3, src: "balance += bonus",    run: (m) =&gt; { m.balance += m.bonus; } },
+          { no: 4, src: "fee = 15",            run: (m) =&gt; { m.fee = 15; } },
+          { no: 5, src: "balance -= fee * 2",  run: (m) =&gt; { m.balance -= m.fee * 2; } },  // BUG
+          { no: 6, src: "audit(balance)",      run: (m) =&gt; { /* expects 105, sees less */ } },
+        ];
+
+        type Write = { step: number; line: number; name: string; before: number; after: number };
+        const journal: Write[] = [];
+
+        // RECORD: one forward run, journalling every changed variable.
+        const mem: Mem = {};
+        program.forEach(function (line, step) {
+          const before: Mem = { ...mem };
+          line.run(mem);
+          for (const name in mem) {
+            if (mem[name] !== before[name]) {
+              journal.push({ step, line: line.no, name,
+                             before: before[name] === undefined ? 0 : before[name],
+                             after: mem[name] });
+            }
+          }
+        });
+        console.log("crash state: " + JSON.stringify(mem) + "   (audit expected balance = 105)");
+
+        // watch balance; reverse-continue  ==  scan the journal backwards for the last write
+        function whoLastWrote(name: string): Write {
+          for (let i = journal.length - 1; i &gt;= 0; i--) {
+            if (journal[i].name === name) return journal[i];
+          }
+          throw new Error(name + " was never written");
+        }
+        const culprit = whoLastWrote("balance");
+        console.log("watch balance; reverse-continue");
+        console.log("  -> stopped at line " + culprit.line + ": \"" +
+                    program[culprit.step].src + "\"  (balance " +
+                    culprit.before + " -> " + culprit.after + ")");
+
+        // reverse-step twice from the end: undo writes one at a time.
+        console.log("reverse-step x2:");
+        const back: Mem = { ...mem };
+        for (const w of journal.slice(-2).reverse()) {
+          back[w.name] = w.before;
+          console.log("  undo line " + w.line + "   state: " + JSON.stringify(back));
+        }
+      </primer-code>
+      <p>
+        Line 5 is fingered immediately — no guessing, no rerunning. Notice <em>how</em> the toy works: it
+        keeps a journal of destroyed values (each write's <code>before</code>), which is exactly the
+        "log the forgetting" strategy — memory spent to fake reversibility on an irreversible machine.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Where does the reverse gear come from?</h2>
+      <p>There are only two places it can come from, and this module has met them both:</p>
+      <ul>
+        <li><strong>A reversible machine — the reverse gear is free.</strong> If the program is written in a
+          reversible language on reversible hardware, backwards execution needs no journal at all: the
+          debugger literally runs the inverse program, statement by statement, derived syntactically as in
+          <primer-ref to="computer-science/reversible-computing/languages/program-inversion">program
+          inversion</primer-ref>. Nothing was forgotten, so nothing needs to be remembered.</li>
+        <li><strong>An irreversible machine — pay with memory.</strong> Real programs on real CPUs destroy
+          information constantly, so the debugger must capture it as it dies: journals of overwritten values,
+          periodic state snapshots, or logs of inputs. This is the engineering reality behind every
+          production time-travel debugger, and the <em>next lesson</em> is about how tools like rr and UDB
+          make the cost astonishingly small.</li>
+      </ul>
+      <p>
+        And here is the pleasing theoretical punchline: option (b) is not a hack that betrays the theory —
+        it <em>is</em> the theory. A debugger that journals destroyed information is precisely
+        <primer-ref soft to="people/bennett">Bennett's</primer-ref> history construction from the
+        reversible-Turing-machine proof, running in production: augment an irreversible computation with a
+        history tape, and the augmented computation becomes reversible. Every time-travel debugger is a
+        history-keeping reversible simulation of an irreversible program — the compute–record–rewind idea,
+        wearing a toolbelt.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="The bug is always in the past">
+      <p>
+        This sounds like a fortune cookie, but it is a precise statement about causality. A failure is an
+        <em>observation</em>; its cause must lie in the observation's past light-cone — the chain of reads
+        and writes that actually fed into the bad value. Forward debugging tries to <em>predict</em> where
+        that chain begins, which is why it needs luck. Backward debugging <em>follows</em> the chain: from
+        the bad value, to the instruction that wrote it, to the bad operands of <em>that</em> instruction, to
+        the instructions that wrote those — a finite regress that provably terminates at the root cause,
+        because the run itself is finite. Each watchpoint-plus-reverse-continue hop is one link of the chain.
+        Debugging stops being detective fiction ("who <em>might</em> have done it?") and becomes archaeology
+        ("dig down one layer; the evidence is all there").
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Reverse execution does not mean re-running in reverse">
+      <p>
+        A tempting mental model: "the debugger executes the program's statements in reverse order". Wrong —
+        and dangerously wrong for a working engineer. Statements in reverse order would be a <em>different
+        program</em> (and mostly nonsense). What reverse-step restores is the machine's <em>previous
+        state</em> along the <em>original forward execution</em> — same path, same branches, same loop
+        iterations, traversed backwards. A reversible debugger never explores executions that didn't happen;
+        it revisits the one that did. That is its superpower against flaky, once-in-a-blue-moon bugs: the
+        recorded run <em>is</em> the failing run, so the bug cannot fail to be there when you go looking.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "revDebugQuiz@1": {
+          "intro": "Reversible debugging: run once to the failure, then walk backwards along the actual execution.",
+          "corruptQ": "Variable x holds a wrong value at the crash. What is the most direct way to find the code that corrupted it?",
+          "corrupt1": "Set a watchpoint on x and reverse-continue: execution stops at the last write to x",
+          "corrupt2": "Set a breakpoint at main() and single-step forwards until x changes",
+          "corrupt3": "Add print statements around every assignment to x and rerun",
+          "corrupt4": "Read every line of the program until the bug is spotted",
+          "convQ": "What does the CONVENTIONAL debugging workflow require when your breakpoint turns out to be after the corruption already happened?",
+          "conv1": "Guess an earlier breakpoint and rerun the whole program",
+          "conv2": "Step backwards to the corruption",
+          "conv3": "The debugger automatically finds the corrupting line",
+          "conv4": "Nothing — a late breakpoint still shows the cause",
+          "rstepQ": "What does reverse-step do?",
+          "rstep1": "Restores the previous state along the original execution — the last executed statement is undone",
+          "rstep2": "Executes the program's statements in reverse textual order",
+          "rstep3": "Restarts the program from the beginning",
+          "rstep4": "Skips backwards to the previous breakpoint, discarding state",
+          "freeQ": "Why can a genuinely reversible machine offer reverse execution for free?",
+          "free1": "Every step is invertible, so the previous state is computed from the current one — no journal needed",
+          "free2": "Reversible machines are faster, so re-running costs nothing",
+          "free3": "Reversible machines store every past state in RAM",
+          "free4": "They cannot — reverse execution always needs a full log",
+          "irrevQ": "On an ordinary (irreversible) machine, what does backward stepping require?",
+          "irrev1": "Instrumentation: journals of destroyed values, snapshots, or logged inputs",
+          "irrev2": "Nothing extra — the CPU can always run backwards",
+          "irrev3": "Recompiling the program in a reversible language",
+          "irrev4": "A quantum co-processor",
+          "journalQ": "A journal records: step {a}: write x, step {b}: write x, step {c}: write y. The program then crashes. With a watchpoint on x, reverse-continue from the crash stops first at which step?",
+          "stepsQ": "You are at execution step {n} and reverse-step {k} times. Which step are you at now?",
+          "bennettQ": "How does a journalling time-travel debugger relate to Bennett's reversible-simulation construction?",
+          "bennett1": "It is the same idea: augment an irreversible computation with a history of destroyed information, making it reversible",
+          "bennett2": "It contradicts it: Bennett proved journals cannot give reversibility",
+          "bennett3": "They are unrelated — Bennett's construction is only about energy",
+          "bennett4": "Bennett's construction only applies to quantum computers",
+          "causalQ": "What does \"the bug is always in the past\" express?",
+          "causal1": "The cause of a failure lies on the causal chain of writes leading to it, which backward execution can follow link by link",
+          "causal2": "Bugs only occur in legacy code",
+          "causal3": "A failure and its cause always occur on the same line",
+          "causal4": "Old versions of a program are buggier than new ones",
+          "rcontQ": "What does reverse-continue do?",
+          "rcont1": "Runs execution backwards at full speed until a breakpoint or watchpoint is hit",
+          "rcont2": "Undoes exactly one machine instruction",
+          "rcont3": "Continues forwards, then jumps back to the start",
+          "rcont4": "Deletes all breakpoints and restarts",
+          "flakyQ": "Why are reversible debuggers especially good for flaky, hard-to-reproduce bugs?",
+          "flaky1": "The failing run itself is interrogated backwards — the bug cannot disappear on a rerun, because there is no rerun",
+          "flaky2": "They make all programs deterministic forever",
+          "flaky3": "They automatically fix race conditions",
+          "flaky4": "They run the program many times until the bug reappears",
+          "onceQ": "How many times must the program be run to locate a bug with the reversible workflow?",
+          "once1": "Once — to the failure; the search then proceeds backwards through that recorded run",
+          "once2": "Twice — once forwards and once backwards from the start",
+          "once3": "Once per hypothesis about the cause",
+          "once4": "As many times as there are breakpoints"
+        }
+      }
+    </script>
+
+    <primer-quiz name="revDebugQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/reversible-computing/languages/reversible-functional-programming",
+      "computer-science/programming/errors-syntax-logic-and-runtime"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("revDebugQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("corruptQ"),
+      options: [
+        { text: () => sceneStrings("corrupt1"), correct: true },
+        { text: () => sceneStrings("corrupt2"), correct: false },
+        { text: () => sceneStrings("corrupt3"), correct: false },
+        { text: () => sceneStrings("corrupt4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("convQ"),
+      options: [
+        { text: () => sceneStrings("conv1"), correct: true },
+        { text: () => sceneStrings("conv2"), correct: false },
+        { text: () => sceneStrings("conv3"), correct: false },
+        { text: () => sceneStrings("conv4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rstepQ"),
+      options: [
+        { text: () => sceneStrings("rstep1"), correct: true },
+        { text: () => sceneStrings("rstep2"), correct: false },
+        { text: () => sceneStrings("rstep3"), correct: false },
+        { text: () => sceneStrings("rstep4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("freeQ"),
+      options: [
+        { text: () => sceneStrings("free1"), correct: true },
+        { text: () => sceneStrings("free2"), correct: false },
+        { text: () => sceneStrings("free3"), correct: false },
+        { text: () => sceneStrings("free4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("irrevQ"),
+      options: [
+        { text: () => sceneStrings("irrev1"), correct: true },
+        { text: () => sceneStrings("irrev2"), correct: false },
+        { text: () => sceneStrings("irrev3"), correct: false },
+        { text: () => sceneStrings("irrev4"), correct: false },
+      ],
+    },
+    {
+      // Last write to x is at step b (a < b < c, and c writes y, not x).
+      prompt: (v) => sceneStrings("journalQ", v),
+      variables: "a=[1:3] b=[4:7] c=[8:12]",
+      answer: "b",
+    },
+    {
+      // Reverse-stepping k times from step n lands at n - k.
+      prompt: (v) => sceneStrings("stepsQ", v),
+      variables: "n=[10:30] k=[1:9]",
+      answer: "n - k",
+    },
+    {
+      prompt: () => sceneStrings("bennettQ"),
+      options: [
+        { text: () => sceneStrings("bennett1"), correct: true },
+        { text: () => sceneStrings("bennett2"), correct: false },
+        { text: () => sceneStrings("bennett3"), correct: false },
+        { text: () => sceneStrings("bennett4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("causalQ"),
+      options: [
+        { text: () => sceneStrings("causal1"), correct: true },
+        { text: () => sceneStrings("causal2"), correct: false },
+        { text: () => sceneStrings("causal3"), correct: false },
+        { text: () => sceneStrings("causal4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rcontQ"),
+      options: [
+        { text: () => sceneStrings("rcont1"), correct: true },
+        { text: () => sceneStrings("rcont2"), correct: false },
+        { text: () => sceneStrings("rcont3"), correct: false },
+        { text: () => sceneStrings("rcont4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("flakyQ"),
+      options: [
+        { text: () => sceneStrings("flaky1"), correct: true },
+        { text: () => sceneStrings("flaky2"), correct: false },
+        { text: () => sceneStrings("flaky3"), correct: false },
+        { text: () => sceneStrings("flaky4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("onceQ"),
+      options: [
+        { text: () => sceneStrings("once1"), correct: true },
+        { text: () => sceneStrings("once2"), correct: false },
+        { text: () => sceneStrings("once3"), correct: false },
+        { text: () => sceneStrings("once4"), correct: false },
+      ],
+    },
+  ]);
+</script>

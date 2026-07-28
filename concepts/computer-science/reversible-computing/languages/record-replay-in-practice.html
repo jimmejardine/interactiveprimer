@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Record &amp; Replay in Practice</primer-title>
+
+    <primer-card>
+      <p>
+        The <primer-ref to="computer-science/reversible-computing/languages/reversible-debugging">previous
+        lesson</primer-ref> promised a debugger with a reverse gear on ordinary, information-destroying
+        hardware — and tools like <strong>rr</strong>, <strong>UDB</strong> and gdb's built-in reverse
+        execution deliver it, on programs of millions of lines, at overheads small enough to leave on all
+        day. Which should strike you as impossible. A big program overwrites gigabytes of state per second;
+        surely "remember everything you destroy" means drowning in a log?
+      </p>
+      <p>
+        The escape is one sharp observation: <strong>almost everything a program does is
+        deterministic</strong>. An add instruction, a memory read, a whole compiler pass — given the same
+        starting state, they produce the same result, every time. Deterministic work doesn't need to be
+        <em>remembered</em>, because it can always be <em>recomputed</em>. The only things that must be
+        recorded are the events the program could not have computed for itself: the
+        <strong>nondeterministic inputs</strong>. Everything else is regenerated on demand by simply running
+        the program again. This is <strong>deterministic record &amp; replay</strong>, and it is how reverse
+        execution actually ships.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What goes in the log</h2>
+      <p>Perhaps the shortest important list in systems programming — record only:</p>
+      <ul>
+        <li><strong>System call results</strong> — what <code>read()</code> returned, what the clock said,
+          what the network delivered;</li>
+        <li><strong>Signals</strong> — which ones arrived, and at exactly which instruction;</li>
+        <li><strong>The thread schedule</strong> — who ran when (rr sidesteps most of this by running all
+          threads on a <em>single core</em>, so the interleaving it chooses is the interleaving it logs);</li>
+        <li><strong>Odd nondeterministic instructions</strong> — like <code>rdtsc</code>, the x86
+          "read the CPU's cycle counter" instruction, whose result differs every run.</li>
+      </ul>
+      <p>
+        Not recorded: results of arithmetic, values of local variables, the contents of memory — all of it
+        deterministic, all of it recomputable. Replaying the log through a fresh execution of the same binary
+        reproduces the original run <em>bit for bit</em>. Try the whole architecture in miniature:
+      </p>
+      <primer-code run>
+        // A program whose ONLY nondeterminism is readInput(). Everything else recomputes.
+        function runProgram(readInput: () =&gt; number, log?: number[]): number {
+          let total = 0;
+          for (let i = 0; i &lt; 4; i++) {
+            const r = readInput();              // nondeterministic!
+            if (log) log.push(r);               // RECORD mode: journal the INPUT only
+            total = total * 2 + r;              // deterministic - recomputed for free
+          }
+          return total;
+        }
+
+        // RECORD: run with "real" (pseudo-random) inputs, logging them.
+        let seed = 42;
+        function noisyInput(): number {
+          seed = (seed * 1103515245 + 12345) % 2147483648;
+          return seed % 10;
+        }
+        const log: number[] = [];
+        const recorded = runProgram(noisyInput, log);
+        console.log("record run:  result = " + recorded + "   log = " + JSON.stringify(log));
+
+        // REPLAY: no randomness at all - just feed the log back in.
+        let cursor = 0;
+        function replayInput(): number { return log[cursor++]; }
+        const replayed = runProgram(replayInput);
+        console.log("replay run:  result = " + replayed + "   (identical, forever, on demand)");
+      </primer-code>
+      <p>
+        Four log entries reproduce the entire run — however much deterministic computation happened between
+        them. That ratio is why rr's log stays small and its recording overhead sits around
+        <strong>1.2–2×</strong> on a single core: the tracee mostly just <em>runs</em>, with the recorder
+        intervening only at syscalls and signals.
+      </p>
+    </primer-card>
+
+    <!-- Timeline figure: checkpoints + event log; reverse-step = restore + replay forward. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "rrTimeline": {
+          "title": "Reverse-step = restore a checkpoint, then replay forward",
+          "timeline": "One recorded execution, as a timeline of steps (0 to 100)",
+          "stepCk": "Periodic checkpoints (squares) snapshot the full state — cheaply, via fork and copy-on-write",
+          "stepLog": "Between checkpoints, the log keeps only the nondeterministic events (dots): syscalls, signals, rdtsc",
+          "stepBack": "To reverse-step from 90 to 89: restore the nearest earlier checkpoint (75), then replay forward 14 steps — backwards is simulated by forwards",
+          "ckLabel": "checkpoints",
+          "evLabel": "logged events",
+          "hereLabel": "you are at 90",
+          "restoreLabel": "1. restore",
+          "replayLabel": "2. replay to 89"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Snapshots make it fast; the log makes it exact</h2>
+      <p>
+        Replay alone gives you time travel of a clumsy sort: to see step 89 of a billion-step run, replay
+        from the very beginning. So the tools add the second ingredient: <strong>periodic
+        checkpoints</strong> — full snapshots of the process, taken cheaply on Linux with
+        <code>fork()</code>, where the operating system's copy-on-write pages mean a "copy" of gigabytes
+        costs almost nothing until pages actually change. Now <code>reverse-step</code> from step
+        <primer-math>n</primer-math> means: <em>restore the nearest checkpoint before
+        <primer-math>n-1</primer-math>, then replay forward to <primer-math>n-1</primer-math></em>.
+      </p>
+      <primer-geometry scene="rrTimeline" caption="A timeline of one recorded run from step 0 to 100. Square marks at 0, 25, 50 and 75 are checkpoints; small dots between them are logged nondeterministic events. Reverse-stepping from step 90 restores the checkpoint at 75, then replays forward to step 89 — a backward move simulated by a forward one."></primer-geometry>
+      <p>
+        Read that again: <strong>the debugger never actually runs backwards</strong>. Every "reverse" command
+        is restore-plus-replay-forward, with the checkpoint spacing setting the price. Dense checkpoints:
+        fast reverse-steps, lots of memory. Sparse checkpoints: cheap recording, slow hops back. If that
+        trade sounds familiar, it should — it is exactly the checkpoint tradeoff from
+        <primer-ref soft to="computer-science/reversible-computing/models/pebble-games">the pebble
+        game</primer-ref>, running in production on your laptop. Bennett's space–time bargain, with
+        <code>fork()</code> as the pebble:
+      </p>
+      <primer-code run>
+        // Reverse-step cost model: restore nearest checkpoint, replay forward.
+        function reverseStepCost(target: number, spacing: number): number {
+          const checkpoint = Math.floor(target / spacing) * spacing;
+          return target - checkpoint;               // steps to replay forward
+        }
+
+        const RUN = 100000;                          // total steps in the recording
+        for (const spacing of [10, 100, 1000, 10000]) {
+          const snapshots = Math.floor(RUN / spacing) + 1;
+          console.log("spacing " + spacing +
+                      ":  snapshots kept = " + snapshots +
+                      ",  worst reverse-step replays " + reverseStepCost(spacing - 1, spacing) +
+                      " steps,  e.g. to step 8674: " + reverseStepCost(8674, spacing));
+        }
+        console.log("dense checkpoints: fast but memory-hungry; sparse: cheap but slow - the pebble tradeoff.");
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="Where did rr come from?">
+      <p>
+        rr was built at <strong>Mozilla</strong> in the early 2010s, born of Firefox-sized desperation: a
+        browser is millions of lines of C++ chewing on the wild-west input of the entire web, and its worst
+        bugs were intermittent — crashes that reproduced once per thousand test runs, evaporating the moment
+        a developer attached a debugger. Robert O'Callahan and colleagues reasoned that if a failing run
+        could be <em>recorded</em> cheaply enough to leave recording on in automated testing, then every
+        one-in-a-thousand failure would become permanently, deterministically replayable — and debuggable
+        backwards at leisure. The trick that made it practical was ruthless minimalism: no instruction
+        emulation, no code rewriting — run the real binary at nearly full speed on one core, log syscalls and
+        signals via <code>ptrace</code>, count hardware performance events to replay signal delivery at the
+        exact right instruction. rr escaped Mozilla to become a beloved everyday tool — and its authors' rule
+        of thumb became folklore: an intermittent bug you can record is just a deterministic bug you haven't
+        walked backwards through yet.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Chaos, and the race that breaks the tape</h2>
+      <p>
+        One core, one interleaving — rr's single-core scheduling makes multithreaded runs recordable, but it
+        also makes them <em>gentler</em> than reality: many race conditions only bite under true parallelism.
+        rr's answer is <strong>chaos mode</strong>, which deliberately randomises scheduling — starving
+        threads, preempting at cruel moments — to coax rare interleavings into showing up <em>while the tape
+        is rolling</em>. Once recorded, even a one-in-a-million race replays forever.
+      </p>
+      <p>
+        The same coin has a dark side: <strong>unrecorded nondeterminism breaks replay</strong>. If two
+        threads race on shared memory across truly parallel cores, the winner of the race is decided by hardware
+        timing that appears in no syscall and no log — a naive replayer cannot reproduce the outcome, and
+        replay diverges from the recording. That is precisely why rr accepts the single-core cost, and why
+        recording true parallelism faithfully (as some research systems attempt) requires logging memory
+        ordering itself, at far greater expense. The log must contain <em>every</em> source of
+        nondeterminism, or the whole edifice quietly collapses.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! The recorder does not store every state">
+      <p>
+        The classic misconception about record &amp; replay — assumed by almost everyone meeting it for the
+        first time — is that the tool saves the program's state after every step, like frames of a film. It
+        does not, and could not: at gigabytes of overwritten state per second, the "film" would dwarf every
+        disk you own. What is stored is <strong>inputs plus occasional checkpoints</strong>: kilobytes of
+        syscall results and signal timings, plus a handful of copy-on-write snapshots. Every intermediate
+        state you inspect in the debugger is <em>recomputed on demand</em> by deterministic replay from the
+        nearest checkpoint. When the debugger shows you "the state at step 89", you are not reading a
+        recording — you are watching a fresh execution that has been steered, by the log, into being
+        indistinguishable from the original. Storage is traded for recomputation: the space–time tradeoff is
+        not just an implementation detail of these tools; it is the whole design.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "recordReplayQuiz@1": {
+          "intro": "Deterministic replay records only nondeterministic inputs; everything else is recomputed.",
+          "mustLogQ": "Which of these must go into the record-and-replay log?",
+          "logSyscall": "The result of a read() system call",
+          "logArith": "The result of every addition the program performs",
+          "logLocal": "The value of each local variable after each statement",
+          "logPure": "The return value of a pure, deterministic function",
+          "noLogQ": "Which of these does NOT need to be recorded?",
+          "noLogArith": "The results of ordinary arithmetic instructions",
+          "noLogSig": "Which signals arrived, and at which instruction",
+          "noLogSched": "The thread schedule",
+          "noLogTsc": "The result of the rdtsc timestamp instruction",
+          "costQ": "Checkpoints were taken at every multiple of 100; the last one before your target is at step {c}. You reverse-step to step {m}. How many steps must be replayed forward from the checkpoint?",
+          "whyFwdQ": "Why is \"reverse-step\" described as simulated rather than real backward execution?",
+          "whyFwd1": "It restores an earlier checkpoint and replays forward to just before the current step",
+          "whyFwd2": "The CPU executes each instruction's inverse in reverse order",
+          "whyFwd3": "It swaps the program's inputs and outputs",
+          "whyFwd4": "It only pretends to move and never changes the shown state",
+          "raceQ": "Why do data races on shared memory break naive record-and-replay?",
+          "race1": "The race's winner is decided by hardware timing that appears in no syscall log, so replay cannot reproduce it",
+          "race2": "Races make programs crash before the log can be written",
+          "race3": "Races produce too many syscalls to record",
+          "race4": "They do not — races are recorded like any other event",
+          "singleCoreQ": "Why does rr run all threads of the recorded program on a single core?",
+          "single1": "So the thread interleaving is chosen by rr itself and can be logged cheaply and exactly",
+          "single2": "Because multicore CPUs cannot execute ptrace",
+          "single3": "To make the program run faster during recording",
+          "single4": "Because checkpoints only work on one core",
+          "chaosQ": "What is rr's chaos mode for?",
+          "chaos1": "Randomising the schedule to provoke rare interleaving bugs while recording is on",
+          "chaos2": "Encrypting the log against tampering",
+          "chaos3": "Compressing checkpoints more aggressively",
+          "chaos4": "Replaying the log in a random order",
+          "pebbleQ": "The checkpoint-spacing tradeoff (dense = fast reverse-steps but memory-heavy; sparse = cheap but slow) is a production instance of which idea?",
+          "pebble1": "The reversible pebble game's space-time tradeoff (Bennett-style checkpointing)",
+          "pebble2": "Amdahl's law",
+          "pebble3": "The CAP theorem",
+          "pebble4": "Moore's law",
+          "logSizeQ": "A run performs {a} million deterministic arithmetic operations and makes {b} system calls. Roughly how many entries does the replay log need?",
+          "storeQ": "What does a record-and-replay tool actually store?",
+          "store1": "Nondeterministic inputs plus occasional checkpoints; intermediate states are recomputed on demand",
+          "store2": "The full memory image after every instruction",
+          "store3": "Only the final state of the program",
+          "store4": "A video recording of the developer's screen",
+          "tscQ": "Why must the result of an instruction like rdtsc (read timestamp counter) be logged?",
+          "tsc1": "Its result differs from run to run — it is a nondeterministic input the replay cannot recompute",
+          "tsc2": "It is the slowest instruction on the CPU",
+          "tsc3": "It modifies memory that the debugger watches",
+          "tsc4": "It does not need to be logged, because time is deterministic",
+          "overheadQ": "Roughly what recording overhead does rr achieve on typical single-core workloads?",
+          "oh1": "About 1.2-2x slowdown",
+          "oh2": "About 100x slowdown",
+          "oh3": "No slowdown at all",
+          "oh4": "About 1000x slowdown"
+        }
+      }
+    </script>
+
+    <primer-quiz name="recordReplayQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/reversible-computing/languages/reversible-debugging"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Timeline: checkpoints + event log; reverse-step = restore + replay. ──
+  registerGeometryScene(
+    "rrTimeline",
+    ({ board, colors, step, sceneStrings }) => {
+      const ink = colors.ink;
+      const ckC = colors.cat[0], evC = colors.cat[1], backC = colors.cat[2], fwdC = colors.cat[3];
+      const T = (x, y, txt, color, size = 13, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+
+      // Base: the execution timeline with step numbers.
+      board.create("arrow", [[-2, 0], [102, 0]], { strokeColor: colors.line, strokeWidth: 2, highlight: false });
+      for (const x of [0, 25, 50, 75, 100]) {
+        board.create("segment", [[x, -0.35], [x, 0.35]], { strokeColor: colors.line, strokeWidth: 1, highlight: false });
+        T(x, -1.1, String(x), ink, 12);
+      }
+      T(50, 5.4, sceneStrings("timeline"), ink, 13);
+
+      // Step 1: checkpoints (squares) at 0, 25, 50, 75.
+      step(sceneStrings("stepCk"), () => {
+        for (const x of [0, 25, 50, 75]) {
+          board.create("point", [x, 0], {
+            face: "[]", size: 4, color: ckC, name: "", fixed: true, highlight: false,
+          });
+        }
+        T(12, 1.2, sceneStrings("ckLabel"), ckC, 12);
+      });
+
+      // Step 2: logged nondeterministic events (dots) between checkpoints.
+      step(sceneStrings("stepLog"), () => {
+        for (const x of [7, 16, 31, 42, 58, 66, 83, 88]) {
+          board.create("point", [x, -0.75], {
+            face: "o", size: 1.5, color: evC, name: "", fixed: true, highlight: false,
+          });
+        }
+        T(60, -1.9, sceneStrings("evLabel"), evC, 12);
+      });
+
+      // Step 3: reverse-step from 90 to 89 = restore checkpoint 75, replay 14 steps.
+      step(sceneStrings("stepBack"), () => {
+        board.create("point", [90, 0], { face: "x", size: 4, color: backC, name: "", fixed: true, highlight: false });
+        T(90, 1.2, sceneStrings("hereLabel"), backC, 12);
+        // 1) restore: arc back from 90 to the checkpoint at 75.
+        board.create("arrow", [[90, 3.0], [76, 0.6]], { strokeColor: backC, strokeWidth: 2, dash: 2, highlight: false });
+        board.create("segment", [[90, 0.6], [90, 3.0]], { strokeColor: backC, strokeWidth: 2, dash: 2, highlight: false });
+        T(85, 3.6, sceneStrings("restoreLabel"), backC, 12);
+        // 2) replay forward from 75 to 89.
+        board.create("arrow", [[75, -2.6], [89, -2.6]], { strokeColor: fwdC, strokeWidth: 2.5, highlight: false });
+        board.create("segment", [[75, -0.6], [75, -2.6]], { strokeColor: fwdC, strokeWidth: 1.5, highlight: false });
+        board.create("segment", [[89, -2.6], [89, -0.6]], { strokeColor: fwdC, strokeWidth: 1.5, dash: 1, highlight: false });
+        T(82, -3.4, sceneStrings("replayLabel"), fwdC, 12);
+      });
+    },
+    { boundingbox: [-8, 6.6, 108, -4.6], keepAspect: false, title: () => makeStrings("rrTimeline")("title") },
+  );
+
+  registerQuiz("recordReplayQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("mustLogQ"),
+      options: [
+        { text: () => sceneStrings("logSyscall"), correct: true },
+        { text: () => sceneStrings("logArith"), correct: false },
+        { text: () => sceneStrings("logLocal"), correct: false },
+        { text: () => sceneStrings("logPure"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("noLogQ"),
+      options: [
+        { text: () => sceneStrings("noLogArith"), correct: true },
+        { text: () => sceneStrings("noLogSig"), correct: false },
+        { text: () => sceneStrings("noLogSched"), correct: false },
+        { text: () => sceneStrings("noLogTsc"), correct: false },
+      ],
+    },
+    {
+      // Replay from checkpoint c to target m: m - c steps. m is always past c (disjoint ranges).
+      prompt: (v) => sceneStrings("costQ", v),
+      variables: "c=[100,200,300] m=[310:390]",
+      constraints: "m > c",
+      answer: "m - c",
+    },
+    {
+      prompt: () => sceneStrings("whyFwdQ"),
+      options: [
+        { text: () => sceneStrings("whyFwd1"), correct: true },
+        { text: () => sceneStrings("whyFwd2"), correct: false },
+        { text: () => sceneStrings("whyFwd3"), correct: false },
+        { text: () => sceneStrings("whyFwd4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("raceQ"),
+      options: [
+        { text: () => sceneStrings("race1"), correct: true },
+        { text: () => sceneStrings("race2"), correct: false },
+        { text: () => sceneStrings("race3"), correct: false },
+        { text: () => sceneStrings("race4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("singleCoreQ"),
+      options: [
+        { text: () => sceneStrings("single1"), correct: true },
+        { text: () => sceneStrings("single2"), correct: false },
+        { text: () => sceneStrings("single3"), correct: false },
+        { text: () => sceneStrings("single4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("chaosQ"),
+      options: [
+        { text: () => sceneStrings("chaos1"), correct: true },
+        { text: () => sceneStrings("chaos2"), correct: false },
+        { text: () => sceneStrings("chaos3"), correct: false },
+        { text: () => sceneStrings("chaos4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pebbleQ"),
+      options: [
+        { text: () => sceneStrings("pebble1"), correct: true },
+        { text: () => sceneStrings("pebble2"), correct: false },
+        { text: () => sceneStrings("pebble3"), correct: false },
+        { text: () => sceneStrings("pebble4"), correct: false },
+      ],
+    },
+    {
+      // Only the b syscalls are nondeterministic; the a million arithmetic ops recompute.
+      prompt: (v) => sceneStrings("logSizeQ", v),
+      variables: "a=[10:99] b=[3:20]",
+      answer: "b",
+    },
+    {
+      prompt: () => sceneStrings("storeQ"),
+      options: [
+        { text: () => sceneStrings("store1"), correct: true },
+        { text: () => sceneStrings("store2"), correct: false },
+        { text: () => sceneStrings("store3"), correct: false },
+        { text: () => sceneStrings("store4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tscQ"),
+      options: [
+        { text: () => sceneStrings("tsc1"), correct: true },
+        { text: () => sceneStrings("tsc2"), correct: false },
+        { text: () => sceneStrings("tsc3"), correct: false },
+        { text: () => sceneStrings("tsc4"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("overheadQ"),
+      options: [
+        { text: () => sceneStrings("oh1"), correct: true },
+        { text: () => sceneStrings("oh2"), correct: false },
+        { text: () => sceneStrings("oh3"), correct: false },
+        { text: () => sceneStrings("oh4"), correct: false },
+      ],
+    },
+  ]);
+</script>
