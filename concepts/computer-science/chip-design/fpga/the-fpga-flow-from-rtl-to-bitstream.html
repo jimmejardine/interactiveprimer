@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>The FPGA Flow: RTL to Bitstream</primer-title>
+
+    <primer-card>
+      <p>
+        You press one button — the tools call it "Generate Bitstream" — and somewhere between twenty
+        minutes and a long lunch later, your RTL is a working chip. In that window, software solves a chain
+        of genuinely hard problems: rewriting your logic into
+        <primer-ref to="computer-science/chip-design/fpga/luts-and-the-fpga-fabric">LUTs</primer-ref>,
+        deciding which of a hundred thousand tiles each one lives in, threading millions of wire segments
+        between them, and then proving the result can keep up with your clock. Understanding this pipeline
+        — what each stage does, what it produces, and <em>which report to read when it finishes</em> — is
+        what separates an engineer from a button-presser. It is also a rehearsal: modules 4 and 5 walk the
+        ASIC version of the same pipeline, where each stage gets deeper, slower and vastly more expensive
+        to get wrong.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What you feed in: design plus constraints</h2>
+      <p>
+        The flow takes two kinds of input. The first is your RTL. The second — every bit as important — is
+        the <strong>constraints file</strong>, which tells the tools two things the RTL cannot:
+      </p>
+      <primer-code lang="text">
+        # constraints.xdc — the two essential declarations
+        create_clock -period 10.000 [get_ports clk]     # "clk runs at 100 MHz — make it work at that speed"
+        set_property PACKAGE_PIN E3  [get_ports clk]    # "the clk signal enters on physical pin E3"
+        set_property PACKAGE_PIN H5  [get_ports led]    # "led leaves on pin H5"
+      </primer-code>
+      <p>
+        The <strong>pin assignments</strong> anchor your ports to the physical package (get one wrong and
+        your LED design flashes a motor driver instead). The <strong>clock definition</strong> is the
+        contract the whole flow works to satisfy: every register-to-register path must settle within one
+        period. Without it the tools have no target — and no way to tell you they missed.
+      </p>
+    </primer-card>
+
+    <!-- Figure: the flow as a stepped pipeline with artefacts between stages. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "fpgaFlow": {
+          "title": "The FPGA flow: each stage consumes the last stage's artefact",
+          "input": "RTL + constraints",
+          "sSynth": "Synthesis",
+          "aSynth": "→ generic gate netlist",
+          "sMap": "Technology mapping",
+          "aMap": "→ LUT6 / FF / carry netlist",
+          "sPlace": "Placement",
+          "aPlace": "→ every cell assigned a tile",
+          "sRoute": "Routing",
+          "aRoute": "→ every net assigned wires",
+          "sSta": "Timing analysis",
+          "aSta": "→ fmax + critical-path report",
+          "sBit": "Bitstream generation",
+          "aBit": "→ .bit file → configured FPGA",
+          "stepSynth": "Synthesis rewrites the RTL into a netlist of generic gates and flip-flops — your always blocks become hardware primitives",
+          "stepMap": "Technology mapping packs those gates into the target's actual resources: LUT6s, flip-flops, carry chains",
+          "stepPlace": "Placement chooses WHICH tile each LUT and FF occupies — a giant optimisation to keep connected cells close",
+          "stepRoute": "Routing threads each net through wire segments and switch matrices; congested regions may force detours",
+          "stepSta": "Static timing analysis checks every path against the clock constraint and reports fmax and the critical path",
+          "stepBit": "Bitstream generation encodes every LUT table and switch setting into the .bit file that configures the chip"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The six stages</h2>
+      <p>
+        Step through the pipeline — and notice that every stage hands a concrete <em>artefact</em> to the
+        next, each one a little closer to physical:
+      </p>
+      <primer-geometry scene="fpgaFlow" caption="A vertical pipeline diagram. RTL and constraints feed Synthesis, which produces a generic gate netlist; Technology mapping turns that into a LUT and flip-flop netlist; Placement assigns each cell a tile; Routing assigns each net its wires; Timing analysis produces the fmax and critical-path report; Bitstream generation produces the .bit file that configures the FPGA."></primer-geometry>
+      <p>
+        Two of these stages are combinatorial optimisation problems of monstrous size.
+        <strong>Placement</strong> must position hundreds of thousands of cells so that connected ones sit
+        near each other — shorter wires mean less delay. <strong>Routing</strong> must then realise every
+        net using the finite wire segments that actually exist, fighting congestion where too many nets
+        want the same channel. Both are NP-hard; the tools attack them with heuristics, randomness and
+        sheer iteration, which is why the same design can take different times (and reach different clock
+        speeds!) on different runs.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Be the placer for a minute</h2>
+      <p>
+        Here is placement in miniature: six blocks, seven nets, a 4×4 grid. Scatter the blocks randomly,
+        measure the total wire length (Manhattan distance per net), then greedily swap pairs whenever a
+        swap helps — which is, in spirit, exactly what the real tools do at nation-state scale (Module 5
+        returns to this problem for ASICs):
+      </p>
+      <primer-code run>
+        // Nets: which pairs of blocks are connected.
+        const nets: [number, number][] = [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [0, 5], [1, 4]];
+
+        // A tiny seeded RNG so every run tells the same story.
+        let seed = 20260728;
+        function rand(n: number): number {
+          seed = (seed * 1103515245 + 12345) % 2147483648;
+          return seed % n;
+        }
+
+        // Random initial placement: 6 blocks dropped on distinct cells of a 4x4 grid.
+        let cells: number[] = [];
+        while (cells.length &lt; 6) {
+          const c = rand(16);
+          if (!cells.includes(c)) cells.push(c);
+        }
+        const pos = (c: number) =&gt; [c % 4, Math.floor(c / 4)];
+
+        function wirelength(cs: number[]): number {
+          let total = 0;
+          for (const [a, b] of nets) {
+            const [ax, ay] = pos(cs[a]), [bx, by] = pos(cs[b]);
+            total += Math.abs(ax - bx) + Math.abs(ay - by);   // Manhattan distance
+          }
+          return total;
+        }
+
+        function show(label: string, cs: number[]) {
+          console.log(`${label}  total wirelength = ${wirelength(cs)}`);
+          for (let y = 3; y &gt;= 0; y--) {
+            let row = "   ";
+            for (let x = 0; x &lt; 4; x++) {
+              const i = cs.indexOf(y * 4 + x);
+              row += i &gt;= 0 ? ` B${i}` : "  .";
+            }
+            console.log(row);
+          }
+        }
+
+        show("Before:", cells);
+
+        // Greedy improvement: keep any pairwise swap that shortens the wires.
+        let improved = true;
+        while (improved) {
+          improved = false;
+          for (let i = 0; i &lt; 6; i++)
+            for (let j = i + 1; j &lt; 6; j++) {
+              const trial = cells.slice();
+              const t = trial[i]; trial[i] = trial[j]; trial[j] = t;
+              if (wirelength(trial) &lt; wirelength(cells)) { cells = trial; improved = true; }
+            }
+        }
+
+        console.log("");
+        show("After greedy swaps:", cells);
+        console.log("\nShorter wires = less delay = a faster clock. Now imagine 500,000 blocks.");
+      </primer-code>
+      <p>
+        Watch the wirelength drop. Real placers add cleverness on top — simulated annealing to escape local
+        minima, analytic solvers, timing-driven weighting so the <em>critical</em> nets get shortest — but
+        the objective you just optimised is the genuine article.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The report culture</h2>
+      <p>
+        A flow run does not end with "done"; it ends with <strong>reports</strong>, and professionals read
+        them the way pilots read instruments. The utilization report you met
+        <primer-ref to="computer-science/chip-design/fpga/block-ram-dsp-slices-and-hard-ip">last
+        lesson</primer-ref>; the new one is the <strong>timing summary</strong>. Its centrepiece: the
+        <strong>critical path</strong> — the slowest register-to-register path in your design — and the
+        <strong>slack</strong>, the margin between that path's delay and the clock period. Positive slack
+        on every path: the design <em>meets timing</em>, and the report quotes your achievable
+        <primer-math>f_{max}</primer-math>. The arithmetic is worth having in your bones:
+      </p>
+      <primer-math display>f_{max} = \frac{1}{T_{crit}} \quad\text{e.g.}\quad T_{crit} = 8\,\text{ns} \implies f_{max} = 125\,\text{MHz}</primer-math>
+      <p>
+        Negative slack — the dreaded red — means the critical path is too slow for the requested clock, and
+        the loop begins: read the path listing (it names every LUT and wire on the offending path), then
+        fix it — restructure the RTL (fewer logic levels, add a pipeline register), help the placer with a
+        floorplan hint, or, honestly, lower the clock. Rerun. Read again. This
+        <strong>edit–compile–report loop is minutes to hours on an FPGA</strong>. Hold that thought for the
+        ASIC modules, where a full physical iteration takes weeks and the final "rerun" — a mask set —
+        costs millions: the FPGA is the rehearsal stage where iteration is nearly free, which is precisely
+        why industry prototypes ASIC designs on FPGAs first.
+      </p>
+      <primer-theorem name="The FPGA flow">
+        <ul>
+          <li><strong>synthesis</strong> → generic netlist; <strong>technology mapping</strong> → LUT/FF
+            netlist; <strong>placement</strong> → cells assigned tiles; <strong>routing</strong> → nets
+            assigned wires; <strong>timing analysis</strong> → fmax and critical path;
+            <strong>bitstream generation</strong> → the configuration file;</li>
+          <li>inputs are RTL <em>plus constraints</em>: pin assignments and clock definitions — the clock
+            is the contract timing analysis checks;</li>
+          <li>the <strong>critical path</strong> is the slowest register-to-register path;
+            <primer-math>f_{max} = 1/T_{crit}</primer-math>; negative slack = timing failed;</li>
+          <li>the flow is judged by its <strong>reports</strong> (utilization, timing summary, critical
+            path) — and the whole loop takes minutes to hours, making the FPGA the cheap rehearsal for the
+            ASIC flow.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Can you run this flow without a vendor?">
+      <p>
+        For most of FPGA history the answer was a flat no: bitstream formats were trade secrets, so only
+        Xilinx's or Altera's tools could target their chips. Then, in the mid-2010s, came one of open
+        source's great reverse-engineering feats: the <strong>IceStorm</strong> project documented the
+        bitstream of Lattice's little iCE40 parts bit by bit, and a complete free flow snapped into
+        existence around it — <strong>Yosys</strong> for synthesis, <strong>nextpnr</strong> for place and
+        route. The whole loop, RTL to configured silicon, runs in <em>seconds</em> for small designs, which
+        transformed FPGA tinkering: continuous-integration servers now build hardware on every git push,
+        exactly like software. The community has since opened up several larger families, and the vendors —
+        who once sent lawyers after bitstream researchers — now sponsor some of the work. If you want to
+        <em>see</em> a placer sweat, nextpnr even ships a GUI that animates the placement converging.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'It synthesized' is not 'it works'">
+      <p>
+        The most seductive line in any log file is <em>"Bitstream generation completed successfully."</em>
+        It means only that the tools produced <em>a</em> circuit — not that the circuit keeps up with your
+        clock. A design can sail through every stage and still carry <strong>negative slack</strong>: the
+        flow will happily emit a bitstream for a design that fails timing (some tools print a warning;
+        none refuse). Load it and you get the cruellest kind of bug — hardware that mostly works, then
+        corrupts a value when the temperature rises or one particular data pattern exercises the critical
+        path, because a register is being clocked before its input has settled. The discipline is
+        absolute: <strong>read the timing summary after every run</strong>, and treat "met timing, worst
+        slack +0.3 ns" — not "bitstream generated" — as the definition of success. Where that number comes
+        from is the subject of static timing analysis, coming in the next module.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: stage order, artefacts, fmax arithmetic, wirelength, report discipline. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "fpgaFlowQuiz@1": {
+          "intro": "Six stages, each with an artefact — and the timing report, not the log file, is the verdict.",
+          "orderQ": "Which is the correct order of the FPGA flow?",
+          "ordRight": "Synthesis → mapping → placement → routing → timing analysis → bitstream",
+          "ordWrong1": "Placement → synthesis → routing → mapping → bitstream → timing analysis",
+          "ordWrong2": "Synthesis → routing → placement → mapping → timing analysis → bitstream",
+          "ordWrong3": "Bitstream → synthesis → mapping → placement → routing → timing analysis",
+          "synthArtQ": "What artefact does synthesis hand to the next stage?",
+          "syNet": "A netlist of generic gates and flip-flops derived from the RTL",
+          "syBit": "The final bitstream",
+          "syWave": "A waveform database",
+          "syPins": "The pin assignment table",
+          "routeArtQ": "What does the routing stage decide?",
+          "roWires": "Which physical wire segments and switch settings realise each net between placed cells",
+          "roTiles": "Which tile each LUT occupies",
+          "roLuts": "Which logic function each LUT stores",
+          "roClock": "The clock frequency of the design",
+          "placeQ": "What is the placement stage trying to minimise, chiefly?",
+          "plWire": "Wire length between connected cells — shorter wires mean less delay",
+          "plLuts": "The number of LUTs used",
+          "plPower": "The configuration time of the bitstream",
+          "plCode": "The number of lines of RTL",
+          "fmaxQ": "The timing report shows a critical path of {t} ns. What is the design's maximum clock frequency in MHz?",
+          "periodQ": "A design must run at {f} MHz. What is the longest the critical path may be, in ns?",
+          "constrQ": "What belongs in the constraints file that cannot be expressed in RTL?",
+          "coPin": "Pin assignments and clock definitions — where signals attach physically and how fast the clock must run",
+          "coLogic": "The Boolean equations of the design",
+          "coTest": "The testbench stimulus",
+          "coState": "The reset values of registers",
+          "slackQ": "A timing report shows worst slack of −1.2 ns. What does this mean?",
+          "slFail": "The critical path is 1.2 ns too slow for the clock — the design fails timing even though a bitstream may exist",
+          "slOk": "The design meets timing with 1.2 ns to spare",
+          "slPower": "The design uses 1.2 W too much power",
+          "slPins": "1.2% of pins are unassigned",
+          "critQ": "What is the \"critical path\"?",
+          "crSlow": "The slowest register-to-register path — the one that limits the achievable clock frequency",
+          "crLong": "The physically longest wire on the die",
+          "crFirst": "The first path the router completed",
+          "crReset": "The path from the reset pin to every register",
+          "failQ": "A design fails timing by a little. Which is NOT a standard fix?",
+          "faIgnore": "Ignore the report — the bitstream was generated, so the design is fine",
+          "faPipe": "Add a pipeline register to split the critical path",
+          "faRtl": "Restructure the RTL to use fewer logic levels",
+          "faClk": "Lower the requested clock frequency",
+          "wireQ": "Two connected blocks land at grid positions ({x1}, {y1}) and ({x2}, {y2}). What is the Manhattan wirelength of their net?",
+          "npQ": "Why can the same design reach different fmax on different runs of the same tools?",
+          "npHeur": "Placement and routing are NP-hard, so the tools use randomised heuristics — different runs find different solutions",
+          "npBug": "The tools are buggy and should be rerun until they agree",
+          "npTemp": "The chip's temperature changes between runs",
+          "npLic": "License servers throttle repeated runs",
+          "rehearseQ": "Why is the FPGA flow called the \"rehearsal stage\" for ASIC design?",
+          "reFast": "The same conceptual pipeline runs in minutes to hours and mistakes cost a rerun — on an ASIC an iteration takes weeks and a mask set costs millions",
+          "reSame": "FPGA and ASIC tools are the same software",
+          "reOld": "FPGAs are older technology than ASICs",
+          "reEasy": "FPGA designs never have bugs"
+        }
+      }
+    </script>
+
+    <primer-quiz name="fpgaFlowQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/fpga/block-ram-dsp-slices-and-hard-ip"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The flow as a vertical pipeline: stage boxes revealed top to bottom, artefacts alongside. ──
+  registerGeometryScene(
+    "fpgaFlow",
+    ({ board, colors, step, sceneStrings }) => {
+      const ink = colors.ink, wire = colors.line;
+      const T = (x, y, txt, color, size = 13, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+      const box = (cx, cy, w, h, color) =>
+        board.create("polygon", [[cx - w / 2, cy + h / 2], [cx + w / 2, cy + h / 2], [cx + w / 2, cy - h / 2], [cx - w / 2, cy - h / 2]], {
+          borders: { strokeColor: color, strokeWidth: 2, highlight: false },
+          fillOpacity: 0, vertices: { visible: false }, highlight: false,
+        });
+      const arrow = (a, b) =>
+        board.create("arrow", [a, b], { strokeColor: wire, strokeWidth: 2, highlight: false });
+
+      const X = 2.2, W = 4.0, H = 0.85, GAP = 1.65;
+      const rowY = (i) => 10.4 - i * GAP;   // stage i = 0..5
+      // A stage: incoming arrow, box, artefact text to the right.
+      const stage = (i, labelKey, artKey, color) => {
+        const y = rowY(i);
+        const from = i === 0 ? 11.55 : rowY(i - 1) - H / 2;
+        arrow([X, from], [X, y + H / 2 + 0.05]);
+        box(X, y, W, H, color);
+        T(X, y, sceneStrings(labelKey), color, 13);
+        T(X + W / 2 + 0.35, y, sceneStrings(artKey), ink, 12, "left");
+      };
+
+      // ── Base: the input at the top. ──
+      T(X, 11.75, sceneStrings("input"), ink, 14);
+
+      const cat = (i) => colors.cat[i % colors.cat.length];
+      step(sceneStrings("stepSynth"), () => stage(0, "sSynth", "aSynth", cat(0)));
+      step(sceneStrings("stepMap"),   () => stage(1, "sMap",   "aMap",   cat(1)));
+      step(sceneStrings("stepPlace"), () => stage(2, "sPlace", "aPlace", cat(2)));
+      step(sceneStrings("stepRoute"), () => stage(3, "sRoute", "aRoute", cat(3)));
+      step(sceneStrings("stepSta"),   () => stage(4, "sSta",   "aSta",   cat(4)));
+      step(sceneStrings("stepBit"),   () => stage(5, "sBit",   "aBit",   cat(5)));
+    },
+    { boundingbox: [-0.9, 12.4, 11.3, 1.2], title: () => makeStrings("fpgaFlow")("title") },
+  );
+
+  registerQuiz("fpgaFlowQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("orderQ"),
+      options: [
+        { text: () => sceneStrings("ordRight"), correct: true },
+        { text: () => sceneStrings("ordWrong1"), correct: false },
+        { text: () => sceneStrings("ordWrong2"), correct: false },
+        { text: () => sceneStrings("ordWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("synthArtQ"),
+      options: [
+        { text: () => sceneStrings("syNet"), correct: true },
+        { text: () => sceneStrings("syBit"), correct: false },
+        { text: () => sceneStrings("syWave"), correct: false },
+        { text: () => sceneStrings("syPins"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("routeArtQ"),
+      options: [
+        { text: () => sceneStrings("roWires"), correct: true },
+        { text: () => sceneStrings("roTiles"), correct: false },
+        { text: () => sceneStrings("roLuts"), correct: false },
+        { text: () => sceneStrings("roClock"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("placeQ"),
+      options: [
+        { text: () => sceneStrings("plWire"), correct: true },
+        { text: () => sceneStrings("plLuts"), correct: false },
+        { text: () => sceneStrings("plPower"), correct: false },
+        { text: () => sceneStrings("plCode"), correct: false },
+      ],
+    },
+    {
+      // fmax = 1000 / t MHz, clean divisors of 1000.
+      prompt: (v) => sceneStrings("fmaxQ", v),
+      variables: "t=[4,5,8,10,20,25]",
+      answer: "1000 / t",
+    },
+    {
+      // period = 1000 / f ns.
+      prompt: (v) => sceneStrings("periodQ", v),
+      variables: "f=[50,100,125,200,250,500]",
+      answer: "1000 / f",
+    },
+    {
+      prompt: () => sceneStrings("constrQ"),
+      options: [
+        { text: () => sceneStrings("coPin"), correct: true },
+        { text: () => sceneStrings("coLogic"), correct: false },
+        { text: () => sceneStrings("coTest"), correct: false },
+        { text: () => sceneStrings("coState"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("slackQ"),
+      options: [
+        { text: () => sceneStrings("slFail"), correct: true },
+        { text: () => sceneStrings("slOk"), correct: false },
+        { text: () => sceneStrings("slPower"), correct: false },
+        { text: () => sceneStrings("slPins"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("critQ"),
+      options: [
+        { text: () => sceneStrings("crSlow"), correct: true },
+        { text: () => sceneStrings("crLong"), correct: false },
+        { text: () => sceneStrings("crFirst"), correct: false },
+        { text: () => sceneStrings("crReset"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("failQ"),
+      options: [
+        { text: () => sceneStrings("faIgnore"), correct: true },
+        { text: () => sceneStrings("faPipe"), correct: false },
+        { text: () => sceneStrings("faRtl"), correct: false },
+        { text: () => sceneStrings("faClk"), correct: false },
+      ],
+    },
+    {
+      // Manhattan distance between two grid positions.
+      prompt: (v) => sceneStrings("wireQ", v),
+      variables: "x1=[0:5] y1=[0:5] x2=[0:5] y2=[0:5]",
+      constraints: "x1 != x2 || y1 != y2",
+      answer: (v) => Math.abs(v.x1 - v.x2) + Math.abs(v.y1 - v.y2),
+    },
+    {
+      prompt: () => sceneStrings("npQ"),
+      options: [
+        { text: () => sceneStrings("npHeur"), correct: true },
+        { text: () => sceneStrings("npBug"), correct: false },
+        { text: () => sceneStrings("npTemp"), correct: false },
+        { text: () => sceneStrings("npLic"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rehearseQ"),
+      options: [
+        { text: () => sceneStrings("reFast"), correct: true },
+        { text: () => sceneStrings("reSame"), correct: false },
+        { text: () => sceneStrings("reOld"), correct: false },
+        { text: () => sceneStrings("reEasy"), correct: false },
+      ],
+    },
+  ]);
+</script>

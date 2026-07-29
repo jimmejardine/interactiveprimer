@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>The Memory Subsystem</primer-title>
+
+    <primer-card>
+      <p>
+        So far our GPU has been living a lie. The cores of the last two lessons asked memory a question
+        and got the answer <em>one cycle later</em>, every time, no matter how many lanes asked at once —
+        a politeness no real memory has ever shown anyone. This lesson ends the fiction. The whole
+        <primer-ref to="computer-science/chip-design/gpu-compute/memory-coalescing">memory story of the
+        GPU-compute module</primer-ref> — scarce bandwidth, punishing latency, the coalescing discipline
+        — exists because of one brutal ratio, and we now build that ratio into PrimerGPU honestly:
+        <strong>eight requestors</strong> (2 <primer-ref
+        to="computer-science/chip-design/capstone/the-scheduler-and-dispatcher">dispatched
+        cores</primer-ref> × 4 lanes, each with an LSU) funnelling into <strong>two memory
+        channels</strong>, each taking <strong>four cycles</strong> per transaction. Eight mouths, two
+        straws. Everything interesting about GPU memory design is a response to exactly this picture.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The memory controller</h2>
+      <p>
+        Between the LSUs and the memory sits the <strong>controller</strong>, a referee with four duties:
+      </p>
+      <ul>
+        <li><strong>Per-channel request queues.</strong> Addresses are interleaved across channels in
+          4-word lines — channel <primer-math>= \lfloor \text{addr}/4 \rfloor \bmod 2</primer-math> — and
+          each channel keeps a queue, because eight requests can arrive in a cycle while a channel
+          finishes one transaction per four;</li>
+        <li><strong>Round-robin arbitration.</strong> When several LSUs request the same channel in the
+          same cycle, a rotating priority pointer decides who queues first — over time, nobody starves;</li>
+        <li><strong>Fixed latency service.</strong> A channel pops one transaction, grinds for 4 cycles,
+          answers, pops the next. (Real DRAM latency varies wildly with row hits and refresh; our fixed 4
+          keeps the arithmetic honest without the chaos);</li>
+        <li><strong>Response routing by requestor ID.</strong> Every transaction carries a tag —
+          <em>which core, which lane</em> — and the response follows the tag home. The answer to "whose
+          data is this?" is written on the envelope, not inferred from timing.</li>
+      </ul>
+      <p>
+        And on the core side, the six-state FSM finally earns its WAIT room: REQUEST issues the lane
+        requests and then the core <strong>stalls in WAIT until every response is home</strong>. Latency,
+        which the previous lessons abstracted into a single polite cycle, is about to become the
+        dominant line in every trace we print.
+      </p>
+    </primer-card>
+
+    <!-- Stepped diagram: 8 LSUs → arbitration → 2 channel queues → latency pipes → responses. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "memSystem": {
+          "title": "Eight requestors, two channels: the funnel and the way back",
+          "stepLsus": "The requestors: two cores × four lanes, each LSU able to demand a word every memory instruction",
+          "stepQueues": "The funnel: round-robin arbitration feeds each request into its address's channel queue",
+          "stepPipes": "Each channel grinds through its queue, one transaction per 4 cycles — the latency pipe",
+          "stepBack": "Responses route home by requestor ID: (core, lane) is stamped on every transaction",
+          "core0": "core 0 LSUs",
+          "core1": "core 1 LSUs",
+          "arb": "arbiter (round robin)",
+          "q0": "queue ch0",
+          "q1": "queue ch1",
+          "pipe": "4 cycles",
+          "mem": "memory",
+          "resp": "response by ID"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The floor plan</h2>
+      <primer-geometry scene="memSystem" caption="Block diagram of the memory subsystem. Eight load-store units, four per core, send request arrows into a round-robin arbiter. The arbiter feeds two channel queues; each queue drains through a 4-cycle latency pipe into memory. Response arrows return from memory to the specific requesting lane, labelled by requestor ID."></primer-geometry>
+      <p>
+        Follow one request through the picture: lane 2 of core 1 computes its address in REQUEST; the
+        arbiter admits it to (say) channel 0's queue behind whoever arrived first; the channel serves it
+        for 4 cycles; and the response — tagged <code>(core 1, lane 2)</code> — lands back in exactly
+        that lane's data latch, while the core sits in WAIT counting its outstanding requests down to
+        zero.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The baby coalescer</h2>
+      <p>
+        Now the twenty lines that the entire
+        <primer-ref to="computer-science/chip-design/gpu-compute/memory-coalescing">coalescing
+        lesson</primer-ref> promised were cheap. When a core's four lanes issue a memory instruction,
+        their four addresses very often form a perfect run — in vector add, lane <primer-math>t</primer-math>
+        of block <primer-math>b</primer-math> touches <primer-math>4b + t</primer-math>: four consecutive
+        words, aligned to a 4-word line. The coalescer checks precisely that:
+      </p>
+      <primer-math display>\text{addr}_t = \text{addr}_0 + t \quad \text{for } t = 0,1,2,3 \;\;\Rightarrow\;\; \text{one 4-word transaction instead of four.}</primer-math>
+      <p>
+        One comparison per lane, one wide request instead of four narrow ones — a <em>quarter</em> of the
+        transactions for the same data. And because a channel's cost is per <em>transaction</em> (4
+        cycles each, regardless of width), that factor of four lands directly on time-in-queue. Do the
+        bandwidth accounting for our kernel: 8 threads each load <primer-math>a[i]</primer-math>, load
+        <primer-math>b[i]</primer-math>, store <primer-math>c[i]</primer-math> — 24 words of traffic.
+        Uncoalesced that is <strong>24 transactions</strong>; coalesced, <strong>6</strong> (three per
+        block). If the addresses had been scattered — strided, hashed, indirect — the check fails, the
+        coalescer shrugs, and you pay full price: the hardware makes the well-behaved pattern cheap, but
+        only the <em>program</em> can choose the pattern. That is why coalescing was taught as a
+        <em>software</em> discipline: this circuit is the reason the discipline pays.
+      </p>
+      <primer-theorem name="The PrimerGPU memory subsystem">
+        <ul>
+          <li><strong>8 LSU requestors → 2 channels</strong>: per-channel queues, round-robin
+            arbitration, 4-cycle fixed service per transaction;</li>
+          <li>channel of an address: <primer-math>\lfloor \text{addr}/4 \rfloor \bmod 2</primer-math>
+            (4-word interleaved lines);</li>
+          <li><strong>responses route by requestor ID</strong> (core, lane) — never by arrival
+            order;</li>
+          <li>the <strong>coalescer</strong> merges a core's 4 adjacent lane addresses into one 4-word
+            transaction: same words moved, quarter the transactions;</li>
+          <li>cores hold in <strong>WAIT</strong> until their outstanding-request count reaches
+            zero.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Measured, not asserted</h2>
+      <p>
+        The simulator now models all of it — queues, arbitration, latency, ID-routing, and a coalescer
+        you can switch off. Both cores run vector add (8 elements, blocks 0 and 1), and we print what the
+        machine <em>measured</em>: total cycles, transaction counts, channel utilisation, and a
+        run-length trace of core 0's FSM so you can watch WAIT stretch:
+      </p>
+      <primer-code run>
+        // ── The memory subsystem: 8 LSUs (2 cores x 4 lanes) vs 2 channels, 4-cycle latency. ──
+        // Vector add, 8 elements as 2 blocks on 2 cores: a@0, b@8, c@16. Toggle the coalescer and count.
+        const PROG = [0x50de, 0x300f, 0x9100, 0x9208, 0x9310, 0x3410, 0x7440, 0x3520, 0x7550, 0x3645, 0x3730, 0x8076, 0xf000];
+        type Fsm = "FETCH" | "DECODE" | "REQUEST" | "WAIT" | "EXECUTE" | "UPDATE" | "DONE";
+        const STEP: Record&lt;string, Fsm&gt; = {
+          FETCH: "DECODE", DECODE: "REQUEST", REQUEST: "WAIT", WAIT: "EXECUTE", EXECUTE: "UPDATE", UPDATE: "FETCH",
+        };
+        const LATENCY = 4;
+        const chanOf = (addr: number) =&gt; Math.floor(addr / 4) % 2;    // 4-word lines, interleaved
+
+        interface Lane { regs: number[]; addr: number; data: number }
+        interface Core { st: Fsm; pc: number; ir: number; pending: number; lanes: Lane[] }
+        // A transaction: lane = -1 means "one coalesced access for all 4 lanes".
+        interface Req { kind: "load" | "store"; addr: number; core: number; lane: number; data: number[] }
+        interface Chan { queue: Req[]; cur: Req | null; left: number; busy: number }
+        interface Machine { cores: Core[]; chans: Chan[]; mem: number[]; txns: number }
+
+        function makeCore(blockIdx: number): Core {
+          const lanes: Lane[] = [];
+          for (let t = 0; t &lt; 4; t++) {
+            const regs = new Array(16).fill(0);
+            regs[13] = blockIdx; regs[14] = 4; regs[15] = t;
+            lanes.push({ regs, addr: 0, data: 0 });
+          }
+          return { st: "FETCH", pc: 0, ir: 0, pending: 0, lanes };
+        }
+
+        function coreNext(s: Core, ci: number, out: Req[], coalesce: boolean): Core {
+          if (s.st === "DONE") return s;
+          const n: Core = { ...s, st: STEP[s.st], lanes: s.lanes.map((l) =&gt; ({ ...l, regs: [...l.regs] })) };
+          const w = s.ir, op = w &gt;&gt; 12, rd = (w &gt;&gt; 8) &amp; 15, rs = (w &gt;&gt; 4) &amp; 15, rt = w &amp; 15, imm = w &amp; 255;
+          if (s.st === "FETCH") n.ir = PROG[s.pc];
+          if (s.st === "REQUEST" &amp;&amp; (op === 7 || op === 8)) {          // the LSUs speak — maybe with one voice
+            const kind = op === 7 ? "load" as const : "store" as const;
+            const addrs = s.lanes.map((l) =&gt; l.regs[rs]);
+            n.lanes.forEach((l, t) =&gt; { l.addr = addrs[t]; });
+            const adjacent = addrs.every((a, t) =&gt; a === addrs[0] + t);
+            if (coalesce &amp;&amp; adjacent) {                                // the baby coalescer: 4 lanes, 1 transaction
+              out.push({ kind, addr: addrs[0], core: ci, lane: -1, data: s.lanes.map((l) =&gt; l.regs[rt]) });
+              n.pending = 1;
+            } else {
+              s.lanes.forEach((l, t) =&gt; out.push({ kind, addr: addrs[t], core: ci, lane: t, data: [l.regs[rt]] }));
+              n.pending = 4;
+            }
+          }
+          if (s.st === "WAIT" &amp;&amp; s.pending &gt; 0) n.st = "WAIT";        // stall until every response is home
+          if (s.st === "EXECUTE") n.lanes.forEach((l) =&gt; {
+            const a = l.regs[rs], b = l.regs[rt];
+            l.data = op === 3 ? a + b : op === 4 ? a - b : op === 5 ? a * b : op === 6 ? Math.floor(a / b) : op === 9 ? imm : l.data;
+          });
+          if (s.st === "UPDATE") {
+            if ((op &gt;= 3 &amp;&amp; op &lt;= 7) || op === 9) n.lanes.forEach((l) =&gt; { if (rd &lt; 13) l.regs[rd] = l.data; });
+            if (op === 15) n.st = "DONE";
+            n.pc = s.pc + 1;
+          }
+          return n;
+        }
+
+        // Response routing: the requestor ID (core, lane) says exactly whose registers get the data.
+        function deliver(r: Req, cores: Core[], mem: number[]) {
+          const c = cores[r.core];
+          if (r.kind === "load") {
+            if (r.lane &lt; 0) c.lanes.forEach((l, t) =&gt; { l.data = mem[r.addr + t]; });
+            else c.lanes[r.lane].data = mem[r.addr];
+          } else {
+            if (r.lane &lt; 0) r.data.forEach((d, t) =&gt; { mem[r.addr + t] = d; });
+            else mem[r.addr] = r.data[0];
+          }
+          c.pending--;
+        }
+
+        function machineNext(m: Machine, rr: number, coalesce: boolean): Machine {
+          const mem = [...m.mem];
+          const out: Req[] = [];
+          const cores = m.cores.map((c, i) =&gt; coreNext(c, i, out, coalesce));
+          const chans = m.chans.map((ch) =&gt; ({ ...ch, queue: [...ch.queue] }));
+          let txns = m.txns;
+          // Channels grind: each busy channel counts down; a finished transaction routes home by ID.
+          chans.forEach((ch) =&gt; {
+            if (ch.cur) {
+              ch.left--; ch.busy++;
+              if (ch.left === 0) { deliver(ch.cur, cores, mem); ch.cur = null; }
+            }
+          });
+          // Arbitration: this cycle's requests join their channel's queue in rotating requestor order.
+          const id = (r: Req) =&gt; r.core * 4 + Math.max(r.lane, 0);
+          out.sort((x, y) =&gt; ((id(x) - rr + 8) % 8) - ((id(y) - rr + 8) % 8));
+          out.forEach((r) =&gt; { chans[chanOf(r.addr)].queue.push(r); txns++; });
+          // Idle channels pull their next job.
+          chans.forEach((ch) =&gt; { if (!ch.cur &amp;&amp; ch.queue.length &gt; 0) { ch.cur = ch.queue.shift()!; ch.left = LATENCY; } });
+          return { cores, chans, mem, txns };
+        }
+
+        function run(coalesce: boolean, trace: boolean): void {
+          const mem = new Array(24).fill(0);
+          for (let i = 0; i &lt; 8; i++) { mem[i] = 10 * (i + 1); mem[8 + i] = i + 1; }
+          let m: Machine = {
+            cores: [makeCore(0), makeCore(1)],
+            chans: [{ queue: [], cur: null, left: 0, busy: 0 }, { queue: [], cur: null, left: 0, busy: 0 }],
+            mem, txns: 0,
+          };
+          const states: string[] = [];
+          let cycle = 0;
+          while (m.cores.some((c) =&gt; c.st !== "DONE")) {
+            states.push(m.cores[0].st);
+            m = machineNext(m, cycle % 8, coalesce);
+            cycle++;
+          }
+          console.log(`coalescer ${coalesce ? "ON " : "OFF"}: ${cycle} cycles, ${m.txns} transactions, ` +
+            `channel busy = [${m.chans.map((ch) =&gt; ch.busy).join(", ")}] cycles ` +
+            `(utilisation ${m.chans.map((ch) =&gt; Math.round((100 * ch.busy) / cycle) + "%").join(", ")})`);
+          const ok = m.mem.slice(16).every((x, i) =&gt; x === 11 * (i + 1));
+          console.log(`  c = [${m.mem.slice(16).join(", ")}]  correct: ${ok}`);
+          if (trace) {
+            // Run-length trace of core 0's FSM, one line per instruction: watch WAIT stretch.
+            let line = "", count = 1;
+            const lines: string[] = [];
+            for (let i = 1; i &lt;= states.length; i++) {
+              if (i &lt; states.length &amp;&amp; states[i] === states[i - 1]) { count++; continue; }
+              line += (states[i - 1] === "WAIT" &amp;&amp; count &gt; 1 ? `WAIT x${count}` : states[i - 1]) + " ";
+              if (states[i - 1] === "UPDATE") { lines.push(line); line = ""; }
+              count = 1;
+            }
+            console.log("  core 0, one line per instruction:");
+            lines.forEach((l, k) =&gt; console.log(`   i${String(k).padStart(2)}: ${l}`));
+          }
+          console.log("");
+        }
+
+        run(true, true);
+        run(false, false);
+      </primer-code>
+      <p>
+        Read the measurements. With the coalescer <strong>on</strong>: 90 cycles, 6 transactions, and the
+        trace shows the two loads (i6, i8) and the store (i11) each stalling in <code>WAIT ×5</code> —
+        the 4-cycle latency plus the handoff, exactly as designed. With it <strong>off</strong>: the same
+        24 words take <strong>24 transactions</strong>, each memory instruction's four requests queue up
+        behind each other on one channel, WAIT stretches to 17 cycles, and the kernel slows from 90 to
+        <strong>126 cycles</strong> — a 40% slowdown from touching <em>identical</em> data in identical
+        order, with only the transaction granularity changed. Notice the channels are busier too (48
+        cycles versus 12) while doing the <em>same job</em>: uncoalesced access doesn't just go slower,
+        it burns the scarce resource harder. Coalescing measured, not asserted.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why does memory get so few doors?">
+      <p>
+        If channels are the bottleneck, why not twenty of them? Because a memory channel is mostly not
+        <em>logic</em> — it is <em>pins, wires and physics</em>. Each channel needs dozens of
+        package balls, matched-length traces across the circuit board, and a high-speed PHY circuit
+        burning real power to slam signals across centimetres of copper billions of times a second.
+        Compute scales with transistors (nearly free and shrinking); off-chip connections scale with the
+        chip's <em>perimeter and package</em> (nearly fixed). That asymmetry is the deepest "why" in this
+        module: it is the reason GPUs surround themselves with wide-but-few memory channels, the reason
+        HBM stacks DRAM millimetres from the die on a silicon interposer to afford thousands of shorter
+        wires, and the reason the coalescer exists at all — when doors are scarce, the winning move is to
+        carry more through each doorway per trip.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Response routing by ID is not bookkeeping">
+      <p>
+        With queues, arbitration and two channels grinding at their own pace, responses can return in a
+        <em>different order</em> than requests were issued — core 0's second load may overtake its first.
+        Now imagine the lazy design: "responses go back to lanes in the order requests went out." It
+        works in every quick test — until queue depths conspire, two transactions swap places, and lane
+        1's register quietly receives lane 2's data. No crash, no error signal: <primer-math>c</primer-math>
+        simply contains plausible-looking wrong sums, sometimes, on some runs. This is the nastiest bug
+        class in hardware — <strong>"mostly works"</strong> — and the fix is structural, not procedural:
+        the requestor ID travels <em>with</em> the transaction, so reordering is harmless by
+        construction. You met this exact idea as tagging in the
+        <primer-ref soft to="computer-science/chip-design/gpu-compute/the-warp-scheduler">scoreboard's
+        world</primer-ref> of out-of-order completion; it will meet you again in every bus protocol,
+        cache miss queue, and network-on-chip you ever design: <em>if completion order is not
+        guaranteed, identity must be carried, never inferred</em>.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: cycle arithmetic, transaction counts, arbitration, channel mapping, ID routing. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "memSubQuiz@1": {
+          "intro": "8 LSUs → 2 channels: per-channel queues, round-robin arbitration, 4-cycle transactions, responses routed by (core, lane) ID. Coalescer: 4 adjacent lane addresses ⇒ 1 transaction.",
+          "serialQ": "{n} transactions are queued on one channel. The channel serves them one at a time, {L} cycles each. For how many cycles is the channel busy in total?",
+          "offQ": "A 4-lane core executes {k} load instructions, every one of them a perfect adjacent run. With the coalescer OFF, how many transactions reach the channels?",
+          "saveQ": "Same {k} coalescible loads on a 4-lane core: how many FEWER transactions does the coalescer ON produce compared with OFF?",
+          "waitQ": "A memory instruction's 4 un-coalesced requests all map to one channel and serialize, {L} cycles each; coalesced they are a single {L}-cycle transaction. Roughly how many extra WAIT cycles does the un-coalesced version cost?",
+          "chanQ": "Channel = floor(addr / 4) mod 2. Which channel serves address {a}?",
+          "arbQ": "Round-robin arbitration: with 8 requestors and the priority pointer at requestor {p}, priority is (r − {p}) mod 8, lowest first. Requestors {r1} and {r2} request the same channel in the same cycle. Which requestor number is enqueued first?",
+          "utilQ": "A run lasted {C} cycles and a channel was busy for {B} of them. What was that channel's utilisation, in percent?",
+          "idQ": "Why must responses be routed by a requestor ID carried with each transaction, rather than returned in the order requests were issued?",
+          "idA": "Queues and independent channels can complete transactions out of order — matching by order would silently deliver data to the wrong lanes",
+          "idB": "IDs make the responses travel faster through the queues",
+          "idC": "Order-based matching would work, but IDs use less storage",
+          "idD": "The DRAM chips require an ID field in their command format",
+          "queueQ": "Why does each channel need a request queue at all?",
+          "queueA": "Up to eight requests can arrive in one cycle while a channel completes at most one transaction per four cycles — arrivals can outpace service",
+          "queueB": "Queues reduce the latency of each individual transaction",
+          "queueC": "DRAM cannot function unless requests are stored twice",
+          "queueD": "It is a debugging aid with no architectural purpose",
+          "coalQ": "What exactly does the baby coalescer check before merging a core's four lane requests?",
+          "coalA": "That the four addresses form a consecutive run — each lane t asking for lane 0's address plus t",
+          "coalB": "That all four lanes are loading the same single address",
+          "coalC": "That the core has been idle for at least 4 cycles",
+          "coalD": "That the other core is not using the memory system",
+          "stateQ": "In the six-state core FSM, which state absorbs the memory system's latency?",
+          "stateA": "WAIT — the core holds there until its outstanding-request count reaches zero",
+          "stateB": "REQUEST — the core re-issues its requests every cycle until served",
+          "stateC": "EXECUTE — the ALUs spin until data arrives",
+          "stateD": "FETCH — instruction fetch pauses to let data traffic through",
+          "whyQ": "With the coalescer on, the simulation finished in 90 cycles instead of 126 AND channel busy time fell from 48 to 12 cycles — moving the same 24 words. What explains both numbers at once?",
+          "whyA": "The channel's cost is per transaction, so packing 4 words into each transaction cuts both the queuing the cores wait behind and the cycles the channels spend serving",
+          "whyB": "The coalescer caches the data so most loads never reach memory",
+          "whyC": "The coalescer raises the clock frequency of the memory channels",
+          "whyD": "With fewer transactions, each one is allowed to carry less data"
+        }
+      }
+    </script>
+
+    <primer-quiz name="memSubQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/capstone/the-scheduler-and-dispatcher",
+      "computer-science/chip-design/gpu-compute/memory-coalescing"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The memory funnel: 8 LSUs → arbiter → 2 channel queues → latency pipes → back by ID. ──
+  registerGeometryScene(
+    "memSystem",
+    ({ board, colors, step, sceneStrings }) => {
+      const txt = (x, y, s, color, fs = 10, bold = false) =>
+        board.create("text", [x, y, s], {
+          strokeColor: color, fontSize: fs, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: bold ? "font-weight:600" : "",
+        });
+      const box = (x0, y0, x1, y1, stroke, fill, opacity) =>
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: fill, fillOpacity: opacity, fixed: true, highlight: false,
+          vertices: { visible: false }, borders: { strokeColor: stroke, strokeWidth: 1.5, highlight: false },
+        });
+      const arrow = (x0, y0, x1, y1, color, dash = 0) =>
+        board.create("arrow", [[x0, y0], [x1, y1]], {
+          strokeColor: color, strokeWidth: 1.5, dash, highlight: false, lastArrow: { type: 2, size: 4 },
+        });
+
+      // Step 1: the eight LSUs, grouped by core.
+      step(sceneStrings("stepLsus"), () => {
+        for (let c = 0; c < 2; c++) {
+          const y = 6.6 - c * 3.0;
+          txt(0.9, y + 1.05, sceneStrings(c === 0 ? "core0" : "core1"), colors.cat[c], 11, true);
+          for (let l = 0; l < 4; l++) {
+            const x = 0.3 + l * 1.15;
+            box(x, y - 0.65, x + 0.95, y + 0.55, colors.cat[c], colors.cat[c], 0.18);
+            txt(x + 0.47, y - 0.05, "L" + l, colors.cat[c], 10, true);
+          }
+        }
+      });
+
+      // Step 2: arbitration into the two channel queues.
+      step(sceneStrings("stepQueues"), () => {
+        box(6.1, 3.4, 8.3, 7.4, colors.line, colors.bg, 0);
+        txt(7.2, 7.05, sceneStrings("arb"), colors.ink, 10, true);
+        for (let c = 0; c < 2; c++)
+          for (let l = 0; l < 4; l++)
+            arrow(5.05, 6.55 - c * 3.0 - (l - 1.5) * 0.28, 6.1, 5.9 - c * 1.4, colors.cat[c]);
+        box(8.9, 5.6, 10.9, 6.6, colors.cat[2], colors.cat[2], 0.18);
+        txt(9.9, 6.1, sceneStrings("q0"), colors.cat[2], 10, true);
+        box(8.9, 3.9, 10.9, 4.9, colors.cat[3], colors.cat[3], 0.18);
+        txt(9.9, 4.4, sceneStrings("q1"), colors.cat[3], 10, true);
+        arrow(8.3, 6.1, 8.9, 6.1, colors.cat[2]);
+        arrow(8.3, 4.4, 8.9, 4.4, colors.cat[3]);
+      });
+
+      // Step 3: the latency pipes into memory.
+      step(sceneStrings("stepPipes"), () => {
+        for (let c = 0; c < 2; c++) {
+          const y = 6.1 - c * 1.7, col = colors.cat[2 + c];
+          for (let seg = 0; seg < 4; seg++) box(11.2 + seg * 0.5, y - 0.25, 11.7 + seg * 0.5, y + 0.25, col, col, 0.12);
+          txt(12.2, y + 0.65, sceneStrings("pipe"), col, 9);
+          arrow(13.25, y, 13.8, y, col);
+        }
+        box(13.8, 3.6, 15.3, 6.9, colors.line, colors.line, 0.12);
+        txt(14.55, 5.25, sceneStrings("mem"), colors.ink, 11, true);
+      });
+
+      // Step 4: responses route home by ID.
+      step(sceneStrings("stepBack"), () => {
+        arrow(13.9, 3.35, 2.6, 2.6, colors.cat[4], 2);
+        arrow(13.9, 7.15, 2.6, 7.85, colors.cat[4], 2);
+        txt(8.2, 2.55, sceneStrings("resp"), colors.cat[4], 10, true);
+      });
+    },
+    { boundingbox: [-0.2, 8.6, 15.8, 1.8], keepAspect: false, title: () => makeStrings("memSystem")("title") },
+  );
+
+  registerQuiz("memSubQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // n transactions × L cycles.
+      prompt: (v) => sceneStrings("serialQ", v),
+      variables: "n=[3:12] L=[3,4,6,8]",
+      answer: "n * L",
+    },
+    {
+      // Coalescer OFF: 4 per load.
+      prompt: (v) => sceneStrings("offQ", v),
+      variables: "k=[2:8]",
+      answer: "4 * k",
+    },
+    {
+      // Saved: 3 per load.
+      prompt: (v) => sceneStrings("saveQ", v),
+      variables: "k=[2:8]",
+      answer: "3 * k",
+    },
+    {
+      // 4L vs L → 3L extra.
+      prompt: (v) => sceneStrings("waitQ", v),
+      variables: "L=[3,4,6,8]",
+      answer: "3 * L",
+    },
+    {
+      // floor(a/4) mod 2.
+      prompt: (v) => sceneStrings("chanQ", v),
+      variables: "a=[0:31]",
+      answer: (v) => Math.floor(v.a / 4) % 2,
+    },
+    {
+      // Rotating priority: smaller (r − p) mod 8 wins.
+      prompt: (v) => sceneStrings("arbQ", v),
+      variables: "p=[1:7] r1=[0:7] r2=[0:7]",
+      constraints: "r1 != r2",
+      answer: (v) => (((v.r1 - v.p + 8) % 8) < ((v.r2 - v.p + 8) % 8) ? v.r1 : v.r2),
+    },
+    {
+      // Utilisation % = 100·B/C with clean numbers.
+      prompt: (v) => sceneStrings("utilQ", { ...v, B: (v.C * v.u) / 100 }),
+      variables: "C=[100,200] u=[10,20,25,50]",
+      answer: "u",
+    },
+    {
+      prompt: () => sceneStrings("idQ"),
+      options: [
+        { text: () => sceneStrings("idA"), correct: true },
+        { text: () => sceneStrings("idB"), correct: false },
+        { text: () => sceneStrings("idC"), correct: false },
+        { text: () => sceneStrings("idD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("queueQ"),
+      options: [
+        { text: () => sceneStrings("queueA"), correct: true },
+        { text: () => sceneStrings("queueB"), correct: false },
+        { text: () => sceneStrings("queueC"), correct: false },
+        { text: () => sceneStrings("queueD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("coalQ"),
+      options: [
+        { text: () => sceneStrings("coalA"), correct: true },
+        { text: () => sceneStrings("coalB"), correct: false },
+        { text: () => sceneStrings("coalC"), correct: false },
+        { text: () => sceneStrings("coalD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("stateQ"),
+      options: [
+        { text: () => sceneStrings("stateA"), correct: true },
+        { text: () => sceneStrings("stateB"), correct: false },
+        { text: () => sceneStrings("stateC"), correct: false },
+        { text: () => sceneStrings("stateD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("whyA"), correct: true },
+        { text: () => sceneStrings("whyB"), correct: false },
+        { text: () => sceneStrings("whyC"), correct: false },
+        { text: () => sceneStrings("whyD"), correct: false },
+      ],
+    },
+  ]);
+</script>

@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Planning a CPU: the RV32I Subset</primer-title>
+
+    <primer-card>
+      <p>
+        Five modules ago you wrote your first <code>assign</code>; last module you followed a design all
+        the way to
+        <primer-ref to="computer-science/chip-design/back-end/packaging-and-chiplets">packaged silicon</primer-ref>.
+        Time to spend that skill on the classic rite of passage: <strong>building a CPU</strong>. Over the
+        next six lessons we will design, in RTL and in a growing TypeScript model, a processor that fetches
+        real 32-bit RISC-V instructions, executes them, and — by the end — runs them five at a time in a
+        pipeline and catches its own bugs. But no wires yet. Every successful chip project starts the same
+        way: <strong>nail down the contract first</strong>. Ours is a clean ten-instruction subset of
+        <primer-ref to="computer-science/computer-architecture/isa/risc-v-registers-and-encoding">RV32I</primer-ref>,
+        the RISC-V base integer instruction set.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The contract: ten instructions</h2>
+      <p>
+        A real RV32I core implements 47 instructions; ten are enough to compute anything and to expose every
+        interesting design problem — arithmetic, memory, and control flow:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Instruction</th><th>Format</th><th>Meaning</th><th>Example</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>ADD</code></td><td>R</td><td>rd = rs1 + rs2</td><td><code>add x3, x1, x2</code></td></tr>
+            <tr><td><code>SUB</code></td><td>R</td><td>rd = rs1 − rs2</td><td><code>sub x4, x1, x2</code></td></tr>
+            <tr><td><code>AND</code></td><td>R</td><td>rd = rs1 &amp; rs2</td><td><code>and x5, x1, x2</code></td></tr>
+            <tr><td><code>OR</code></td><td>R</td><td>rd = rs1 | rs2</td><td><code>or x6, x1, x2</code></td></tr>
+            <tr><td><code>ADDI</code></td><td>I</td><td>rd = rs1 + imm</td><td><code>addi x1, x0, 5</code></td></tr>
+            <tr><td><code>LW</code></td><td>I</td><td>rd = mem[rs1 + imm]</td><td><code>lw x5, 8(x2)</code></td></tr>
+            <tr><td><code>SW</code></td><td>S</td><td>mem[rs1 + imm] = rs2</td><td><code>sw x5, 12(x2)</code></td></tr>
+            <tr><td><code>BEQ</code></td><td>B</td><td>if rs1 == rs2, pc += imm</td><td><code>beq x1, x3, loop</code></td></tr>
+            <tr><td><code>JAL</code></td><td>J</td><td>rd = pc + 4; pc += imm</td><td><code>jal x1, func</code></td></tr>
+            <tr><td><code>LUI</code></td><td>U</td><td>rd = imm &lt;&lt; 12</td><td><code>lui x7, 0x12345</code></td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Why RISC-V and not something homemade? Three reasons. It is <strong>open</strong> — no licence, no
+        permission, which is why it has become the lingua franca of computer architecture courses and a
+        thousand startups. Its encodings are <strong>ruthlessly regular</strong>, which will make our
+        decoder almost embarrassingly small. And it has <strong>real toolchains</strong>: the moment our
+        CPU works, an off-the-shelf compiler can generate programs for it. A homemade ISA gets you none of
+        that — and teaches you less, because its warts are yours alone.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The registers — and the strange case of x0</h2>
+      <p>
+        RV32I gives software 32 registers, <code>x0</code> through <code>x31</code>, each 32 bits wide.
+        Thirty-one of them are ordinary storage. The first is not: <strong><code>x0</code> is hardwired to
+        zero</strong>. Reads always return 0; writes disappear without a trace. This one odd register is a
+        quiet masterstroke — it gives the ISA a free constant zero, and it turns missing instructions into
+        pseudo-instructions: <code>addi x5, x0, 7</code> is "load constant 7", <code>add x5, x1, x0</code>
+        is "copy x1", <code>jal x0, target</code> is "jump and discard the return address", and
+        <code>addi x0, x0, 0</code> is the official NOP. We will meet <code>x0</code> again in
+        <em>every single lesson</em> of this module, usually as a bug it either prevents or causes.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Six formats, fixed field positions</h2>
+      <p>
+        Every RV32I instruction is exactly 32 bits, built from the same few fields. Reading the columns
+        right to left (bit 0 is on the right):
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Format</th><th>Bits 31 … 25</th><th>24 … 20</th><th>19 … 15</th><th>14 … 12</th><th>11 … 7</th><th>6 … 0</th><th>Used by</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>R</strong></td><td>funct7</td><td>rs2</td><td>rs1</td><td>funct3</td><td>rd</td><td>opcode</td><td>ADD SUB AND OR</td></tr>
+            <tr><td><strong>I</strong></td><td colspan="2">imm[11:0]</td><td>rs1</td><td>funct3</td><td>rd</td><td>opcode</td><td>ADDI LW</td></tr>
+            <tr><td><strong>S</strong></td><td>imm[11:5]</td><td>rs2</td><td>rs1</td><td>funct3</td><td>imm[4:0]</td><td>opcode</td><td>SW</td></tr>
+            <tr><td><strong>B</strong></td><td>imm[12|10:5]</td><td>rs2</td><td>rs1</td><td>funct3</td><td>imm[4:1|11]</td><td>opcode</td><td>BEQ</td></tr>
+            <tr><td><strong>U</strong></td><td colspan="4">imm[31:12]</td><td>rd</td><td>opcode</td><td>LUI</td></tr>
+            <tr><td><strong>J</strong></td><td colspan="4">imm[20|10:1|11|19:12]</td><td>rd</td><td>opcode</td><td>JAL</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Stare at the columns, not the rows: <code>rs1</code> is <em>always</em> bits 19:15,
+        <code>rs2</code> always 24:20, <code>rd</code> always 11:7, <code>opcode</code> always 6:0. No
+        format ever moves them. That is the regularity our decoder will cash in: the register-file read
+        addresses can be wired straight out of the instruction word before we even know which instruction
+        it is. The price is paid by the immediates, which get scrambled (S splits its immediate around
+        <code>rs2</code>; B and J interleave bits) precisely so the register fields never move. B and J
+        immediates are also in multiples of 2 — the low bit is implicit — buying double the branch reach
+        for free.
+      </p>
+      <primer-vignette title="Why are the immediate bits shuffled into such a strange order?">
+        <p>
+          Because hardware pays for <em>muxes</em>, not for weird-looking documentation. The RISC-V
+          architects chose the scrambling so that each immediate bit comes from as few different
+          instruction-word positions as possible across all formats — the sign bit, for instance, is
+          <em>always</em> bit 31, so sign extension never waits for format decoding. A human assembler
+          finds <code>imm[4:1|11]</code> ugly; a decoder finds it nearly free. It is a beautiful example of
+          an ISA being co-designed with the datapaths that will implement it — the spec looks strange on
+          paper and elegant in gates. The scrambling costs software nothing: assemblers do the shuffling,
+          and no human ever encodes a branch by hand. Well — except us, in the code block below.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <!-- The datapath-loop preview figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "rvLoop": {
+          "title": "The five-station loop every instruction will travel",
+          "pc": "PC",
+          "imem": "Instr mem",
+          "rf": "Decode + RF",
+          "alu": "ALU",
+          "dmem": "Data mem",
+          "wb": "write-back",
+          "npc": "next PC: +4, or branch/jump target",
+          "stepFetch": "Fetch: the PC addresses instruction memory, which hands back one 32-bit word",
+          "stepDecode": "Decode: split the word into fields; rs1/rs2 read the register file",
+          "stepExec": "Execute: the ALU adds, subtracts, compares — or computes an address",
+          "stepMem": "Memory: only LW and SW actually use the data memory",
+          "stepWb": "Write-back: the result returns to the register file — and the next PC closes the loop"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The shape of the machine to come</h2>
+      <p>
+        Here is the whole project on one napkin. Every instruction, whatever its format, will take the same
+        walk: the <code>pc</code> fetches a word from instruction memory, decode splits it into fields, the
+        register file supplies <code>rs1</code>/<code>rs2</code>, the ALU computes, data memory is touched
+        if needed, and the result loops back — into <code>rd</code> and into the next <code>pc</code>:
+      </p>
+      <primer-geometry scene="rvLoop" caption="A block diagram of the CPU loop: PC feeds instruction memory, then decode and register file, then ALU, then data memory; a write-back arrow returns to the register file and a next-PC arrow returns to the PC."></primer-geometry>
+      <p>
+        The module plan follows that drawing. Next lesson builds the
+        <primer-ref soft to="computer-science/chip-design/cpu/the-register-file-in-rtl">register file</primer-ref>;
+        then we close the whole loop as a
+        <primer-ref soft to="computer-science/chip-design/cpu/a-single-cycle-cpu-in-rtl">single-cycle CPU</primer-ref>,
+        give it a proper
+        <primer-ref soft to="computer-science/chip-design/cpu/the-control-unit-and-instruction-decode">control unit</primer-ref>,
+        <primer-ref soft to="computer-science/chip-design/cpu/pipelining-the-cpu-in-rtl">pipeline it</primer-ref>
+        five deep, fix the
+        <primer-ref soft to="computer-science/chip-design/cpu/hazards-and-forwarding-in-rtl">hazards</primer-ref>
+        that pipelining unleashes, and finally
+        <primer-ref soft to="computer-science/chip-design/cpu/verifying-the-cpu">verify the whole thing</primer-ref>
+        the way real CPU teams do.
+      </p>
+      <primer-vignette title="Watch out! The ISA is a contract, not a design">
+        <p>
+          The commonest beginner mistake in this project is to start drawing hardware while the instruction
+          list is still wobbling. Resist it. An ISA says <em>what</em> must happen — "after
+          <code>ADD</code>, <code>rd</code> holds the sum" — and says <strong>nothing</strong> about
+          <em>how</em>. The same ten-instruction contract we just signed will be implemented
+          <em>three different ways in this very module</em>: as a functional TypeScript model, as a
+          single-cycle datapath, and as a five-stage pipeline. A phone core, a laptop core and a
+          supercomputer core implementing RV32I share not one wire of design — yet run the same binaries.
+          That separation is the whole economic miracle of the ISA: software outlives any particular
+          silicon. Nail the contract; <em>then</em> design. (It is also why the contract will be our
+          referee in the final lesson: any implementation can be checked against a simpler one.)
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>First tool: an encoder and decoder</h2>
+      <p>
+        Our first deliverable is not hardware but tooling — a tiny assembler and disassembler we will reuse
+        in <em>every</em> lesson of this module. Encoding is just fields shifted into place and OR'd
+        together; decoding is the reverse. Run it, then try encoding your own instruction — change a
+        register or an immediate and check the hex word moves the way the format table predicts:
+      </p>
+      <primer-code run>
+// ── Encoders: shift each field into its slot and OR them together. ──
+function R(f7: number, f3: number, rd: number, rs1: number, rs2: number): number {
+  return ((f7 &lt;&lt; 25) | (rs2 &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | (rd &lt;&lt; 7) | 0x33) | 0;
+}
+function I(op: number, f3: number, rd: number, rs1: number, imm: number): number {
+  return (((imm &amp; 0xfff) &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | (rd &lt;&lt; 7) | op) | 0;
+}
+function S(f3: number, rs2: number, rs1: number, imm: number): number {
+  return ((((imm &gt;&gt; 5) &amp; 0x7f) &lt;&lt; 25) | (rs2 &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | ((imm &amp; 0x1f) &lt;&lt; 7) | 0x23) | 0;
+}
+function B(f3: number, rs1: number, rs2: number, imm: number): number {
+  return ((((imm &gt;&gt; 12) &amp; 1) &lt;&lt; 31) | (((imm &gt;&gt; 5) &amp; 0x3f) &lt;&lt; 25) | (rs2 &lt;&lt; 20) | (rs1 &lt;&lt; 15) |
+          (f3 &lt;&lt; 12) | (((imm &gt;&gt; 1) &amp; 0xf) &lt;&lt; 8) | (((imm &gt;&gt; 11) &amp; 1) &lt;&lt; 7) | 0x63) | 0;
+}
+function U(op: number, rd: number, imm20: number): number {
+  return ((imm20 &lt;&lt; 12) | (rd &lt;&lt; 7) | op) | 0;
+}
+function J(rd: number, imm: number): number {
+  return ((((imm &gt;&gt; 20) &amp; 1) &lt;&lt; 31) | (((imm &gt;&gt; 1) &amp; 0x3ff) &lt;&lt; 21) | (((imm &gt;&gt; 11) &amp; 1) &lt;&lt; 20) |
+          (((imm &gt;&gt; 12) &amp; 0xff) &lt;&lt; 12) | (rd &lt;&lt; 7) | 0x6f) | 0;
+}
+
+// ── Our ten-instruction subset, as a tiny assembler. ──
+const asm = {
+  ADD:  (rd: number, rs1: number, rs2: number) =&gt; R(0x00, 0, rd, rs1, rs2),
+  SUB:  (rd: number, rs1: number, rs2: number) =&gt; R(0x20, 0, rd, rs1, rs2),
+  AND:  (rd: number, rs1: number, rs2: number) =&gt; R(0x00, 7, rd, rs1, rs2),
+  OR:   (rd: number, rs1: number, rs2: number) =&gt; R(0x00, 6, rd, rs1, rs2),
+  ADDI: (rd: number, rs1: number, imm: number) =&gt; I(0x13, 0, rd, rs1, imm),
+  LW:   (rd: number, rs1: number, imm: number) =&gt; I(0x03, 2, rd, rs1, imm),
+  SW:   (rs2: number, rs1: number, imm: number) =&gt; S(2, rs2, rs1, imm),
+  BEQ:  (rs1: number, rs2: number, imm: number) =&gt; B(0, rs1, rs2, imm),
+  JAL:  (rd: number, imm: number) =&gt; J(rd, imm),
+  LUI:  (rd: number, imm20: number) =&gt; U(0x37, rd, imm20),
+};
+
+// ── Decoder: pull the fixed-position fields first, THEN ask the opcode what they mean. ──
+interface Decoded {
+  name: string; fmt: string;
+  opcode: number; rd: number; f3: number; rs1: number; rs2: number; f7: number; imm: number;
+}
+function decode(w: number): Decoded {
+  const opcode = w &amp; 0x7f, rd = (w &gt;&gt; 7) &amp; 0x1f, f3 = (w &gt;&gt; 12) &amp; 7;
+  const rs1 = (w &gt;&gt; 15) &amp; 0x1f, rs2 = (w &gt;&gt; 20) &amp; 0x1f, f7 = (w &gt;&gt;&gt; 25) &amp; 0x7f;
+  const immI = w &gt;&gt; 20;                                     // &gt;&gt; sign-extends bit 31 down
+  const immS = ((w &gt;&gt; 25) &lt;&lt; 5) | ((w &gt;&gt; 7) &amp; 0x1f);
+  const immB = ((w &gt;&gt; 31) &lt;&lt; 12) | (((w &gt;&gt; 7) &amp; 1) &lt;&lt; 11) | (((w &gt;&gt; 25) &amp; 0x3f) &lt;&lt; 5) | (((w &gt;&gt; 8) &amp; 0xf) &lt;&lt; 1);
+  const immU = (w &gt;&gt; 12) &lt;&lt; 12;
+  const immJ = ((w &gt;&gt; 31) &lt;&lt; 20) | (((w &gt;&gt; 12) &amp; 0xff) &lt;&lt; 12) | (((w &gt;&gt; 20) &amp; 1) &lt;&lt; 11) | (((w &gt;&gt; 21) &amp; 0x3ff) &lt;&lt; 1);
+  let name = "??", fmt = "?", imm = 0;
+  if      (opcode === 0x33) { fmt = "R"; name = f3 === 0 ? (f7 === 0x20 ? "SUB" : "ADD") : f3 === 7 ? "AND" : "OR"; }
+  else if (opcode === 0x13) { fmt = "I"; name = "ADDI"; imm = immI; }
+  else if (opcode === 0x03) { fmt = "I"; name = "LW";   imm = immI; }
+  else if (opcode === 0x23) { fmt = "S"; name = "SW";   imm = immS; }
+  else if (opcode === 0x63) { fmt = "B"; name = "BEQ";  imm = immB; }
+  else if (opcode === 0x6f) { fmt = "J"; name = "JAL";  imm = immJ; }
+  else if (opcode === 0x37) { fmt = "U"; name = "LUI";  imm = immU; }
+  return { name, fmt, opcode, rd, f3, rs1, rs2, f7, imm };
+}
+
+// ── Round trip: assemble, print the word, take it apart again. ──
+const hex = (w: number) =&gt; "0x" + (w &gt;&gt;&gt; 0).toString(16).padStart(8, "0");
+const program: [string, number][] = [
+  ["addi x1, x0, 5",    asm.ADDI(1, 0, 5)],
+  ["addi x2, x0, -3",   asm.ADDI(2, 0, -3)],
+  ["add  x3, x1, x2",   asm.ADD(3, 1, 2)],
+  ["sub  x4, x1, x2",   asm.SUB(4, 1, 2)],
+  ["lw   x5, 8(x1)",    asm.LW(5, 1, 8)],
+  ["sw   x5, 12(x1)",   asm.SW(5, 1, 12)],
+  ["beq  x1, x2, -8",   asm.BEQ(1, 2, -8)],
+  ["jal  x1, 2048",     asm.JAL(1, 2048)],
+  ["lui  x6, 0x12345",  asm.LUI(6, 0x12345)],
+];
+
+console.log("assembly            | word       | name fmt | rd rs1 rs2 | imm");
+console.log("--------------------+------------+----------+------------+------");
+for (const [src, w] of program) {
+  const d = decode(w);
+  console.log(
+    `${src.padEnd(19)} | ${hex(w)} | ${d.name.padEnd(4)} ${d.fmt}    | ` +
+    `${String(d.rd).padStart(2)}  ${String(d.rs1).padStart(2)}  ${String(d.rs2).padStart(2)}  | ${d.imm}`,
+  );
+}
+      </primer-code>
+      <p>
+        Two details worth savouring in the output. The word for <code>addi x1, x0, 5</code>,
+        <code>0x00500093</code>, is the exact bit pattern a real RISC-V compiler emits — our toy speaks the
+        genuine language. And look at the raw <code>rd</code>/<code>rs2</code> columns for the store and
+        branch rows: the decoder pulls fields from <em>fixed positions first</em> and only then asks the
+        opcode what they mean — for <code>SW</code> the "rd" bits are really immediate bits. Fixed
+        positions, format-dependent meaning: that is the RISC-V decode idiom, and it is exactly how our
+        hardware decoder will work in two lessons' time.
+      </p>
+    </primer-card>
+
+    <!-- Quiz. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "rv32iQuiz@1": {
+          "intro": "The contract: ten RV32I instructions, six formats, and one register that is always zero.",
+          "addiQ": "ADDI x{d}, x{s}, {i} executes while x{s} holds {v}. What does x{d} hold afterwards?",
+          "x0writeQ": "A rogue instruction executes ADDI x0, x0, {i}. What does a later read of x0 return?",
+          "x0readQ": "ADDI x{d}, x0, {i} executes. What lands in x{d}?",
+          "immposQ": "An immediate field is {b} bits wide and sign-extended. What is the largest positive value it can encode?",
+          "regbitsQ": "RV32I has 32 registers. How many bits does an instruction field need to name one?",
+          "widthQ": "How many bits long is every RV32I instruction?",
+          "opcodeQ": "The opcode field occupies bits 6:0. How many distinct opcode values can it express?",
+          "fmtLwQ": "LW names one source register and one immediate offset, and writes rd. Which format is it?",
+          "fmtLwA": "I-type — the same format as ADDI",
+          "fmtLwB": "S-type — all memory instructions use S",
+          "fmtLwC": "R-type — it reads a register, after all",
+          "fmtLwD": "U-type — offsets are large constants",
+          "fmtSwQ": "SW reads two registers, has an immediate, and writes NO register. Which format is it?",
+          "fmtSwA": "S-type — its immediate is split so rs1 and rs2 keep their usual positions",
+          "fmtSwB": "I-type — it has an immediate, so it must be",
+          "fmtSwC": "R-type — two source registers means R",
+          "fmtSwD": "J-type — stores jump data to memory",
+          "fmtWhyQ": "Why do the S and B formats split their immediates into pieces instead of keeping them contiguous?",
+          "fmtWhyA": "So rs1, rs2 and rd never move between formats — the decoder extracts them with fixed wires, no muxes",
+          "fmtWhyB": "To encrypt the instruction stream lightly",
+          "fmtWhyC": "A historical accident kept for backwards compatibility",
+          "fmtWhyD": "To make immediates larger than 32 bits",
+          "contractQ": "Two teams build completely different datapaths, both implementing RV32I correctly. The same compiled program…",
+          "contractA": "produces identical results on both — the ISA is the contract, the datapath is an implementation choice",
+          "contractB": "must be recompiled for each datapath",
+          "contractC": "runs only on the datapath it was benchmarked on",
+          "contractD": "produces results that differ by timing",
+          "luiQ": "Which instruction exists purely to plant a 20-bit immediate in the top bits of a register, so big constants can be built in two steps?",
+          "luiA": "LUI",
+          "luiB": "JAL",
+          "luiC": "ADDI",
+          "luiD": "BEQ"
+        }
+      }
+    </script>
+
+    <primer-quiz name="rv32iQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/back-end/packaging-and-chiplets",
+      "computer-science/computer-architecture/isa/risc-v-registers-and-encoding"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The datapath-loop napkin sketch, revealed station by station. ──
+  registerGeometryScene(
+    "rvLoop",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (x1, y1, x2, y2, key, c) => {
+        board.create("polygon", [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], {
+          vertices: { visible: false }, borders: { strokeColor: c, strokeWidth: 2, highlight: false },
+          fillColor: c, fillOpacity: 0.08, highlight: false,
+        });
+        board.create("text", [(x1 + x2) / 2, (y1 + y2) / 2, () => sceneStrings(key)], {
+          anchorX: "middle", anchorY: "middle", strokeColor: colors.ink, fontSize: 13, fixed: true, highlight: false,
+        });
+      };
+      const arrow = (pts, c) => {
+        for (let i = 0; i < pts.length - 2; i++)
+          board.create("segment", [pts[i], pts[i + 1]], { strokeColor: c, strokeWidth: 2, highlight: false });
+        board.create("arrow", [pts[pts.length - 2], pts[pts.length - 1]], { strokeColor: c, strokeWidth: 2, highlight: false });
+      };
+
+      step(sceneStrings("stepFetch"), () => {
+        box(0.5, 3, 2.5, 5, "pc", colors.cat[0]);
+        box(3.5, 3, 6.8, 5, "imem", colors.cat[1]);
+        arrow([[2.5, 4], [3.5, 4]], colors.line);
+      });
+      step(sceneStrings("stepDecode"), () => {
+        box(7.8, 3, 11.4, 5, "rf", colors.cat[2]);
+        arrow([[6.8, 4], [7.8, 4]], colors.line);
+      });
+      step(sceneStrings("stepExec"), () => {
+        box(12.4, 3, 14.6, 5, "alu", colors.cat[3]);
+        arrow([[11.4, 4], [12.4, 4]], colors.line);
+      });
+      step(sceneStrings("stepMem"), () => {
+        box(15.6, 3, 18.8, 5, "dmem", colors.cat[4]);
+        arrow([[14.6, 4], [15.6, 4]], colors.line);
+      });
+      step(sceneStrings("stepWb"), () => {
+        // Write-back: up and over, back into the register file.
+        arrow([[18.8, 4], [19.6, 4], [19.6, 6.2], [9.6, 6.2], [9.6, 5]], colors.cat[0]);
+        board.create("text", [14.5, 6.6, () => sceneStrings("wb")], {
+          anchorX: "middle", anchorY: "middle", strokeColor: colors.ink, fontSize: 12, fixed: true, highlight: false,
+        });
+        // Next PC: down and back to the PC.
+        arrow([[13.5, 3], [13.5, 1.4], [1.5, 1.4], [1.5, 3]], colors.cat[1]);
+        board.create("text", [7.5, 0.9, () => sceneStrings("npc")], {
+          anchorX: "middle", anchorY: "middle", strokeColor: colors.ink, fontSize: 12, fixed: true, highlight: false,
+        });
+      });
+    },
+    { boundingbox: [-0.3, 7.4, 20.4, 0.2], title: () => makeStrings("rvLoop")("title") },
+  );
+
+  registerQuiz("rv32iQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("addiQ", v),
+      variables: "d=[1:9] s=[10:15] i=[1:60] v=[5:80]",
+      answer: "v + i",
+    },
+    {
+      prompt: (v) => sceneStrings("x0writeQ", v),
+      variables: "i=[1:200]",
+      answer: 0,
+    },
+    {
+      prompt: (v) => sceneStrings("x0readQ", v),
+      variables: "d=[1:9] i=[1:99]",
+      answer: "i",
+    },
+    {
+      prompt: (v) => sceneStrings("immposQ", v),
+      variables: "b=[12,13,21]",
+      answer: "2 ^ (b - 1) - 1",
+    },
+    { prompt: () => sceneStrings("regbitsQ"), answer: 5 },
+    { prompt: () => sceneStrings("widthQ"), answer: 32 },
+    { prompt: () => sceneStrings("opcodeQ"), answer: 128 },
+    {
+      prompt: () => sceneStrings("fmtLwQ"),
+      options: [
+        { text: () => sceneStrings("fmtLwA"), correct: true },
+        { text: () => sceneStrings("fmtLwB"), correct: false },
+        { text: () => sceneStrings("fmtLwC"), correct: false },
+        { text: () => sceneStrings("fmtLwD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fmtSwQ"),
+      options: [
+        { text: () => sceneStrings("fmtSwA"), correct: true },
+        { text: () => sceneStrings("fmtSwB"), correct: false },
+        { text: () => sceneStrings("fmtSwC"), correct: false },
+        { text: () => sceneStrings("fmtSwD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fmtWhyQ"),
+      options: [
+        { text: () => sceneStrings("fmtWhyA"), correct: true },
+        { text: () => sceneStrings("fmtWhyB"), correct: false },
+        { text: () => sceneStrings("fmtWhyC"), correct: false },
+        { text: () => sceneStrings("fmtWhyD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("contractQ"),
+      options: [
+        { text: () => sceneStrings("contractA"), correct: true },
+        { text: () => sceneStrings("contractB"), correct: false },
+        { text: () => sceneStrings("contractC"), correct: false },
+        { text: () => sceneStrings("contractD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("luiQ"),
+      options: [
+        { text: () => sceneStrings("luiA"), correct: true },
+        { text: () => sceneStrings("luiB"), correct: false },
+        { text: () => sceneStrings("luiC"), correct: false },
+        { text: () => sceneStrings("luiD"), correct: false },
+      ],
+    },
+  ]);
+</script>

@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>The Register File in RTL</primer-title>
+
+    <primer-card>
+      <p>
+        The contract is signed — time to cut the first metal. We start with the piece every other block
+        will lean on: the <strong>register file</strong>, the CPU's 32-word scratchpad. It is the busiest
+        memory on the chip: in the machine we are building it will be read twice and written once
+        <em>every single cycle, forever</em>. You already know its software face from the
+        <primer-ref to="computer-science/chip-design/cpu/planning-a-cpu-the-rv32i-subset">RV32I plan</primer-ref>
+        — 32 registers of 32 bits, with <code>x0</code> pinned to zero — and its place beside the ALU from
+        <primer-ref to="computer-science/computer-systems/registers-alu-and-control-unit">computer
+        systems</primer-ref>. Today we pin down its hardware truth: exactly what ports it has, exactly when
+        data moves, and exactly how <code>x0</code> stays zero.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two reads, one write: counting ports from the ISA</h2>
+      <p>
+        How many ports does the register file need? Don't guess — read the contract.
+        <code>add x3, x1, x2</code> must, in one cycle, <em>read</em> <code>x1</code> and <code>x2</code>
+        and <em>write</em> <code>x3</code>. That is the worst case in our subset, so the register file is a
+        <strong>2R1W</strong> memory: two read ports (traditionally named for the fields that drive them,
+        <code>rs1</code> and <code>rs2</code>) and one write port (<code>rd</code>). Three instructions can
+        touch it at once — two readers and a writer — and none may wait, because in a CPU "wait" means a
+        stalled machine.
+      </p>
+      <p>
+        The two kinds of port work on <em>different clocks of logic</em>:
+      </p>
+      <ul>
+        <li><strong>Reads are combinational.</strong> Put an address on <code>rs1</code> and
+          <code>rdata1</code> settles later that same cycle — no clock edge involved. A read port is
+          nothing more than a 32-way mux selecting one of 32 flip-flop outputs.</li>
+        <li><strong>The write is clocked.</strong> <code>wdata</code> is captured into register
+          <code>rd</code> at the rising edge, and only if the control unit asserts <code>we</code>
+          (the signal we will later call <code>RegWrite</code>). This is our
+          <primer-ref to="computer-science/chip-design/rtl/sequential-logic-and-always-ff" soft>settle,
+          then snap</primer-ref> rhythm: reads settle all cycle, the edge snaps the write in.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>The module, in full</h2>
+      <p>
+        Here is the whole thing — genuinely all of it. After five modules of RTL, a 32×32 2R1W register
+        file with a hardwired zero comes to about a dozen lines:
+      </p>
+      <primer-code lang="text">
+module regfile (
+  input  logic        clk,
+  input  logic        we,               // RegWrite, from the control unit
+  input  logic [4:0]  rs1, rs2, rd,     // two read addresses, one write address
+  input  logic [31:0] wdata,
+  output logic [31:0] rdata1, rdata2
+);
+  logic [31:0] regs [31:0];             // the 32 x 32-bit array
+
+  // Two combinational read ports: each is just a 32-way mux.
+  // x0 is forced to zero on the way out.
+  assign rdata1 = (rs1 == 5'd0) ? 32'd0 : regs[rs1];
+  assign rdata2 = (rs2 == 5'd0) ? 32'd0 : regs[rs2];
+
+  // One clocked write port. Writes aimed at x0 are silently dropped.
+  always_ff @(posedge clk)
+    if (we &amp;&amp; rd != 5'd0)
+      regs[rd] &lt;= wdata;
+endmodule
+      </primer-code>
+      <p>
+        Read the <code>x0</code> defence carefully — it is belt <em>and</em> braces. The read ports
+        <strong>force</strong> zero out whenever the address is 0, and the write port <strong>refuses</strong>
+        to store when <code>rd</code> is 0. Either alone would almost work; together they make
+        <code>x0 == 0</code> an invariant no instruction sequence can break. Synthesis enjoys the braces
+        too: register 0 is never written and never read as storage, so the optimizer quietly deletes its 32
+        flip-flops.
+      </p>
+      <primer-vignette title="Watch out! The register file that stored to x0">
+        <p>
+          Drop the <code>rd != 5'd0</code> guard and everything <em>looks</em> fine — until a program runs
+          <code>jal x0, loop</code> (a plain jump: "discard the return address"). Your register file
+          dutifully stores the return address into register 0… and if the read path returns
+          <code>regs[0]</code> rather than forced zero, <code>x0</code> is suddenly, silently,
+          <em>not zero</em>. Every later "load constant" (<code>addi x5, x0, 7</code>), every NOP, every
+          "compare against zero" is now poisoned — the program doesn't crash at the store, it goes subtly
+          insane hundreds of instructions later. This is a classic CPU bug class: the violation and the
+          symptom are far apart. Tuck that away — in the final lesson we will write an assertion whose only
+          job is to catch exactly this.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Same cycle, same register: who wins?</h2>
+      <p>
+        One timing subtlety decides whether next lesson's CPU is buggy or correct. Suppose in one cycle the
+        write port is storing 42 into <code>x7</code> <em>while</em> a read port is reading <code>x7</code>.
+        What comes out? Trace the hardware: the read mux taps the flip-flops' <em>current outputs</em>, all
+        cycle long; the write only lands <em>at the edge that ends the cycle</em>. So the read sees the
+        <strong>old</strong> value, and the new one becomes visible the following cycle. For our
+        single-cycle CPU this is exactly right: an instruction reads its sources <em>before</em> its own
+        result exists — reads-see-old matches program order perfectly. (File the question away, though:
+        when the pipeline arrives, reader and writer will be <em>different instructions</em> sharing a
+        cycle, and this same question becomes a genuine hazard with a whole lesson of consequences.)
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The model, running</h2>
+      <p>
+        Now the executable twin — the same 2R1W behaviour in the two-phase style we will grow into a full
+        CPU next lesson: reads are plain functions (combinational), and the write produces the
+        <em>next</em> state (the edge). Watch cycle 0 read the old value of the register it is writing, and
+        cycles 1–2 bounce off <code>x0</code>:
+      </p>
+      <primer-code run>
+// -- The register file: 32 words of 32 bits, two read ports, one write port. --
+interface RF { regs: number[] }
+
+// Combinational reads: just a big mux. x0 always reads as zero.
+const read = (rf: RF, r: number): number =&gt; (r === 0 ? 0 : rf.regs[r]);
+
+// The clocked write: honoured only when we is set AND rd is not x0.
+function write(rf: RF, we: number, rd: number, wdata: number): RF {
+  const regs = rf.regs.slice();
+  if (we &amp;&amp; rd !== 0) regs[rd] = wdata | 0;
+  return { regs };
+}
+
+// -- Drive it single-cycle style: reads settle first, then the edge commits the write. --
+interface Cycle { rs1: number; rs2: number; we: number; rd: number; wdata: number; note: string }
+const script: Cycle[] = [
+  { rs1: 0, rs2: 5, we: 1, rd: 5, wdata: 123, note: "write x5=123; the same-cycle read of x5 sees the OLD value" },
+  { rs1: 5, rs2: 0, we: 1, rd: 0, wdata: 999, note: "x5 now reads 123; meanwhile, try to write x0=999..." },
+  { rs1: 0, rs2: 5, we: 1, rd: 6, wdata: 7,   note: "...and x0 still reads 0: the write was silently dropped" },
+  { rs1: 6, rs2: 5, we: 0, rd: 7, wdata: 42,  note: "we=0: rd and wdata are ignored entirely" },
+  { rs1: 7, rs2: 6, we: 0, rd: 0, wdata: 0,   note: "x7 was never written; x6 holds 7" },
+];
+
+let rf: RF = { regs: new Array(32).fill(0) };
+console.log("cycle | rdata1 rdata2 | write     | note");
+console.log("------+---------------+-----------+-----");
+script.forEach((c, i) =&gt; {
+  const r1 = read(rf, c.rs1), r2 = read(rf, c.rs2);   // reads: combinational, pre-edge
+  rf = write(rf, c.we, c.rd, c.wdata);                // the rising edge
+  const w = c.we ? `x${c.rd} := ${c.wdata}` : "(we=0)";
+  console.log(`  ${i}   |  ${String(r1).padStart(4)}   ${String(r2).padStart(4)}  | ${w.padEnd(9)} | ${c.note}`);
+});
+console.log(`\nafter: x0=${read(rf, 0)}  x5=${read(rf, 5)}  x6=${read(rf, 6)}  x7=${read(rf, 7)}`);
+      </primer-code>
+      <p>
+        Five cycles, every rule on display: combinational reads, the edge-committed write, reads-see-old on
+        a same-cycle collision, <code>we</code> gating the port, and <code>x0</code> shrugging off a write.
+        Keep <code>read</code> and <code>write</code> in your head — next lesson they get sandwiched
+        between a decoder and an ALU, and the machine starts to run.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Flip-flops today, SRAM tomorrow</h2>
+      <p>
+        Our register file is built from flip-flops — 31 real registers × 32 bits ≈ a thousand flops plus
+        two 32-way muxes. At this size that is the right call: cheap, fast, and the synthesis tool handles
+        it without ceremony. But the approach does not scale. Multiply the muxes and the fan-out and you
+        can feel it: every extra read port replicates a 32-way, 32-bit mux; every extra entry deepens it.
+        Big register files — a GPU's, say — abandon flip-flops for dense SRAM banks and start playing
+        scheduling games to fake many ports out of few. If you want to see how monstrous the same idea can
+        get, peek at the
+        <primer-ref soft to="computer-science/chip-design/gpu-compute/the-gpu-register-file-and-operand-collector">GPU
+        register file</primer-ref>: <em>megabytes</em> of registers per chip, served by banked SRAM and an
+        operand collector. Same contract as our twelve lines — read sources, write results — utterly
+        different machinery. The ISA-vs-implementation lesson, already paying rent.
+      </p>
+      <primer-vignette title="Why not give the CPU more registers, then?">
+        <p>
+          If registers are this cheap, why stop at 32? Because the register <em>file</em> is cheap but the
+          register <em>fields</em> are not: each register number costs 5 bits of every instruction, and an
+          R-type already spends 15 of its 32 bits naming registers. Doubling to 64 registers would spend 18
+          bits — squeezing opcodes and immediates — for gains that fall off a cliff once the compiler has
+          "enough" places to keep loop variables. RISC-V's answer is 32 (and even a 16-register embedded
+          variant, RV32E, for tiny cores). The sweet spot is an ISA-level trade-off between encoding space,
+          register-file area, and how many live values compilers actually juggle — decided in 1980s RISC
+          research and barely moved since.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <!-- Quiz. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "rfQuiz@1": {
+          "intro": "32 words, two combinational read ports, one clocked write port — and x0 is always zero.",
+          "x0wQ": "The write port is driven with we=1, rd=x0, wdata={v}. What does a read of x0 return on the next cycle?",
+          "wrQ": "The write port stores {v} into x{r} at the end of cycle 3. A read of x{r} during cycle 3 returns {p}; what does a read during cycle 4 return?",
+          "oldQ": "In the same cycle, the write port stores {v} into x{r} while a read port reads x{r}, which currently holds {p}. What does the read return?",
+          "bitsQ": "A register file has {n} registers, each {w} bits wide. Ignoring the hardwired zero trick, how many bits of state is that?",
+          "portQ": "Why does the register file need exactly two read ports and one write port for our subset?",
+          "portA": "An R-type instruction like ADD reads rs1 and rs2 and writes rd — all in one cycle",
+          "portB": "One port per instruction format",
+          "portC": "Reads are twice as fast as writes",
+          "portD": "The clock runs twice per cycle on the read side",
+          "combQ": "What is a read port, structurally?",
+          "combA": "A 32-way combinational mux over the flip-flop outputs — no clock involved",
+          "combB": "A small clocked state machine that fetches the value in two cycles",
+          "combC": "A tri-state bus that all registers drive at once",
+          "combD": "A shift register that rotates values to the output",
+          "wportQ": "Why is the write port clocked, when the read ports are not?",
+          "wportA": "Writes change state, and in synchronous design all state changes commit at the clock edge",
+          "wportB": "Writes are rarer than reads",
+          "wportC": "The write mux is too slow to be combinational",
+          "wportD": "It is an arbitrary style choice with no consequences",
+          "sameQ": "Single-cycle CPU, one instruction: why is reads-see-old exactly the right same-cycle semantics?",
+          "sameA": "An instruction must read its sources as they were BEFORE it executes; its own result belongs to later instructions",
+          "sameB": "Old values are electrically easier to produce",
+          "sameC": "It is wrong, but harmless in practice",
+          "sameD": "Because reads happen in the second half of the cycle",
+          "guardQ": "The write port's guard is: if (we && rd != 5'd0). What does each half prevent?",
+          "guardA": "we gates writes to cycles the control unit intends; rd != 0 keeps x0 immutable",
+          "guardB": "we prevents metastability; rd != 0 saves power",
+          "guardC": "Both halves do the same job, for redundancy",
+          "guardD": "we selects the format; rd != 0 selects the bank",
+          "jalQ": "Which innocent-looking instruction writes to x0 on purpose, and so relies on the register file discarding the write?",
+          "jalA": "jal x0, target — a plain jump that discards the return address",
+          "jalB": "add x3, x1, x2 — the classic R-type",
+          "jalC": "lw x5, 8(x2) — a load",
+          "jalD": "beq x1, x2, loop — branches have no rd at all",
+          "sramQ": "Why do flip-flop register files stop scaling, pushing huge designs (like GPUs) to banked SRAM?",
+          "sramA": "Every added port replicates a full read mux and grows fan-out — area and delay balloon with ports × entries",
+          "sramB": "Flip-flops wear out after too many writes",
+          "sramC": "SRAM is combinational and therefore faster by definition",
+          "sramD": "Synthesis tools refuse arrays larger than 32 entries"
+        }
+      }
+    </script>
+
+    <primer-quiz name="rfQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/cpu/planning-a-cpu-the-rv32i-subset",
+      "computer-science/computer-systems/registers-alu-and-control-unit"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("rfQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("x0wQ", v),
+      variables: "v=[1:500]",
+      answer: 0,
+    },
+    {
+      prompt: (v) => sceneStrings("wrQ", v),
+      variables: "v=[10:99] r=[1:9] p=[100:199]",
+      answer: "v",
+    },
+    {
+      prompt: (v) => sceneStrings("oldQ", v),
+      variables: "v=[10:99] r=[1:9] p=[100:199]",
+      answer: "p",
+    },
+    {
+      prompt: (v) => sceneStrings("bitsQ", v),
+      variables: "n=[16,32,64] w=[16,32]",
+      answer: "n * w",
+    },
+    {
+      prompt: () => sceneStrings("portQ"),
+      options: [
+        { text: () => sceneStrings("portA"), correct: true },
+        { text: () => sceneStrings("portB"), correct: false },
+        { text: () => sceneStrings("portC"), correct: false },
+        { text: () => sceneStrings("portD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("combQ"),
+      options: [
+        { text: () => sceneStrings("combA"), correct: true },
+        { text: () => sceneStrings("combB"), correct: false },
+        { text: () => sceneStrings("combC"), correct: false },
+        { text: () => sceneStrings("combD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("wportQ"),
+      options: [
+        { text: () => sceneStrings("wportA"), correct: true },
+        { text: () => sceneStrings("wportB"), correct: false },
+        { text: () => sceneStrings("wportC"), correct: false },
+        { text: () => sceneStrings("wportD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sameQ"),
+      options: [
+        { text: () => sceneStrings("sameA"), correct: true },
+        { text: () => sceneStrings("sameB"), correct: false },
+        { text: () => sceneStrings("sameC"), correct: false },
+        { text: () => sceneStrings("sameD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("guardQ"),
+      options: [
+        { text: () => sceneStrings("guardA"), correct: true },
+        { text: () => sceneStrings("guardB"), correct: false },
+        { text: () => sceneStrings("guardC"), correct: false },
+        { text: () => sceneStrings("guardD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("jalQ"),
+      options: [
+        { text: () => sceneStrings("jalA"), correct: true },
+        { text: () => sceneStrings("jalB"), correct: false },
+        { text: () => sceneStrings("jalC"), correct: false },
+        { text: () => sceneStrings("jalD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sramQ"),
+      options: [
+        { text: () => sceneStrings("sramA"), correct: true },
+        { text: () => sceneStrings("sramB"), correct: false },
+        { text: () => sceneStrings("sramC"), correct: false },
+        { text: () => sceneStrings("sramD"), correct: false },
+      ],
+    },
+  ]);
+</script>

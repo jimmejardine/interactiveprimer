@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>GPU Caches and the Memory Hierarchy</primer-title>
+
+    <primer-card>
+      <p>
+        Yes, GPUs have caches — and if you carry your
+        <primer-ref to="computer-science/computer-architecture/memory/cache-fundamentals">CPU cache
+        intuition</primer-ref> across unedited, they will lie to you. On a CPU, the cache's job is to make
+        <em>one thread's</em> memory look fast: keep its working set close, and a load that would cost 300
+        cycles costs 4. A GPU cache serves <strong>a hundred thousand threads at once</strong>, and split a
+        hundred thousand ways there is no "close" left to offer anyone. So GPU caches do a different job —
+        not hiding latency (warps and the
+        <primer-ref to="computer-science/chip-design/gpu-compute/the-warp-scheduler">scheduler</primer-ref>
+        do that) but <strong>filtering bandwidth</strong>: absorbing re-fetches so that precious DRAM
+        bandwidth is spent only on bytes that truly have to come from DRAM. Same SRAM, same tag arrays,
+        completely different purpose. This lesson rebuilds your mental model of the hierarchy, GPU-style.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The hierarchy, top to bottom</h2>
+      <p>
+        Four levels, each roughly an order of magnitude bigger and slower than the last:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Level</th><th>Size (representative)</th><th>Visible to</th><th>Latency (approx.)</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Register file</td><td>256 KB per SM</td><td>one thread (its own registers)</td><td>~1 cycle</td></tr>
+            <tr><td>Shared memory / L1</td><td>128 KB per SM (one SRAM pool)</td><td>block (shared) / SM (L1)</td><td>~20–30 cycles</td></tr>
+            <tr><td>L2 cache</td><td>a few MB, in slices</td><td>the whole chip</td><td>~200 cycles</td></tr>
+            <tr><td>GDDR / HBM DRAM</td><td>tens of GB</td><td>everything</td><td>~400–600 cycles</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The shapes are CPU-familiar; the <em>per-thread arithmetic</em> is not. Do it once and the whole
+        philosophy of GPU caching falls out. A mainstream part has, say, <strong>2 MB of L2</strong>
+        shared by roughly <strong>100,000 resident threads</strong>:
+      </p>
+      <primer-math display>\frac{2\,\text{MB}}{100{,}000 \text{ threads}} \approx 20 \text{ bytes per thread.}</primer-math>
+      <p>
+        Twenty bytes. Not twenty kilobytes — twenty <em>bytes</em>, five floats, per thread. The per-SM L1
+        fares little better: 128 KB across up to 2,048 resident threads is <strong>64 B each</strong>. And
+        now the punchline of the whole hierarchy: the <strong>register file</strong>, at 256 KB per SM, is
+        <em>bigger than the L1</em> and gives each thread <strong>128 B</strong> of truly private,
+        single-cycle storage. Per thread, the GPU pyramid is upside down: registers are the roomiest fast
+        storage a thread will ever see, and each cache level below offers it <em>less</em>. Compare a CPU
+        core: 32 KB of L1 split between 2 SMT threads is <strong>16 KB each</strong> — about a thousand
+        times the GPU figure.
+      </p>
+    </primer-card>
+
+    <!-- Stepped log-scale bar chart: per-thread bytes at each level. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "perThreadBars": {
+          "title": "Fast storage per thread (log scale)",
+          "stepCpu": "A CPU thread's view: kilobytes of L1 and megabyte-scale L2, nearly to itself",
+          "stepGpu": "A GPU thread's view: its registers are its mansion — the caches offer it tens of bytes",
+          "stepGap": "The gap is about three orders of magnitude — GPU caches cannot play the CPU role",
+          "cpuL1": "CPU L1",
+          "cpuL2": "CPU L2",
+          "gpuRF": "GPU regs",
+          "gpuL1": "GPU L1",
+          "gpuL2": "GPU L2",
+          "gapNote": "≈ 1000× less"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>One picture of the imbalance</h2>
+      <p>
+        Plotted per thread — the only fair way to compare machines with such different thread counts — the
+        hierarchy looks like this:
+      </p>
+      <primer-geometry scene="perThreadBars" caption="A logarithmic bar chart of fast storage per thread. CPU L1 offers about 16 kilobytes per thread and CPU L2 about 512 kilobytes. On the GPU, registers offer 128 bytes per thread, L1 64 bytes and L2 about 20 bytes — roughly a thousand times less than the CPU figures."></primer-geometry>
+      <p>
+        This chart is why the rest of the lesson keeps repeating one sentence: on a GPU,
+        <strong>latency is hidden by warps, and caches are for saving bandwidth</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What a bandwidth filter actually does</h2>
+      <p>
+        If a cache cannot hold anyone's working set, what is it for? Catching <strong>sharing and
+        spillover</strong> — the reuse that exists <em>between</em> threads rather than within one:
+      </p>
+      <ul>
+        <li><strong>Cross-thread reuse.</strong> Thousands of threads read the same lookup table, the
+          same matrix tile edge, the same neighbour cells of a stencil. The first reader pays DRAM; the
+          L2 serves everyone else. DRAM sees one fetch instead of thousands — bandwidth
+          <em>filtered</em>.</li>
+        <li><strong>Coalescing's safety net.</strong> When a warp's accesses are imperfect —
+          <primer-ref to="computer-science/chip-design/gpu-compute/memory-coalescing">misaligned or
+          slightly scattered</primer-ref> — caches with <strong>sectored lines</strong> (128-byte lines
+          fetched as four independent 32-byte sectors) hold the over-fetched sectors, so a neighbouring
+          warp that wants them a moment later finds them without a second trip to DRAM.</li>
+        <li><strong>Traffic shaping, on request.</strong> Modern GPUs let code annotate accesses: a
+          <em>streaming</em> hint marks data that will not be reused (evict it first — don't let it flush
+          the useful stuff), and an <strong>L2 residency</strong> window can pin a hot region — that one
+          lookup table every thread hammers — so it never leaves the L2 at all.</li>
+      </ul>
+      <p>
+        Notice what is <em>absent</em>: no per-thread latency story. A hit in the GPU's L2 still costs
+        ~200 cycles — useless for making one thread feel fast, which is fine, because no one is asking it
+        to. Ready warps cover the 200 cycles; the L2's contribution is that DRAM's <em>bandwidth</em>
+        wasn't spent.
+      </p>
+      <p>
+        One honest paragraph about <strong>coherence</strong>, because CPU habits expect it: the per-SM
+        L1s are <em>not</em> kept coherent with each other. If SM 3 writes a value that SM 40 then reads
+        from its own stale L1, the hardware will not fix it for you. The discipline is simple and
+        GPU-shaped: threads in different blocks communicate through global memory only at
+        <strong>kernel boundaries</strong> (a new kernel launch invalidates the L1s and sees everything),
+        or via <strong>atomics</strong>, which operate at the L2 — the one point every SM agrees on.
+        Writes typically go <em>through</em> the L1 (write-through, no write-allocate) to the L2 precisely
+        so that the little lies the L1s tell stay read-only and short-lived.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Thrash, executable</h2>
+      <p>
+        The per-thread arithmetic predicts something testable: a working set that a lone thread could
+        cache comfortably becomes uncacheable when ten thousand siblings share the same SRAM. One tiny
+        direct-mapped cache, two worlds:
+      </p>
+      <primer-code run>
+        // One cache, two worlds: a lone thread with reuse vs a crowd sharing the same SRAM.
+        const LINES = 1024;                       // cache capacity, in lines
+
+        function hitRate(stream: number[]): number {
+          const tag = new Array(LINES).fill(-1);  // direct-mapped: slot = line % LINES
+          let hits = 0;
+          for (const line of stream) {
+            const slot = line % LINES;
+            if (tag[slot] === line) hits++;
+            else tag[slot] = line;
+          }
+          return hits / stream.length;
+        }
+
+        // World 1: ONE thread sweeps its 256-line working set ten times (a CPU-ish loop).
+        const alone: number[] = [];
+        for (let pass = 0; pass &lt; 10; pass++)
+          for (let i = 0; i &lt; 256; i++) alone.push(i);
+
+        // World 2: 8192 threads share the SAME cache. Each has its own tiny 4-line
+        // working set and they run interleaved, warp-style — everyone revisits
+        // their data ten times, just like world 1.
+        const crowd: number[] = [];
+        for (let pass = 0; pass &lt; 10; pass++)
+          for (let t = 0; t &lt; 8192; t++)
+            for (let i = 0; i &lt; 4; i++) crowd.push(t * 4 + i);
+
+        console.log(`lone thread, 256-line set, 10 passes:  hit rate ${(100 * hitRate(alone)).toFixed(1)}%`);
+        console.log(`8192 threads x 4 lines, 10 passes:     hit rate ${(100 * hitRate(crowd)).toFixed(1)}%`);
+      </primer-code>
+      <p>
+        Identical reuse in the program — every line is touched ten times in both worlds — yet the crowd
+        gets almost nothing: 8192 × 4 = 32,768 distinct lines cycle through 1,024 slots, and every revisit
+        finds its line evicted. Shrink the crowd to 128 threads (512 lines total) and the hit rate snaps
+        back. That is the arithmetic of 20 bytes per thread, acted out.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="If caches barely help, why does the L2 keep growing?">
+      <p>
+        Recent flagship GPUs ship tens of megabytes of L2 (or an extra "infinity" level of last-level
+        cache) — a strange investment in a structure this lesson keeps calling tiny. The economics are on
+        the bandwidth side: every byte served from L2 is a byte GDDR/HBM doesn't ship, and DRAM bandwidth
+        is the most expensive commodity on the board — wide buses, exotic packaging, stacked dies,
+        watts. Growing the L2 is cheaper than growing the memory bus, so vendors buy <em>effective</em>
+        bandwidth with SRAM: a 50% L2 hit rate doubles what the DRAM system appears to deliver. The cache
+        grew, but its job description didn't — it is a bigger filter, not a latency machine.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Don't optimise for a cache you can't have">
+      <p>
+        A classic wasted afternoon: restructuring a kernel so each thread revisits its own data "while
+        it's hot in L1" — CPU-style temporal-locality tuning. But your thread's share of the L1 is ~64
+        bytes; by the time the warp scheduler has cycled through a few dozen other warps, "your" lines are
+        long gone. On a GPU you engineer reuse in the two memories you actually control:
+        <strong>registers</strong> (keep accumulators and loop-carried values in per-thread variables —
+        128 B of guaranteed residence) and
+        <primer-ref to="computer-science/chip-design/gpu-compute/shared-memory-and-bank-conflicts">shared
+        memory</primer-ref> (stage tiles explicitly, block-wide). Leave the caches exactly one job: make
+        your <em>access patterns</em> coalesced and let the L1/L2 quietly absorb the spillover and
+        cross-thread sharing. Reuse you can't name and place is reuse you don't have.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: per-thread arithmetic, hierarchy order, filter-vs-hider, coherence discipline. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "gpuCacheQuiz@1": {
+          "intro": "GPU hierarchy: RF → shared/L1 (per SM) → L2 (chip-wide) → DRAM. Per-thread cache shares are tiny — caches filter bandwidth; warps hide latency.",
+          "l2Q": "A GPU has {m} MB of L2 shared by {t}K resident threads (1 K = 1024, 1 MB = 1024 KB). How many bytes of L2 per thread?",
+          "rfQ": "An SM has a {r} KB register file and {w} resident warps of 32 threads. How many bytes of register file per thread?",
+          "regsQ": "A thread's register-file share is {r} bytes. With 4-byte registers, how many registers is that?",
+          "l1Q": "An SM's L1/shared pool is {k} KB, shared by {w} resident warps of 32 threads. How many bytes per thread?",
+          "ratioQ": "A CPU thread has {c} KB of L1 essentially to itself; a GPU thread's L1 share is {g} bytes. How many times more L1 does the CPU thread have?",
+          "sectorQ": "A GPU cache line of {L} bytes is sectored into 32-byte sectors that can be fetched independently. How many sectors per line?",
+          "dramQ": "A GPU has {G} GB of DRAM and {t}K resident threads (1 K = 1024, 1 GB = 1024 MB). How many KB of DRAM per thread?",
+          "orderQ": "Order the GPU memory hierarchy from closest/fastest to farthest/slowest.",
+          "orderA": "Register file → shared memory / L1 (per SM) → L2 slices (chip-wide) → GDDR/HBM DRAM",
+          "orderB": "L2 → register file → DRAM → shared memory",
+          "orderC": "DRAM → L2 → L1 → registers",
+          "orderD": "Shared memory → DRAM → L2 → registers",
+          "filterQ": "What is the primary job of a GPU's L1 and L2 caches?",
+          "filterA": "Bandwidth filters: absorb re-fetches and cross-thread sharing so DRAM bandwidth is spent only once per truly-needed byte — latency is hidden by warps instead",
+          "filterB": "Latency hiders: make each individual thread's loads feel fast, as on a CPU",
+          "filterC": "Instruction storage: they hold the kernel's code",
+          "filterD": "Power gating: they switch off idle SMs",
+          "cohQ": "SM 3 writes a global value; a thread on SM 40 reads the address moments later, within the same kernel and without atomics. What does the hardware guarantee?",
+          "cohA": "Nothing — per-SM L1s are not coherent with each other; visibility is guaranteed only across kernel boundaries or via atomics at the L2",
+          "cohB": "The write is broadcast to every L1 within one cycle, like CPU MESI coherence",
+          "cohC": "SM 40 always reads the new value because L1s are write-through",
+          "cohD": "The GPU raises a hardware exception on the stale read",
+          "whyQ": "Why can't a GPU cache play the CPU role of holding each thread's working set?",
+          "whyA": "Divided among ~100K resident threads, even megabytes of cache come to tens of bytes per thread — no working set fits",
+          "whyB": "GPU caches use slower SRAM cells than CPU caches",
+          "whyC": "GPU caches are placed off-chip next to the DRAM",
+          "whyD": "GPU threads are forbidden from issuing loads",
+          "tuneQ": "Where should a GPU programmer engineer data reuse?",
+          "tuneA": "In registers (per-thread accumulators) and in shared memory (explicitly staged tiles) — and keep global accesses coalesced for the caches",
+          "tuneB": "In the L1, by re-touching data quickly so it stays hot",
+          "tuneC": "In DRAM, by duplicating the data per thread",
+          "tuneD": "Nowhere — reuse is impossible on a GPU",
+          "resQ": "What is an L2 residency (persistence) window for?",
+          "resA": "Pinning a hot, chip-wide-shared region — like a lookup table every thread reads — so it stays in L2 instead of being evicted by streaming traffic",
+          "resB": "Reserving L2 capacity for the operating system",
+          "resC": "Storing each warp's program counter",
+          "resD": "Extending the register file of one thread"
+        }
+      }
+    </script>
+
+    <primer-quiz name="gpuCacheQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/gpu-compute/shared-memory-and-bank-conflicts",
+      "computer-science/computer-architecture/memory/cache-fundamentals"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Log-scale bars: fast storage per thread, CPU vs GPU. ──
+  registerGeometryScene(
+    "perThreadBars",
+    ({ board, colors, step, sceneStrings }) => {
+      const txt = (x, y, s, color, fs = 10, bold = false) =>
+        board.create("text", [x, y, s], {
+          strokeColor: color, fontSize: fs, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: bold ? "font-weight:600" : "",
+        });
+      const bar = (x0, h, fill) =>
+        board.create(
+          "polygon",
+          [[x0, 0], [x0 + 1.4, 0], [x0 + 1.4, h], [x0, h]],
+          {
+            fillColor: fill, fillOpacity: 0.45, strokeColor: colors.line, strokeWidth: 1.2,
+            fixed: true, highlight: false, vertices: { visible: false },
+            borders: { strokeColor: colors.line, highlight: false },
+          },
+        );
+      const seg = (p1, p2, opts = {}) =>
+        board.create("segment", [p1, p2], {
+          strokeColor: colors.line, strokeWidth: 1, fixed: true, highlight: false, ...opts,
+        });
+
+      // Base: axes and log gridlines at 1 B, 100 B, 10 KB, 1 MB (log10 = 0, 2, 4, 6).
+      seg([0, 0], [12.6, 0], { strokeWidth: 1.5 });
+      seg([0, 0], [0, 6.4], { strokeWidth: 1.5 });
+      const ticks = [[0, "1 B"], [2, "100 B"], [4, "10 KB"], [6, "1 MB"]];
+      for (const [ly, lab] of ticks) {
+        seg([0, ly], [12.6, ly], { strokeOpacity: 0.25, dash: 2 });
+        txt(-0.9, ly, lab, colors.ink, 9);
+      }
+
+      // Bars: [x, log10(bytes/thread), value label, label key, colour, step group]
+      // CPU: 32 KB L1 / 2 SMT threads = 16 KB;  1 MB L2 / 2 = 512 KB.
+      // GPU: 256 KB RF / 2048 threads = 128 B;  128 KB L1 / 2048 = 64 B;  2 MB L2 / ~100K = 20 B.
+      const bars = [
+        [0.6, Math.log10(16384), "16 KB", "cpuL1", colors.cat[1]],
+        [3.0, Math.log10(524288), "512 KB", "cpuL2", colors.cat[1]],
+        [6.2, Math.log10(128), "128 B", "gpuRF", colors.cat[0]],
+        [8.6, Math.log10(64), "64 B", "gpuL1", colors.cat[0]],
+        [11.0, Math.log10(20), "20 B", "gpuL2", colors.cat[0]],
+      ];
+      const drawBar = ([x, h, val, key, fill]) => {
+        bar(x, h, fill);
+        txt(x + 0.7, h + 0.35, val, colors.ink, 10, true);
+        txt(x + 0.7, -0.45, sceneStrings(key), colors.ink, 10);
+      };
+
+      // Step 1: the CPU's world.
+      step(sceneStrings("stepCpu"), () => {
+        drawBar(bars[0]);
+        drawBar(bars[1]);
+      });
+
+      // Step 2: the GPU's world.
+      step(sceneStrings("stepGpu"), () => {
+        drawBar(bars[2]);
+        drawBar(bars[3]);
+        drawBar(bars[4]);
+      });
+
+      // Step 3: the thousand-fold gap.
+      step(sceneStrings("stepGap"), () => {
+        seg([1.3, Math.log10(16384)], [9.3, Math.log10(64)], {
+          strokeColor: colors.cat[3], strokeWidth: 1.5, dash: 2,
+        });
+        txt(5.6, 3.4, sceneStrings("gapNote"), colors.cat[3], 12, true);
+      });
+    },
+    { boundingbox: [-2.0, 7.0, 13.2, -1.1], keepAspect: false, title: () => makeStrings("perThreadBars")("title") },
+  );
+
+  registerQuiz("gpuCacheQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // m MB / (t·1024 threads) = 1024·m/t bytes.
+      prompt: (v) => sceneStrings("l2Q", v),
+      variables: "m=[2,4,8] t=[32,64,128]",
+      answer: "1024 * m / t",
+    },
+    {
+      // r KB / (32w threads) = 32r/w bytes.
+      prompt: (v) => sceneStrings("rfQ", v),
+      variables: "r=[64,128,256] w=[32,64]",
+      answer: "32 * r / w",
+    },
+    {
+      // Bytes → 4-byte registers.
+      prompt: (v) => sceneStrings("regsQ", v),
+      variables: "r=[64,128,256]",
+      answer: "r / 4",
+    },
+    {
+      // k KB / (32w threads) = 32k/w bytes.
+      prompt: (v) => sceneStrings("l1Q", v),
+      variables: "k=[64,128,256] w=[32,64]",
+      answer: "32 * k / w",
+    },
+    {
+      // CPU/GPU per-thread ratio.
+      prompt: (v) => sceneStrings("ratioQ", v),
+      variables: "c=[16,32] g=[32,64,128]",
+      answer: "c * 1024 / g",
+    },
+    {
+      // Sectors per line.
+      prompt: (v) => sceneStrings("sectorQ", v),
+      variables: "L=[128,256]",
+      answer: "L / 32",
+    },
+    {
+      // G GB / (t·1024 threads) = 1024·G/t KB — DRAM per thread is HUGE.
+      prompt: (v) => sceneStrings("dramQ", v),
+      variables: "G=[8,16,32] t=[64,128]",
+      answer: "1024 * G / t",
+    },
+    {
+      prompt: () => sceneStrings("orderQ"),
+      options: [
+        { text: () => sceneStrings("orderA"), correct: true },
+        { text: () => sceneStrings("orderB"), correct: false },
+        { text: () => sceneStrings("orderC"), correct: false },
+        { text: () => sceneStrings("orderD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("filterQ"),
+      options: [
+        { text: () => sceneStrings("filterA"), correct: true },
+        { text: () => sceneStrings("filterB"), correct: false },
+        { text: () => sceneStrings("filterC"), correct: false },
+        { text: () => sceneStrings("filterD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cohQ"),
+      options: [
+        { text: () => sceneStrings("cohA"), correct: true },
+        { text: () => sceneStrings("cohB"), correct: false },
+        { text: () => sceneStrings("cohC"), correct: false },
+        { text: () => sceneStrings("cohD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("whyA"), correct: true },
+        { text: () => sceneStrings("whyB"), correct: false },
+        { text: () => sceneStrings("whyC"), correct: false },
+        { text: () => sceneStrings("whyD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tuneQ"),
+      options: [
+        { text: () => sceneStrings("tuneA"), correct: true },
+        { text: () => sceneStrings("tuneB"), correct: false },
+        { text: () => sceneStrings("tuneC"), correct: false },
+        { text: () => sceneStrings("tuneD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("resQ"),
+      options: [
+        { text: () => sceneStrings("resA"), correct: true },
+        { text: () => sceneStrings("resB"), correct: false },
+        { text: () => sceneStrings("resC"), correct: false },
+        { text: () => sceneStrings("resD"), correct: false },
+      ],
+    },
+  ]);
+</script>

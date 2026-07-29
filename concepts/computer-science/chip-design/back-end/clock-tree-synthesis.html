@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Clock Tree Synthesis</primer-title>
+
+    <primer-card>
+      <p>
+        One signal on a chip has a job unlike any other. The clock must reach <strong>every flip-flop on the
+        die — often a million of them — and arrive at all of them at the same instant</strong>. Not roughly
+        the same instant: within a few picoseconds, across a piece of silicon a centimetre wide, through
+        wires where a signal crawls at a fraction of the speed of light. No ordinary net faces anything like
+        this. That is why, in the flow, the clock is not routed with the other nets at all: after
+        <primer-ref to="computer-science/chip-design/back-end/placement-and-routing">placement</primer-ref>
+        and before signal routing, a dedicated step — <strong>clock tree synthesis (CTS)</strong> — builds
+        the clock its own private distribution network, buffer by buffer.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Skew: the enemy, measured</h2>
+      <p>
+        Let <primer-math>t_i</primer-math> be the moment the clock edge arrives at flip-flop
+        <primer-math>i</primer-math> (its <strong>arrival time</strong>, measured from the clock source; the
+        overall source-to-sink delay is called the <strong>insertion delay</strong>). The
+        <strong>skew</strong> is the spread:
+      </p>
+      <primer-math display>\text{skew} = \max_i t_i - \min_i t_i.</primer-math>
+      <p>
+        Skew hurts twice, in opposite directions:
+      </p>
+      <ul>
+        <li><strong>Setup</strong>: if the capturing flop's clock arrives <em>early</em> relative to the
+          launching flop's, the data has less than a full period to travel — skew is subtracted straight off
+          your timing budget. A 50 ps skew on a 500 ps cycle eats 10% of the chip's speed.</li>
+        <li><strong>Hold</strong>: if the capturing flop's clock arrives <em>late</em>, the <em>next</em>
+          data value can race through a short path and overwrite the current one before it is safely
+          captured — a <strong>hold violation</strong>, which corrupts data outright.</li>
+      </ul>
+      <p>
+        CTS's core promise is skew held to a tiny bound. Its tools: a tree of identical <strong>clock
+        buffers</strong> inserted level by level, wire lengths deliberately balanced so every root-to-sink
+        path matches.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "hTree": {
+          "title": "The H-tree: equal paths by construction",
+          "stepH1": "One H, centred on the die: from the clock source at the centre, all four tips are exactly the same wire length away",
+          "stepH2": "Recurse: each tip becomes the centre of a half-sized H — 16 tips, all still equidistant from the source",
+          "stepH3": "Recurse again: 64 equidistant sinks. Every level multiplies the sinks by 4 while adding identical wire to every path"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The H-tree: geometry does the balancing</h2>
+      <p>
+        The most elegant answer to skew is drawn, not computed. Start at the die's centre and draw an
+        <strong>H</strong>: by symmetry, its four tips are at <em>exactly</em> equal wire length from the
+        centre. Now make each tip the centre of a half-sized H: sixteen tips, still perfectly equidistant.
+        Recurse. After <primer-math>L</primer-math> levels you have <primer-math>4^L</primer-math> sinks, and
+        <strong>every one of them is the same distance from the source</strong> — zero skew by construction:
+      </p>
+      <primer-geometry scene="hTree" caption="An H-tree growing by recursion: a single H centred on the die, then a half-sized H at each of its four tips (16 tips), then again (64 sinks). Every root-to-sink path has identical length, so the geometric skew is zero."></primer-geometry>
+      <p>
+        Real chips cannot use a pure H-tree everywhere — flops are not arranged in neat powers of four, and
+        macros punch holes in the pattern — so practical CTS builds <strong>buffered balanced trees</strong>:
+        H-tree-like trunks feeding locally balanced branches, with buffer insertion equalising delays where
+        geometry alone cannot. High-end CPUs go one step further: a <strong>clock mesh</strong> — a grid of
+        wire driven from many points at once, shorting all the local arrival times together. Meshes achieve
+        superbly low skew and tolerate variation, at the cost of substantial extra power — the mesh is
+        essentially one giant capacitor toggling every cycle.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Compute a skew yourself</h2>
+      <primer-code run>
+        // A tiny clock tree: root → two buffers → four sinks.
+        // Arrival at a sink = sum of buffer + wire delays along its path (ps).
+        interface Sink { name: string; path: number[]; }
+
+        const report = (label: string, sinks: Sink[]) => {
+          const arrivals = sinks.map((s) => ({
+            name: s.name,
+            t: s.path.reduce((a, b) => a + b, 0),
+          }));
+          for (const a of arrivals) console.log(`  ${a.name}: ${a.t} ps`);
+          const ts = arrivals.map((a) => a.t);
+          const skew = Math.max(...ts) - Math.min(...ts);
+          console.log(`  → skew = ${skew} ps\n`);
+          return skew;
+        };
+
+        console.log("Before balancing (raw routed clock):");
+        report("before", [
+          { name: "FF0 (near) ", path: [60, 40] },        // short branch
+          { name: "FF1 (near) ", path: [60, 55] },
+          { name: "FF2 (far)  ", path: [60, 90, 70] },    // long branch
+          { name: "FF3 (far)  ", path: [60, 90, 95] },
+        ]);
+
+        console.log("After CTS (buffers added to pad the short paths):");
+        report("after", [
+          { name: "FF0 (near) ", path: [60, 40, 118] },   // padding buffer inserted
+          { name: "FF1 (near) ", path: [60, 55, 105] },
+          { name: "FF2 (far)  ", path: [60, 90, 70] },
+          { name: "FF3 (far)  ", path: [60, 90, 95] },
+        ]);
+
+        console.log("Note the fix: CTS SLOWED the fast paths to match the slow ones.");
+        console.log("Insertion delay grew — but the spread (skew) is what matters.");
+      </primer-code>
+      <p>
+        Notice what balancing did: it made the <em>fast</em> paths slower. Insertion delay — the total
+        source-to-sink latency — got worse; skew got better. That trade is the whole business of CTS, and it
+        is a good trade, because flops only ever compare arrival times <em>against each other</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The tree is also a power hog — and a tool</h2>
+      <p>
+        The clock net switches <em>every cycle, everywhere</em> — it is routinely 20–40% of a chip's dynamic
+        power. This is exactly why
+        clock gating (switching off the clock to idle blocks) is so effective, and the gating cells physically live <em>inside the tree</em>
+        built by CTS: shutting a gate high in the tree stills an entire subtree of buffers and flops below it.
+      </p>
+      <p>
+        One more twist separates the masters from the apprentices: skew can be a <strong>tool</strong>.
+        <strong>Useful skew</strong> deliberately delivers the clock <em>slightly late</em> to a flop whose
+        incoming logic path is too slow — borrowing time from the (faster) next stage. CTS honours these
+        intentional offsets while crushing all the unintentional ones.
+      </p>
+      <primer-theorem name="Clock tree synthesis">
+        <ul>
+          <li><strong>skew</strong> = max − min clock arrival across the flops; it eats setup margin and
+            causes hold failures — the two dangers point in opposite directions;</li>
+          <li>the <strong>H-tree</strong> equalises path lengths by recursive geometry
+            (<primer-math>4^L</primer-math> sinks after <primer-math>L</primer-math> levels, all
+            equidistant); practical CTS builds buffered balanced trees on the same principle;</li>
+          <li><strong>clock meshes</strong> buy the lowest skew and variation-tolerance at a heavy power
+            cost — the CPU-class option;</li>
+          <li>balancing works by <strong>slowing the fast paths</strong>: insertion delay rises so that the
+            spread shrinks;</li>
+          <li><strong>useful skew</strong> is deliberate, engineered skew that lends time to slow paths;</li>
+          <li>CTS runs <strong>after placement, before signal routing</strong> — and the clock-gating cells
+            live inside the tree it builds.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Why does CTS run exactly there in the flow?">
+      <p>
+        The ordering is forced from both sides. CTS cannot run <em>before placement</em> because the tree's
+        entire job is to reach the flops wherever they physically sit — no positions, no tree. And it must
+        run <em>before signal routing</em> because the clock is the most timing-critical net on the chip: it
+        gets first pick of the routing resources (typically the mid-stack layers, wide and shielded), and
+        every data net then routes around it. There is a subtler reason too: once the tree exists, every
+        flop's <em>real</em> clock arrival time is known, so the timing engine can stop assuming an ideal
+        zero-skew clock and start using actual arrival times — from this point on, the design is being timed
+        as the silicon will actually behave. That switch, from "ideal clock" to "propagated clock", is one of
+        the flow's rites of passage.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Slowing the clock cannot fix hold">
+      <p>
+        Every designer's first instinct when timing fails: relax the clock. For a <strong>setup</strong>
+        violation this works — a longer period gives the data more time. But a <strong>hold</strong>
+        violation caused by skew is a race between the <em>new</em> data racing through a short path and the
+        <em>same edge</em> arriving late at the capturing flop. Both contestants are launched by the same
+        edge; the clock <em>period</em> appears nowhere in the inequality. Slow the clock to 1 Hz and the
+        race plays out identically — <strong>hold is clock-frequency-independent</strong>. A chip with a real
+        hold violation on a functional path is not "slow silicon you can down-bin"; it is <strong>dead at
+        any speed</strong> — which is the scariest sentence in the back-end, and why hold margins are
+        checked with extra paranoia and fixed by inserting delay into the offending short paths before
+        tape-out.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "ctsQuiz@1": {
+          "intro": "Skew = max − min clock arrival; H-trees balance by geometry; hold failures do not care about clock frequency.",
+          "skewQ": "Three flops receive the clock edge at {a} ps, {b} ps and {c} ps after the source. What is the skew in ps?",
+          "htreeQ": "An H-tree recursed {n} levels deep delivers the clock to 4^{n} sinks. How many sinks is that?",
+          "marginQ": "The clock period is {t} ps and the (unfavourable) skew between launch and capture flops is {s} ps. How many ps remain for logic plus flop overheads?",
+          "sinkLvlQ": "A chip has {m} flops. Each H-tree level multiplies the sinks by 4, starting from 4 at level 1. What is the sink count at level {n}? (Answer 4^{n}.)",
+          "holdQ": "A chip fails hold checks because of clock skew. What happens if you run it at half the clock frequency?",
+          "hSame": "It still fails — the hold race is between same-edge events, so the clock period never enters the inequality",
+          "hFix": "It passes — halving the frequency doubles every margin",
+          "hWorse": "It fails twice as badly",
+          "hDep": "It depends on the duty cycle",
+          "meshQ": "Compared with a balanced tree, a clock mesh offers…",
+          "mGood": "Lower skew and better tolerance of variation, at the price of substantially higher power",
+          "mBad1": "Lower power at the price of higher skew",
+          "mBad2": "Fewer buffers and fewer wires",
+          "mBad3": "The same skew but simpler design",
+          "whenQ": "Where does CTS sit in the physical-design flow?",
+          "wAfterP": "After placement (the flop positions must be known) and before signal routing (the clock gets first pick of routing resources)",
+          "wBeforeP": "Before placement, so cells can be placed around the tree",
+          "wAfterR": "After signal routing, in the gaps that remain",
+          "wSynth": "During logic synthesis, before any physical step",
+          "usefulQ": "What is 'useful skew'?",
+          "uGood": "Deliberately delivering the clock slightly late to a flop fed by a slow path — borrowing time from the next, faster stage",
+          "uBad1": "The residual skew that CTS failed to remove",
+          "uBad2": "Skew that is small enough to ignore",
+          "uBad3": "The skew between different clock domains",
+          "balanceQ": "How does CTS balancing actually equalise arrival times?",
+          "bSlow": "By adding buffers and wire to the fast paths — insertion delay rises so that the spread shrinks",
+          "bFast": "By speeding up the slow paths with special faster wire",
+          "bRemove": "By removing flops from the long branches",
+          "bFreq": "By assigning slower branches a slower clock",
+          "insQ": "What is insertion delay?",
+          "iDef": "The total delay from the clock source to a sink through the tree",
+          "iSkew": "Another name for skew",
+          "iSetup": "The setup time of a flip-flop",
+          "iGate": "The delay added by a clock-gating cell only",
+          "gateQ": "Why do clock-gating cells sit inside the clock tree?",
+          "gSub": "Gating a node high in the tree stills the whole subtree of buffers and flops below it — that is where the power savings live",
+          "gEasy": "It is the only place with free space after placement",
+          "gSkew": "Gating cells reduce skew",
+          "gTest": "So that scan test can bypass them",
+          "eatQ": "Skew eats setup margin. On a 500 ps cycle, a 50 ps unfavourable skew costs what fraction of the cycle?",
+          "eTen": "10%",
+          "eOne": "1%",
+          "eHalf": "50%",
+          "eNone": "None — setup checks ignore skew"
+        }
+      }
+    </script>
+
+    <primer-quiz name="ctsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/chip-design/back-end/placement-and-routing"],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The H-tree, recursed three levels: 1 H → 4 Hs → 16 Hs (64 sinks). ──
+  registerGeometryScene(
+    "hTree",
+    ({ board, colors, step, sceneStrings }) => {
+      const seg = (a, b, color, w) =>
+        board.create("segment", [a, b], { strokeColor: color, strokeWidth: w, highlight: false });
+      // Draw one H centred at (cx, cy) with half-span s; return its four tips.
+      const drawH = (cx, cy, s, color, w) => {
+        seg([cx - s, cy], [cx + s, cy], color, w);
+        seg([cx - s, cy - s], [cx - s, cy + s], color, w);
+        seg([cx + s, cy - s], [cx + s, cy + s], color, w);
+        return [
+          [cx - s, cy - s], [cx - s, cy + s],
+          [cx + s, cy - s], [cx + s, cy + s],
+        ];
+      };
+
+      // Base: die outline + the clock source at the centre.
+      board.create("polygon", [[0, 0], [16, 0], [16, 16], [0, 16]], {
+        borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false },
+        fillOpacity: 0, vertices: { visible: false }, highlight: false,
+      });
+      board.create("point", [8, 8], {
+        name: "", size: 3, color: colors.ink, fixed: true, highlight: false,
+      });
+      board.create("text", [8, 16.8, "clock source at the centre"], {
+        strokeColor: colors.ink, fontSize: 12, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+      });
+
+      let tips1 = [];
+      let tips2 = [];
+
+      step(sceneStrings("stepH1"), () => {
+        tips1 = drawH(8, 8, 4, colors.cat[0], 4);
+      });
+
+      step(sceneStrings("stepH2"), () => {
+        tips2 = [];
+        for (const [x, y] of tips1) tips2 = tips2.concat(drawH(x, y, 2, colors.cat[1], 2.5));
+      });
+
+      step(sceneStrings("stepH3"), () => {
+        for (const [x, y] of tips2) {
+          const tips3 = drawH(x, y, 1, colors.cat[2], 1.5);
+          for (const [sx, sy] of tips3)
+            board.create("point", [sx, sy], {
+              name: "", size: 1.5, color: colors.cat[2], fixed: true, highlight: false,
+            });
+        }
+      });
+    },
+    { boundingbox: [-1.2, 17.6, 17.2, -1.2], title: () => makeStrings("hTree")("title") },
+  );
+
+  registerQuiz("ctsQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("skewQ", v),
+      variables: "a=[100:140] b=[141:180] c=[181:240]",
+      answer: "c - a",
+    },
+    {
+      prompt: (v) => sceneStrings("htreeQ", v),
+      variables: "n=[2:6]",
+      answer: "4^n",
+    },
+    {
+      prompt: (v) => sceneStrings("marginQ", v),
+      variables: "t=[500,800,1000] s=[20:90]",
+      answer: "t - s",
+    },
+    {
+      prompt: (v) => sceneStrings("sinkLvlQ", v),
+      variables: "m=[100000,500000,1000000] n=[3:7]",
+      answer: "4^n",
+    },
+    {
+      prompt: () => sceneStrings("holdQ"),
+      options: [
+        { text: () => sceneStrings("hSame"), correct: true },
+        { text: () => sceneStrings("hFix"), correct: false },
+        { text: () => sceneStrings("hWorse"), correct: false },
+        { text: () => sceneStrings("hDep"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("meshQ"),
+      options: [
+        { text: () => sceneStrings("mGood"), correct: true },
+        { text: () => sceneStrings("mBad1"), correct: false },
+        { text: () => sceneStrings("mBad2"), correct: false },
+        { text: () => sceneStrings("mBad3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whenQ"),
+      options: [
+        { text: () => sceneStrings("wAfterP"), correct: true },
+        { text: () => sceneStrings("wBeforeP"), correct: false },
+        { text: () => sceneStrings("wAfterR"), correct: false },
+        { text: () => sceneStrings("wSynth"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("usefulQ"),
+      options: [
+        { text: () => sceneStrings("uGood"), correct: true },
+        { text: () => sceneStrings("uBad1"), correct: false },
+        { text: () => sceneStrings("uBad2"), correct: false },
+        { text: () => sceneStrings("uBad3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("balanceQ"),
+      options: [
+        { text: () => sceneStrings("bSlow"), correct: true },
+        { text: () => sceneStrings("bFast"), correct: false },
+        { text: () => sceneStrings("bRemove"), correct: false },
+        { text: () => sceneStrings("bFreq"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("insQ"),
+      options: [
+        { text: () => sceneStrings("iDef"), correct: true },
+        { text: () => sceneStrings("iSkew"), correct: false },
+        { text: () => sceneStrings("iSetup"), correct: false },
+        { text: () => sceneStrings("iGate"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gateQ"),
+      options: [
+        { text: () => sceneStrings("gSub"), correct: true },
+        { text: () => sceneStrings("gEasy"), correct: false },
+        { text: () => sceneStrings("gSkew"), correct: false },
+        { text: () => sceneStrings("gTest"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("eatQ"),
+      options: [
+        { text: () => sceneStrings("eTen"), correct: true },
+        { text: () => sceneStrings("eOne"), correct: false },
+        { text: () => sceneStrings("eHalf"), correct: false },
+        { text: () => sceneStrings("eNone"), correct: false },
+      ],
+    },
+  ]);
+</script>

@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Pipelining the CPU in RTL</primer-title>
+
+    <primer-card>
+      <p>
+        Our
+        <primer-ref to="computer-science/chip-design/cpu/the-control-unit-and-instruction-decode">single-cycle
+        CPU with its control unit</primer-ref> works — and wastes almost everything it owns. During the 900
+        ps it spends on one instruction, the instruction memory works for 250 ps and idles for 650; the ALU
+        works for 200 and idles for 700. Five expensive stations, each busy a fifth of the time. The fix is
+        the oldest trick in manufacturing, the
+        <primer-ref to="computer-science/computer-architecture/pipelining/the-classic-five-stage-pipeline">assembly
+        line</primer-ref>: cut the sweep into <strong>five stages</strong> — IF, ID, EX, MEM, WB — put a
+        register between each pair, and let <em>five instructions travel the datapath at once</em>, each
+        occupying a different station. Same silicon, same program — and a clock nearly five times faster.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Cutting the sweep: pipeline registers</h2>
+      <p>
+        Where exactly do we cut? At the natural seams of the walk: after fetch (<strong>IF/ID</strong>),
+        after decode and register read (<strong>ID/EX</strong>), after the ALU (<strong>EX/MEM</strong>),
+        and after data memory (<strong>MEM/WB</strong>). Each cut is a plain bank of flip-flops — an
+        <code>always_ff</code> like any other — whose job is to hold one instruction's intermediate world
+        while the stage behind it starts on the next instruction. Critically, each register carries
+        <strong>data and control together</strong>: the values read so far <em>and</em> the instruction's
+        control bundle, because the signals decoded back in ID will be needed by muxes two or three stages
+        downstream:
+      </p>
+      <primer-code lang="text">
+// One pipeline register, as a packed struct: DATA and CONTROL travel together.
+typedef struct packed {
+  logic [31:0] pc, a, b, imm;   // values read in ID
+  logic [4:0]  rd;              // the destination, needed all the way in WB
+  ctl_t        ctl;             // the whole control bundle rides along
+} id_ex_t;
+
+id_ex_t id_ex;
+always_ff @(posedge clk)
+  if (!rst_n) id_ex &lt;= '0;      // an all-zero bundle = a harmless NOP
+  else        id_ex &lt;= id_ex_next;
+
+// The top level reshapes from one big sweep into five short ones:
+//   IF:  pc, imem                  -&gt; if_id
+//   ID:  decode, regfile read      -&gt; id_ex     (control is BORN here)
+//   EX:  alu                       -&gt; ex_mem    (control bundle shrinks)
+//   MEM: dmem                      -&gt; mem_wb
+//   WB:  write-back mux -&gt; regfile write port
+      </primer-code>
+      <p>
+        Control is <em>born once</em>, in ID, exactly as last lesson — and then <em>rides the pipeline</em>,
+        each stage peeling off the signals it consumes: EX uses <code>alu_src</code>/<code>alu_op</code>,
+        MEM uses <code>mem_read</code>/<code>mem_write</code>, WB uses
+        <code>reg_write</code>/<code>mem_to_reg</code>. The bundle physically shrinks as it travels — a
+        pleasing detail: by MEM/WB only two bits of it are left alive.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The arithmetic that pays for it all</h2>
+      <p>
+        The single-cycle clock had to span the whole 900 ps walk. Now each stage only has to span
+        <em>itself</em> — at worst the slowest station, 250 ps, plus the pipeline register's own overhead
+        (say 40 ps of clock-to-Q and setup):
+      </p>
+      <primer-math display>T_{clk} \approx 250 + 40 = 290\ \text{ps} \quad\text{vs}\quad 900\ \text{ps} \;\Rightarrow\; \text{about } 3.1\times \text{ today, } \approx 5\times \text{ with balanced stages}</primer-math>
+      <p>
+        Two honest footnotes live in that formula. The clock is set by the <strong>slowest stage</strong>,
+        so unbalanced stages squander the win — real designs sweat to equalise them (and our 250 ps
+        memories are the obvious next target). And the register overhead is pure tax, paid five times per
+        instruction where the single-cycle design paid it once. Cut a pipeline ever finer and the tax
+        dominates — one reason the megahertz-chasing 31-stage pipelines of the mid-2000s were abandoned.
+      </p>
+    </primer-card>
+
+    <!-- The occupancy diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "pipeGrid": {
+          "title": "Seven instructions flowing through five stages, cycle by cycle",
+          "hCycle": "cycle",
+          "hIF": "IF", "hID": "ID", "hEX": "EX", "hMEM": "MEM", "hWB": "WB",
+          "stepFill0": "Cycle 0: I0 enters fetch — the pipeline is nearly empty",
+          "stepFill": "Cycles 1–3: each cycle, a new instruction enters IF while the ones ahead shuffle right",
+          "stepFull": "Cycle 4: all five stages busy — five instructions in flight; I0 retires at the end of it",
+          "stepSteady": "Cycles 5–6: steady state — one instruction retires EVERY cycle, the pipeline's whole point",
+          "stepDrain": "Cycles 7–10: no new fetches; the pipeline drains, one retirement per cycle to the last"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Reading the flow</h2>
+      <p>
+        The pipeline's life story is best told as a table of <em>who is where, when</em>. Here are seven
+        instructions (the exact program from the code block below) flowing through — each row a cycle,
+        each column a stage:
+      </p>
+      <primer-geometry scene="pipeGrid" caption="A table with cycles as rows and the five pipeline stages as columns. Instruction I0 enters IF at cycle 0 and moves one stage right each cycle; following instructions enter behind it, so from cycle 4 all five stages are occupied and one instruction retires per cycle until the pipeline drains at cycle 10."></primer-geometry>
+      <p>
+        Read any <em>row</em>: five different instructions at work simultaneously. Read any
+        <em>diagonal</em>: one instruction marching IF → ID → EX → MEM → WB, taking five cycles for its
+        personal journey. Both readings are true at once — that is the whole trick.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The model: five stages in the two-phase simulator</h2>
+      <p>
+        In the simulator, pipelining means one thing: the <code>State</code> grows four new members — the
+        pipeline registers — and <code>next()</code> computes each stage <em>from the current registers</em>,
+        committing all of them at once. Note the stage order inside <code>next()</code> is written WB
+        first, IF last: every stage must consume the <em>pre-edge</em> values, exactly like hardware
+        (this is the non-blocking-assignment discipline wearing a TypeScript costume). We run a deliberately
+        <strong>hazard-free</strong> program — every value read is at least three instructions old:
+      </p>
+      <primer-code run>
+// ── Assembler + decoder + control (recap of lessons 34 and 37, compact). ──
+function R(f7: number, f3: number, rd: number, rs1: number, rs2: number): number {
+  return ((f7 &lt;&lt; 25) | (rs2 &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | (rd &lt;&lt; 7) | 0x33) | 0;
+}
+function I(op: number, f3: number, rd: number, rs1: number, imm: number): number {
+  return (((imm &amp; 0xfff) &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | (rd &lt;&lt; 7) | op) | 0;
+}
+const asm = {
+  ADD:  (rd: number, rs1: number, rs2: number) =&gt; R(0x00, 0, rd, rs1, rs2),
+  ADDI: (rd: number, rs1: number, imm: number) =&gt; I(0x13, 0, rd, rs1, imm),
+};
+interface Decoded { name: string; rd: number; rs1: number; rs2: number; imm: number; useRs2: boolean }
+function decode(w: number): Decoded {
+  const opcode = w &amp; 0x7f, rd = (w &gt;&gt; 7) &amp; 0x1f, f3 = (w &gt;&gt; 12) &amp; 7;
+  const rs1 = (w &gt;&gt; 15) &amp; 0x1f, rs2 = (w &gt;&gt; 20) &amp; 0x1f, f7 = (w &gt;&gt;&gt; 25) &amp; 0x7f;
+  if (opcode === 0x33)
+    return { name: f3 === 0 ? (f7 === 0x20 ? "SUB" : "ADD") : f3 === 7 ? "AND" : "OR", rd, rs1, rs2, imm: 0, useRs2: true };
+  return { name: "ADDI", rd, rs1, rs2, imm: w &gt;&gt; 20, useRs2: false };  // (subset: ALU ops only today)
+}
+interface Ctl { RegWrite: number; ALUSrc: number; ALUOp: string }
+function control(d: Decoded): Ctl {
+  return { RegWrite: 1, ALUSrc: d.name === "ADDI" ? 1 : 0, ALUOp: d.name === "ADDI" ? "ADD" : d.name };
+}
+
+// ── Four pipeline registers join pc/regs in the state. ──
+interface IFID  { pc: number; word: number }
+interface IDEX  { pc: number; name: string; rd: number; a: number; b: number; imm: number; c: Ctl }
+interface EXMEM { pc: number; name: string; rd: number; alu: number; c: Ctl }
+interface MEMWB { pc: number; name: string; rd: number; val: number; c: Ctl }
+interface State {
+  pc: number; regs: number[];
+  if_id: IFID | null; id_ex: IDEX | null; ex_mem: EXMEM | null; mem_wb: MEMWB | null;
+}
+
+function next(s: State, imem: number[]): State {
+  const regs = s.regs.slice();
+  // WB — writes land in the first half of the cycle, so ID below reads fresh values.
+  if (s.mem_wb &amp;&amp; s.mem_wb.c.RegWrite &amp;&amp; s.mem_wb.rd !== 0) regs[s.mem_wb.rd] = s.mem_wb.val;
+  // MEM — nothing to do for ALU ops; just pass the result along.
+  const mem_wb: MEMWB | null = s.ex_mem
+    ? { pc: s.ex_mem.pc, name: s.ex_mem.name, rd: s.ex_mem.rd, val: s.ex_mem.alu, c: s.ex_mem.c }
+    : null;
+  // EX — the ALU.
+  let ex_mem: EXMEM | null = null;
+  if (s.id_ex) {
+    const e = s.id_ex, b = e.c.ALUSrc ? e.imm : e.b;
+    const alu = e.c.ALUOp === "SUB" ? (e.a - b) | 0 : e.c.ALUOp === "AND" ? e.a &amp; b : e.c.ALUOp === "OR" ? e.a | b : (e.a + b) | 0;
+    ex_mem = { pc: e.pc, name: e.name, rd: e.rd, alu, c: e.c };
+  }
+  // ID — decode once; the control bundle rides along from here.
+  let id_ex: IDEX | null = null;
+  if (s.if_id) {
+    const d = decode(s.if_id.word);
+    id_ex = { pc: s.if_id.pc, name: d.name, rd: d.rd, a: regs[d.rs1], b: regs[d.rs2], imm: d.imm, c: control(d) };
+  }
+  // IF — fetch (until the program runs out).
+  const word = imem[s.pc &gt;&gt; 2];
+  const if_id: IFID | null = word === undefined ? null : { pc: s.pc, word };
+  return { pc: s.pc + 4, regs, if_id, id_ex, ex_mem, mem_wb };
+}
+
+// ── A deliberately hazard-FREE program (every value is ≥3 instructions old when read). ──
+const imem = [
+  asm.ADDI(1, 0, 5),    // I0: x1 = 5
+  asm.ADDI(2, 0, 7),    // I1: x2 = 7
+  asm.ADDI(3, 0, 9),    // I2: x3 = 9
+  asm.ADDI(4, 0, 11),   // I3: x4 = 11
+  asm.ADD(5, 1, 2),     // I4: x5 = x1 + x2   (x1 four back, x2 three back: safe)
+  asm.ADDI(7, 0, 100),  // I5: x7 = 100       (independent filler)
+  asm.ADD(6, 3, 4),     // I6: x6 = x3 + x4   (x3 four back, x4 three back: safe)
+];
+const tag = (x: { pc: number } | null | undefined) =&gt; (x ? "I" + (x.pc &gt;&gt; 2) : ".");
+
+let s: State = { pc: 0, regs: new Array(32).fill(0), if_id: null, id_ex: null, ex_mem: null, mem_wb: null };
+console.log("cycle |  IF  ID  EX MEM  WB");
+console.log("------+---------------------");
+for (let cycle = 0; ; cycle++) {
+  const fetching = imem[s.pc &gt;&gt; 2] !== undefined ? { pc: s.pc } : null;
+  console.log(
+    `  ${String(cycle).padStart(2)}  | ${[fetching, s.if_id, s.id_ex, s.ex_mem, s.mem_wb].map((x) =&gt; tag(x).padStart(3)).join(" ")}`,
+  );
+  if (!fetching &amp;&amp; !s.if_id &amp;&amp; !s.id_ex &amp;&amp; !s.ex_mem &amp;&amp; !s.mem_wb) break;
+  s = next(s, imem);
+}
+console.log(`\nx5 = ${s.regs[5]} (12?)  x6 = ${s.regs[6]} (20?)  x7 = ${s.regs[7]} (100?)`);
+
+// ── The cliffhanger: a DEPENDENT pair, same machinery. ──
+const imem2 = [asm.ADDI(1, 0, 5), asm.ADDI(2, 0, 7), asm.ADD(3, 1, 2)];
+let t: State = { pc: 0, regs: new Array(32).fill(0), if_id: null, id_ex: null, ex_mem: null, mem_wb: null };
+for (let cycle = 0; cycle &lt; 8; cycle++) t = next(t, imem2);
+console.log(`\nDependent pair: x3 = ${t.regs[3]}   — expected 5 + 7 = 12. The pipeline just computed garbage…`);
+      </primer-code>
+      <p>
+        Seven instructions, eleven cycles, correct results — and then the sting in the tail. The dependent
+        pair at the bottom (<code>addi x1</code> immediately consumed by <code>add x3, x1, x2</code>)
+        sails through the same machinery and computes <strong>0 instead of 12</strong>. Nothing crashed:
+        <code>add</code> simply read <code>x1</code> and <code>x2</code> in ID <em>before</em> the
+        <code>addi</code>s ahead of it had written them back. Our pipeline is fast and <em>wrong</em> for
+        any program with closely-spaced dependencies — which is to say, every real program. That bug has a
+        name — a <em>data hazard</em> — and fixing it in hardware is the entire next lesson.
+      </p>
+      <primer-vignette title="Watch out! Pipelining changes throughput, not latency">
+        <p>
+          A common trap: "five stages, so each instruction now finishes five times sooner." Backwards —
+          each individual instruction now takes <em>five short cycles</em> instead of one long one, roughly
+          the same wall-clock journey (a touch worse, thanks to the register tax). What improves — by
+          nearly 5× — is <strong>throughput</strong>: instructions <em>completed per second</em>, because
+          one retires every cycle instead of every 900 ps. The distinction matters everywhere in
+          computing: adding checkout lanes serves more shoppers per hour without making any single
+          shopper's queue-to-door time shorter. When a datasheet brags about pipeline depth, it is
+          promising throughput — never latency.
+        </p>
+      </primer-vignette>
+      <primer-vignette title="How deep did pipelines get?">
+        <p>
+          If 5 stages give ~5×, why not 50? Intel tried. The Pentium 4's NetBurst pipeline reached 31
+          stages chasing clock frequency as a marketing number — and collided with physics from every
+          side: the per-stage register tax stopped shrinking, mispredicted branches meant refilling a
+          31-stage pipe (a catastrophe we will taste, in miniature, next lesson), and 3.8 GHz of switching
+          turned the die into a hotplate. The industry retreated to ~12–20 stages and spent its transistors
+          on width (several instructions per cycle) and smarter prediction instead. Depth is a dial, not a
+          virtue — our five stages sit at the classic sweet spot where the textbooks, and a great many real
+          embedded cores, still live.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <!-- Quiz. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "pipeQuiz@1": {
+          "intro": "Five stages, five instructions in flight: the clock now fits the slowest stage, not the whole walk.",
+          "memQ": "In a 5-stage pipeline with no stalls, an instruction is fetched (IF) in cycle {k}. During which cycle is it in MEM?",
+          "wbQ": "In a 5-stage pipeline with no stalls, an instruction is fetched (IF) in cycle {k}. During which cycle is it in WB?",
+          "totQ": "{n} instructions flow through a 5-stage pipeline with no stalls. Counting from the first fetch, how many cycles until the last one retires?",
+          "fmaxQ": "A single-cycle design's {t} ps sweep is cut into 5 equal stages, and each pipeline register adds {o} ps of overhead. What is the new clock period in ps?",
+          "flightQ": "At full steam, how many instructions does the 5-stage pipeline hold in flight at once?",
+          "regQ": "What must a pipeline register such as ID/EX carry?",
+          "regA": "Both the instruction's data values AND its control bundle — downstream stages need both",
+          "regB": "Only data — control signals are recomputed in every stage",
+          "regC": "Only control — data lives in the register file",
+          "regD": "The full 32-bit instruction word, and nothing else",
+          "clkQ": "In a pipelined design, the clock period is set by…",
+          "clkA": "the slowest single stage (plus register overhead) — not the sum of all stages",
+          "clkB": "the sum of all five stage delays",
+          "clkC": "the average stage delay",
+          "clkD": "the fastest stage, since it finishes first",
+          "latQ": "Compared with the single-cycle design, the pipelined CPU's per-instruction latency and throughput…",
+          "latA": "Latency: about the same or slightly worse. Throughput: nearly 5x better — one retirement per (much shorter) cycle",
+          "latB": "Both improve 5x",
+          "latC": "Latency improves 5x; throughput is unchanged",
+          "latD": "Both are unchanged — pipelining only saves power",
+          "ctlQ": "Where are control signals computed in the pipelined CPU, and how do they reach the right stage?",
+          "ctlA": "Decoded once in ID; the bundle rides the pipeline registers, and each stage peels off the signals it consumes",
+          "ctlB": "Recomputed from the opcode in every stage",
+          "ctlC": "Broadcast from a central controller to all stages each cycle",
+          "ctlD": "Stored in the register file alongside the data",
+          "whyQ": "Why must there be a register bank between adjacent stages at all?",
+          "whyA": "To hold one instruction's intermediate results while the previous stage starts the NEXT instruction — without it, the stages are just one long combinational path again",
+          "whyB": "To slow the signals down so they arrive together",
+          "whyC": "Because SystemVerilog requires one always_ff per module",
+          "whyD": "To store the program counter history for debugging",
+          "hazQ": "The lesson ends with add x3, x1, x2 computing 0 instead of 12 right after addi x1 and addi x2. Why?",
+          "hazA": "The add read x1 and x2 in ID before the two addi instructions ahead of it reached WB — a data hazard",
+          "hazB": "The ALU is too slow for back-to-back adds",
+          "hazC": "The control bundle was decoded incorrectly",
+          "hazD": "x3 is hardwired to zero, like x0"
+        }
+      }
+    </script>
+
+    <primer-quiz name="pipeQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/cpu/the-control-unit-and-instruction-decode",
+      "computer-science/computer-architecture/pipelining/the-classic-five-stage-pipeline"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The stage-occupancy table, revealed phase by phase. ──
+  registerGeometryScene(
+    "pipeGrid",
+    ({ board, colors, step, sceneStrings }) => {
+      // Column x-positions: cycle label, then IF ID EX MEM WB.
+      const colX = [1.1, 3.2, 5.2, 7.2, 9.2, 11.2];
+      const rowY = (cycle) => 10.3 - cycle;
+      // The verified occupancy table: rows = cycles, entries = instruction index or null.
+      const rows = [
+        [0, null, null, null, null],
+        [1, 0, null, null, null],
+        [2, 1, 0, null, null],
+        [3, 2, 1, 0, null],
+        [4, 3, 2, 1, 0],
+        [5, 4, 3, 2, 1],
+        [6, 5, 4, 3, 2],
+        [null, 6, 5, 4, 3],
+        [null, null, 6, 5, 4],
+        [null, null, null, 6, 5],
+        [null, null, null, null, 6],
+      ];
+      const cell = (x, y, txt, c, bold = false) =>
+        board.create("text", [x, y, txt], {
+          anchorX: "middle", anchorY: "middle", strokeColor: c, fontSize: bold ? 13 : 12,
+          fontUnit: "px", cssStyle: bold ? "font-weight: 700" : "", fixed: true, highlight: false,
+        });
+      const drawRow = (cycle) => {
+        cell(colX[0], rowY(cycle), String(cycle), colors.ink);
+        rows[cycle].forEach((instr, s) => {
+          if (instr === null) cell(colX[s + 1], rowY(cycle), "·", colors.line);
+          else cell(colX[s + 1], rowY(cycle), "I" + instr, colors.cat[instr % 5], true);
+        });
+      };
+
+      // Base: the header row and a rule under it.
+      ["hCycle", "hIF", "hID", "hEX", "hMEM", "hWB"].forEach((key, i) =>
+        board.create("text", [colX[i], 11.4, () => sceneStrings(key)], {
+          anchorX: "middle", anchorY: "middle", strokeColor: colors.ink, fontSize: 13,
+          cssStyle: "font-weight: 700", fixed: true, highlight: false,
+        }),
+      );
+      board.create("segment", [[0.3, 10.9], [12, 10.9]], { strokeColor: colors.line, strokeWidth: 1, highlight: false });
+
+      step(sceneStrings("stepFill0"), () => drawRow(0));
+      step(sceneStrings("stepFill"), () => { drawRow(1); drawRow(2); drawRow(3); });
+      step(sceneStrings("stepFull"), () => drawRow(4));
+      step(sceneStrings("stepSteady"), () => { drawRow(5); drawRow(6); });
+      step(sceneStrings("stepDrain"), () => { drawRow(7); drawRow(8); drawRow(9); drawRow(10); });
+    },
+    { boundingbox: [-0.2, 12.2, 12.6, -1.2], title: () => makeStrings("pipeGrid")("title") },
+  );
+
+  registerQuiz("pipeQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // IF at k → ID k+1, EX k+2, MEM k+3.
+      prompt: (v) => sceneStrings("memQ", v),
+      variables: "k=[2:15]",
+      answer: "k + 3",
+    },
+    {
+      prompt: (v) => sceneStrings("wbQ", v),
+      variables: "k=[2:15]",
+      answer: "k + 4",
+    },
+    {
+      prompt: (v) => sceneStrings("totQ", v),
+      variables: "n=[10:60]",
+      answer: "n + 4",
+    },
+    {
+      prompt: (v) => sceneStrings("fmaxQ", v),
+      variables: "t=[800,900,1000] o=[20,30,40,50]",
+      answer: "t / 5 + o",
+    },
+    { prompt: () => sceneStrings("flightQ"), answer: 5 },
+    {
+      prompt: () => sceneStrings("regQ"),
+      options: [
+        { text: () => sceneStrings("regA"), correct: true },
+        { text: () => sceneStrings("regB"), correct: false },
+        { text: () => sceneStrings("regC"), correct: false },
+        { text: () => sceneStrings("regD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("clkQ"),
+      options: [
+        { text: () => sceneStrings("clkA"), correct: true },
+        { text: () => sceneStrings("clkB"), correct: false },
+        { text: () => sceneStrings("clkC"), correct: false },
+        { text: () => sceneStrings("clkD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("latQ"),
+      options: [
+        { text: () => sceneStrings("latA"), correct: true },
+        { text: () => sceneStrings("latB"), correct: false },
+        { text: () => sceneStrings("latC"), correct: false },
+        { text: () => sceneStrings("latD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ctlQ"),
+      options: [
+        { text: () => sceneStrings("ctlA"), correct: true },
+        { text: () => sceneStrings("ctlB"), correct: false },
+        { text: () => sceneStrings("ctlC"), correct: false },
+        { text: () => sceneStrings("ctlD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("whyA"), correct: true },
+        { text: () => sceneStrings("whyB"), correct: false },
+        { text: () => sceneStrings("whyC"), correct: false },
+        { text: () => sceneStrings("whyD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hazQ"),
+      options: [
+        { text: () => sceneStrings("hazA"), correct: true },
+        { text: () => sceneStrings("hazB"), correct: false },
+        { text: () => sceneStrings("hazC"), correct: false },
+        { text: () => sceneStrings("hazD"), correct: false },
+      ],
+    },
+  ]);
+</script>

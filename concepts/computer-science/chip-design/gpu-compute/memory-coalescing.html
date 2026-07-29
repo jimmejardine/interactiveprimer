@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Memory Coalescing</primer-title>
+
+    <primer-card>
+      <p>
+        Thirty-two addresses walk into a memory system. That is not the setup for a joke — it is what
+        happens <em>every time a warp executes one load instruction</em>. Each lane computes its own
+        address, so a single <code>ld</code> arrives at the memory pipeline as a bundle of 32 requests,
+        and what happens next decides more GPU performance than any other single mechanism in this module.
+        You already know from
+        <primer-ref to="computer-science/chip-design/gpu-compute/branch-divergence-and-reconvergence">divergence</primer-ref>
+        that a warp's lanes can waste the <em>compute</em> engine by disagreeing about control flow; this
+        lesson is the memory-side twin: lanes can waste the <em>memory</em> engine by disagreeing about
+        <strong>where their addresses point</strong>. The referee is a piece of hardware called the
+        <strong>coalescer</strong>, and its rules are simple enough to fit on a napkin — yet ignoring them
+        routinely costs software a factor of ten to thirty.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The coalescer's napkin rules</h2>
+      <p>
+        DRAM does not sell individual bytes. As you saw when the
+        <primer-ref to="computer-science/computer-architecture/memory/locality-and-the-memory-wall">memory
+        wall</primer-ref> first loomed, memory systems move data in fixed-size chunks — on a GPU,
+        <strong>32-byte sectors</strong>, grouped into <strong>128-byte cache lines</strong> (four sectors).
+        The coalescer looks at a warp's 32 addresses and asks one question: <em>how few sectors cover all
+        of them?</em> It merges every request landing in the same sector into a single fetch, and issues
+        one memory transaction per distinct sector touched.
+      </p>
+      <primer-theorem name="Coalescing">
+        <ul>
+          <li>one warp load/store = <strong>32 addresses at once</strong>; the coalescer merges them into
+            the minimum set of <strong>32-byte sectors</strong>;</li>
+          <li>cost is counted in <strong>sectors fetched, not elements requested</strong> — efficiency =
+            useful bytes ÷ fetched bytes;</li>
+          <li>the golden pattern: <strong>consecutive lanes read consecutive words</strong> — 32 four-byte
+            loads collapse into 4 sectors (one 128-byte line), 100% efficiency;</li>
+          <li>scattered addresses fetch scattered sectors: worst case <strong>one transaction per
+            lane</strong>, 32× the traffic for the same useful data.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Work the golden case once by hand. Lane <primer-math>t</primer-math> reads the 4-byte float at
+        address <primer-math>4t</primer-math>: lanes 0–7 land in sector 0 (bytes 0–31), lanes 8–15 in
+        sector 1, and so on — <strong>4 sectors, 128 bytes fetched, 128 bytes used</strong>. The whole
+        warp's load is one cache-line fill. Now stretch the same warp out with a stride: lane
+        <primer-math>t</primer-math> reads address <primer-math>4st</primer-math> for stride
+        <primer-math>s</primer-math> elements, and the requests spread across
+        <primer-math>\min(32,\,4s)</primer-math> sectors:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Access pattern (4-byte floats)</th><th>Sectors fetched</th><th>Bytes fetched</th><th>Efficiency</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Unit stride, aligned</td><td>4</td><td>128</td><td>100%</td></tr>
+            <tr><td>Unit stride, misaligned by 4 B</td><td>5</td><td>160</td><td>80%</td></tr>
+            <tr><td>Stride 2</td><td>8</td><td>256</td><td>50%</td></tr>
+            <tr><td>Stride 8</td><td>32</td><td>1024</td><td>12.5%</td></tr>
+            <tr><td>Stride 32</td><td>32</td><td>1024</td><td>12.5%</td></tr>
+            <tr><td>Random gather</td><td>up to 32</td><td>up to 1024</td><td>as low as 12.5%</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Read the misaligned row kindly: starting the warp 4 bytes off a sector boundary drags in
+        <em>one</em> extra sector — an 80% day, mildly annoying. Strides are the real villain: by stride 8
+        every lane owns its own sector, the memory system hauls 1024 bytes to deliver 128 useful ones, and
+        your kernel's effective bandwidth is one-eighth of the number on the spec sheet. Nothing further
+        degrades after that — the damage saturates at one transaction per lane — which is why stride 8 and
+        stride 32 tie for last place.
+      </p>
+    </primer-card>
+
+    <!-- Chart: efficiency vs stride, with element size slider. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "strideCliff": {
+          "title": "Coalescing efficiency vs access stride",
+          "elemLabel": "Element size"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The cliff</h2>
+      <p>
+        Plotting efficiency against stride gives one of the most consequential curves in GPU programming —
+        a cliff edge right at the origin. Efficiency is
+        <primer-math>\min\!\left(1, \tfrac{32}{e\,s}\right)\cdot 100\%</primer-math> for element size
+        <primer-math>e</primer-math> bytes and stride <primer-math>s</primer-math>: it halves at stride 2,
+        halves again by stride 4, and flatlines once every lane occupies its own sector. Larger elements
+        hit the floor sooner — and the floor itself is higher, because a fat element fills more of its
+        sector:
+      </p>
+      <primer-chart scene="strideCliff" caption="Coalescing efficiency in percent against access stride from 1 to 32 elements. The curve starts at 100 percent for stride 1 and falls steeply like 1 over stride, flattening at a floor once every lane touches its own 32-byte sector. A slider changes the element size between 4, 8 and 16 bytes, moving the floor to 12.5, 25 or 50 percent."></primer-chart>
+      <primer-chart-sliders name="coalesceSliders"></primer-chart-sliders>
+      <p>
+        Notice there is no gentle regime: the difference between stride 1 and stride 2 is already a factor
+        of two of your memory bandwidth. Coalescing is not a tuning refinement — it is the first-order
+        term.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>AoS vs SoA: the data-layout lesson</h2>
+      <p>
+        Almost every real coalescing disaster is the same disaster: a sensible-looking
+        <strong>array of structures</strong> (AoS). Store 3-D points as
+        <code>x y z x y z …</code> and ask a warp to read everyone's <code>x</code>:
+      </p>
+      <primer-code lang="typescript">
+        // AoS — array of structures: lane t reads xyz[3 * t], stride 3.
+        interface PointAoS { x: number; y: number; z: number }
+        // memory: x0 y0 z0 x1 y1 z1 x2 y2 z2 ...  — the x's are 12 bytes apart
+
+        // SoA — structure of arrays: lane t reads xs[t], stride 1.
+        interface PointsSoA { xs: number[]; ys: number[]; zs: number[] }
+        // memory: x0 x1 x2 ... | y0 y1 y2 ... | z0 z1 z2 ...  — the x's are contiguous
+      </primer-code>
+      <p>
+        The AoS read is a stride-3 access — 12 sectors instead of 4, a third of your bandwidth gone before
+        the kernel computes anything. The <strong>structure of arrays</strong> (SoA) layout stores each
+        field contiguously, so "everyone's <code>x</code>" is the golden unit-stride pattern. Same data,
+        same bytes, same algorithm — the <em>layout</em> is the optimisation. This is the single most
+        transferable lesson of the module: on a machine where 32 threads touch memory simultaneously,
+        <strong>data layout is not a detail of style, it is the shape of your memory traffic</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The coalescer, executable</h2>
+      <p>
+        The hardware's core loop is countable in a dozen lines: bucket each lane's address into its
+        32-byte sector, count distinct sectors, compare against bytes actually wanted. Here it is grading
+        the patterns from the table — plus the "CPU-style chunking" pattern you will meet in the warning
+        below:
+      </p>
+      <primer-code run>
+        // The coalescer: collapse a warp's 32 lane addresses into unique 32-byte sectors.
+        const SECTOR = 32;
+        const lanes = [...Array(32).keys()];
+
+        function sectors(addrs: number[]): number {
+          const seen = new Set&lt;number&gt;();
+          for (const a of addrs) seen.add(Math.floor(a / SECTOR));
+          return seen.size;
+        }
+
+        function report(name: string, addrs: number[]): void {
+          const n = sectors(addrs);
+          const useful = addrs.length * 4;          // 32 four-byte loads wanted
+          const fetched = n * SECTOR;
+          const eff = (100 * useful / fetched).toFixed(1);
+          console.log(`${name.padEnd(26)} ${String(n).padStart(2)} sectors  ${String(fetched).padStart(4)} B fetched  efficiency ${eff}%`);
+        }
+
+        report("unit stride", lanes.map((t) =&gt; t * 4));
+        report("misaligned by 4 B", lanes.map((t) =&gt; 4 + t * 4));
+        report("stride 2", lanes.map((t) =&gt; t * 8));
+        report("stride 32", lanes.map((t) =&gt; t * 128));
+        report("CPU-style chunks (N=1024)", lanes.map((t) =&gt; t * 1024 * 4));
+
+        // seeded pseudo-random gather — same "random" every run
+        let s = 12345;
+        const rnd = () =&gt; (s = (s * 1103515245 + 12345) % 2147483648) / 2147483648;
+        report("random gather", lanes.map(() =&gt; Math.floor(rnd() * 4096) * 4));
+      </primer-code>
+      <p>
+        Change the misalignment offset to 32 (a whole sector) and watch the penalty vanish — alignment
+        only matters modulo the sector size. Then try stride 3, the AoS case, and check it against the
+        <primer-math>\min(32, 4s)</primer-math> formula.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why does memory move 32 bytes at a time anyway?">
+      <p>
+        Because DRAM is a burst device. Opening a row of a DRAM chip is slow and expensive, but once open,
+        the chip streams a <em>burst</em> of consecutive bytes at full interface speed — modern GDDR
+        delivers data in bursts that map naturally onto 32-byte sectors. Requesting one byte costs
+        essentially the same time and energy as requesting the whole burst, so the memory system rounds
+        every request up. CPUs made the same choice decades ago (64-byte cache lines) for the same reason.
+        The GPU twist is scale: a CPU miss fetches one line for one core's load, while a GPU warp can
+        legitimately need 32 <em>different</em> lines at once — so the hardware was given a coalescer to
+        catch the cases where those 32 requests were secretly one.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Your CPU instinct is exactly backwards">
+      <p>
+        A seasoned CPU programmer parallelising a loop over <primer-math>N</primer-math> items gives each
+        thread a <strong>contiguous chunk</strong>: thread <primer-math>t</primer-math> takes elements
+        <primer-math>[tN/T,\;(t{+}1)N/T)</primer-math>. On a CPU that is perfect — each core streams its
+        own cache lines. Port it to a GPU and it is a catastrophe, because the lanes of a warp execute
+        <em>the same load simultaneously</em>: on iteration 0, lane 0 reads element 0, lane 1 reads
+        element <primer-math>N/T</primer-math>, lane 2 reads <primer-math>2N/T</primer-math>… — a giant
+        stride, one transaction per lane, every iteration. The GPU-right pattern is
+        <strong>interleaved</strong>: thread <primer-math>t</primer-math> takes elements
+        <primer-math>t,\;t{+}T,\;t{+}2T,\dots</primer-math> — then on every iteration consecutive lanes
+        read consecutive elements, the golden pattern. Each individual thread's accesses look scattered,
+        and that is fine: <strong>coalescing is about what a warp does in one instant, not what one thread
+        does over time</strong>. This inversion is the number-one performance bug in code ported from
+        CPUs.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: sector counts, efficiency fractions, AoS/SoA, chunk-vs-interleave. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "coalesceQuiz@1": {
+          "intro": "One warp load = 32 addresses at once. The coalescer fetches one 32-byte sector per distinct sector touched; efficiency = useful bytes ÷ fetched bytes.",
+          "unitQ": "A warp's 32 lanes read consecutive {e}-byte elements starting at a sector-aligned address (lane $t$ reads address ${e}t$). How many 32-byte sectors are fetched?",
+          "strideQ": "A warp's 32 lanes read 4-byte floats with a stride of {s} elements (lane $t$ reads element ${s}t$, aligned). How many 32-byte sectors are fetched?",
+          "effQ": "A warp reads 4-byte floats with a stride of {s} elements. What is the coalescing efficiency, as a percentage?",
+          "wasteQ": "A warp reads 4-byte floats with a stride of {s} elements (stride ≤ 8). How many times more bytes are fetched than are actually used?",
+          "bigStrideQ": "A warp's 32 lanes read 4-byte floats with a stride of {s} elements. How many memory transactions (sectors) does the coalescer issue?",
+          "aosQ": "Points are stored AoS as structures of {f} consecutive 4-byte floats. A warp reads the first field of 32 consecutive structures. How many 32-byte sectors are fetched?",
+          "misQ": "A warp makes an otherwise perfect unit-stride read of 32 four-byte floats, but the base address is offset 4 bytes past a sector boundary. How many 32-byte sectors are fetched?",
+          "interQ": "A grid of {T} threads processes a long array with the GPU-correct interleaved pattern: thread $t$ handles elements $t$, $t + {T}$, $t + 2\\cdot{T}$, … Which element does thread {t0} handle on its second iteration?",
+          "soaQ": "A kernel must read the x-coordinate of every particle. Which memory layout lets the warp's 32 reads coalesce into a single 128-byte line?",
+          "soaA": "SoA (structure of arrays): all x's stored contiguously, so consecutive lanes read consecutive words",
+          "soaB": "AoS (array of structures): x, y, z interleaved per particle, so the x's are one stride apart",
+          "soaC": "Either — the coalescer rearranges memory layouts automatically",
+          "soaD": "Neither — coordinates can never be coalesced",
+          "chunkQ": "Why is giving each GPU thread its own contiguous chunk of an array (the CPU habit) a coalescing disaster?",
+          "chunkA": "The warp's lanes execute each load simultaneously, so at every instant the 32 active addresses are one chunk-length apart — a huge stride, one transaction per lane",
+          "chunkB": "Contiguous chunks overflow the register file",
+          "chunkC": "Chunks force the warp to diverge at every branch",
+          "chunkD": "It is fine — each thread's accesses are sequential, which is all that matters",
+          "whatQ": "What does the coalescer actually do?",
+          "whatA": "It merges the 32 simultaneous lane addresses of one warp memory instruction into the minimum set of 32-byte sector transactions",
+          "whatB": "It compresses the data in each cache line before transmission",
+          "whatC": "It reorders a single thread's loads to hide latency",
+          "whatD": "It converts loads into stores to save bandwidth",
+          "sevQ": "Rank the severity: misalignment by one element vs a large stride (≥ 8 elements), for a warp's unit-size loads.",
+          "sevA": "Misalignment is mild (one extra sector, ~80% efficiency); large strides are disasters (one transaction per lane, ~12.5%)",
+          "sevB": "Misalignment is the disaster; strides are mild",
+          "sevC": "Both always cost exactly 50%",
+          "sevD": "Neither has any effect on modern hardware"
+        }
+      }
+    </script>
+
+    <primer-quiz name="coalesceQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/gpu-compute/branch-divergence-and-reconvergence",
+      "computer-science/computer-architecture/memory/locality-and-the-memory-wall"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerChartSliders, registerQuiz, makeStrings } from "primer";
+
+  // ── Efficiency vs stride, with an element-size selector. ──
+  registerChartSliders("coalesceSliders", [
+    {
+      name: "e",
+      label: () => makeStrings("strideCliff")("elemLabel"),
+      type: "choice",
+      options: ["4 B", "8 B", "16 B"],
+      value: 0,
+    },
+  ]);
+
+  registerCharts(
+    [
+      {
+        name: "strideCliff",
+        f: (x, s) => {
+          const e = [4, 8, 16][s.e];                 // element size in bytes
+          const stride = Math.max(1, Math.round(x)); // integer strides only
+          const sectors = Math.min(32, e * stride);  // distinct 32-B sectors touched
+          return (100 * e) / sectors;                // useful ÷ fetched, in %
+        },
+        line: (colors) => ({ strokeColor: colors.cat[0], strokeWidth: 2.5 }),
+      },
+    ],
+    {
+      xmin: 0.5,
+      xmax: 32.5,
+      ymin: 0,
+      ymax: 110,
+      xticks: 4,
+      yticks: 25,
+      xaxisname: "stride",
+      yaxisname: "%",
+      title: () => makeStrings("strideCliff")("title"),
+    },
+    "coalesceSliders",
+  );
+
+  registerQuiz("coalesceQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Unit stride, e-byte elements: 32e/32 = e sectors.
+      prompt: (v) => sceneStrings("unitQ", v),
+      variables: "e=[4,8]",
+      answer: "e",
+    },
+    {
+      // Stride s floats: min(32, 4s) sectors — clean cases s ≤ 8.
+      prompt: (v) => sceneStrings("strideQ", v),
+      variables: "s=[2,4,8]",
+      answer: "4 * s",
+    },
+    {
+      // Efficiency 100/s % for s ≤ 8.
+      prompt: (v) => sceneStrings("effQ", v),
+      variables: "s=[2,4,8]",
+      answer: "100 / s",
+    },
+    {
+      // Fetched/useful = s.
+      prompt: (v) => sceneStrings("wasteQ", v),
+      variables: "s=[2,4,8]",
+      answer: "s",
+    },
+    {
+      // Saturated: one sector per lane.
+      prompt: (v) => sceneStrings("bigStrideQ", v),
+      variables: "s=[8,16,32,64]",
+      answer: 32,
+    },
+    {
+      // AoS field read = stride f: 4f sectors (f ≤ 8 keeps it under the cap).
+      prompt: (v) => sceneStrings("aosQ", v),
+      variables: "f=[2,3,4,6,8]",
+      answer: "4 * f",
+    },
+    {
+      // Misaligned unit stride: 5 sectors.
+      prompt: () => sceneStrings("misQ"),
+      answer: 5,
+    },
+    {
+      // Interleaved indexing: second iteration = t0 + T.
+      prompt: (v) => sceneStrings("interQ", v),
+      variables: "T=[128,256,512] t0=[0:100]",
+      answer: "t0 + T",
+    },
+    {
+      prompt: () => sceneStrings("soaQ"),
+      options: [
+        { text: () => sceneStrings("soaA"), correct: true },
+        { text: () => sceneStrings("soaB"), correct: false },
+        { text: () => sceneStrings("soaC"), correct: false },
+        { text: () => sceneStrings("soaD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("chunkQ"),
+      options: [
+        { text: () => sceneStrings("chunkA"), correct: true },
+        { text: () => sceneStrings("chunkB"), correct: false },
+        { text: () => sceneStrings("chunkC"), correct: false },
+        { text: () => sceneStrings("chunkD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whatQ"),
+      options: [
+        { text: () => sceneStrings("whatA"), correct: true },
+        { text: () => sceneStrings("whatB"), correct: false },
+        { text: () => sceneStrings("whatC"), correct: false },
+        { text: () => sceneStrings("whatD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sevQ"),
+      options: [
+        { text: () => sceneStrings("sevA"), correct: true },
+        { text: () => sceneStrings("sevB"), correct: false },
+        { text: () => sceneStrings("sevC"), correct: false },
+        { text: () => sceneStrings("sevD"), correct: false },
+      ],
+    },
+  ]);
+</script>

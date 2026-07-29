@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Constrained-Random Stimulus</primer-title>
+
+    <primer-card>
+      <p>
+        Let's do a small, terrifying calculation. A 32-bit adder takes two 32-bit inputs, so its input
+        space has <primer-math>2^{32} \times 2^{32} = 2^{64}</primer-math> pairs — about
+        <primer-math>1.8 \times 10^{19}</primer-math>. Suppose your simulator checks one pair per
+        nanosecond, a billion per second (wildly optimistic). Then exhaustively testing <em>one adder</em>
+        takes <primer-math>1.8 \times 10^{10}</primer-math> seconds — roughly <strong>585 years</strong>.
+        For a 64-bit adder, the same sum says <primer-math>10^{22}</primer-math> years: comfortably past
+        the heat death of the stars. Directed tests — hand-written "try 3+5, try the carry chain, try
+        overflow" — cover the cases <em>you thought of</em>, and the bugs, with great reliability, live in
+        the cases you didn't. The industry's answer is one of verification's best ideas:
+        <strong>throw dice — but load them</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Random finds what you didn't think to test</h2>
+      <p>
+        Pure random stimulus explores without prejudice: it wanders into corners no test plan lists —
+        the carry that ripples all 32 bits, the back-to-back operations with a stale flag, the address
+        that aliases a cache line. Paired with the
+        <primer-ref to="computer-science/chip-design/verification/testbenches-and-simulation">golden
+        model</primer-ref> from the testbench lesson, it becomes a bug-finding machine: generate a random
+        input, feed it to DUT <em>and</em> model, compare, repeat a million times overnight. No human
+        imagination required — which is precisely the point, since human imagination is what failed.
+      </p>
+      <p>
+        But <em>unconstrained</em> randomness has a fatal flaw: most random bit patterns are
+        <strong>illegal inputs</strong>. A random 32-bit word is almost never a valid one-hot select
+        (32 valid patterns out of 4,294,967,296); a random address ignores alignment rules; a random opcode
+        byte is mostly gibberish the decoder may rightly reject. Feed a DUT garbage and it fails for boring,
+        spec-permitted reasons — noise that buries real bugs. The fix is <strong>constrained random</strong>:
+        declare the <em>rules of legality</em>, and let a solver pick freely <em>within</em> them.
+      </p>
+      <primer-code lang="text">
+        class mem_txn;
+          rand logic [31:0] addr;
+          rand logic [1:0]  op;          // 0 = READ, 1 = WRITE, 2 = FLUSH
+          rand logic [31:0] data;
+
+          constraint aligned  { addr % 4 == 0; }              // word-aligned only
+          constraint in_range { addr inside {[32'h1000 : 32'h1FFC]}; }
+          constraint op_mix   { op dist { 0 := 6, 1 := 3, 2 := 1 }; }  // weighted: 60/30/10
+        endclass
+
+        initial begin
+          mem_txn t = new();
+          repeat (100000) begin
+            assert (t.randomize());      // the SOLVER picks values satisfying ALL constraints
+            drive(t);                    // apply to the DUT...
+            check(t);                    // ...and compare against the golden model
+          end
+        end
+      </primer-code>
+      <p>
+        The <code>rand</code> variables are the dice; each <code>constraint</code> block is a loading rule;
+        and <code>randomize()</code> invokes a genuine <strong>constraint solver</strong> that finds a value
+        assignment satisfying every rule at once (it can handle constraints that interlock, like
+        <code>addr</code> ranges that depend on <code>op</code>). The <code>dist</code> weighting tilts the
+        dice — here 60% reads — because realistic traffic mixes find different bugs than uniform ones.
+        Constraints are your <em>machine-readable spec of legal inputs</em>: writing them forces the team to
+        say precisely what the design must tolerate.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Seeds: randomness you can replay</h2>
+      <p>
+        The dice are not truly random — they are a <strong>pseudo-random</strong> sequence unrolled from a
+        starting <strong>seed</strong>. Same seed, same sequence, bit for bit, forever. This turns
+        randomness from a liability into an instrument: a nightly regression runs thousands of seeds; when
+        seed 8,675,309 fails at 3 a.m., the log records it, and in the morning you rerun exactly that seed
+        and watch the identical failure under a debugger. <strong>A failing seed is a treasure</strong> —
+        it is a bug, gift-wrapped, reproducible on demand. Losing the seed (or letting the bench draw
+        entropy the seed doesn't control) means a bug you saw once and may never see again; verification
+        teams treat that as a process failure on par with losing the RTL itself.
+      </p>
+      <p>
+        Watch the whole machinery run — a seeded generator, constraints, weighted ops, and perfect
+        reproducibility:
+      </p>
+      <primer-code run>
+        // ── A seeded PRNG (mulberry32): same seed → same stream, forever. ──
+        function mulberry32(seed: number): () =&gt; number {
+          let s = seed &gt;&gt;&gt; 0;
+          return () =&gt; {
+            s = (s + 0x6D2B79F5) &gt;&gt;&gt; 0;
+            let t = s;
+            t = Math.imul(t ^ (t &gt;&gt;&gt; 15), t | 1);
+            t ^= t + Math.imul(t ^ (t &gt;&gt;&gt; 7), t | 61);
+            return ((t ^ (t &gt;&gt;&gt; 14)) &gt;&gt;&gt; 0) / 4294967296;
+          };
+        }
+
+        // ── The constraints: word-aligned addresses in [0x1000, 0x1FFC], weighted ops. ──
+        function drawTxn(rnd: () =&gt; number): { op: string; addr: number } {
+          const r = rnd();
+          const op = r &lt; 0.6 ? "READ " : r &lt; 0.9 ? "WRITE" : "FLUSH";     // dist 6:3:1
+          const addr = 0x1000 + Math.floor(rnd() * 1024) * 4;             // % 4 == 0, in range
+          return { op, addr };
+        }
+
+        for (const seed of [42, 42, 99]) {                 // 42 twice: watch it repeat!
+          const rnd = mulberry32(seed);
+          const txns = Array.from({ length: 5 }, () =&gt; drawTxn(rnd));
+          const line = txns.map((t) =&gt; `${t.op} @0x${t.addr.toString(16)}`).join("  ");
+          console.log(`seed ${seed}: ${line}`);
+        }
+
+        // ── And the weights really hold, in the long run: ──
+        const rnd = mulberry32(7);
+        const count: Record&lt;string, number&gt; = { "READ ": 0, "WRITE": 0, "FLUSH": 0 };
+        for (let i = 0; i &lt; 10000; i++) count[drawTxn(rnd).op]++;
+        console.log("\n10,000 draws with seed 7:", JSON.stringify(count), "(expect ~6000/3000/1000)");
+      </primer-code>
+      <p>
+        The two seed-42 lines are identical — that is reproducibility, and every address is aligned and in
+        range — that is legality. Randomness with an audit trail.
+      </p>
+      <primer-theorem name="Constrained-random verification">
+        <ul>
+          <li>directed tests cover the cases you thought of; input spaces
+            (<primer-math>2^{64}</primer-math> pairs for one 32-bit adder) make exhaustion physically
+            impossible;</li>
+          <li><strong>random stimulus</strong> + a <strong>golden model</strong> finds the cases you
+            didn't think of — the industry workhorse;</li>
+          <li><strong>constraints</strong> encode the spec of <em>legal</em> inputs (<code>inside</code>
+            ranges, alignment, <code>dist</code> weights); a solver picks freely within them;</li>
+          <li>the stream unrolls from a <strong>seed</strong>: same seed, same stimulus — log every seed,
+            replay every failure;</li>
+          <li>over-constraining is under-testing: every constraint narrows what can ever be explored.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Who tests the dice?">
+      <p>
+        A subtle profession-within-the-profession: the constraint solver itself can bias your dice.
+        Solvers must pick <em>uniformly-ish</em> among the legal solutions, but a carelessly-written
+        constraint set can make some legal values astronomically rarer than others — for instance,
+        constraining <code>a + b == c</code> with all three random may make tiny values of <code>c</code>
+        vastly over-represented depending on solve order. SystemVerilog even lets you control it
+        (<code>solve a before b</code>). Verification teams therefore <em>measure</em> their randomness:
+        histogram the generated values, eyeball the distribution, and — in the next lesson's language —
+        collect coverage on the <em>stimulus</em> as well as the design. Trust, but verify, applies to your
+        own dice too. And when the histogram looks wrong, the fix is almost always to simplify the
+        constraints rather than to fight the solver.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Unconstrained chaos, over-constrained blindness">
+      <p>
+        Two ditches, one road. Drive with <em>no</em> constraints and you mostly generate illegal stimulus:
+        random one-hot selects that aren't one-hot, misaligned addresses, opcodes from outer space. The DUT
+        "fails" in ways the spec never promised to handle, your triage queue fills with non-bugs, and the
+        team learns to ignore red — the worst possible culture. But the opposite ditch is quieter and
+        deadlier: <strong>over-constraining</strong>. Every constraint you add is a region of input space
+        you have promised never to explore. Constrain addresses to "nice" ranges and you will never test the
+        boundary; force operations to alternate read/write and the back-to-back-write bug ships. The
+        discipline: constraints must encode <em>exactly the spec's definition of legal</em> — no tighter,
+        no looser. When the spec says "any address", your constraints must eventually try the ugly ones:
+        zero, all-ones, the last word before wraparound. If a constraint exists only to make failures stop,
+        you haven't fixed a bug — you've stopped looking for it.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: input-space arithmetic, seeds, constraint reading, weights. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "crvQuiz@1": {
+          "intro": "Load the dice: constraints encode legal inputs, the seed makes every failure replayable.",
+          "spaceQ": "An adder takes two {n}-bit operands. Its input space has 2^k distinct pairs. What is k?",
+          "yearsQ": "A simulator applies 10^{a} stimulus vectors per second to a design whose legal input space holds 10^{b} vectors. Exhaustive enumeration takes 10^k seconds. What is k?",
+          "alignQ": "A constraint requires addr % {m} == 0 and addr inside [0:{r}]. How many legal values of addr exist?",
+          "rangeQ": "A constraint requires x inside [{lo}:{hi}]. How many legal values of x exist?",
+          "distQ": "A constraint block declares op dist { ADD := {wa}, SUB := {ws} }, and the bench draws {n} transactions. About how many ADDs should appear?",
+          "onehotQ": "A {n}-bit select must be one-hot. Out of all 2^{n} possible bit patterns, how many are legal?",
+          "seedQ": "Two overnight regressions run the same bench with the same seed. What do they generate?",
+          "sdRight": "Bit-for-bit identical stimulus — the pseudo-random stream unrolls deterministically from the seed",
+          "sdDiff": "Different stimulus — randomness never repeats",
+          "sdHalf": "The same values but in a different order",
+          "sdTool": "It depends on the simulator's mood that night",
+          "treasureQ": "Why is a failing seed described as a treasure?",
+          "trRight": "Rerunning that seed replays the identical stimulus, making the bug reproducible on demand for debugging",
+          "trLucky": "Failing seeds are statistically rare, like winning lottery numbers",
+          "trSkip": "It lets the team skip that test in future runs",
+          "trFast": "Failing seeds make simulation run faster",
+          "whyRandQ": "Why does random stimulus find bugs that directed tests miss?",
+          "wrRight": "Directed tests only cover scenarios someone imagined; random stimulus wanders into unimagined corners — where the bugs live",
+          "wrMore": "Random tests always execute more cycles per second",
+          "wrCover": "Random tests automatically achieve 100% coverage",
+          "wrSpec": "Random tests read the specification more carefully",
+          "unconQ": "What mostly comes out of an UNCONSTRAINED random generator driving a real interface?",
+          "unRight": "Illegal stimulus — misaligned addresses, non-one-hot selects, gibberish opcodes — producing noise failures the spec never promised to handle",
+          "unLegal": "Perfectly legal traffic, uniformly spread",
+          "unBest": "Exactly the corner cases the test plan lists",
+          "unNothing": "Nothing — the solver refuses to run without constraints",
+          "overQ": "What is the danger of OVER-constraining the stimulus?",
+          "ovRight": "Every constraint walls off input space forever — over-constrain and real legal scenarios (and their bugs) are never explored",
+          "ovSlow": "The solver becomes slower but the testing is unaffected",
+          "ovSeed": "Seeds stop being reproducible",
+          "ovNone": "None — tighter constraints always mean better tests",
+          "solverQ": "What does calling randomize() on an object with constraint blocks actually invoke?",
+          "soRight": "A constraint solver that finds values satisfying all the declared constraints simultaneously",
+          "soUniform": "A plain uniform random number generator that retries forever",
+          "soCompile": "A compile-time enumeration of every legal value",
+          "soUser": "A callback the user must write by hand"
+        }
+      }
+    </script>
+
+    <primer-quiz name="crvQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/verification/assertions-and-sva"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("crvQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Two n-bit operands: 2^(2n) pairs.
+      prompt: (v) => sceneStrings("spaceQ", v),
+      variables: "n=[8,16,24,32,48,64]",
+      answer: "2 * n",
+    },
+    {
+      // 10^b vectors at 10^a per second: 10^(b−a) seconds.
+      prompt: (v) => sceneStrings("yearsQ", v),
+      variables: "a=[6:9] b=[15:20]",
+      answer: "b - a",
+    },
+    {
+      // Multiples of m in [0, r] with r = m·k: k + 1 values (including 0).
+      prompt: (v) => sceneStrings("alignQ", { ...v, r: v.m * v.k }),
+      variables: "m=[4,8,16] k=[5:12]",
+      answer: "k + 1",
+    },
+    {
+      // Inclusive range count.
+      prompt: (v) => sceneStrings("rangeQ", v),
+      variables: "lo=[0:5] hi=[10:30]",
+      answer: "hi - lo + 1",
+    },
+    {
+      // Expected ADDs = n·wa/(wa+ws), with n = (wa+ws)·k shown in the prompt.
+      prompt: (v) => sceneStrings("distQ", { ...v, n: (v.wa + v.ws) * v.k }),
+      variables: "wa=[1:5] ws=[1:5] k=[10:30]",
+      answer: "wa * k",
+    },
+    {
+      // n legal one-hot patterns.
+      prompt: (v) => sceneStrings("onehotQ", v),
+      variables: "n=[8,16,32,64]",
+      answer: "n",
+    },
+    {
+      prompt: () => sceneStrings("seedQ"),
+      options: [
+        { text: () => sceneStrings("sdRight"), correct: true },
+        { text: () => sceneStrings("sdDiff"), correct: false },
+        { text: () => sceneStrings("sdHalf"), correct: false },
+        { text: () => sceneStrings("sdTool"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("treasureQ"),
+      options: [
+        { text: () => sceneStrings("trRight"), correct: true },
+        { text: () => sceneStrings("trLucky"), correct: false },
+        { text: () => sceneStrings("trSkip"), correct: false },
+        { text: () => sceneStrings("trFast"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyRandQ"),
+      options: [
+        { text: () => sceneStrings("wrRight"), correct: true },
+        { text: () => sceneStrings("wrMore"), correct: false },
+        { text: () => sceneStrings("wrCover"), correct: false },
+        { text: () => sceneStrings("wrSpec"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("unconQ"),
+      options: [
+        { text: () => sceneStrings("unRight"), correct: true },
+        { text: () => sceneStrings("unLegal"), correct: false },
+        { text: () => sceneStrings("unBest"), correct: false },
+        { text: () => sceneStrings("unNothing"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("overQ"),
+      options: [
+        { text: () => sceneStrings("ovRight"), correct: true },
+        { text: () => sceneStrings("ovSlow"), correct: false },
+        { text: () => sceneStrings("ovSeed"), correct: false },
+        { text: () => sceneStrings("ovNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("solverQ"),
+      options: [
+        { text: () => sceneStrings("soRight"), correct: true },
+        { text: () => sceneStrings("soUniform"), correct: false },
+        { text: () => sceneStrings("soCompile"), correct: false },
+        { text: () => sceneStrings("soUser"), correct: false },
+      ],
+    },
+  ]);
+</script>

@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>The GPU Register File and Operand Collector</primer-title>
+
+    <primer-card>
+      <p>
+        Quick quiz: what is the biggest memory <em>on</em> a modern GPU die? Not the L2 cache. Not the L1s.
+        It is the <strong>register file</strong>. Each SM carries about <strong>256 KB</strong> of
+        registers — more than its L1 and shared memory combined — and a hundred-SM GPU therefore holds
+        <em>tens of megabytes of registers</em>, dwarfing every cache on the chip. On a CPU, registers are
+        a few hundred bytes of precious flip-flops; on a GPU they are the single largest SRAM budget. This
+        lesson explains why the sizes flipped, and meets the clever machinery — <strong>banks</strong> and
+        the <strong>operand collector</strong> — that makes such a monster readable at all.
+      </p>
+      <p>
+        The "why" you already know. The
+        <primer-ref to="computer-science/chip-design/gpu-compute/the-warp-scheduler">zero-cost warp
+        switch</primer-ref> works because every resident warp's registers live on-chip <em>permanently</em>
+        — nothing saved, nothing restored. Up to 48–64 warps × 32 threads × dozens of registers each: the
+        multitude has to <em>live somewhere</em>, and the register file is that somewhere. It is the warp
+        scheduler's trick, made of SRAM.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A register 128 bytes wide</h2>
+      <p>
+        First, recalibrate what "a register" means. When a warp's instruction names register
+        <code>r5</code>, all 32 lanes mean <em>their own</em> <code>r5</code> — so the hardware stores one
+        architectural register as a row of
+        <primer-math>32 \times 32\text{ bits} = 128</primer-math> <strong>bytes</strong>. A single GPU
+        register is the size of a whole CPU cache line. Reading "one operand" means pulling 128 bytes out
+        of SRAM; a fused multiply-add
+        (<primer-math>a \cdot b + c</primer-math>) needs <em>three</em> such reads. Now count the traffic:
+        32 lanes × 3 operands per FMA, and the SM's four partitions each issuing every cycle. A register
+        file built the CPU way — one flat array of flip-flops with a read port per consumer — would need a
+        port count no silicon can route. Multi-ported SRAM pays roughly <em>quadratic</em> area for its
+        ports; at this scale the flat design is simply impossible.
+      </p>
+      <p>
+        The solution is the standard one for impossible port counts: <strong>fake many ports with many
+        banks</strong>. The register file is split into single-ported SRAM <strong>banks</strong> (say 4
+        per partition), registers striped across them — register <primer-math>r_n</primer-math> lives in
+        bank <primer-math>n \bmod 4</primer-math>. Four banks can serve four <em>different-bank</em>
+        requests in one cycle; two requests to the <em>same</em> bank must take turns.
+      </p>
+      <primer-theorem name="The GPU register file">
+        <ul>
+          <li>one architectural register = <strong>32 lanes × 32 bits = 128 bytes</strong> — a
+            cache-line-sized vector;</li>
+          <li>all resident warps' registers live in the RF <strong>permanently</strong> — it is the
+            physical substrate of the zero-cost warp switch;</li>
+          <li>impossible port counts are faked with <strong>banked single-ported SRAM</strong> plus an
+            <strong>operand collector</strong> that gathers operands over cycles;</li>
+          <li>the RF is an <strong>occupancy budget</strong>: registers-per-thread × resident threads × 4 B
+            must fit in the RF.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Stepped banked-RF + operand collector diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "rfBanks": {
+          "title": "Banked register file feeding an operand collector",
+          "bank": "Bank",
+          "coll": "Operand collector — staging buffers, one per in-flight instruction",
+          "toAlu": "→ to the ALU lanes when all 3 operands have arrived",
+          "stepSpread": "FMA r1 ← r2·r7 + r9: operands map to banks 2, 3, 1 — all different, all collected in ONE cycle",
+          "stepClash": "FMA r0 ← r2·r6 + r10: all three operands map to bank 2 — the collector must gather them over THREE cycles",
+          "cyc1": "cycle 1",
+          "cyc2": "cycle 2",
+          "cyc3": "cycle 3"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The operand collector: assembling an instruction's ingredients</h2>
+      <p>
+        Banks create a new problem: an instruction's three operands may not all be readable this cycle.
+        Enter the <strong>operand collector</strong> — a small set of staging buffers, one per in-flight
+        instruction. When the scheduler issues an instruction, it parks in a collector slot and its operand
+        requests go to the banks; an <strong>arbiter</strong> grants each bank to one request per cycle,
+        and operands trickle into the slot as their banks free up. When all three have arrived, the
+        instruction fires into the ALU lanes. Spread across banks, collection takes one cycle; piled onto
+        one bank, it <strong>serialises</strong> — quietly costing throughput:
+      </p>
+      <primer-geometry scene="rfBanks" caption="Four register-file banks sit above an operand collector. In the first step, an FMA's three operands map to three different banks and all arrive in one cycle. In the second step, another FMA's three operands all map to bank 2, so they arrive one per cycle over three cycles, serialised."></primer-geometry>
+      <p>
+        Who prevents the pile-ups? Mostly the <strong>compiler</strong>: register allocation on a GPU is
+        <em>bank-aware</em>, choosing register numbers for hot instructions so their operands stripe across
+        different banks. It is a strange thought from CPU-land — that renaming <code>r6</code> to
+        <code>r7</code> could speed up your inner loop — but on a banked register file, register
+        <em>numbers</em> have physics.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Try it: a bank-conflict simulator</h2>
+      <p>
+        The arbiter's behaviour is easy to model: each bank serves one request per cycle, so an
+        instruction's collection time is the depth of its worst bank queue. Watch a conflict-free FMA, a
+        worst-case one, and a partial clash:
+      </p>
+      <primer-code run>
+        // Operand collection: register r lives in bank r % NUM_BANKS; one read per bank per cycle.
+        const NUM_BANKS = 4;
+
+        function collect(name: string, regs: number[]): void {
+          // settle: sort each operand request into its bank's queue
+          const queues: number[][] = Array.from({ length: NUM_BANKS }, () => []);
+          for (const r of regs) queues[r % NUM_BANKS].push(r);
+
+          // snap, cycle by cycle: every bank hands over the front of its queue
+          const cycles = Math.max(...queues.map((q) => q.length));
+          console.log(`${name}: operands ${regs.map((r) => "r" + r).join(", ")}`);
+          for (let c = 1; c &lt;= cycles; c++) {
+            const served: string[] = [];
+            for (let b = 0; b &lt; NUM_BANKS; b++) {
+              const r = queues[b].shift();
+              if (r !== undefined) served.push(`bank${b}→r${r}`);
+            }
+            console.log(`  cycle ${c}: ${served.join("  ")}`);
+          }
+          console.log(`  collected in ${cycles} cycle(s)\n`);
+        }
+
+        collect("FMA A (spread)",    [2, 7, 9]);    // banks 2, 3, 1 — no conflict
+        collect("FMA B (worst)",     [2, 6, 10]);   // banks 2, 2, 2 — 3-way conflict
+        collect("FMA C (partial)",   [4, 8, 3]);    // banks 0, 0, 3 — 2-way conflict
+      </primer-code>
+      <p>
+        Real collectors juggle several instructions at once, so a bank cycle wasted by one instruction can
+        be used by another — the average cost of conflicts is softened, but never zero. The lesson
+        generalises: <em>whenever you meet banked SRAM, the question is always "who collides?"</em> — you
+        will ask it again, almost verbatim, for shared memory two lessons from now.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The occupancy currency</h2>
+      <p>
+        One more consequence, and it is the big one. The register file is a fixed pot that every resident
+        thread draws from:
+      </p>
+      <primer-math display>\text{regs/thread} \times \text{resident threads} \times 4\,\text{B} \;\le\; \text{RF size}</primer-math>
+      <p>
+        With a 256 KB register file, a kernel using 32 registers per thread can keep
+        <primer-math>256\,\text{KB} / (32 \times 4\,\text{B}) = 2048</primer-math> threads (64 warps)
+        resident — more than the SM's warp slots, so registers don't bind. But a register-hungry kernel
+        using 128 registers per thread caps residency at 512 threads — just 16 warps, and suddenly the warp
+        scheduler may not have enough warps to hide memory latency. Registers are the <strong>currency that
+        buys occupancy</strong>; this equation returns as one of the three budgets in this module's
+        capstone lesson.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Tens of megabytes… of registers?">
+      <p>
+        Add it up: 256 KB × 132 SMs on a flagship die is <strong>33 MB of architectural registers</strong>
+        — more memory than the entire RAM of the PC that ran DOOM, spent purely on the working values of
+        threads-in-flight. Meanwhile the same die's L2 is a few tens of MB and its L1s a few KB per
+        <em>thread-slice</em>. The size inversion tells you what a GPU really is: a machine whose working
+        set is not <em>data</em> but <em>thread state</em>. CPUs keep a little state for few threads and
+        cache lots of data; GPUs keep enormous state for thousands of threads and stream the data past it.
+        Once you see the register file as the biggest memory on the die, the whole architecture reads
+        differently.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Registers are not free">
+      <p>
+        CPU thinking says registers are the cheapest resource in the machine — use as many as you like.
+        On a GPU that instinct silently halves your performance: every register per thread is
+        <strong>stolen from residency</strong>. A kernel that doubles its register use may drop from 64
+        resident warps to 32 — and if 32 isn't enough to hide DRAM latency, your arithmetic units idle even
+        though "nothing changed" in the algorithm. This is why CUDA exposes knobs like
+        <code>-maxrregcount</code> and <code>__launch_bounds__</code>: they tell the compiler to
+        <em>spill</em> values to memory rather than burn registers, trading a little arithmetic-side
+        traffic for warps of latency-hiding. Sometimes the spill wins, sometimes it doesn't — but the trade
+        exists <em>only</em> because registers are occupancy currency.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: RF budgets, vector-register width, collector cycles, occupancy reasoning. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "rfQuiz@1": {
+          "intro": "One register = 32 lanes × 4 B = 128 B. Banked SRAM + operand collector fake the ports; the RF budget caps residency.",
+          "budgetQ": "An SM has a {r} KB register file. A kernel uses {k} registers per thread (4 bytes each). How many threads can be resident at once?",
+          "warpsQ": "An SM's register file holds 65,536 registers. A kernel uses {k} registers per thread and a warp is 32 threads. How many warps fit?",
+          "widthQ": "One architectural register spans {l} lanes at 4 bytes per lane. How many bytes wide is it?",
+          "clashQ": "All {n} operands of an instruction map to the same register-file bank, and a bank serves one read per cycle. How many cycles does collection take?",
+          "twoQ": "An FMA needs 3 operands; two of them map to bank {b} and the third to a different bank. How many cycles does the operand collector need?",
+          "totalQ": "A GPU has {s} SMs, each with a 256 KB register file. How many megabytes of registers does the chip hold in total?",
+          "perThreadQ": "A thread uses {k} registers of 4 bytes each. How many bytes of register file does that one thread occupy?",
+          "whyBankQ": "Why is the register file built from single-ported banks plus an operand collector, instead of one flat multi-ported array?",
+          "wbA": "32 lanes × 3 operands × multiple issues per cycle would need a port count whose area and wiring no silicon can afford — banks fake the ports",
+          "wbB": "Banks are required by the IEEE floating-point standard",
+          "wbC": "Multi-ported SRAM cannot store floating-point values",
+          "wbD": "The operand collector is only used for debugging",
+          "collQ": "What does the operand collector do?",
+          "coA": "It stages each in-flight instruction, gathering its operands from the banks over one or more cycles, and fires the instruction when all have arrived",
+          "coB": "It collects garbage registers from finished threads",
+          "coC": "It prefetches data from DRAM into the L2",
+          "coD": "It decides which warp issues next",
+          "freeQ": "A kernel's register use per thread doubles. What happens to the maximum number of resident threads the register file allows?",
+          "frA": "It halves — registers are the currency that buys residency, so heavier threads mean fewer of them",
+          "frB": "Nothing — registers are free on a GPU",
+          "frC": "It doubles — more registers attract more threads",
+          "frD": "Residency becomes unlimited once a kernel exceeds 64 registers",
+          "whoQ": "Whose job is it to avoid register-file bank conflicts?",
+          "whoA": "Mostly the compiler's — register allocation picks register numbers so hot instructions' operands stripe across different banks",
+          "whoB": "The programmer must write bank numbers into the source code",
+          "whoC": "The operating system's scheduler",
+          "whoD": "Nobody's — bank conflicts are impossible by construction",
+          "sizeQ": "How does the GPU's total register capacity compare with its caches?",
+          "szA": "The register file is the biggest memory on the die — tens of MB across all SMs, larger than the L2 — because every resident warp's state lives there",
+          "szB": "Registers total a few hundred bytes, as on a CPU",
+          "szC": "The L1 caches are always larger than the register file",
+          "szD": "GPUs have no registers; everything lives in cache"
+        }
+      }
+    </script>
+
+    <primer-quiz name="rfQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/gpu-compute/the-warp-scheduler"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Banked RF + operand collector: a spread collection, then a serialised one. ──
+  registerGeometryScene(
+    "rfBanks",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, fill, opacity = 0.22) =>
+        board.create(
+          "polygon",
+          [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+          {
+            fillColor: fill, fillOpacity: opacity, strokeColor: colors.line, strokeWidth: 1.2,
+            fixed: true, highlight: false, vertices: { visible: false },
+            borders: { strokeColor: colors.line, highlight: false },
+          },
+        );
+      const txt = (x, y, s, color, fs = 10, bold = false) =>
+        board.create("text", [x, y, s], {
+          strokeColor: color, fontSize: fs, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: bold ? "font-weight:600" : "",
+        });
+      const arrow = (from, to, color) =>
+        board.create("arrow", [from, to], { strokeColor: color, strokeWidth: 1.5, highlight: false, fixed: true });
+
+      // Base: four banks along the top, the collector below, exit arrow.
+      const bankX = (b) => 0.4 + b * 3.1;
+      for (let b = 0; b < 4; b++) {
+        box(bankX(b), 6.4, bankX(b) + 2.7, 8.2, colors.cat[0], 0.16);
+        txt(bankX(b) + 1.35, 7.3, sceneStrings("bank") + " " + b, colors.ink, 11, true);
+        arrow([bankX(b) + 1.35, 6.35], [bankX(b) + 1.35, 5.15], colors.line);
+      }
+      box(0.4, 3.1, 12.6, 5.1, colors.cat[2], 0.18);
+      txt(6.5, 4.1, sceneStrings("coll"), colors.ink, 11);
+      txt(6.5, 2.55, sceneStrings("toAlu"), colors.ink, 10);
+
+      // A little operand chip: register name + arrival cycle, drawn under its bank.
+      const chip = (b, slot, name, cycKey, fill) => {
+        const x = bankX(b) + 0.25 + slot * 1.25;
+        const y = 5.45;
+        box(x, y - 0.75, x + 1.1, y + 0.35, fill, 0.4);
+        txt(x + 0.55, y + 0.02, name, colors.ink, 10, true);
+        txt(x + 0.55, y - 0.46, sceneStrings(cycKey), colors.ink, 8);
+      };
+
+      // Step 1: spread operands — banks 2, 3, 1 — one cycle.
+      step(sceneStrings("stepSpread"), () => {
+        chip(2, 0, "r2", "cyc1", colors.cat[1]);
+        chip(3, 0, "r7", "cyc1", colors.cat[1]);
+        chip(1, 0, "r9", "cyc1", colors.cat[1]);
+      });
+
+      // Step 2: all three in bank 2 — serialised over three cycles.
+      step(sceneStrings("stepClash"), () => {
+        chip(2, 1, "r6", "cyc2", colors.cat[3]);
+        chip(0, 0, "r10→", "cyc3", colors.cat[3]);
+        txt(bankX(2) + 1.35, 6.15, "r2, r6, r10 → " + sceneStrings("bank") + " 2", colors.cat[3], 9.5, true);
+      });
+    },
+    { boundingbox: [-0.2, 8.8, 13.2, 1.9], keepAspect: false, title: () => makeStrings("rfBanks")("title") },
+  );
+
+  registerQuiz("rfQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // threads = r KB * 1024 / (4k) = r*256/k.
+      prompt: (v) => sceneStrings("budgetQ", v),
+      variables: "r=[64,128,256] k=[32,64,128]",
+      answer: (v) => (v.r * 256) / v.k,
+    },
+    {
+      // warps = 65536 / (32k) = 2048/k.
+      prompt: (v) => sceneStrings("warpsQ", v),
+      variables: "k=[32,64,128]",
+      answer: (v) => 2048 / v.k,
+    },
+    {
+      // vector register width = lanes * 4 B.
+      prompt: (v) => sceneStrings("widthQ", v),
+      variables: "l=[16,32,64]",
+      answer: "l * 4",
+    },
+    {
+      // n-way same-bank conflict = n cycles.
+      prompt: (v) => sceneStrings("clashQ", v),
+      variables: "n=[2:4]",
+      answer: "n",
+    },
+    {
+      // 2-way clash among 3 operands = 2 cycles.
+      prompt: (v) => sceneStrings("twoQ", v),
+      variables: "b=[0:3]",
+      answer: 2,
+    },
+    {
+      // total RF MB = s * 256 KB / 1024 = s/4.
+      prompt: (v) => sceneStrings("totalQ", v),
+      variables: "s=[80,100,120]",
+      answer: "s / 4",
+    },
+    {
+      // bytes per thread = 4k.
+      prompt: (v) => sceneStrings("perThreadQ", v),
+      variables: "k=[16:96]",
+      answer: "k * 4",
+    },
+    {
+      prompt: () => sceneStrings("whyBankQ"),
+      options: [
+        { text: () => sceneStrings("wbA"), correct: true },
+        { text: () => sceneStrings("wbB"), correct: false },
+        { text: () => sceneStrings("wbC"), correct: false },
+        { text: () => sceneStrings("wbD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("collQ"),
+      options: [
+        { text: () => sceneStrings("coA"), correct: true },
+        { text: () => sceneStrings("coB"), correct: false },
+        { text: () => sceneStrings("coC"), correct: false },
+        { text: () => sceneStrings("coD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("freeQ"),
+      options: [
+        { text: () => sceneStrings("frA"), correct: true },
+        { text: () => sceneStrings("frB"), correct: false },
+        { text: () => sceneStrings("frC"), correct: false },
+        { text: () => sceneStrings("frD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whoQ"),
+      options: [
+        { text: () => sceneStrings("whoA"), correct: true },
+        { text: () => sceneStrings("whoB"), correct: false },
+        { text: () => sceneStrings("whoC"), correct: false },
+        { text: () => sceneStrings("whoD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sizeQ"),
+      options: [
+        { text: () => sceneStrings("szA"), correct: true },
+        { text: () => sceneStrings("szB"), correct: false },
+        { text: () => sceneStrings("szC"), correct: false },
+        { text: () => sceneStrings("szD"), correct: false },
+      ],
+    },
+  ]);
+</script>
+</content>
+</invoke>

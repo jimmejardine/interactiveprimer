@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Interconnect Fabrics and Arbitration</primer-title>
+
+    <primer-card>
+      <p>
+        You now speak <primer-ref to="computer-science/chip-design/soc/the-axi-protocol">AXI</primer-ref> —
+        the language of one master talking to one slave. But an SoC has <em>M</em> masters (CPU cores, DMA
+        engines, a GPU, a display controller that must never miss a frame) and <em>S</em> slaves (DRAM,
+        SRAM, a rack of peripherals), and all of them want to talk at once. The machinery in the middle —
+        the <strong>interconnect fabric</strong> — is a full design discipline of its own: it decides who
+        may speak, routes every transaction to its owner, referees the fights, and quietly determines more
+        of a chip's real-world performance than most of the blocks it connects.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>From shared bus to crossbar</h2>
+      <p>
+        The simplest fabric is the <strong>shared bus</strong>: one set of wires, everyone attached, one
+        conversation at a time. It's small and easy — and it serialises the whole chip. While the DMA
+        engine streams a megabyte to memory, the CPU's urgent little UART poke stands in line behind it.
+        Shared buses ruled the microcontroller era; they suffocate anything bigger.
+      </p>
+      <p>
+        The opposite extreme is the <strong>crossbar</strong>: a private potential path from <em>every</em>
+        master to <em>every</em> slave — <primer-math>M \times S</primer-math> crosspoints. Now the CPU
+        can read SRAM <em>while</em> the DMA engine writes DRAM <em>while</em> the display controller
+        fetches a frame from a third port: any set of transfers to <strong>distinct slaves</strong>
+        proceeds concurrently. The price is area and wiring that grow as the product
+        <primer-math>M \times S</primer-math> — double both sides and the fabric quadruples. So real SoCs
+        build <strong>partial and cascaded fabrics</strong>: a small, fast crossbar between the bandwidth
+        players (CPU cluster, GPU, DMA, memory controller), with the dozens of slow peripherals hanging
+        off a shared branch behind a single crossbar port. Spend crosspoints where the traffic is.
+      </p>
+      <p>
+        Inside the fabric, your old friend <strong>address decode</strong> does the routing: the high bits
+        of each transaction's address select the output port, exactly as in the memory-map lesson — just
+        replicated per master and pipelined.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "crossbar": {
+          "title": "A 3×3 crossbar: concurrency when targets differ, arbitration when they collide",
+          "stepCast": "Three masters on the left, three slaves on the right",
+          "stepWires": "The full crossbar: a potential path from every master to every slave — 3 × 3 = 9 crosspoints",
+          "stepConc": "Different targets, same cycle: CPU→SRAM and DMA→DRAM proceed together — impossible on a shared bus",
+          "stepArb": "Collision: CPU and GPU both want DRAM. The arbiter grants the CPU; the GPU waits its turn",
+          "lWaits": "waits"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>See the crossbar work</h2>
+      <primer-geometry scene="crossbar" caption="A diagram with three master blocks (CPU, DMA, GPU) on the left and three slave blocks (DRAM, SRAM, UART) on the right. First a faint grid of nine possible connections appears. Then two thick simultaneous connections light up: CPU to SRAM and DMA to DRAM. Finally a contention case: both CPU and GPU aim at DRAM; the CPU's path is drawn solid as the granted winner while the GPU's is dashed and labelled as waiting."></primer-geometry>
+      <p>
+        The last step is the important one: a crossbar removes <em>structural</em> conflicts (fights over
+        wires) but cannot remove <em>destination</em> conflicts. Two masters, one slave — someone must
+        choose. That someone is the <strong>arbiter</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Arbitration: who goes first?</h2>
+      <p>
+        An arbiter is a small combinational-plus-state machine at each contended port, answering one
+        question per cycle: of the masters requesting this slave, who wins? The classic policies:
+      </p>
+      <ul>
+        <li><strong>Fixed priority</strong> — masters are ranked; the highest-ranked requester always
+          wins. Tiny, fast… and dangerous: a chatty high-priority master can lock everyone else out
+          <em>forever</em>. That failure mode has a name — <strong>starvation</strong>;</li>
+        <li><strong>Round-robin</strong> — the winner moves to the back of the queue: after granting
+          master <primer-math>g</primer-math>, the arbiter searches from
+          <primer-math>g+1</primer-math> onward. Every requester is served within <primer-math>M</primer-math>
+          grants — fairness by construction;</li>
+        <li><strong>Weighted schemes</strong> — round-robin with unequal shares: give the display engine
+          3 grants per cycle-of-turns and the debug port 1. Fairness with a thumb on the scale.</li>
+      </ul>
+      <p>
+        Which thumb, on which scale, is <strong>quality of service (QoS)</strong>. The CPU's cache miss is
+        <em>latency-critical</em> — a stalled pipeline bleeds performance every waiting cycle, but it only
+        wants a cache line. The DMA engine is the opposite: <em>bandwidth-hungry</em> but patient — no one
+        cares whether any single beat waits, only that megabytes per second keep flowing. A good fabric
+        lets urgent-and-small overtake bulky-and-patient, and modern interconnects carry explicit QoS
+        priority values on each transaction for exactly this purpose.
+      </p>
+      <p>
+        Two more realities of grown-up fabrics. <strong>Outstanding transactions</strong>: with AXI IDs,
+        several masters' requests can be in flight through the fabric at once, and responses must find
+        their way <em>back</em> — the fabric appends routing information to each ID so the R and B channels
+        retrace their steps. And <strong>pipelining</strong>: a big fabric's paths are long, so designers
+        drop <strong>register slices</strong> (a rank of flip-flops on each channel) into the middle. Each
+        slice buys back clock frequency — shorter combinational paths, exactly the timing-closure trade
+        you know from the RTL module — at the cost of a cycle of latency. The fabric is a pipeline you
+        route messages through, not a wire.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Race the arbiters</h2>
+      <p>
+        Policies sound abstract until you count grants. Below, four masters share one slave for 300
+        cycles. Master 0 is greedy (requests 95% of cycles); the others request 40% of cycles. Same
+        traffic, two arbiters — compare who actually gets served:
+      </p>
+      <primer-code run>
+        // Fixed priority vs round-robin, same requests, one contended slave.
+        let seed = 2026;
+        const rand = () =&gt; {
+          seed = (seed * 1664525 + 1013904223) % 4294967296;
+          return seed / 4294967296;
+        };
+
+        const N = 4;
+        const fixedGrants = [0, 0, 0, 0];
+        const rrGrants = [0, 0, 0, 0];
+        let rrLast = N - 1;                      // round-robin pointer
+
+        for (let cycle = 0; cycle &lt; 300; cycle++) {
+          const req: boolean[] = [];
+          for (let m = 0; m &lt; N; m++) req.push(rand() &lt; (m === 0 ? 0.95 : 0.4));
+
+          // Fixed priority: lowest index wins.
+          for (let m = 0; m &lt; N; m++) {
+            if (req[m]) { fixedGrants[m]++; break; }
+          }
+          // Round-robin: search from just past the last winner.
+          for (let k = 1; k &lt;= N; k++) {
+            const m = (rrLast + k) % N;
+            if (req[m]) { rrGrants[m]++; rrLast = m; break; }
+          }
+        }
+
+        console.log("master | wants     | fixed-priority | round-robin");
+        console.log("-------+-----------+----------------+------------");
+        for (let m = 0; m &lt; N; m++) {
+          const wants = m === 0 ? "95%/cycle" : "40%/cycle";
+          console.log(`   ${m}   | ${wants} |      ${String(fixedGrants[m]).padStart(3)}       |    ${String(rrGrants[m]).padStart(3)}`);
+        }
+        console.log("\nFixed priority: master 0 devours the slave; master 3 starves.");
+        console.log("Round-robin: everyone eats.");
+      </primer-code>
+      <p>
+        Under fixed priority, masters 1–3 only ever win in the rare cycles when master 0 is silent — and
+        master 3 needs masters 0, 1 <em>and</em> 2 all silent at once. Round-robin serves the same greedy
+        master less and everyone else steadily. Nudge master 0's <code>0.95</code> up to <code>1.0</code>
+        and rerun: under fixed priority the other three masters flatline at exactly zero. That's
+        starvation — not slow service, <em>no</em> service.
+      </p>
+      <primer-theorem name="Fabrics and arbitration">
+        <ul>
+          <li><strong>shared bus</strong>: one transfer at a time; <strong>crossbar</strong>: any masters
+            to <em>distinct</em> slaves concurrently, at <primer-math>M \times S</primer-math> cost;
+            real chips cascade partial fabrics;</li>
+          <li><strong>address decode</strong> routes requests; fabric-added <strong>ID routing</strong>
+            steers responses back;</li>
+          <li><strong>arbitration</strong> resolves same-slave conflicts: fixed priority risks
+            <strong>starvation</strong>; round-robin guarantees service within
+            <primer-math>M</primer-math> grants; weighted/QoS schemes blend urgency with fairness;</li>
+          <li><strong>register slices</strong> pipeline the fabric: higher clock frequency, one cycle of
+            latency each — timing closure, applied to the chip's roads.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Why does the display controller outrank the CPU?">
+      <p>
+        A surprising QoS folk theorem from real chips: the humble display controller often carries the
+        <em>highest</em> priority in the whole memory system — above the mighty CPU. Why? Because its
+        deadline is physical. The panel's pixel clock drains the display FIFO at a fixed, non-negotiable
+        rate; if a frame fetch arrives even slightly late, the FIFO underruns and the user <em>sees the
+        screen glitch</em>. A CPU that waits an extra 100 ns merely runs imperceptibly slower — a display
+        that waits too long fails visibly, every time. So QoS design starts not from "who is important?"
+        but from "who has a hard real-time deadline, and what is the cost of missing it?" Bandwidth-hungry
+        but deadline-free agents (DMA bulk copies) go last, latency-sensitive agents (CPU misses) go in
+        the middle, and anything wired to physics goes first.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Starvation ships in real silicon">
+      <p>
+        Fixed priority feels harmless in simulation, because testbenches politely take turns. Real traffic
+        doesn't. A GPU or DMA engine in a busy phase can request <em>every single cycle</em> — and behind
+        a fixed-priority arbiter, a lower-priority master then waits literally forever. The system-level
+        symptom is horrible to debug: the chip doesn't crash; one subsystem just silently never makes
+        progress — a watchdog fires seconds later, far from the cause, and nothing in any single block's
+        verification ever looked wrong. Chips have shipped with exactly this bug. The rule of the
+        experienced integrator: <strong>default to round-robin (or any policy with a service guarantee),
+        and use bare fixed priority only where you can <em>prove</em> the high-priority master's traffic
+        is bounded.</strong> An arbiter is a promise about worst-case behaviour, not average behaviour.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "fabricQuiz@1": {
+          "intro": "Crossbars buy concurrency; arbiters decide the collisions.",
+          "linkQ": "A full crossbar connects {m} masters to {s} slaves. How many crosspoint paths must it build?",
+          "concQ": "A full crossbar connects {m} masters and {s} slaves, and every master requests a different slave. At most how many transfers can proceed in the same cycle?",
+          "rrQ": "A round-robin arbiter over masters 0, 1 and 2 last granted master {g}. In the next cycle every master is requesting. Which master number is granted?",
+          "fpQ": "A fixed-priority arbiter grants the lowest-numbered requester. In some cycle exactly two masters request: master {p} and master {q}. Which master number wins?",
+          "busQ": "On a shared bus with five masters attached, how many transactions can be in the data-transfer phase at the same moment?",
+          "shOne": "One — the bus is a single shared conversation",
+          "shFive": "Five — one per master",
+          "shTwo": "Two — one read and one write",
+          "shAny": "As many as the slaves can accept",
+          "starveQ": "Behind a fixed-priority arbiter, a high-priority master requests every cycle for a long stretch. What happens to a low-priority master?",
+          "stA": "It is starved — it makes zero progress for as long as the pressure lasts, with no crash to point at the cause",
+          "stB": "It is served every other cycle, since the arbiter alternates",
+          "stC": "The fabric raises its priority automatically after a few cycles",
+          "stD": "Its requests are buffered and replayed at double speed later",
+          "sliceQ": "Dropping a register slice into a long fabric path buys…",
+          "slA": "A shorter combinational path (higher achievable clock frequency) at the cost of one extra cycle of latency",
+          "slB": "Lower latency and higher frequency at once",
+          "slC": "Extra storage that software can address",
+          "slD": "Nothing — register slices are only for debug visibility",
+          "decodeQ": "Inside the fabric, what determines which slave port a transaction is routed to?",
+          "deA": "Address decode — the high bits of the transaction's address select the owner, per the memory map",
+          "deB": "The transaction's data payload",
+          "deC": "Whichever slave has been idle longest",
+          "deD": "A software routing table the OS updates on every access",
+          "respQ": "Several masters have transactions outstanding through the fabric. How does a read response find its way back to the right master?",
+          "reA": "By ID — the fabric extends each transaction's ID with routing information and the response retraces it",
+          "reB": "The response is broadcast to all masters, who filter by address",
+          "reC": "Responses always return in global request order, so no routing is needed",
+          "reD": "The slave looks the master up in the memory map",
+          "qosQ": "The CPU (latency-critical cache misses) and a DMA engine (bandwidth-hungry bulk copies) contend for memory. What does good QoS do?",
+          "qA": "Lets the CPU's small urgent requests overtake the DMA's patient bulk traffic — urgency first, throughput underneath",
+          "qB": "Always serves the DMA first, since it moves more bytes",
+          "qC": "Splits every cycle exactly 50/50 regardless of need",
+          "qD": "Disables the DMA whenever the CPU is running",
+          "growQ": "Why don't SoCs simply build one full crossbar over all ~50 masters and slaves?",
+          "grA": "Crosspoint cost grows as the product M × S — so real chips cascade small crossbars for the heavy traffic with shared branches for slow peripherals",
+          "grB": "Crossbars cannot carry AXI traffic",
+          "grC": "Full crossbars are illegal in the AXI specification",
+          "grD": "Because a crossbar is slower than a shared bus"
+        }
+      }
+    </script>
+
+    <primer-quiz name="fabricQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/chip-design/soc/the-axi-protocol"],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Crossbar: masters left, slaves right; concurrency then contention. ──
+  registerGeometryScene(
+    "crossbar",
+    ({ board, colors, step, sceneStrings }) => {
+      const T = (x, y, txt, color, size = 13, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+      const box = (x, y, w, h, c, name) => {
+        board.create("polygon", [[x, y], [x + w, y], [x + w, y + h], [x, y + h]], {
+          fillColor: c, fillOpacity: 0.15, highlight: false, hasInnerPoints: false,
+          borders: { strokeColor: c, strokeWidth: 2, highlight: false },
+          vertices: { visible: false },
+        });
+        T(x + w / 2, y + h / 2, name, colors.ink, 13);
+      };
+      const mC = colors.cat[1], sC = colors.cat[2];
+      // Master port (right edge midpoints) and slave port (left edge midpoints) coordinates.
+      const my = { CPU: 7.6, DMA: 5.0, GPU: 2.4 };
+      const sy = { DRAM: 7.6, SRAM: 5.0, UART: 2.4 };
+      const mx = 2.4, sx = 9.6;   // port x-positions
+
+      step(sceneStrings("stepCast"), () => {
+        box(0.2, 6.8, 2.2, 1.6, mC, "CPU");
+        box(0.2, 4.2, 2.2, 1.6, mC, "DMA");
+        box(0.2, 1.6, 2.2, 1.6, mC, "GPU");
+        box(9.6, 6.8, 2.2, 1.6, sC, "DRAM");
+        box(9.6, 4.2, 2.2, 1.6, sC, "SRAM");
+        box(9.6, 1.6, 2.2, 1.6, sC, "UART");
+      });
+
+      step(sceneStrings("stepWires"), () => {
+        Object.values(my).forEach((y0) =>
+          Object.values(sy).forEach((y1) =>
+            board.create("segment", [[mx, y0], [sx, y1]], {
+              strokeColor: colors.line, strokeWidth: 1, strokeOpacity: 0.35, highlight: false,
+            })));
+      });
+
+      step(sceneStrings("stepConc"), () => {
+        board.create("arrow", [[mx, my.CPU], [sx, sy.SRAM]], {
+          strokeColor: colors.cat[0], strokeWidth: 3.5, highlight: false,
+        });
+        board.create("arrow", [[mx, my.DMA], [sx, sy.DRAM]], {
+          strokeColor: colors.cat[3], strokeWidth: 3.5, highlight: false,
+        });
+      });
+
+      step(sceneStrings("stepArb"), () => {
+        board.create("arrow", [[mx, my.CPU], [sx, sy.DRAM]], {
+          strokeColor: colors.cat[4], strokeWidth: 3.5, highlight: false,
+        });
+        board.create("arrow", [[mx, my.GPU], [sx, sy.DRAM]], {
+          strokeColor: colors.cat[4], strokeWidth: 2, dash: 2, highlight: false,
+        });
+        T(6, 4.4, sceneStrings("lWaits"), colors.cat[4], 11);
+      });
+    },
+    { boundingbox: [-0.6, 9.2, 12.6, 0.8], title: () => makeStrings("crossbar")("title") },
+  );
+
+  registerQuiz("fabricQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("linkQ", v),
+      variables: "m=[2:6] s=[2:6]",
+      answer: "m * s",
+    },
+    {
+      // All targets distinct: limited by min(m, s).
+      prompt: (v) => sceneStrings("concQ", v),
+      variables: "m=[2:5] s=[2:5]",
+      answer: (v) => Math.min(v.m, v.s),
+    },
+    {
+      prompt: (v) => sceneStrings("rrQ", v),
+      variables: "g=[0:2]",
+      answer: "(g + 1) % 3",
+    },
+    {
+      // Lowest number wins; q = p + j > p.
+      prompt: (v) => sceneStrings("fpQ", { ...v, q: v.p + v.j }),
+      variables: "p=[0:2] j=[1:3]",
+      answer: "p",
+    },
+    {
+      prompt: () => sceneStrings("busQ"),
+      options: [
+        { text: () => sceneStrings("shOne"), correct: true },
+        { text: () => sceneStrings("shFive"), correct: false },
+        { text: () => sceneStrings("shTwo"), correct: false },
+        { text: () => sceneStrings("shAny"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("starveQ"),
+      options: [
+        { text: () => sceneStrings("stA"), correct: true },
+        { text: () => sceneStrings("stB"), correct: false },
+        { text: () => sceneStrings("stC"), correct: false },
+        { text: () => sceneStrings("stD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sliceQ"),
+      options: [
+        { text: () => sceneStrings("slA"), correct: true },
+        { text: () => sceneStrings("slB"), correct: false },
+        { text: () => sceneStrings("slC"), correct: false },
+        { text: () => sceneStrings("slD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("decodeQ"),
+      options: [
+        { text: () => sceneStrings("deA"), correct: true },
+        { text: () => sceneStrings("deB"), correct: false },
+        { text: () => sceneStrings("deC"), correct: false },
+        { text: () => sceneStrings("deD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("respQ"),
+      options: [
+        { text: () => sceneStrings("reA"), correct: true },
+        { text: () => sceneStrings("reB"), correct: false },
+        { text: () => sceneStrings("reC"), correct: false },
+        { text: () => sceneStrings("reD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("qosQ"),
+      options: [
+        { text: () => sceneStrings("qA"), correct: true },
+        { text: () => sceneStrings("qB"), correct: false },
+        { text: () => sceneStrings("qC"), correct: false },
+        { text: () => sceneStrings("qD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("growQ"),
+      options: [
+        { text: () => sceneStrings("grA"), correct: true },
+        { text: () => sceneStrings("grB"), correct: false },
+        { text: () => sceneStrings("grC"), correct: false },
+        { text: () => sceneStrings("grD"), correct: false },
+      ],
+    },
+  ]);
+</script>

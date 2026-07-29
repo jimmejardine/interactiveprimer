@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>A Single-Cycle CPU in RTL</primer-title>
+
+    <primer-card>
+      <p>
+        Today the machine runs. We have a contract (ten RV32I instructions), a
+        <primer-ref to="computer-science/chip-design/cpu/the-register-file-in-rtl">register file</primer-ref>,
+        and an encoder that speaks real machine code. This lesson wires everything into the simplest CPU
+        organisation there is: the <strong>single-cycle</strong> datapath, where <em>every instruction
+        completes in exactly one clock cycle</em>. One edge, one instruction — fetch, decode, execute,
+        memory, write-back, all in a single combinational sweep between two ticks. It is the
+        <primer-ref to="computer-science/computer-architecture/datapath/the-single-bus-datapath">datapath
+        idea</primer-ref> taken to its purest form: beautiful, easy to reason about, and — as we will
+        measure at the end — magnificently slow.
+      </p>
+    </primer-card>
+
+    <!-- The signature datapath figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "singleCycle": {
+          "title": "The single-cycle datapath: one combinational sweep between clock edges",
+          "pc": "PC",
+          "imem": "Instr mem",
+          "rf": "Decode + RF",
+          "immg": "imm gen",
+          "alu": "ALU",
+          "dmem": "Data mem",
+          "mux": "mux",
+          "rs1lbl": "rs1 value",
+          "rs2lbl": "rs2 / imm",
+          "swlbl": "store data",
+          "wblbl": "wb_data — back into rd",
+          "npclbl": "pc_next: pc+4, or pc+imm on a taken branch or jump",
+          "stepFetch": "Fetch: pc addresses the instruction ROM; instr comes out combinationally",
+          "stepDecode": "Decode: fixed-position fields drive the RF read ports; the imm gen unscrambles the immediate",
+          "stepExec": "Execute: the ALU-B mux picks rs2 or imm; the ALU computes a result — or an address",
+          "stepMem": "Memory: LW reads and SW writes at address alu_out; everyone else passes straight through",
+          "stepWb": "Write-back: a mux picks ALU result, memory data or pc+4 for rd — and pc_next closes the loop"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The whole loop, on one diagram</h2>
+      <p>
+        This figure is the module's signature — we will redraw it, sliced and annotated, for the next three
+        lessons. Step through it left to right; every wire we name here
+        (<code>pc</code>, <code>instr</code>, <code>imm</code>, <code>alu_out</code>, <code>wb_data</code>)
+        keeps its name for the rest of the project:
+      </p>
+      <primer-geometry scene="singleCycle" caption="The single-cycle datapath: the PC feeds instruction memory; the instruction's fields feed the register file and immediate generator; a mux selects rs2 or the immediate into the ALU; the ALU output addresses data memory; a write-back mux returns a result to the register file, and next-PC logic loops back to the PC."></primer-geometry>
+      <p>
+        Notice what is <em>not</em> in the picture: pipeline registers, stall logic, caches — nothing but
+        the loop. The only flip-flops are the <code>pc</code>, the register file, and the memories. All the
+        rest is one huge combinational cloud, and the cycle rhythm you learned with
+        <code>always_ff</code> — settle, then snap — runs the entire machine: during the cycle the cloud
+        settles through all five stations; at the edge, the <code>pc</code>, the register file and the data
+        memory snap their new values in, and the next instruction begins.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The RTL skeleton</h2>
+      <p>
+        In SystemVerilog the top level is mostly instantiation and two muxes — the blocks are the modules
+        we have been building all course:
+      </p>
+      <primer-code lang="text">
+module cpu (input logic clk, rst_n);
+  logic [31:0] pc, pc_next, instr, imm;
+  logic [31:0] rdata1, rdata2, alu_b, alu_out, mem_rdata, wb_data;
+
+  // The only flip-flops in the whole CPU (besides the RF and memories): the PC.
+  always_ff @(posedge clk)
+    if (!rst_n) pc &lt;= 32'd0;
+    else        pc &lt;= pc_next;
+
+  imem    u_imem (.addr(pc), .instr(instr));                     // fetch (a ROM)
+  decoder u_dec  (.instr, .rs1, .rs2, .rd, .imm, .ctl);          // fields + immediate + controls
+  regfile u_rf   (.clk, .we(ctl.reg_write), .rs1, .rs2, .rd,
+                  .wdata(wb_data), .rdata1, .rdata2);            // last lesson's module!
+  assign alu_b   = ctl.alu_src ? imm : rdata2;                   // the ALU-B mux
+  alu     u_alu  (.a(rdata1), .b(alu_b), .op(ctl.alu_op), .y(alu_out));
+  dmem    u_dmem (.clk, .we(ctl.mem_write), .addr(alu_out),
+                  .wdata(rdata2), .rdata(mem_rdata));            // loads and stores
+
+  // Write-back mux, then the next-PC mux closes the loop.
+  assign wb_data = ctl.mem_to_reg ? mem_rdata
+                 : ctl.jump       ? pc + 32'd4                   // JAL's link value
+                 :                  alu_out;
+  assign take    = ctl.jump | (ctl.branch &amp; (rdata1 == rdata2));
+  assign pc_next = take ? pc + imm : pc + 32'd4;
+endmodule
+      </primer-code>
+      <p>
+        Three details deserve a pause. First, the ALU pulls double duty: for <code>ADD</code> it adds
+        values, for <code>LW</code>/<code>SW</code> it adds <code>rs1 + imm</code> to make an
+        <em>address</em> — one adder, two jobs, selected by the <code>alu_src</code> mux. Second,
+        <code>wb_data</code> has three sources (ALU, memory, <code>pc + 4</code> for <code>JAL</code>'s
+        return address) — that mux is the last decision every instruction makes. Third, <code>pc_next</code>
+        is itself a mux: <code>pc + 4</code> by default, <code>pc + imm</code> for a taken branch or jump.
+        Where do all the little select signals come from? For now, imagine a <code>decoder</code> box that
+        just knows; giving that box its proper name and internals is the whole of the next lesson.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The payoff: it runs a real program</h2>
+      <p>
+        Now the moment the module has been building toward. Below is the entire CPU as a two-phase
+        simulator — the exact pattern from the flip-flop lesson, with a richer <code>State</code>:
+        the architectural state is <code>{pc, regs, mem}</code>, and <code>next()</code> is the whole
+        combinational cloud — fetch, decode, register read, ALU, memory, write-back, next-PC — committed
+        atomically, one call per clock edge. The instruction memory holds genuine RV32I words assembled by
+        lesson 34's encoder, forming a loop that sums 1+2+3+4+5:
+      </p>
+      <primer-code run>
+// ── The assembler + decoder from the planning lesson (compact recap). ──
+function R(f7: number, f3: number, rd: number, rs1: number, rs2: number): number {
+  return ((f7 &lt;&lt; 25) | (rs2 &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | (rd &lt;&lt; 7) | 0x33) | 0;
+}
+function I(op: number, f3: number, rd: number, rs1: number, imm: number): number {
+  return (((imm &amp; 0xfff) &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | (rd &lt;&lt; 7) | op) | 0;
+}
+function B(f3: number, rs1: number, rs2: number, imm: number): number {
+  return ((((imm &gt;&gt; 12) &amp; 1) &lt;&lt; 31) | (((imm &gt;&gt; 5) &amp; 0x3f) &lt;&lt; 25) | (rs2 &lt;&lt; 20) | (rs1 &lt;&lt; 15) |
+          (f3 &lt;&lt; 12) | (((imm &gt;&gt; 1) &amp; 0xf) &lt;&lt; 8) | (((imm &gt;&gt; 11) &amp; 1) &lt;&lt; 7) | 0x63) | 0;
+}
+function J(rd: number, imm: number): number {
+  return ((((imm &gt;&gt; 20) &amp; 1) &lt;&lt; 31) | (((imm &gt;&gt; 1) &amp; 0x3ff) &lt;&lt; 21) | (((imm &gt;&gt; 11) &amp; 1) &lt;&lt; 20) |
+          (((imm &gt;&gt; 12) &amp; 0xff) &lt;&lt; 12) | (rd &lt;&lt; 7) | 0x6f) | 0;
+}
+const asm = {
+  ADD:  (rd: number, rs1: number, rs2: number) =&gt; R(0x00, 0, rd, rs1, rs2),
+  SUB:  (rd: number, rs1: number, rs2: number) =&gt; R(0x20, 0, rd, rs1, rs2),
+  ADDI: (rd: number, rs1: number, imm: number) =&gt; I(0x13, 0, rd, rs1, imm),
+  BEQ:  (rs1: number, rs2: number, imm: number) =&gt; B(0, rs1, rs2, imm),
+  JAL:  (rd: number, imm: number) =&gt; J(rd, imm),
+};
+interface Decoded { name: string; rd: number; rs1: number; rs2: number; imm: number }
+function decode(w: number): Decoded {
+  const opcode = w &amp; 0x7f, rd = (w &gt;&gt; 7) &amp; 0x1f, f3 = (w &gt;&gt; 12) &amp; 7;
+  const rs1 = (w &gt;&gt; 15) &amp; 0x1f, rs2 = (w &gt;&gt; 20) &amp; 0x1f, f7 = (w &gt;&gt;&gt; 25) &amp; 0x7f;
+  const immI = w &gt;&gt; 20;
+  const immS = ((w &gt;&gt; 25) &lt;&lt; 5) | ((w &gt;&gt; 7) &amp; 0x1f);
+  const immB = ((w &gt;&gt; 31) &lt;&lt; 12) | (((w &gt;&gt; 7) &amp; 1) &lt;&lt; 11) | (((w &gt;&gt; 25) &amp; 0x3f) &lt;&lt; 5) | (((w &gt;&gt; 8) &amp; 0xf) &lt;&lt; 1);
+  const immJ = ((w &gt;&gt; 31) &lt;&lt; 20) | (((w &gt;&gt; 12) &amp; 0xff) &lt;&lt; 12) | (((w &gt;&gt; 20) &amp; 1) &lt;&lt; 11) | (((w &gt;&gt; 21) &amp; 0x3ff) &lt;&lt; 1);
+  if (opcode === 0x33) return { name: f3 === 0 ? (f7 === 0x20 ? "SUB" : "ADD") : f3 === 7 ? "AND" : "OR", rd, rs1, rs2, imm: 0 };
+  if (opcode === 0x13) return { name: "ADDI", rd, rs1, rs2, imm: immI };
+  if (opcode === 0x03) return { name: "LW",   rd, rs1, rs2, imm: immI };
+  if (opcode === 0x23) return { name: "SW",   rd, rs1, rs2, imm: immS };
+  if (opcode === 0x63) return { name: "BEQ",  rd, rs1, rs2, imm: immB };
+  if (opcode === 0x6f) return { name: "JAL",  rd, rs1, rs2, imm: immJ };
+  return { name: "LUI", rd, rs1, rs2, imm: (w &gt;&gt; 12) &lt;&lt; 12 };
+}
+
+// ── The program: sum 1+2+3+4+5 into x1, with a real BEQ loop. ──
+const imem = [
+  asm.ADDI(1, 0, 0),   //  0: addi x1, x0, 0    sum  = 0
+  asm.ADDI(2, 0, 1),   //  4: addi x2, x0, 1    i    = 1
+  asm.ADDI(3, 0, 6),   //  8: addi x3, x0, 6    stop = 6
+  asm.BEQ(2, 3, 16),   // 12: beq  x2, x3, +16  if i == stop goto 28 (done)
+  asm.ADD(1, 1, 2),    // 16: add  x1, x1, x2   sum += i
+  asm.ADDI(2, 2, 1),   // 20: addi x2, x2, 1    i += 1
+  asm.JAL(0, -12),     // 24: jal  x0, -12      back to the beq
+];                     // 28: (falls off the end: done)
+
+// ── The state: everything that lives in flip-flops or RAM. ──
+interface State { pc: number; regs: number[]; mem: number[] }
+
+// ── next(): ONE combinational sweep — fetch, decode, execute, write back. ──
+function next(s: State): State {
+  const instr = decode(imem[s.pc &gt;&gt; 2]);            // fetch + decode
+  const regs = s.regs.slice(), mem = s.mem.slice();
+  const a = s.regs[instr.rs1], b = s.regs[instr.rs2];  // register-file read
+  const wr = (rd: number, v: number) =&gt; { if (rd !== 0) regs[rd] = v | 0; };  // x0 stays 0
+  let pc = s.pc + 4;                                // default next-PC
+  switch (instr.name) {
+    case "ADD":  wr(instr.rd, a + b); break;
+    case "SUB":  wr(instr.rd, a - b); break;
+    case "AND":  wr(instr.rd, a &amp; b); break;
+    case "OR":   wr(instr.rd, a | b); break;
+    case "ADDI": wr(instr.rd, a + instr.imm); break;
+    case "LUI":  wr(instr.rd, instr.imm); break;
+    case "LW":   wr(instr.rd, mem[(a + instr.imm) &gt;&gt; 2]); break;
+    case "SW":   mem[(a + instr.imm) &gt;&gt; 2] = b; break;
+    case "BEQ":  if (a === b) pc = s.pc + instr.imm; break;
+    case "JAL":  wr(instr.rd, s.pc + 4); pc = s.pc + instr.imm; break;
+  }
+  return { pc, regs, mem };
+}
+
+// ── The clock: settle, then snap — until the PC falls off the program. ──
+let state: State = { pc: 0, regs: new Array(32).fill(0), mem: new Array(16).fill(0) };
+console.log("cycle | pc  | instr           | x1 x2 x3");
+console.log("------+-----+-----------------+----------");
+let cycle = 0;
+while (state.pc &gt;&gt; 2 &lt; imem.length) {
+  const d = decode(imem[state.pc &gt;&gt; 2]);
+  const args = d.name === "JAL" ? `x${d.rd}, ${d.imm}`
+    : d.name === "BEQ" ? `x${d.rs1}, x${d.rs2}, ${d.imm}`
+    : d.name === "ADDI" ? `x${d.rd}, x${d.rs1}, ${d.imm}`
+    : `x${d.rd}, x${d.rs1}, x${d.rs2}`;
+  state = next(state);
+  console.log(
+    `  ${String(cycle).padStart(2)}  | ${String(state.pc).padStart(3)} | ` +
+    `${(d.name.toLowerCase() + " " + args).padEnd(15)} | ${state.regs[1]}  ${state.regs[2]}  ${state.regs[3]}`,
+  );
+  cycle++;
+}
+console.log(`\nDone in ${cycle} cycles: x1 = ${state.regs[1]}   (1+2+3+4+5 = 15?)`);
+      </primer-code>
+      <p>
+        Twenty-four cycles, twenty-four instructions, and <code>x1</code> lands on 15. Watch the
+        <code>pc</code> column: it marches in 4s, snaps back to 12 at every <code>jal x0, -12</code>, and
+        finally skips to 28 when <code>beq</code> sees <code>x2 == x3</code>. That register-by-register
+        trace is worth keeping — in the final lesson this same little model becomes the <em>golden
+        reference</em> our pipelined hardware is checked against, retirement by retirement.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The bill: one clock to fit the worst walk</h2>
+      <p>
+        Now the accounting. The clock can only tick when the <em>longest</em> combinational path has
+        settled — and different instructions take very different walks. Rough, plausible numbers for our
+        five stations:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Station</th><th>Delay</th><th>ADD uses</th><th>BEQ uses</th><th>LW uses</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Instruction memory</td><td>250 ps</td><td>✓</td><td>✓</td><td>✓</td></tr>
+            <tr><td>RF read + decode</td><td>150 ps</td><td>✓</td><td>✓</td><td>✓</td></tr>
+            <tr><td>ALU</td><td>200 ps</td><td>✓</td><td>✓</td><td>✓</td></tr>
+            <tr><td>Data memory</td><td>250 ps</td><td>—</td><td>—</td><td>✓</td></tr>
+            <tr><td>WB mux + RF setup</td><td>50 ps</td><td>✓</td><td>—</td><td>✓</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        <code>ADD</code> finishes its walk in 650 ps; <code>BEQ</code> in 600. But <code>LW</code> strolls
+        through <em>every</em> station: 250 + 150 + 200 + 250 + 50 = <strong>900 ps</strong>. The clock
+        must accommodate it:
+      </p>
+      <primer-math display>T_{clk} \ge 900\ \text{ps} \quad\Rightarrow\quad f_{max} \approx 1.1\ \text{GHz}</primer-math>
+      <p>
+        Every <code>ADD</code> now spends 250 ps of its cycle doing nothing — finished, waiting for a clock
+        edge sized for someone else's journey. That idle time, multiplied by billions of instructions, is
+        the price of the single-cycle design's simplicity. Cutting the walk into stations that tick
+        independently is the <em>pipelining</em> idea, two lessons from now — and this table is exactly the
+        arithmetic that will justify it.
+      </p>
+      <primer-vignette title="Watch out! Single-cycle does not mean fast">
+        <p>
+          "Every instruction completes in one cycle" <em>sounds</em> like a performance boast — surely CPI
+          = 1 is ideal? The catch is that not all cycles are equal: the single-cycle machine achieves CPI
+          = 1 by stretching the cycle to fit its <strong>worst instruction's full path</strong>, so every
+          instruction pays <code>LW</code>'s 900 ps toll. A pipelined design with the same silicon runs its
+          clock ~4–5× faster; even paying occasional multi-cycle penalties, it wins by miles. When you
+          evaluate any processor, multiply all three factors — instructions × cycles-per-instruction ×
+          <em>seconds-per-cycle</em> — never the first two alone. Single-cycle optimises the middle factor
+          by sacrificing the third.
+        </p>
+      </primer-vignette>
+      <primer-vignette title="Did anyone ever ship a single-cycle CPU?">
+        <p>
+          Almost — the very first microprocessors came close out of necessity, and small FPGA softcores and
+          teaching chips still do. But the organisation's true home is as a <em>reference</em>. RISC
+          pioneers used the single-cycle machine as the baseline against which the pipelined MIPS and SPARC
+          designs were argued in the 1980s, and textbooks have taught it first ever since — not because you
+          would ship it, but because it is the only CPU organisation simple enough to hold complete in your
+          head. That is also why our verification story (lesson 40) trusts it: a design simple enough to be
+          obviously right is the perfect referee for one that is fast but hairy. Simplicity is not a
+          stepping stone; it is an asset.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <!-- Quiz. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "scQuiz@1": {
+          "intro": "One instruction, one cycle, one combinational sweep — and a clock sized for the slowest walk.",
+          "sumQ": "The lesson's sum program (sum = 0; i = 1; loop: add i to sum and increment i until i equals {n}). When it halts, what is the sum register x1?",
+          "cycQ": "That same program (3 setup instructions, then a 4-instruction beq/add/addi/jal loop, halting when i reaches {n}) retires how many instructions — i.e. how many cycles does the single-cycle CPU spend?",
+          "npcTQ": "A BEQ sits at pc = {p} with branch immediate {i}, and its two source registers are EQUAL. What is the next pc?",
+          "npcNQ": "A BEQ sits at pc = {p} with branch immediate {i}, and its two source registers DIFFER. What is the next pc?",
+          "jalQ": "JAL x1, {i} executes at pc = {p}. What value is written into x1?",
+          "critQ": "Which instruction's path sets the single-cycle clock period, and why?",
+          "critA": "LW — it alone chains instruction memory, RF read, ALU, data memory AND write-back in one cycle",
+          "critB": "ADD — arithmetic is the heart of the machine",
+          "critC": "BEQ — comparing is slower than adding",
+          "critD": "JAL — it changes the pc, which is extra work",
+          "clkQ": "While the machine executes a fast ADD, the clock period is…",
+          "clkA": "still the full worst-case (LW) period — the clock cannot shrink per instruction",
+          "clkB": "shortened to ADD's own path delay",
+          "clkC": "halved, since ADD skips data memory",
+          "clkD": "irrelevant, because ADD is combinational",
+          "addrQ": "During LW, which unit computes the memory address rs1 + imm?",
+          "addrA": "The ALU — the same adder that does ADD, steered by the ALUSrc mux",
+          "addrB": "A dedicated address-generation unit next to the data memory",
+          "addrC": "The instruction memory",
+          "addrD": "The write-back mux",
+          "wbQ": "The write-back mux at the end of the datapath chooses between which candidates for rd?",
+          "wbA": "The ALU result, the data-memory read value, and pc + 4 (for JAL)",
+          "wbB": "rs1 and rs2",
+          "wbC": "The old and new values of the pc",
+          "wbD": "The immediate and the opcode",
+          "edgeQ": "How many clock edges does one instruction need from fetch to committed write-back?",
+          "edgeA": "One — the whole journey is combinational; the single edge at the end commits everything",
+          "edgeB": "Five — one per station",
+          "edgeC": "Two — one to read, one to write",
+          "edgeD": "It depends on the instruction",
+          "whyQ": "What makes it possible for fetch, decode, ALU and memory all to happen in the same cycle?",
+          "whyA": "They are chained combinationally — signals ripple through; only the pc, RF and memory update at the edge",
+          "whyB": "Each unit has its own private clock, ticking in sequence",
+          "whyC": "The instructions are prefetched the cycle before",
+          "whyD": "The memory is asynchronous DRAM"
+        }
+      }
+    </script>
+
+    <primer-quiz name="scQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/cpu/the-register-file-in-rtl",
+      "computer-science/computer-architecture/datapath/the-single-bus-datapath"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The single-cycle datapath, revealed stage by stage. ──
+  registerGeometryScene(
+    "singleCycle",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (x1, y1, x2, y2, key, c, fs = 13) => {
+        board.create("polygon", [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], {
+          vertices: { visible: false }, borders: { strokeColor: c, strokeWidth: 2, highlight: false },
+          fillColor: c, fillOpacity: 0.08, highlight: false,
+        });
+        board.create("text", [(x1 + x2) / 2, (y1 + y2) / 2, () => sceneStrings(key)], {
+          anchorX: "middle", anchorY: "middle", strokeColor: colors.ink, fontSize: fs, fixed: true, highlight: false,
+        });
+      };
+      const arrow = (pts, c) => {
+        for (let i = 0; i < pts.length - 2; i++)
+          board.create("segment", [pts[i], pts[i + 1]], { strokeColor: c, strokeWidth: 2, highlight: false });
+        board.create("arrow", [pts[pts.length - 2], pts[pts.length - 1]], { strokeColor: c, strokeWidth: 2, highlight: false });
+      };
+      const note = (x, y, key, fs = 11) =>
+        board.create("text", [x, y, () => sceneStrings(key)], {
+          anchorX: "middle", anchorY: "middle", strokeColor: colors.ink, fontSize: fs, fixed: true, highlight: false,
+        });
+
+      step(sceneStrings("stepFetch"), () => {
+        box(0.3, 3, 2.1, 5, "pc", colors.cat[0]);
+        box(3, 3, 5.8, 5, "imem", colors.cat[1]);
+        arrow([[2.1, 4], [3, 4]], colors.line);
+      });
+      step(sceneStrings("stepDecode"), () => {
+        box(6.7, 3, 9.9, 5, "rf", colors.cat[2]);
+        arrow([[5.8, 4], [6.7, 4]], colors.line);
+        box(6.7, 1.4, 9.9, 2.4, "immg", colors.cat[2], 12);
+        arrow([[6.2, 4], [6.2, 1.9], [6.7, 1.9]], colors.line);
+      });
+      step(sceneStrings("stepExec"), () => {
+        arrow([[9.9, 4.6], [11.2, 4.6]], colors.cat[2]);
+        note(10.55, 5.0, "rs1lbl");
+        arrow([[9.9, 3.4], [11.2, 3.4]], colors.cat[2]);
+        arrow([[9.9, 1.9], [10.6, 1.9], [10.6, 3.4]], colors.cat[2]);
+        note(10.55, 2.95, "rs2lbl");
+        box(11.2, 3, 13.2, 5, "alu", colors.cat[3]);
+      });
+      step(sceneStrings("stepMem"), () => {
+        arrow([[13.2, 4], [14.2, 4]], colors.line);
+        box(14.2, 3, 17, 5, "dmem", colors.cat[4]);
+        arrow([[9.4, 3], [9.4, 0.6], [15.6, 0.6], [15.6, 3]], colors.cat[2]);
+        note(12.5, 0.25, "swlbl");
+      });
+      step(sceneStrings("stepWb"), () => {
+        box(17.6, 3.4, 18.8, 4.6, "mux", colors.cat[0], 12);
+        arrow([[17, 4], [17.6, 4]], colors.line);
+        arrow([[13.2, 4.8], [13.7, 4.8], [13.7, 5.8], [17.2, 5.8], [17.2, 4.4], [17.6, 4.4]], colors.cat[3]);
+        arrow([[18.8, 4], [19.5, 4], [19.5, 6.6], [8.3, 6.6], [8.3, 5]], colors.cat[0]);
+        note(14, 7, "wblbl");
+        arrow([[12.2, 3], [12.2, -0.4], [1.2, -0.4], [1.2, 3]], colors.cat[1]);
+        note(7, -0.85, "npclbl");
+      });
+    },
+    { boundingbox: [-0.4, 7.6, 20.4, -1.5], title: () => makeStrings("singleCycle")("title") },
+  );
+
+  registerQuiz("scQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Sum 1..n-1: the loop halts when i reaches n.
+      prompt: (v) => sceneStrings("sumQ", v),
+      variables: "n=[4:9]",
+      answer: "n * (n - 1) / 2",
+    },
+    {
+      // 3 setup + 4(n-1) loop + final beq = 4n.
+      prompt: (v) => sceneStrings("cycQ", v),
+      variables: "n=[4:9]",
+      answer: "4 * n",
+    },
+    {
+      prompt: (v) => sceneStrings("npcTQ", { ...v, p: 4 * v.k }),
+      variables: "k=[10:30] i=[-12,-8,8,12,16]",
+      answer: (v) => 4 * v.k + v.i,
+    },
+    {
+      prompt: (v) => sceneStrings("npcNQ", { ...v, p: 4 * v.k }),
+      variables: "k=[10:30] i=[-12,-8,8,12,16]",
+      answer: (v) => 4 * v.k + 4,
+    },
+    {
+      prompt: (v) => sceneStrings("jalQ", { ...v, p: 4 * v.k }),
+      variables: "k=[10:30] i=[8,12,16,20]",
+      answer: (v) => 4 * v.k + 4,
+    },
+    {
+      prompt: () => sceneStrings("critQ"),
+      options: [
+        { text: () => sceneStrings("critA"), correct: true },
+        { text: () => sceneStrings("critB"), correct: false },
+        { text: () => sceneStrings("critC"), correct: false },
+        { text: () => sceneStrings("critD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("clkQ"),
+      options: [
+        { text: () => sceneStrings("clkA"), correct: true },
+        { text: () => sceneStrings("clkB"), correct: false },
+        { text: () => sceneStrings("clkC"), correct: false },
+        { text: () => sceneStrings("clkD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("addrQ"),
+      options: [
+        { text: () => sceneStrings("addrA"), correct: true },
+        { text: () => sceneStrings("addrB"), correct: false },
+        { text: () => sceneStrings("addrC"), correct: false },
+        { text: () => sceneStrings("addrD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("wbQ"),
+      options: [
+        { text: () => sceneStrings("wbA"), correct: true },
+        { text: () => sceneStrings("wbB"), correct: false },
+        { text: () => sceneStrings("wbC"), correct: false },
+        { text: () => sceneStrings("wbD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("edgeQ"),
+      options: [
+        { text: () => sceneStrings("edgeA"), correct: true },
+        { text: () => sceneStrings("edgeB"), correct: false },
+        { text: () => sceneStrings("edgeC"), correct: false },
+        { text: () => sceneStrings("edgeD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("whyA"), correct: true },
+        { text: () => sceneStrings("whyB"), correct: false },
+        { text: () => sceneStrings("whyC"), correct: false },
+        { text: () => sceneStrings("whyD"), correct: false },
+      ],
+    },
+  ]);
+</script>

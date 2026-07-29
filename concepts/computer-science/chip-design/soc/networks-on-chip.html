@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Networks on Chip</primer-title>
+
+    <primer-card>
+      <p>
+        The <primer-ref soft to="computer-science/chip-design/soc/interconnect-fabrics-and-arbitration">crossbar</primer-ref>
+        served us well — every master a private path to every slave — but its cost grows as
+        <primer-math>N^2</primer-math>. At eight masters it's a bargain; at sixty-four cores, a
+        <primer-ref to="computer-science/chip-design/soc/memory-controllers-in-hardware">memory
+        controller</primer-ref> per edge, and a swarm of accelerators, the crossbar is a wiring
+        catastrophe that no floorplan can absorb. The
+        <primer-ref to="computer-science/computer-architecture/accelerators/interconnection-networks">interconnection-networks</primer-ref>
+        toolbox offers the escape, and it is the same one the telephone system and the Internet
+        found: stop building a wire per conversation. <strong>Packetise.</strong> Put a small
+        <em>router</em> at each grid point, give every block a local doorstep, and let messages
+        find their own way, a hop at a time. The SoC grows a postal service — and like any postal
+        service, its character is set by three choices: how letters are cut up, which route they
+        take, and what stops the whole system jamming.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Flits: cutting the letter into beads</h2>
+      <p>
+        A message (a cache line, a DMA burst) becomes a <strong>packet</strong>; the packet is
+        chopped into <strong>flits</strong> (<em>flow-control digits</em>) — the unit a router
+        buffers and forwards, typically one link-width each:
+      </p>
+      <ul>
+        <li>the <strong>head flit</strong> carries the destination address; it does the navigating,
+          claiming the route hop by hop;</li>
+        <li><strong>body flits</strong> carry payload and simply follow the path the head opened;</li>
+        <li>the <strong>tail flit</strong> closes the door, releasing the claimed resources behind
+          it.</li>
+      </ul>
+      <p>
+        Routers forward flits in <strong>wormhole</strong> style: the head moves on as soon as the
+        next link is free, and the packet stretches out like a worm across several routers at once
+        — the head three hops ahead while the tail is still leaving home. Buffering is per-flit,
+        not per-packet, so router storage stays tiny; the price is that a blocked head leaves its
+        body parked <em>across</em> the network, holding a chain of links. Remember that price —
+        it is where deadlock will come from.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The mesh, and routing by dimension</h2>
+      <p>
+        Topologies abound — rings, tori, fat trees — but the workhorse of SoCs is the
+        <strong>2-D mesh</strong>: routers at grid points, links to the four neighbours, a block
+        (core, cache slice, memory controller) at each router's doorstep. It is the shape that
+        loves silicon back: planar, short equal wires, and it grows by tiling.
+      </p>
+      <p>
+        Routing rule number one is almost embarrassingly simple. <strong>XY dimension-ordered
+        routing</strong>: first travel along <primer-math>x</primer-math> until your column is
+        correct, then along <primer-math>y</primer-math> to the destination. Deterministic, needs
+        no tables — just two comparators — and it crosses exactly
+        <primer-math>|x_1-x_2| + |y_1-y_2|</primer-math> links, a shortest path. But its deep
+        virtue is subtler: XY is <strong>deadlock-free by construction</strong>. A deadlock needs a
+        <em>cycle</em> of packets each waiting for a link the next one holds. Any such cycle in a
+        mesh must somewhere turn from travelling in <primer-math>y</primer-math> back into
+        travelling in <primer-math>x</primer-math> — and XY simply never makes that turn. Once
+        you've turned onto your column, you never leave it. No y-to-x turns, no cyclic channel
+        dependency, no deadlock — a proof you can draw on a napkin.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "mesh": {
+          "title": "A 4×4 mesh: an XY route, a deadlock, and the escape",
+          "src": "src (0,0)",
+          "dst": "dst (3,2)",
+          "lX": "X first…",
+          "lY": "…then Y",
+          "lCycle": "cyclic wait",
+          "lVc": "VC1 escape lanes",
+          "stepRoute": "XY routing from (0,0) to (3,2): travel X until the column is right, then Y — five hops, |3−0| + |2−0|, and never a y-to-x turn",
+          "stepDeadlock": "Now four packets P1–P4, each turning around the inner square: each HOLDS one link (its body is parked on it, wormhole-style) and WAITS for the link the next packet holds. A cycle of hold-and-wait: nobody can move, ever. XY forbids these turns — this picture needs a routing rule that allows them",
+          "stepVc": "Virtual channels to the rescue: a second flit-buffer lane on each physical link. Blocked traffic sits in VC0 while the escape VC1 (used in a fixed order) stays cycle-free — the wait graph loses its loop and the wormholes drain"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>See it on the grid</h2>
+      <p>
+        Step through the three headline ideas on one 4×4 mesh:
+      </p>
+      <primer-geometry scene="mesh" caption="A four by four mesh of routers. First an XY route is highlighted from router (0,0): three hops east along the bottom row, then two hops north up the rightmost column to (3,2). Then four packets are shown holding the four links of the inner square, each waiting for the next link around the loop, forming a deadlock cycle. Finally dashed second lanes, virtual channels, appear on those links, breaking the cycle."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Virtual channels: more lanes, same road</h2>
+      <p>
+        A <strong>virtual channel</strong> (VC) is an extra set of flit buffers sharing one
+        physical link — several queues multiplexed onto the same wires, like turning a one-lane
+        road into a motorway without widening the tarmac. VCs earn their area three times over:
+      </p>
+      <ul>
+        <li><strong>head-of-line relief:</strong> without VCs, one blocked packet at the front of a
+          router's queue plugs the link for everyone behind it, even packets headed somewhere
+          idle. With VCs, traffic slips past on another lane;</li>
+        <li><strong>deadlock avoidance:</strong> impose an ordering on VCs (a packet may only move
+          to an equal-or-later VC class) and the channel-dependency graph loses its cycles — this
+          is the second escape from deadlock, and the one that lets fancier-than-XY routing be
+          safe;</li>
+        <li><strong>traffic classes:</strong> give request and response traffic different VCs (so
+          replies can never be blocked behind the requests that caused them — itself a deadlock
+          risk!), and give latency-critical or real-time flows a priority lane.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>What does a message cost?</h2>
+      <p>
+        The back-of-napkin latency model has two terms — distance and length. The head pays per
+        hop; the rest of the packet follows in pipeline:
+      </p>
+      <primer-math display>T \;\approx\; \underbrace{H \cdot t_{\text{hop}}}_{\text{head walks }H\text{ hops}} \;+\; \underbrace{L / b}_{\text{serialisation: } L \text{ flits at } b \text{ per cycle}}</primer-math>
+      <p>
+        with <primer-math>H = |x_1-x_2|+|y_1-y_2|</primer-math> on a mesh and
+        <primer-math>t_{\text{hop}}</primer-math> the router-plus-link pipeline delay (a few
+        cycles). Short packets are dominated by distance; long bursts by serialisation — which is
+        why a cache-line read cares about hop count while a DMA stream cares about link width. For
+        whole-chip capacity, the standard yardstick is <strong>bisection bandwidth</strong>: cut
+        the chip in half and sum the bandwidth of the severed links. A
+        <primer-math>k \times k</primer-math> mesh cut down the middle severs
+        <primer-math>k</primer-math> links — so doubling the mesh's side length doubles bisection
+        bandwidth but <em>quadruples</em> the cores contending for it. That mismatch is the
+        eternal argument for keeping traffic local.
+      </p>
+      <primer-theorem name="Networks on chip">
+        <ul>
+          <li>messages become <strong>packets</strong>, packets become <strong>flits</strong>:
+            head (navigates), body (payload), tail (releases); <strong>wormhole</strong> switching
+            spreads a packet across several routers;</li>
+          <li><strong>XY routing</strong> on a mesh: X then Y, shortest-path,
+            <primer-math>H=|\Delta x|+|\Delta y|</primer-math>, and deadlock-free by construction
+            — no y-to-x turn means no dependency cycle;</li>
+          <li><strong>deadlock</strong> = a cycle of packets each holding a link the next needs;
+            the two escapes are <strong>restricted routing</strong> and <strong>ordered virtual
+            channels</strong>;</li>
+          <li><strong>VCs</strong> also relieve head-of-line blocking and separate traffic
+            classes;</li>
+          <li>latency <primer-math>\approx H\,t_{\text{hop}} + L/b</primer-math>; capacity is
+            summarised by <strong>bisection bandwidth</strong>.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Route a batch, find the hot links</h2>
+      <p>
+        Here is XY routing as ten lines of code, plus an occupancy counter per link. A seeded batch
+        of packets crosses a 4×4 mesh; watch where XY piles them up:
+      </p>
+      <primer-code run>
+        // XY routing on a 4x4 mesh, counting how many packets use each link.
+        const N = 4;
+        let seed = 77;
+        const rand = () =&gt; { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
+        const cell = () =&gt; [Math.floor(rand() * N), Math.floor(rand() * N)];
+
+        const load = new Map&lt;string, number&gt;();          // directed link -&gt; packets carried
+        const use = (a: string, b: string) =&gt; { const k = `${a}-&gt;${b}`; load.set(k, (load.get(k) || 0) + 1); };
+
+        function routeXY(sx: number, sy: number, dx: number, dy: number): number {
+          let x = sx, y = sy, hops = 0;
+          while (x !== dx) { const nx = x + Math.sign(dx - x); use(`(${x},${y})`, `(${nx},${y})`); x = nx; hops++; }
+          while (y !== dy) { const ny = y + Math.sign(dy - y); use(`(${x},${y})`, `(${x},${ny})`); y = ny; hops++; }
+          return hops;                                    // always |dx-sx| + |dy-sy|
+        }
+
+        console.log("pkt  src -&gt; dst     hops");
+        for (let p = 0; p &lt; 10; p++) {
+          const [sx, sy] = cell();
+          let [dx, dy] = cell();
+          if (sx === dx &amp;&amp; sy === dy) dx = (dx + 1) % N; // no packets to yourself
+          const h = routeXY(sx, sy, dx, dy);
+          console.log(`  ${p}  (${sx},${sy}) -&gt; (${dx},${dy})   ${h}`);
+        }
+
+        const busy = [...load.entries()].sort((a, b) =&gt; b[1] - a[1]);
+        console.log("\ncontention map - busiest links:");
+        for (const [link, n] of busy.slice(0, 5)) console.log(`  ${link}  carried ${n} packets`);
+        console.log(`\n${load.size} links used; max load ${busy[0][1]}.`);
+        console.log("XY funnels every packet's column-turn through one router per (column,row) pair -");
+        console.log("deterministic and deadlock-free, but hotspots are the price of never turning y-to-x.");
+      </primer-code>
+      <p>
+        Increase the packet count to 40 and rerun: the maximum link load climbs much faster than
+        the average — deterministic routing concentrates traffic. That observation is exactly what
+        tempts designers toward adaptive routing… and straight into the vignette below.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Is there really a tiny Internet inside your phone?">
+      <p>
+        Almost — and the differences are as instructive as the likeness. Like the Internet, a NoC
+        has routers, packets, addresses and multi-hop paths; the mental furniture transfers
+        one-for-one. Unlike the Internet, a NoC <em>never drops a packet</em>: flow control is
+        credit-based — a router only sends a flit when the neighbour has advertised a free buffer —
+        so congestion propagates as polite backpressure rather than loss and retransmission. There
+        is no TCP, no routing protocol chatter, no misbehaving stranger's traffic: every router was
+        designed by the same team and verified against the same spec, which is why hop latencies
+        are measured in <em>cycles</em>, not milliseconds. GPUs run one of the industry's densest
+        examples as their internal glue — dozens of cores on one side, a comb of memory-controller
+        channels on the other, and a NoC in between carrying terabytes per second. The postal
+        service metaphor runs deep: the Internet is the international mail, and the NoC is the
+        pneumatic tube system inside one very well-run building.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Adaptive routing can resurrect the deadlock XY buried">
+      <p>
+        After seeing XY's hotspots, the obvious "improvement" writes itself: let each router steer
+        around congestion — go Y first when X is busy, X first otherwise. Ship it, and the chip
+        runs beautifully for hours… then freezes solid, whole quadrants of the mesh waiting on each
+        other, no error, no timeout, no recovery. By allowing <em>both</em> turn orders you have
+        re-created exactly the cyclic channel dependencies that XY's missing turns made impossible
+        — the four-packet cycle from the figure above, now legal again. The lesson generalises far
+        beyond routing: <strong>deadlock freedom is a proof obligation, not a vibe</strong>. Every
+        adaptive scheme that works — turn-model routing (forbid a carefully chosen subset of
+        turns), Duato's protocol (adaptive lanes backed by an ordered escape VC that is always
+        cycle-free) — comes with a theorem attached showing the channel-dependency graph is
+        acyclic. If you cannot draw that graph for your clever new router and show it has no
+        cycles, you have not designed a router; you have designed an intermittent, unreproducible
+        field failure.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "nocQuiz@1": {
+          "intro": "XY: go X, then Y. Hops = |Δx| + |Δy|. Latency ≈ hops × per-hop + serialisation. Deadlock = a cycle of hold-and-wait on links.",
+          "hopQ": "With XY routing on a mesh, a packet goes from router ({x1},{y1}) to router ({x2},{y2}). How many hops (links) does it cross?",
+          "latQ": "A packet's head crosses {h} hops at {t} cycles per hop; the packet is {f} flits long and the link moves one flit per cycle. Using latency ≈ hops × per-hop + flits, how many cycles?",
+          "flitQ": "A {b}-byte packet is carved into {w}-byte flits. How many flits (including head and tail)?",
+          "bisQ": "Cutting a {k}×{k} mesh down the middle severs {k} links of {w} GB/s each. What is the bisection bandwidth in GB/s?",
+          "headQ": "What does the HEAD flit of a wormhole packet do?",
+          "hdNav": "It carries the destination and claims the route hop by hop; body flits follow the path it opened, and the tail releases it",
+          "hdSum": "It carries a checksum of the body",
+          "hdLast": "It is transmitted last, to confirm delivery",
+          "hdCpu": "It interrupts the CPU at every router",
+          "wormQ": "Wormhole switching means…",
+          "woSnake": "a packet's flits snake through the network pipeline-style, spread across several routers at once, instead of being fully buffered at each hop",
+          "woWait": "each router stores the entire packet before forwarding it",
+          "woDrop": "packets burrow past congested routers by being dropped and resent",
+          "woOne": "only one packet may be in the network at a time",
+          "xyQ": "Why is XY dimension-ordered routing deadlock-free on a mesh?",
+          "xyTurn": "It never turns from y-travel back into x-travel, so no cyclic channel dependency can form — the wait graph is acyclic by construction",
+          "xyShort": "Because it always takes the shortest path",
+          "xyFast": "Because its routers are faster than adaptive ones",
+          "xyBuf": "Because it uses infinite buffers",
+          "dlQ": "Four packets each hold one link of a square and wait for the link the next packet holds. Why is this a deadlock?",
+          "dlCycle": "It is a cyclic hold-and-wait: each holds a resource the next needs, none can advance or release, and no timeout breaks the loop",
+          "dlSlow": "It is merely congestion — it clears once traffic subsides",
+          "dlLost": "The packets' addresses have been corrupted",
+          "dlPower": "The routers have lost power",
+          "vcQ": "Virtual channels help because…",
+          "vcLane": "several flit-buffer lanes share one physical link, so a blocked packet stops plugging the link for everyone (HOL relief) — and ordered VC classes break dependency cycles",
+          "vcWire": "they add extra physical wires between routers",
+          "vcSpeed": "they double the clock frequency of the link",
+          "vcCrc": "they detect transmission errors",
+          "escQ": "The two standard escapes from NoC deadlock are…",
+          "esBoth": "restrict the allowed turns (e.g. XY) or impose an ordering on virtual channels — both make the channel-dependency graph acyclic",
+          "esDrop": "drop packets and retransmit, like the Internet",
+          "esWait": "add timeouts and reboot the mesh",
+          "esBig": "make every buffer big enough for the largest packet",
+          "adQ": "An adaptive router freely picks X or Y each hop to dodge congestion. What is the hidden danger?",
+          "adCycle": "It re-permits the turn cycles XY banned — without a deadlock-freedom proof (e.g. an ordered escape VC), the fabric can wedge solid",
+          "adSlow": "Adaptive choices always increase hop count",
+          "adHot": "It makes hotspots strictly worse than XY",
+          "adNone": "None — adaptivity is free"
+        }
+      }
+    </script>
+
+    <primer-quiz name="nocQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/soc/memory-controllers-in-hardware",
+      "computer-science/computer-architecture/accelerators/interconnection-networks"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── One 4×4 mesh, three stories: an XY route, a deadlock cycle, the VC escape. ──
+  registerGeometryScene(
+    "mesh",
+    ({ board, colors, step, sceneStrings }) => {
+      const P = (i) => i * 3; // router (i,j) sits at (3i, 3j)
+      const lab = (x, y, txt, color, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: 10, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+      const arrow = (a, b, color, dash = 0, w = 3) =>
+        board.create("arrow", [a, b], { strokeColor: color, strokeWidth: w, dash, highlight: false });
+
+      // ── Base: links first, then the 16 routers on top. ──
+      for (let i = 0; i < 4; i++)
+        for (let j = 0; j < 4; j++) {
+          if (i < 3) board.create("segment", [[P(i), P(j)], [P(i + 1), P(j)]], { strokeColor: colors.line, strokeWidth: 1.5, strokeOpacity: 0.6, highlight: false });
+          if (j < 3) board.create("segment", [[P(i), P(j)], [P(i), P(j + 1)]], { strokeColor: colors.line, strokeWidth: 1.5, strokeOpacity: 0.6, highlight: false });
+        }
+      for (let i = 0; i < 4; i++)
+        for (let j = 0; j < 4; j++)
+          board.create(
+            "polygon",
+            [[P(i) - 0.55, P(j) - 0.55], [P(i) + 0.55, P(j) - 0.55], [P(i) + 0.55, P(j) + 0.55], [P(i) - 0.55, P(j) + 0.55]],
+            { fillColor: colors.cat[0], fillOpacity: 0.25, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false } },
+          );
+
+      // Step 1: the XY route (0,0) → (3,2): east along row 0, north up column 3.
+      step(sceneStrings("stepRoute"), () => {
+        lab(0, -1.3, sceneStrings("src"), colors.cat[1]);
+        lab(9, 7.3, sceneStrings("dst"), colors.cat[1]);
+        for (let i = 0; i < 3; i++) arrow([P(i) + 0.7, 0], [P(i + 1) - 0.7, 0], colors.cat[1]);
+        for (let j = 0; j < 2; j++) arrow([9, P(j) + 0.7], [9, P(j + 1) - 0.7], colors.cat[1]);
+        lab(4.5, 0.9, sceneStrings("lX"), colors.cat[1]);
+        lab(7.9, 4.5, sceneStrings("lY"), colors.cat[1], "right");
+      });
+
+      // Step 2: four packets deadlocked around the inner square (clockwise), offset off the links.
+      step(sceneStrings("stepDeadlock"), () => {
+        arrow([3.8, 2.6], [5.6, 2.6], colors.cat[3]);   // P1: east along the bottom, wants north
+        lab(4.7, 2.0, "P1", colors.cat[3]);
+        arrow([6.4, 3.8], [6.4, 5.6], colors.cat[3]);   // P2: north along the right, wants west
+        lab(7.0, 4.7, "P2", colors.cat[3]);
+        arrow([5.2, 6.4], [3.4, 6.4], colors.cat[3]);   // P3: west along the top, wants south
+        lab(4.3, 7.0, "P3", colors.cat[3]);
+        arrow([2.6, 5.2], [2.6, 3.4], colors.cat[3]);   // P4: south along the left, wants east
+        lab(2.0, 4.3, "P4", colors.cat[3]);
+        lab(4.5, 4.5, sceneStrings("lCycle"), colors.cat[3]);
+      });
+
+      // Step 3: dashed VC1 escape lanes on the same physical links.
+      step(sceneStrings("stepVc"), () => {
+        arrow([3.8, 3.3], [5.6, 3.3], colors.cat[2], 2, 2);
+        arrow([5.7, 3.8], [5.7, 5.6], colors.cat[2], 2, 2);
+        arrow([5.2, 5.7], [3.4, 5.7], colors.cat[2], 2, 2);
+        arrow([3.3, 5.2], [3.3, 3.4], colors.cat[2], 2, 2);
+        lab(4.5, 8.2, sceneStrings("lVc"), colors.cat[2]);
+      });
+    },
+    { boundingbox: [-2.2, 9.3, 11.2, -2.3], title: () => makeStrings("mesh")("title") },
+  );
+
+  registerQuiz("nocQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Hops = |Δx| + |Δy|; src ≠ dst.
+      prompt: (v) => sceneStrings("hopQ", v),
+      variables: "x1=[0:3] y1=[0:3] x2=[0:3] y2=[0:3]",
+      constraints: "x1 != x2 || y1 != y2",
+      answer: (v) => Math.abs(v.x1 - v.x2) + Math.abs(v.y1 - v.y2),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // T = h*t + f.
+      prompt: (v) => sceneStrings("latQ", v),
+      variables: "h=[2:6] t=[2,3,4] f=[4,8,16]",
+      answer: "h * t + f",
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Flits = b / w (clean divisors).
+      prompt: (v) => sceneStrings("flitQ", v),
+      variables: "b=[256,512,1024] w=[16,32,64]",
+      answer: "b / w",
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Bisection = k * w.
+      prompt: (v) => sceneStrings("bisQ", v),
+      variables: "k=[4,8,16] w=[2,4,8]",
+      answer: "k * w",
+      keyboard: "geometry-lengths",
+    },
+    {
+      prompt: () => sceneStrings("headQ"),
+      options: [
+        { text: () => sceneStrings("hdNav"), correct: true },
+        { text: () => sceneStrings("hdSum"), correct: false },
+        { text: () => sceneStrings("hdLast"), correct: false },
+        { text: () => sceneStrings("hdCpu"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("wormQ"),
+      options: [
+        { text: () => sceneStrings("woSnake"), correct: true },
+        { text: () => sceneStrings("woWait"), correct: false },
+        { text: () => sceneStrings("woDrop"), correct: false },
+        { text: () => sceneStrings("woOne"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("xyQ"),
+      options: [
+        { text: () => sceneStrings("xyTurn"), correct: true },
+        { text: () => sceneStrings("xyShort"), correct: false },
+        { text: () => sceneStrings("xyFast"), correct: false },
+        { text: () => sceneStrings("xyBuf"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dlQ"),
+      options: [
+        { text: () => sceneStrings("dlCycle"), correct: true },
+        { text: () => sceneStrings("dlSlow"), correct: false },
+        { text: () => sceneStrings("dlLost"), correct: false },
+        { text: () => sceneStrings("dlPower"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("vcQ"),
+      options: [
+        { text: () => sceneStrings("vcLane"), correct: true },
+        { text: () => sceneStrings("vcWire"), correct: false },
+        { text: () => sceneStrings("vcSpeed"), correct: false },
+        { text: () => sceneStrings("vcCrc"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("escQ"),
+      options: [
+        { text: () => sceneStrings("esBoth"), correct: true },
+        { text: () => sceneStrings("esDrop"), correct: false },
+        { text: () => sceneStrings("esWait"), correct: false },
+        { text: () => sceneStrings("esBig"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("adQ"),
+      options: [
+        { text: () => sceneStrings("adCycle"), correct: true },
+        { text: () => sceneStrings("adSlow"), correct: false },
+        { text: () => sceneStrings("adHot"), correct: false },
+        { text: () => sceneStrings("adNone"), correct: false },
+      ],
+    },
+  ]);
+</script>

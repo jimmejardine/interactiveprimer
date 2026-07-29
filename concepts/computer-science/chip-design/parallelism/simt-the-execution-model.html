@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>SIMT: The Execution Model</primer-title>
+
+    <primer-card>
+      <p>
+        You have seen <primer-ref to="computer-science/computer-architecture/data-parallel/gpu-architecture-and-simt">the
+        machine</primer-ref>: streaming multiprocessors, warps, a scheduler that hides latency by switching
+        threads. This lesson looks at the same territory from the opposite side — as a
+        <strong>contract</strong>. Before we can design GPU hardware in the coming modules, we need to state
+        precisely what the software is promised: what a kernel launch <em>means</em>, which guarantees the
+        silicon must honour, and — just as important — which guarantees are deliberately withheld. The
+        withheld ones are where all the hardware freedom lives.
+      </p>
+      <p>
+        The contract is called <strong>SIMT</strong> — <em>Single Instruction, Multiple Threads</em> — and
+        its genius is a sleight of hand: the programmer writes one ordinary scalar program, and the silicon
+        runs vector operations. Understanding exactly where the illusion sits is the whole lesson.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The kernel: one program, a grid of threads</h2>
+      <p>
+        The unit of GPU work is a <strong>kernel</strong>: a scalar function describing what <em>one</em>
+        thread does. You launch it over a <strong>grid</strong> of thread <strong>blocks</strong>, each block
+        holding up to ~1024 <strong>threads</strong>. Every thread runs the same code and discovers who it is
+        from its coordinates — here in CUDA-style pseudocode:
+      </p>
+      <primer-code lang="text">
+        // one scalar program, launched across millions of threads
+        __global__ void vecAdd(const float* a, const float* b, float* c, int n) {
+          int i = blockIdx.x * blockDim.x + threadIdx.x;   // my unique global index
+          if (i &lt; n)                                       // guard the ragged edge
+            c[i] = a[i] + b[i];
+        }
+
+        // host side: launch enough blocks to cover all n elements
+        int threadsPerBlock = 256;
+        int blocks = (n + threadsPerBlock - 1) / threadsPerBlock;   // ceil(n / 256)
+        vecAdd&lt;&lt;&lt;blocks, threadsPerBlock&gt;&gt;&gt;(a, b, c, n);
+      </primer-code>
+      <p>
+        The index arithmetic is the idiom you will type ten thousand times:
+        <primer-math>i = \text{blockIdx} \times \text{blockDim} + \text{threadIdx}</primer-math>. Thread 3 of
+        block 5, with 256 threads per block, owns element <primer-math>5 \times 256 + 3 = 1283</primer-math>.
+        And note the guard: the grid is built from <em>whole</em> blocks, so launching
+        <primer-math>\lceil n / 256 \rceil</primer-math> blocks over-provisions threads at the ragged edge —
+        the <code>if (i &lt; n)</code> keeps the spares from scribbling out of bounds.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The hardware's secret: warps</h2>
+      <p>
+        Now the sleight of hand. The hardware does <em>not</em> run those threads independently. It bundles
+        them, 32 at a time, into <strong>warps</strong> that execute in lock-step: <strong>one instruction
+        issues, and all 32 lanes perform it</strong> on their own registers. Each thread keeps the
+        <em>illusion</em> of a private program counter and private registers — but per warp there is really
+        one instruction stream driving a 32-wide vector unit.
+      </p>
+      <p>
+        Compare the two honest alternatives you already know. With
+        <primer-ref to="computer-science/computer-architecture/data-parallel/simd-multimedia-extensions">explicit
+        SIMD intrinsics</primer-ref>, <em>you</em> manage the vector width: your source code says
+        "add these 8 floats to those 8 floats", and widening the machine means rewriting the code. SIMT hides
+        the width entirely: you write scalar code per thread, and the compiler and hardware pick how to pack
+        threads into lanes. That is why the same kernel source has survived warp schedulers, dual-issue SMs
+        and four hardware generations unchanged — the width was never in the program. SIMT is
+        <strong>SIMD with a programmer-friendly face</strong>: vector efficiency, scalar ergonomics.
+      </p>
+    </primer-card>
+
+    <!-- The decomposition: grid → blocks → warps → lanes, stepped. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "decomp": {
+          "title": "One launch, four levels: grid → blocks → warps → lanes",
+          "gridLbl": "Grid — one kernel launch",
+          "blockWord": "Block",
+          "warpWord": "Warp",
+          "block2Lbl": "Block 2 — 128 threads (programmer's view)",
+          "lanesLbl": "Warp 1 — one instruction issues, 32 lanes execute it (hardware's view)",
+          "stepBlocks": "The grid is split into independent blocks — the hardware may run them in any order, on any SM",
+          "stepWarps": "Inside a block, the hardware bundles threads into warps of 32 — this level is invisible to the programming model",
+          "stepLanes": "A warp is really a 32-wide vector operation: one instruction stream, 32 lanes in lock-step"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The four levels, drawn</h2>
+      <p>
+        Step through the decomposition. Two of these levels (grid, block) belong to the <em>programming
+        model</em>; the warp level belongs to the <em>microarchitecture</em> — keep that boundary in sight,
+        because the "Watch out!" below turns on it:
+      </p>
+      <primer-geometry scene="decomp" caption="A stepped decomposition. A grid box at the top splits into eight independent blocks; block 2 expands into four warps of 32 threads each; warp 1 expands into a row of 32 lane squares driven by a single instruction stream."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Be the machine: a SIMT executor in TypeScript</h2>
+      <p>
+        The best way to internalise the model is to build it. Here is a toy SIMT machine: it takes a scalar
+        kernel and runs it over a grid <em>warp by warp</em>, exactly as an SM's scheduler would (warp width
+        4 instead of 32, so the printout fits). Watch the index arithmetic produce each lane's global
+        <code>i</code>, and watch the final ragged warp run with its out-of-range lanes <em>masked</em>:
+      </p>
+      <primer-code run>
+        const WARP = 4;       // real GPUs: 32 — 4 keeps the printout readable
+        const blockDim = 8;   // threads per block
+        const gridDim = 2;    // blocks in the grid
+        const n = 13;         // vector length — deliberately NOT a multiple
+
+        const a = Array.from({ length: n }, (_, k) =&gt; k);
+        const b = Array.from({ length: n }, (_, k) =&gt; 10 * k);
+        const c: number[] = new Array(n).fill(0);
+
+        // The kernel: what ONE thread does. Scalar code, no widths anywhere.
+        function kernel(blockIdx: number, threadIdx: number): string {
+          const i = blockIdx * blockDim + threadIdx;
+          if (i &lt; n) { c[i] = a[i] + b[i]; return `i=${i}`; }
+          return "masked";   // the ragged-edge guard, seen from the hardware side
+        }
+
+        // The machine: issue the kernel warp-by-warp, all lanes in lock-step.
+        for (let blockIdx = 0; blockIdx &lt; gridDim; blockIdx++) {
+          for (let w = 0; w &lt; blockDim / WARP; w++) {
+            const lanes: string[] = [];
+            for (let lane = 0; lane &lt; WARP; lane++) {
+              lanes.push(kernel(blockIdx, w * WARP + lane));
+            }
+            console.log(`block ${blockIdx}, warp ${w}: ` + lanes.join("  "));
+          }
+        }
+        console.log("c = [" + c.join(", ") + "]");
+      </primer-code>
+      <p>
+        The inner <code>lane</code> loop is the part that is <em>hardware</em> on a real GPU — all four (or
+        32) calls happen in the same cycle, driven by one instruction. Only the outer loops are genuinely
+        sequential decisions of the scheduler, and even those interleave freely across SMs.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The block: the unit of togetherness — and the scalability contract</h2>
+      <p>
+        Why does the model bother with blocks at all, rather than one flat sea of threads? Because the
+        contract needs a boundary between "threads that may cooperate" and "threads that may not":
+      </p>
+      <ul>
+        <li><strong>Within a block</strong>: threads are guaranteed <em>co-resident</em> on one SM, so they
+          can share the SM's fast shared memory and synchronise at a <strong>barrier</strong>
+          (<code>__syncthreads()</code>-style: everyone waits until all arrive).</li>
+        <li><strong>Between blocks</strong>: nothing. Blocks are <strong>independent</strong> — the hardware
+          may run them in any order, on any SM, in any degree of parallelism.</li>
+      </ul>
+      <p>
+        That second, deliberately empty promise is the <strong>scalability contract</strong>, and it is why
+        the GPU ecosystem works at all: a kernel that launches 10,000 independent blocks runs correctly on a
+        laptop GPU with 8 SMs (blocks queue up, ~1250 each) and on a datacentre GPU with 140 SMs (blocks
+        spread wide) — <em>the same binary, no recompilation, near-linear scaling</em>. The hardware designer
+        gets to choose the SM count per market segment precisely because the software was never allowed to
+        care.
+      </p>
+      <primer-theorem name="The SIMT contract">
+        <ul>
+          <li>a <strong>kernel</strong> is one scalar program launched over a grid of blocks of threads; each
+            thread finds its work via <primer-math>\text{blockIdx} \times \text{blockDim} +
+            \text{threadIdx}</primer-math>;</li>
+          <li>the hardware executes threads in <strong>warps of 32 in lock-step</strong> — one instruction
+            issue drives 32 lanes; the warp is microarchitecture, not model;</li>
+          <li>threads in a <strong>block</strong> may share memory and barrier-synchronise; blocks are
+            <strong>independent</strong> — order and placement are unpromised;</li>
+          <li>that withheld promise is the <strong>scalability contract</strong>: the same kernel runs on any
+            number of SMs.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Why 32? And why on earth is it called a 'warp'?">
+      <p>
+        The name comes from weaving: on a loom, the <em>warp</em> is the set of parallel threads held under
+        tension while the shuttle passes through — dozens of threads, advancing together, one row at a time.
+        For a machine that advances 32 "threads" together one instruction at a time, some early NVIDIA
+        architect couldn't resist, and the textile pun stuck (Star Trek had nothing to do with it). As for
+        32: it is a compromise, not a law of nature. Wider warps amortise the instruction-issue machinery
+        over more lanes (cheaper control per FLOP) but waste more work when threads diverge or the data runs
+        ragged; narrower warps waste control. NVIDIA landed on 32 in 2006 and has never moved; AMD ran 64-wide
+        "wavefronts" for a decade, then added a 32-wide mode in RDNA (2019) — two vendors' independent
+        gradient descent converging on the same neighbourhood.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The warp is not in the programming model">
+      <p>
+        Nothing in the kernel language mentions warps — and that is a <em>specification</em>, not an
+        oversight. The classic trap: threads in a warp run in lock-step <em>today</em>, so old code often
+        skipped block barriers for threads it knew shared a warp ("implicit warp synchronisation") — and it
+        worked, for years. Then Volta (2017) gave threads independent program counters so diverged threads
+        could interleave, and that entire genre of code <strong>silently broke</strong>. The rule that
+        survives hardware generations: <strong>correctness may rely only on the model</strong> (block
+        barriers, explicit warp-sync primitives); <strong>warp awareness is for performance</strong>
+        (coalescing, divergence — you will meet both in the next module). Code that is only correct because
+        of a microarchitectural habit is a time bomb with a driver-update fuse.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: index arithmetic, warp counts, model-vs-microarchitecture, the scalability contract. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "simtQuiz@1": {
+          "intro": "SIMT: scalar kernels over a grid of blocks; warps of 32 in lock-step underneath; blocks independent by contract.",
+          "gidQ": "A thread has blockIdx = {bi}, threadIdx = {ti}, and blockDim = {bd}. What is its global index (blockIdx · blockDim + threadIdx)?",
+          "warpsPerBlockQ": "A block has {t} threads. With 32-thread warps, how many warps does the hardware carve it into? (Partial warps still cost a whole warp.)",
+          "lastWarpQ": "A block has {t} threads (not a multiple of 32). How many threads are ACTIVE in its final, partial warp?",
+          "totalQ": "A kernel launches {g} blocks of {t} threads each. How many threads in the whole grid?",
+          "modelQ": "Which of these is a microarchitectural detail rather than part of the SIMT programming model?",
+          "moWarp": "The 32-thread warp width",
+          "moIdx": "threadIdx and blockIdx coordinates",
+          "moBarrier": "The block-level barrier",
+          "moShared": "Block-shared memory",
+          "scaleQ": "Why does the model insist that blocks be independent, with no promised execution order?",
+          "scAny": "So one kernel binary runs correctly on any GPU size — blocks can be scheduled in any order across however many SMs exist",
+          "scFast": "Because dependent blocks would run faster but use more power",
+          "scDebug": "To make debugging easier",
+          "scCache": "Because blocks share a cache line",
+          "promiseQ": "Which of these does the SIMT contract deliberately NOT promise?",
+          "prOrder": "Anything about the order in which blocks execute, or synchronisation between blocks within a kernel",
+          "prBarrier": "That threads in a block can synchronise at a barrier",
+          "prShared": "That threads in a block can share fast memory",
+          "prIdx": "That every thread can compute a unique index",
+          "contrastQ": "How does SIMT differ from explicit SIMD intrinsics?",
+          "coHidden": "In SIMT the vector width is managed by the compiler and hardware — the source stays scalar per thread; intrinsics bake the width into the code",
+          "coWider": "SIMT vectors are always wider than SIMD vectors",
+          "coFloat": "SIMD handles only floats, SIMT only integers",
+          "coSame": "There is no difference — they are two names for one thing",
+          "issueQ": "Per warp per issue slot, how many instructions does the hardware actually fetch and issue?",
+          "isOne": "One — it drives all 32 lanes in lock-step",
+          "is32": "32 — one per thread",
+          "isVaries": "It varies with each thread's private program counter",
+          "isZero": "None — threads execute without instructions",
+          "implicitQ": "Old code skipped block barriers because warp threads run in lock-step anyway. What is wrong with that?",
+          "imBreak": "It relies on microarchitecture, not the model — a hardware change (like Volta's independent thread scheduling) silently breaks it",
+          "imSlow": "Nothing is wrong — it is the recommended style",
+          "imCompile": "It fails to compile on all known toolchains",
+          "imPower": "It works but doubles power consumption",
+          "guardQ": "Why does nearly every kernel start with a guard comparing its global index i against the problem size n, doing nothing when i is out of range?",
+          "guRagged": "The grid is built from whole blocks, so the launch over-provisions threads — spare threads at the ragged edge must not touch memory",
+          "guSpeed": "The comparison warms up the ALUs before real work",
+          "guSync": "It synchronises the threads in the block",
+          "guWarp": "It tells the hardware where each warp begins",
+          "whoQ": "In the SIMT split of responsibilities, correctness should rely on ____, while warp awareness buys ____.",
+          "whModel": "the programming model (barriers, explicit sync) … performance",
+          "whWarp": "warp lock-step … correctness",
+          "whDriver": "the driver version … portability",
+          "whLuck": "testing on one GPU … future-proofing"
+        }
+      }
+    </script>
+
+    <primer-quiz name="simtQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/parallelism/latency-vs-throughput-design",
+      "computer-science/computer-architecture/data-parallel/gpu-architecture-and-simt",
+      "computer-science/computer-architecture/data-parallel/simd-multimedia-extensions"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Grid → blocks → warps → lanes, revealed level by level. ──
+  registerGeometryScene(
+    "decomp",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, stroke, fill, txt, fs = 11, bold = false) => {
+        board.create(
+          "polygon",
+          [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+          { fillColor: fill, fillOpacity: fill ? 0.2 : 0, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: stroke, strokeWidth: 1.5, highlight: false } },
+        );
+        if (txt) {
+          board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, txt], {
+            strokeColor: colors.ink, fontSize: fs, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: bold ? "font-weight:600" : "",
+          });
+        }
+      };
+      const link = (a, b) =>
+        board.create("segment", [a, b], { strokeColor: colors.line, strokeWidth: 1, dash: 2, highlight: false });
+
+      // ── Base: the grid — the whole launch. ──
+      box(0.5, 8.2, 20.5, 10.2, colors.line, colors.bg, "");
+      board.create("text", [10.5, 10.55, sceneStrings("gridLbl")], {
+        strokeColor: colors.ink, fontSize: 13, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600",
+      });
+
+      // Step 1: eight independent blocks inside the grid; Block 2 highlighted.
+      step(sceneStrings("stepBlocks"), () => {
+        for (let bIdx = 0; bIdx < 8; bIdx++) {
+          const x = 0.8 + bIdx * 2.46;
+          const isFocus = bIdx === 2;
+          box(x, 8.5, x + 2.26, 9.9, isFocus ? colors.cat[1] : colors.line, colors.cat[0],
+            sceneStrings("blockWord") + " " + bIdx, 10, isFocus);
+        }
+      });
+
+      // Step 2: Block 2 expands into four warps of 32.
+      step(sceneStrings("stepWarps"), () => {
+        link([6.86, 8.5], [4.2, 7.4]);
+        link([8.0, 8.5], [16.8, 7.4]);
+        box(4.2, 4.4, 16.8, 7.4, colors.cat[1], null, "");
+        board.create("text", [10.5, 7.05, sceneStrings("block2Lbl")], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600",
+        });
+        for (let w = 0; w < 4; w++) {
+          box(4.5, 6.15 - w * 0.62, 16.5, 6.65 - w * 0.62, colors.line, colors.cat[2],
+            sceneStrings("warpWord") + " " + w + "  (threads " + (w * 32) + "–" + (w * 32 + 31) + ")", 10, w === 1);
+        }
+      });
+
+      // Step 3: Warp 1 expands into 32 lock-step lanes.
+      step(sceneStrings("stepLanes"), () => {
+        link([4.5, 5.53], [0.7, 3.3]);
+        link([16.5, 5.53], [20.3, 3.3]);
+        box(0.5, 1.0, 20.5, 3.3, colors.cat[3], null, "");
+        for (let lane = 0; lane < 32; lane++) {
+          box(0.72 + lane * 0.617, 1.7, 1.24 + lane * 0.617, 2.5, colors.line, colors.cat[3], "");
+        }
+        board.create("text", [10.5, 2.95, sceneStrings("lanesLbl")], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: "font-weight:600",
+        });
+      });
+    },
+    { boundingbox: [-0.2, 11.0, 21.2, 0.4], keepAspect: false, title: () => makeStrings("decomp")("title") },
+  );
+
+  registerQuiz("simtQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Global index = bi*bd + ti.
+      prompt: (v) => sceneStrings("gidQ", v),
+      variables: "bi=[1:7] bd=[64,128,256] ti=[0:63]",
+      answer: "bi * bd + ti",
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Warps per block = ceil(t/32).
+      prompt: (v) => sceneStrings("warpsPerBlockQ", v),
+      variables: "t=[64,96,100,128,200,256]",
+      answer: (v) => Math.ceil(v.t / 32),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Active threads in the last partial warp = t mod 32 (choices avoid multiples of 32).
+      prompt: (v) => sceneStrings("lastWarpQ", v),
+      variables: "t=[70,100,150,200,250]",
+      answer: (v) => v.t % 32,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Total threads = g*t.
+      prompt: (v) => sceneStrings("totalQ", v),
+      variables: "g=[2:20] t=[64,128,256]",
+      answer: "g * t",
+      keyboard: "geometry-lengths",
+    },
+    {
+      prompt: () => sceneStrings("modelQ"),
+      options: [
+        { text: () => sceneStrings("moWarp"), correct: true },
+        { text: () => sceneStrings("moIdx"), correct: false },
+        { text: () => sceneStrings("moBarrier"), correct: false },
+        { text: () => sceneStrings("moShared"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("scaleQ"),
+      options: [
+        { text: () => sceneStrings("scAny"), correct: true },
+        { text: () => sceneStrings("scFast"), correct: false },
+        { text: () => sceneStrings("scDebug"), correct: false },
+        { text: () => sceneStrings("scCache"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("promiseQ"),
+      options: [
+        { text: () => sceneStrings("prOrder"), correct: true },
+        { text: () => sceneStrings("prBarrier"), correct: false },
+        { text: () => sceneStrings("prShared"), correct: false },
+        { text: () => sceneStrings("prIdx"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("contrastQ"),
+      options: [
+        { text: () => sceneStrings("coHidden"), correct: true },
+        { text: () => sceneStrings("coWider"), correct: false },
+        { text: () => sceneStrings("coFloat"), correct: false },
+        { text: () => sceneStrings("coSame"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("issueQ"),
+      options: [
+        { text: () => sceneStrings("isOne"), correct: true },
+        { text: () => sceneStrings("is32"), correct: false },
+        { text: () => sceneStrings("isVaries"), correct: false },
+        { text: () => sceneStrings("isZero"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("implicitQ"),
+      options: [
+        { text: () => sceneStrings("imBreak"), correct: true },
+        { text: () => sceneStrings("imSlow"), correct: false },
+        { text: () => sceneStrings("imCompile"), correct: false },
+        { text: () => sceneStrings("imPower"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("guardQ"),
+      options: [
+        { text: () => sceneStrings("guRagged"), correct: true },
+        { text: () => sceneStrings("guSpeed"), correct: false },
+        { text: () => sceneStrings("guSync"), correct: false },
+        { text: () => sceneStrings("guWarp"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whoQ"),
+      options: [
+        { text: () => sceneStrings("whModel"), correct: true },
+        { text: () => sceneStrings("whWarp"), correct: false },
+        { text: () => sceneStrings("whDriver"), correct: false },
+        { text: () => sceneStrings("whLuck"), correct: false },
+      ],
+    },
+  ]);
+</script>

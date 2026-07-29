@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Voltage Scaling and Power Domains</primer-title>
+
+    <primer-card>
+      <p>
+        Clock gating attacked <primer-math>\alpha</primer-math>. Now for the heavyweight lever in
+        <primer-math>P = \alpha C V^2 f</primer-math>: the <strong>square</strong> on
+        <primer-math>V</primer-math>. Voltage is the only knob that enters quadratically — and since lowering
+        frequency <em>permits</em> lowering voltage (gates switch slower at lower <primer-math>V</primer-math>,
+        so a slower clock tolerates it), the two move together for a compounded, roughly cubic win. This was
+        the engine of
+        <primer-ref to="computer-science/computer-architecture/foundations/moores-law-and-dennard-scaling">Dennard
+        scaling</primer-ref> while it lasted; now that it no longer comes free with each process node, chips
+        do it <em>actively</em>, minute by minute — and carve themselves into independently powered fiefdoms
+        to do it well.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>DVFS: the V² lever, pulled at runtime</h2>
+      <p>
+        <strong>Dynamic voltage-frequency scaling</strong> lets the operating system slide the chip along a
+        table of legal <primer-math>(f, V)</primer-math> operating points. The honest arithmetic, for
+        halving the clock and dropping the supply from 1.0 V to 0.7 V:
+      </p>
+      <primer-math display>\frac{P_{\text{new}}}{P_{\text{old}}} \;=\; \frac{f/2}{f}\cdot\frac{(0.7V)^2}{V^2}
+        \;=\; 0.5 \times 0.49 \;\approx\; 0.245 \;\approx\; \tfrac{1}{4}.</primer-math>
+      <p>
+        Half the speed for a quarter of the power — that trade is why your laptop's fan spins down when you
+        stop compiling. Note what it does to <em>energy per task</em>: time doubles while power quarters, so
+        the energy for a fixed job scales as <primer-math>V^2</primer-math> alone — the frequency cancels.
+        Lower voltage is (dynamically) always more efficient <em>per unit of work</em>… until leakage, which
+        flows the whole time the chip is powered, changes the verdict. Run the sweep:
+      </p>
+      <primer-code run>
+        // DVFS sweep: dynamic power falls as f·V², but leakage taxes every second of runtime.
+        const points = [
+          { f: 2.0, V: 1.0 },     // GHz, volts
+          { f: 1.5, V: 0.85 },
+          { f: 1.0, V: 0.7 },
+          { f: 0.5, V: 0.55 },
+        ];
+        const P_LEAK = 0.3;       // W, roughly constant while the domain is powered
+        // Calibrated so 2 GHz @ 1.0 V burns 2 W of dynamic power; task = 1e9 cycles.
+        const pDyn = (f: number, V: number) =&gt; f * V * V;
+
+        console.log("f(GHz)  V(V)   Pdyn(W)  time(s)  energy(J)");
+        let bestE = Infinity, bestF = 0;
+        for (const p of points) {
+          const t = 1 / p.f;                      // 1e9 cycles / (f GHz)
+          const E = (pDyn(p.f, p.V) + P_LEAK) * t;
+          console.log(" " + p.f.toFixed(1) + "    " + p.V.toFixed(2) + "    " +
+                      pDyn(p.f, p.V).toFixed(2) + "     " + t.toFixed(2) + "     " + E.toFixed(2));
+          if (E &lt; bestE) { bestE = E; bestF = p.f; }
+        }
+        console.log("");
+        console.log("best energy per task: " + bestF.toFixed(1) + " GHz (" + bestE.toFixed(2) + " J)");
+        console.log("Crawling is NOT optimal: below the sweet spot, leakage x long runtime");
+        console.log("dominates - often better to 'race to idle' and power-gate the domain.");
+      </primer-code>
+      <p>
+        The sweep exposes the real shape of the problem: dynamic energy per task falls with
+        <primer-math>V^2</primer-math>, but leakage energy <em>grows</em> with runtime, so energy-per-task
+        has a minimum at a middling operating point. Below it, the winning strategy flips to
+        <strong>race to idle</strong>: sprint at an efficient point, finish early, then kill the power
+        entirely. Which raises the question — how do you kill power to only <em>part</em> of a chip?
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "domains": {
+          "title": "An SoC carved into power domains — and the power-down sequence",
+          "cpu": "CPU — 0.9 V, always-on",
+          "gpu": "GPU — 0.8 V, switchable",
+          "per": "peripherals — 0.6 V",
+          "ls": "level shifters",
+          "iso": "isolation cells",
+          "sw": "power switch",
+          "off": "OFF",
+          "s1": "1 — isolate: clamp outputs to a safe 0/1",
+          "s2": "2 — save state → retention registers",
+          "s3": "3 — open the power switch: leakage ≈ 0",
+          "cIso": "Step 1 — isolation cells clamp every output of the domain to a safe constant, so neighbours never see a floating wire",
+          "cSave": "Step 2 — architectural state is parked in retention registers (or saved to memory) so work can resume after wake-up",
+          "cGate": "Step 3 — the power switch opens and the domain goes dark: dynamic AND leakage power both fall to (almost) zero"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Power domains: different voltages, switchable islands</h2>
+      <p>
+        A modern SoC is not one circuit at one voltage — it is a federation of <strong>voltage
+        domains</strong>: the CPU sprinting at 0.9 V, slow peripherals ambling at 0.6 V, each block given
+        just enough voltage for <em>its</em> timing. Two kinds of special cells stitch the federation
+        together, and a third switches parts of it off:
+      </p>
+      <ul>
+        <li><strong>Level shifters</strong> sit on every wire crossing between voltage domains, translating
+          one domain's logic levels into the other's. Without one, a 0.6 V "high" arriving at a 0.9 V gate
+          is neither a clean 0 nor 1 — the receiving inverter half-conducts and burns.</li>
+        <li><strong>Isolation cells</strong> guard the outputs of any domain that can be switched
+          <em>off</em>, clamping them to a safe constant so the powered neighbours never stare at a floating
+          wire.</li>
+        <li><strong>Power switches</strong> (header/footer transistors between a domain and the supply
+          rails) implement <strong>power gating</strong>: open the switch and the domain is truly dark —
+          unlike clock gating, which stops dynamic power but leaves every transistor leaking, power gating
+          kills <em>leakage</em> too. The price: all state inside evaporates, so anything worth keeping goes
+          into <strong>retention registers</strong> (special flops with a tiny always-on shadow latch) or
+          out to memory first.</li>
+      </ul>
+      <p>
+        Powering down is therefore a <em>ceremony</em>, run by a small always-on power-controller FSM, and
+        the order is everything: <strong>isolate → save → switch off</strong>, and on wake-up the mirror
+        image, <strong>switch on → restore → de-isolate</strong>. Step through it on the floorplan:
+      </p>
+      <primer-geometry scene="domains" caption="A chip floorplan with three coloured power domains — an always-on CPU at 0.9 V, a switchable GPU at 0.8 V, and peripherals at 0.6 V — with level-shifter cells on the voltage crossings, isolation cells on the GPU boundary, and a power switch. Steps animate the power-down ceremony: isolate the outputs, save state to retention registers, open the power switch."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Power intent, and one more voltage trick</h2>
+      <p>
+        Notice that none of this — domains, shifters, isolation, retention — appears in your RTL, which
+        still describes pure logic. The partitioning lives in a separate <strong>power-intent</strong>
+        specification (<strong>UPF</strong>, or the older CPF): a file declaring the domains, their supply
+        nets, where isolation and retention are required, and the legal power states. Every tool in the flow
+        reads it — synthesis inserts the special cells, verification simulates domains actually losing state
+        (catching the missing-retention bug before silicon), and the back-end wires the switch networks. One
+        spec, honoured everywhere: the same "say what you mean, let the tools enforce it" pattern as clock
+        gating, scaled up to the whole chip.
+      </p>
+      <p>
+        A final, finer-grained voltage lever: libraries ship each cell in several <strong>threshold-voltage
+        (V<sub>t</sub>) flavours</strong>. Low-V<sub>t</sub> cells switch fast but leak hard;
+        high-V<sub>t</sub> cells are slow and thrifty. The tools mix them: <strong>low-V<sub>t</sub> only on
+        the critical paths</strong> that need the speed, high-V<sub>t</sub> everywhere else — buying back the
+        vast majority of leakage for zero performance cost.
+      </p>
+      <primer-theorem name="The voltage levers">
+        <ul>
+          <li><strong>DVFS</strong>: lower <primer-math>f</primer-math> permits lower
+            <primer-math>V</primer-math>; power falls roughly cubically
+            (<primer-math>0.5f</primer-math>, <primer-math>0.7V \Rightarrow \approx \tfrac14 P</primer-math>);
+            dynamic energy per task scales as <primer-math>V^2</primer-math>, but leakage favours
+            <strong>race-to-idle</strong>;</li>
+          <li><strong>voltage domains</strong> give each block its own supply, with <strong>level
+            shifters</strong> at every crossing;</li>
+          <li><strong>power gating</strong> switches domains off entirely, killing leakage — requires
+            <strong>isolation cells</strong>, <strong>retention registers</strong>, and the ordered ceremony
+            isolate → save → off, on → restore → de-isolate;</li>
+          <li><strong>UPF/CPF</strong> captures the power intent as a separate spec the whole flow
+            honours;</li>
+          <li><strong>multi-V<sub>t</sub> mixing</strong>: low-V<sub>t</sub> (fast, leaky) on critical paths
+            only.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="How many power states can one phone chip have?">
+      <p>
+        Hundreds — and enumerating them is itself an engineering discipline. A flagship mobile SoC has
+        dozens of switchable domains (per-core, per-cluster, GPU slices, media blocks, modem pieces), each
+        with several DVFS points, plus retention-versus-full-off variants for the sleeping ones. The legal
+        combinations form a state space the power-controller firmware walks all day: your phone crosses
+        power states thousands of times per second, mostly for milliseconds at a time, and a misordered
+        transition in even one obscure corner (de-isolating before the supply is stable, say) becomes the
+        kind of once-a-week freeze that no software patch can fully hide. This is why UPF-aware verification
+        teams simulate <em>power-state machines</em>, not just logic — and why "low-power methodology
+        engineer" is a job title with excellent job security.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Power gating without isolation — the dead block that poisons the living">
+      <p>
+        Open a domain's power switch without isolation cells and its output wires do not politely go to 0 —
+        they <strong>float</strong>, drifting toward mid-rail voltages. Every powered gate listening to them
+        now has an input that is neither 0 nor 1: its pull-up and pull-down networks both half-conduct,
+        burning <strong>crowbar current</strong> continuously, while its output flickers with noise —
+        garbage values marching into live logic. The failure is beautifully perverse: you switched a block
+        <em>off</em> to save power, and the chip now burns <em>more</em>, while corrupting the blocks that
+        are still alive. Every switchable domain's outputs must be clamped by isolation cells <em>before</em>
+        the switch opens — which is exactly why the sequence isolate → save → gate-off is enforced by an FSM
+        in hardware, not left to polite software convention.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "dvfsQuiz@1": {
+          "intro": "P = αCV²f: voltage counts squared. DVFS pairs lower f with lower V; power gating kills leakage but needs isolation + retention + the ordered ceremony.",
+          "dvfsQ": "An operating-point change drops frequency to f/{a} and supply to {b}/10 of V. The new dynamic power, as a percent of the original, is…",
+          "energyQ": "Supply drops to {b}/10 of V (frequency scaled to match). Dynamic energy per task, as a percent of the original, is…",
+          "leakQ": "A domain leaks {l} mW whenever powered. If power gating turns it off {p}% of the time, what is the average leakage saving, in mW?",
+          "downQ": "What is the correct power-DOWN sequence for a switchable domain?",
+          "dRight": "Isolate the outputs → save state to retention → open the power switch",
+          "dWrong1": "Open the power switch → save state → isolate",
+          "dWrong2": "Save state → open the power switch → isolate",
+          "dWrong3": "Any order works — the steps are independent",
+          "upQ": "And the correct power-UP sequence?",
+          "uRight": "Close the power switch → restore state → de-isolate the outputs",
+          "uWrong1": "De-isolate → close the power switch → restore",
+          "uWrong2": "Restore state → de-isolate → close the power switch",
+          "uWrong3": "The reverse of any order used for power-down",
+          "isoQ": "What does an isolation cell do?",
+          "iRight": "Clamps an off domain's outputs to a safe constant 0 or 1, so powered neighbours never see a floating wire",
+          "iWrong1": "Translates logic levels between two different supply voltages",
+          "iWrong2": "Stores the domain's state while it is off",
+          "iWrong3": "Filters noise from the clock signal",
+          "lsQ": "What does a level shifter do?",
+          "lRight": "Translates logic levels on a wire crossing between two domains running at different supply voltages",
+          "lWrong1": "Clamps floating outputs of an off domain",
+          "lWrong2": "Shifts data left or right by one bit",
+          "lWrong3": "Raises the clock frequency between domains",
+          "retQ": "Retention registers exist because…",
+          "rRight": "Power gating destroys all state in the domain — a tiny always-on shadow latch keeps the bits so work can resume on wake-up",
+          "rWrong1": "Ordinary flip-flops are too slow for low-voltage domains",
+          "rWrong2": "They are needed to synchronize clock domains",
+          "rWrong3": "STA requires them on every multicycle path",
+          "upfQ": "What is UPF (or CPF)?",
+          "pRight": "A separate power-intent specification — domains, supplies, isolation, retention, legal power states — that every tool in the flow reads and honours",
+          "pWrong1": "A SystemVerilog dialect for writing low-power RTL",
+          "pWrong2": "The report file listing each net's switching power",
+          "pWrong3": "A fabrication step that deposits the power rails",
+          "vtQ": "How are multi-Vt cell libraries used?",
+          "vRight": "Low-Vt cells (fast but leaky) go only on critical paths; high-Vt cells (slow, low-leakage) everywhere else",
+          "vWrong1": "Low-Vt everywhere — speed always wins",
+          "vWrong2": "High-Vt on critical paths to make them more robust",
+          "vWrong3": "Vt flavours are chosen at random to average out variation",
+          "gateVsQ": "Power gating differs from clock gating in that power gating…",
+          "gRight": "Kills leakage as well as dynamic power — but destroys state and needs isolation and a wake-up ceremony",
+          "gWrong1": "Only stops the clock; leakage continues",
+          "gWrong2": "Is cheaper and used on every individual register",
+          "gWrong3": "Increases leakage in exchange for lower dynamic power",
+          "floatQ": "A domain is switched off without isolation cells. What happens to downstream powered logic?",
+          "fRight": "Its inputs float toward mid-rail: gates half-conduct, burning crowbar current, and compute garbage",
+          "fWrong1": "Nothing — unpowered outputs read as clean zeros",
+          "fWrong2": "It automatically power-gates itself in sympathy",
+          "fWrong3": "It runs faster because the load has disappeared"
+        }
+      }
+    </script>
+
+    <primer-quiz name="dvfsQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/front-end/clock-gating-and-low-power-rtl",
+      "computer-science/computer-architecture/foundations/moores-law-and-dennard-scaling"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── SoC floorplan: three power domains, boundary cells, and the power-down ceremony. ──
+  registerGeometryScene(
+    "domains",
+    ({ board, colors, step, sceneStrings }) => {
+      const lab = (x, y, txt, col = colors.ink, size = 12) =>
+        board.create("text", [x, y, txt], {
+          strokeColor: col, fontSize: size, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      const rect = (x0, y0, x1, y1, col, fillOp = 0.22) =>
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: col, fillOpacity: fillOp, fixed: true, highlight: false,
+          vertices: { visible: false }, borders: { strokeColor: colors.line, strokeWidth: 1.2, highlight: false },
+        });
+      const cell = (x, y, col) => rect(x - 0.18, y - 0.18, x + 0.18, y + 0.18, col, 0.7);
+
+      // Base: die outline and the three domains.
+      rect(0, 0, 12.4, 8.4, colors.bg, 0);
+      rect(0.4, 4.4, 6.4, 8.0, colors.cat[0]);
+      lab(3.4, 7.5, sceneStrings("cpu"));
+      rect(6.9, 2.2, 12.0, 8.0, colors.cat[1]);
+      lab(9.45, 7.5, sceneStrings("gpu"));
+      rect(0.4, 0.4, 6.4, 3.8, colors.cat[2]);
+      lab(3.4, 3.3, sceneStrings("per"));
+
+      // Level shifters on the CPU/peripheral and CPU/GPU voltage crossings.
+      [1.6, 3.4, 5.2].forEach((x) => cell(x, 4.1, colors.cat[3]));
+      [5.2, 6.2].forEach((y) => cell(6.65, y, colors.cat[3]));
+      lab(1.6, 4.75, sceneStrings("ls"), colors.cat[3], 11);
+
+      // Isolation cells on the switchable GPU's boundary; power switch at its foot.
+      [3.2, 4.4, 5.6].forEach((y) => cell(7.15, y, colors.cat[1]));
+      lab(8.45, 2.65, sceneStrings("iso"), colors.cat[1], 11);
+      rect(9.0, 1.2, 11.4, 2.0, colors.cat[3], 0.4);
+      lab(10.2, 1.6, sceneStrings("sw"), colors.ink, 11);
+
+      // Step 1: isolate.
+      step(sceneStrings("cIso"), () => {
+        [3.2, 4.4, 5.6].forEach((y) => cell(7.15, y, colors.cat[1]));
+        lab(3.3, 9.0, sceneStrings("s1"), colors.cat[1], 12);
+      });
+      // Step 2: save state.
+      step(sceneStrings("cSave"), () => {
+        lab(9.45, 6.6, sceneStrings("s2"), colors.cat[2], 12);
+      });
+      // Step 3: gate off.
+      step(sceneStrings("cGate"), () => {
+        rect(6.9, 2.2, 12.0, 8.0, colors.line, 0.35);
+        lab(9.45, 5.0, sceneStrings("off"), colors.ink, 18);
+        lab(9.4, 9.0, sceneStrings("s3"), colors.ink, 12);
+      });
+    },
+    { boundingbox: [-0.5, 9.6, 12.9, -0.5], keepAspect: false, title: () => makeStrings("domains")("title") },
+  );
+
+  registerQuiz("dvfsQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Factor = (1/a)·(b/10)² → percent = b²/a (integer for these choices).
+      prompt: (v) => sceneStrings("dvfsQ", v),
+      variables: "a=[2,4] b=[6,8,10]",
+      answer: "(b ^ 2) / a",
+    },
+    {
+      // Energy per task ∝ V²: percent = b².
+      prompt: (v) => sceneStrings("energyQ", v),
+      variables: "b=[5,6,7,8,9]",
+      answer: "b ^ 2",
+    },
+    {
+      // Average saving = l·p/100 (integer combos).
+      prompt: (v) => sceneStrings("leakQ", v),
+      variables: "l=[40,60,80,200] p=[25,50,75]",
+      answer: "l * p / 100",
+    },
+    {
+      prompt: () => sceneStrings("downQ"),
+      options: [
+        { text: () => sceneStrings("dRight"), correct: true },
+        { text: () => sceneStrings("dWrong1"), correct: false },
+        { text: () => sceneStrings("dWrong2"), correct: false },
+        { text: () => sceneStrings("dWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("upQ"),
+      options: [
+        { text: () => sceneStrings("uRight"), correct: true },
+        { text: () => sceneStrings("uWrong1"), correct: false },
+        { text: () => sceneStrings("uWrong2"), correct: false },
+        { text: () => sceneStrings("uWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("isoQ"),
+      options: [
+        { text: () => sceneStrings("iRight"), correct: true },
+        { text: () => sceneStrings("iWrong1"), correct: false },
+        { text: () => sceneStrings("iWrong2"), correct: false },
+        { text: () => sceneStrings("iWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lsQ"),
+      options: [
+        { text: () => sceneStrings("lRight"), correct: true },
+        { text: () => sceneStrings("lWrong1"), correct: false },
+        { text: () => sceneStrings("lWrong2"), correct: false },
+        { text: () => sceneStrings("lWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("retQ"),
+      options: [
+        { text: () => sceneStrings("rRight"), correct: true },
+        { text: () => sceneStrings("rWrong1"), correct: false },
+        { text: () => sceneStrings("rWrong2"), correct: false },
+        { text: () => sceneStrings("rWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("upfQ"),
+      options: [
+        { text: () => sceneStrings("pRight"), correct: true },
+        { text: () => sceneStrings("pWrong1"), correct: false },
+        { text: () => sceneStrings("pWrong2"), correct: false },
+        { text: () => sceneStrings("pWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("vtQ"),
+      options: [
+        { text: () => sceneStrings("vRight"), correct: true },
+        { text: () => sceneStrings("vWrong1"), correct: false },
+        { text: () => sceneStrings("vWrong2"), correct: false },
+        { text: () => sceneStrings("vWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gateVsQ"),
+      options: [
+        { text: () => sceneStrings("gRight"), correct: true },
+        { text: () => sceneStrings("gWrong1"), correct: false },
+        { text: () => sceneStrings("gWrong2"), correct: false },
+        { text: () => sceneStrings("gWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("floatQ"),
+      options: [
+        { text: () => sceneStrings("fRight"), correct: true },
+        { text: () => sceneStrings("fWrong1"), correct: false },
+        { text: () => sceneStrings("fWrong2"), correct: false },
+        { text: () => sceneStrings("fWrong3"), correct: false },
+      ],
+    },
+  ]);
+</script>

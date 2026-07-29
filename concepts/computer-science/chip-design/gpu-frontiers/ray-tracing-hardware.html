@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Ray-Tracing Hardware</primer-title>
+
+    <primer-card>
+      <p>
+        <primer-ref to="computer-science/computer-graphics/ray-tracing">Ray tracing</primer-ref> is the
+        physically honest way to make pictures: follow light, ray by ray, bouncing where it bounces. It is
+        also, from a GPU architect's point of view, a workload designed by an enemy. Everything this course
+        has taught you about what GPUs love — coherent memory streams, warps marching in lock-step, regular
+        tiles of predictable work — ray tracing violates on purpose. Two rays that start as pixel-neighbours
+        bounce off different surfaces and, within one hop, are reading unrelated corners of memory, walking
+        different depths of a pointer-linked tree, and taking different branches. Incoherent access, divergent
+        control flow, pointer chasing: the complete catalogue of GPU poison, and every frame drinks it.
+      </p>
+      <p>
+        For decades the answer was "so don't do it in real time". The modern answer is more interesting:
+        <strong>build fixed-function hardware for exactly the poisonous part, and leave the rest
+        programmable</strong>. That hardware is the <strong>RT core</strong> — and it is the previous
+        module's fixed-versus-programmable split, replayed for light. Just as
+        <primer-ref to="computer-science/chip-design/gpu-frontiers/tensor-cores-and-matrix-engines">tensor
+        cores</primer-ref> carved the matmul out of the shader lanes, RT cores carve out the ray's search for
+        <em>what it hits</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The data structure that makes rays affordable</h2>
+      <p>
+        Testing a ray against every one of a scene's millions of triangles is hopeless — the trick that makes
+        ray tracing possible at all is the <strong>bounding volume hierarchy (BVH)</strong>. Wrap groups of
+        triangles in boxes; wrap groups of boxes in bigger boxes; repeat until one root box holds the scene.
+        A ray now plays twenty-questions: does it hit the root box? If not, <em>the entire scene is ruled out
+        in one test</em>. If yes, test the two child boxes and descend only into the ones hit, pruning whole
+        subtrees at every level, until a small leaf hands over its handful of triangles for exact
+        intersection tests. The cost falls from <em>linear</em> in the triangle count to roughly
+        <em>logarithmic</em>:
+      </p>
+      <primer-math display>\text{tests} \approx O(\log n) \quad \text{instead of} \quad O(n)</primer-math>
+      <p>
+        The BVH itself is <em>built</em> (and, for deforming objects, cheaply <em>refitted</em>) by ordinary
+        compute shaders before rendering — and here lives a classic trade: a carefully optimised tree traces
+        faster but costs more to build, so games lean on fast builds and refits while film renderers spend
+        minutes crafting exquisite trees. A refit keeps the tree's shape and only re-inflates the boxes
+        around moved triangles — cheap, but the boxes grow baggy and traversal slows, so engines rebuild
+        periodically.
+      </p>
+    </primer-card>
+
+    <!-- Figure: a ray descending a 2-D BVH, pruning as it goes. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "bvhTrace": {
+          "title": "A ray walks the BVH: test boxes, descend into hits, prune misses",
+          "stepRoot": "Test the root box: hit — the scene cannot be ruled out, descend",
+          "stepChildren": "Test both children: the left box is hit; the right box MISSES — its whole subtree (6 triangles) is pruned with one test",
+          "stepLeaves": "Inside the left child, test its two leaf boxes: one hit, one miss — pruned again",
+          "stepTris": "Only the surviving leaf's 3 triangles get exact ray-triangle tests: 5 box tests + 3 triangle tests, versus 12 triangle tests brute-force"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Watch one ray do it</h2>
+      <p>
+        Here is the whole idea in two dimensions: twelve triangles, a two-level hierarchy, one ray. Step
+        through the traversal and count the work.
+      </p>
+      <primer-geometry scene="bvhTrace" caption="A 2-D scene of twelve triangles grouped into nested bounding boxes. A ray enters from the left; stepping through shows the root box hit, the right child missed and pruned (greyed out), one leaf pruned, and only three triangles receiving exact intersection tests."></primer-geometry>
+      <p>
+        Five box tests plus three triangle tests instead of twelve triangle tests — modest at this toy scale,
+        but the gap is exponential in scene size: at a million triangles the BVH path costs a few dozen tests
+        where brute force costs a million. <em>Per ray.</em> At millions of rays per frame, the hierarchy is
+        not an optimisation; it is the difference between possible and absurd.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What the RT core actually hardwires</h2>
+      <p>
+        Look at what traversal consists of: ray-versus-box slab tests, ray-versus-triangle intersection
+        maths, and the bookkeeping of a traversal stack (which subtrees are still pending). It is a tight,
+        fixed algorithm with irregular <em>data</em> — precisely the shape of thing that wastes a SIMT
+        machine (every ray on its own path, lanes idling for each other) and precisely the shape of thing a
+        small dedicated circuit does beautifully. So each SM gains an <strong>RT core</strong>: a
+        fixed-function unit that, handed a ray, <em>autonomously</em> walks the BVH — fetching nodes, running
+        box tests, managing its own stack, running exact ray-triangle tests at the leaves — and returns the
+        answer: <em>you hit this triangle, at this distance, with these barycentrics</em>.
+      </p>
+      <p>
+        Meanwhile the SIMT lanes do what they are good at: <strong>shading</strong> the hit — running the
+        programmable material code, deciding what colour that surface contributes, and possibly spawning new
+        rays. The division of labour is the module's recurring pattern:
+      </p>
+      <primer-theorem name="The RT core split">
+        <ul>
+          <li><strong>fixed-function</strong>: BVH traversal — box tests, traversal-stack management, and
+            exact ray-triangle intersection — one autonomous unit per SM;</li>
+          <li><strong>programmable</strong>: shading the hit point, material logic, and deciding which rays
+            to cast next — on the ordinary SIMT lanes;</li>
+          <li>the BVH is <strong>built and refitted by compute</strong>, traded between build cost and
+            traversal quality;</li>
+          <li>the RT core finds <em>what a ray hits</em>; it says nothing about <em>what that hit looks
+            like</em>.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Notice how the poison list has been neutralised rather than cured: the pointer chasing and divergent
+        tree-walking still happen — but inside a little machine built for them, off the critical path of the
+        warps, which stay busy shading whatever hits come back.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Count it yourself</h2>
+      <p>
+        This demo builds a tiny two-level BVH over a triangle set and traces rays both ways, counting
+        intersection tests. The geometry is 2-D and the "triangle test" is a bounding-box check — the
+        counting, which is the point, is faithful.
+      </p>
+      <primer-code run>
+        // A 2-D "triangle" is just its bounding box here; tests are what we count.
+        interface Box { x0: number; y0: number; x1: number; y1: number; }
+
+        function rayHitsBox(ox: number, oy: number, dx: number, dy: number, b: Box): boolean {
+          // Slab test: interval of t where the ray is inside the box on each axis.
+          let t0 = -Infinity, t1 = Infinity;
+          if (dx !== 0) {
+            const a = (b.x0 - ox) / dx, c = (b.x1 - ox) / dx;
+            t0 = Math.max(t0, Math.min(a, c)); t1 = Math.min(t1, Math.max(a, c));
+          } else if (ox &lt; b.x0 || ox &gt; b.x1) return false;
+          if (dy !== 0) {
+            const a = (b.y0 - oy) / dy, c = (b.y1 - oy) / dy;
+            t0 = Math.max(t0, Math.min(a, c)); t1 = Math.min(t1, Math.max(a, c));
+          } else if (oy &lt; b.y0 || oy &gt; b.y1) return false;
+          return t1 &gt;= Math.max(t0, 0);
+        }
+
+        // 12 triangles in 4 spatial clusters of 3.
+        const tris: Box[] = [];
+        const clusters = [[1, 8], [3, 6], [11, 2], [13, 4]];
+        for (const [cx, cy] of clusters)
+          for (let i = 0; i &lt; 3; i++)
+            tris.push({ x0: cx + i * 0.6, y0: cy, x1: cx + i * 0.6 + 0.5, y1: cy + 0.5 });
+
+        const wrap = (list: Box[]): Box => ({
+          x0: Math.min(...list.map(b =&gt; b.x0)), y0: Math.min(...list.map(b =&gt; b.y0)),
+          x1: Math.max(...list.map(b =&gt; b.x1)), y1: Math.max(...list.map(b =&gt; b.y1)),
+        });
+        // Two-level BVH: root -> 2 children -> 2 leaves each -> 3 triangles.
+        const leaves = [0, 1, 2, 3].map(i =&gt; tris.slice(i * 3, i * 3 + 3));
+        const leafBoxes = leaves.map(wrap);
+        const childBoxes = [wrap(leafBoxes.slice(0, 2)), wrap(leafBoxes.slice(2))];
+        const root = wrap(childBoxes);
+
+        function trace(ox: number, oy: number, dx: number, dy: number) {
+          let brute = 0, boxTests = 0, triTests = 0;
+          for (const t of tris) { brute++; rayHitsBox(ox, oy, dx, dy, t); }
+          boxTests++;                                        // root
+          if (rayHitsBox(ox, oy, dx, dy, root))
+            for (let c = 0; c &lt; 2; c++) {
+              boxTests++;                                    // child
+              if (!rayHitsBox(ox, oy, dx, dy, childBoxes[c])) continue;
+              for (let l = 0; l &lt; 2; l++) {
+                boxTests++;                                  // leaf
+                if (!rayHitsBox(ox, oy, dx, dy, leafBoxes[c * 2 + l])) continue;
+                for (const t of leaves[c * 2 + l]) { triTests++; rayHitsBox(ox, oy, dx, dy, t); }
+              }
+            }
+          console.log(`ray (${ox},${oy})->(${dx},${dy}):  brute ${brute} tri tests   |` +
+                      `  BVH ${boxTests} box + ${triTests} tri = ${boxTests + triTests}`);
+        }
+
+        trace(0, 8.2, 1, 0);      // skims the top cluster
+        trace(0, 2.2, 1, 0.1);    // heads for the bottom-right clusters
+        trace(0, 12, 1, 0);       // misses everything: ONE box test settles it
+      </primer-code>
+      <p>
+        The third ray is the quiet superstar: it misses the scene, and the BVH proves it with a single root
+        test where brute force ground through all twelve. Real scenes push the same ratios out to millions.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The hybrid reality, and the next frontier</h2>
+      <p>
+        No shipping game traces every ray for every pixel. The economical recipe is <strong>hybrid
+        rendering</strong>: rasterise primary visibility the classic way (it is coherent and cheap), then
+        spend rays only where rasterisation lies — shadows, reflections, global illumination — at a frugal
+        budget of one-ish rays per pixel, and let a <strong>denoiser</strong> (increasingly a neural one,
+        running on the tensor cores next door) hallucinate the smooth image a thousand rays would have given.
+        Denoising is not a garnish; it is the enabler that makes single-sample ray budgets look like film.
+      </p>
+      <p>
+        And the frontier is exactly where you would guess: <em>coherence</em>. Secondary rays arrive in
+        scrambled order, so the newest hardware and APIs experiment with <strong>ray reordering</strong> —
+        binning in-flight rays by direction and position, so that rays walking the same part of the BVH run
+        together and the memory system sees streams again instead of noise. It is the oldest GPU lesson,
+        applied to the newest workload: if the work will not arrive coherent, <em>sort it until it is</em>.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why is a box test so much cheaper than it looks?">
+      <p>
+        A ray-box "slab test" needs no trigonometry and no square roots: for each axis, two subtractions and
+        two multiplies (by a precomputed reciprocal of the ray direction) give the interval of the ray that
+        lies between the box's two planes; intersect the intervals and you are done. Six multiplies, a
+        handful of min/max operations — no divides in the inner loop, no branches worth the name. It
+        pipelines perfectly, which is exactly why it can be etched into fixed-function silicon that runs
+        several tests per clock. The exact ray-triangle test is only modestly dearer. The expensive part of
+        ray tracing was never the geometry maths — it is the <em>memory system</em> serving a million rays
+        that each want a different branch of the tree. That is the wall the RT core's autonomous traversal
+        (and ray reordering) is really built against.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! RT cores find the hit — they don't shade it">
+      <p>
+        "Add more RT cores" only speeds up the part of the frame that was <em>finding intersections</em>. A
+        scene bound by expensive material shaders sees almost nothing from beefier traversal hardware — the
+        SIMT lanes were the bottleneck all along. A scene bound by incoherent secondary-ray memory traffic
+        is throttled by the cache and DRAM system, and again more box-test throughput barely moves the
+        needle. Before you buy (or design!) silicon, profile <em>which wall you are on</em>: traversal-bound,
+        shading-bound, or bandwidth-bound frames call for three different fixes, and only the first one is
+        "more RT cores". Hardware design is diagnosis before prescription — the accelerator you need is the
+        one aimed at your actual bottleneck.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: test-count arithmetic, BVH role, hybrid classification, divergence reasoning. Bank of 12, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "rtHardwareQuiz@1": {
+          "intro": "BVH: nested boxes turn a ray's hit search from O(n) triangle tests into ~O(log n). RT cores hardwire traversal + intersection; shading stays on the SIMT lanes.",
+          "bruteQ": "A brute-force tracer tests every triangle for every ray. For {n} triangles and {r} rays, how many ray-triangle tests?",
+          "bvhQ": "A ray descends a balanced BVH for {d} levels, testing 2 child boxes at each level, then runs {t} exact triangle tests in the surviving leaf. How many intersection tests in total?",
+          "depthQ": "A perfectly balanced binary BVH has {n} leaf boxes. How many levels deep is it (log₂ of {n})?",
+          "ratioQ": "For one ray, brute force costs {n} triangle tests; the BVH path costs {b} tests. How many times fewer tests is the BVH path?",
+          "roleQ": "What work does an RT core hardwire?",
+          "roleFixed": "BVH traversal — box tests, stack management — plus exact ray-triangle intersection",
+          "roleShade": "Material shading and lighting maths",
+          "roleBuild": "Compiling shaders for ray tracing",
+          "roleDenoise": "Denoising the final image",
+          "splitQ": "In the RT-core division of labour, what stays on the programmable SIMT lanes?",
+          "spShade": "Shading the hit point — material code, colour, and spawning further rays",
+          "spBox": "The ray-box slab tests",
+          "spStack": "The traversal stack bookkeeping",
+          "spTri": "The exact ray-triangle intersection",
+          "divQ": "Why do neighbouring rays wreck SIMT efficiency after one bounce?",
+          "dPaths": "They hit different surfaces and then walk different BVH paths and unrelated memory — divergent branches and incoherent access",
+          "dSlow": "Rays move at different physical speeds",
+          "dPrec": "Ray maths needs FP64, which GPUs lack",
+          "dCount": "There are more rays than lanes",
+          "hybridQ": "In hybrid rendering, which stage is typically still rasterised?",
+          "hPrimary": "Primary visibility — what each pixel sees first — with rays reserved for shadows, reflections and GI",
+          "hShadow": "Shadows — rasterisation computes them exactly",
+          "hGi": "Global illumination — it is cheap to rasterise",
+          "hNone": "Nothing — hybrid means all rays, half resolution",
+          "denoiseQ": "What role does denoising play in real-time ray tracing?",
+          "dnBudget": "It makes ~1-ray-per-pixel budgets look like thousands of rays — the enabler of real-time tracing",
+          "dnSharp": "It sharpens textures after upscaling",
+          "dnBvh": "It removes noise from the BVH build",
+          "dnAudio": "It filters audio artefacts",
+          "refitQ": "For a deforming character, a BVH refit (rather than a full rebuild)…",
+          "rfCheap": "is cheap — the tree keeps its shape and boxes re-inflate — but quality degrades until a periodic rebuild",
+          "rfFree": "is free and produces a perfect tree every frame",
+          "rfGpu": "must run on the CPU only",
+          "rfNever": "is impossible; deforming objects cannot be traced",
+          "wallQ": "A frame is bound by expensive material shaders. What will doubling the RT cores do?",
+          "wlLittle": "Almost nothing — the SIMT lanes doing shading are the bottleneck, not traversal",
+          "wlDouble": "Double the frame rate",
+          "wlMem": "Halve memory traffic",
+          "wlNoise": "Remove the need for denoising",
+          "reorderQ": "Ray reordering / coherence sorting speeds up tracing by…",
+          "roGroup": "binning rays by direction and position so rays walking the same part of the BVH run together — coherent memory streams again",
+          "roFewer": "casting fewer rays in total",
+          "roSkip": "skipping the BVH entirely",
+          "roClock": "raising the RT core's clock frequency"
+        }
+      }
+    </script>
+
+    <primer-quiz name="rtHardwareQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/gpu-frontiers/tensor-cores-and-matrix-engines",
+      "computer-science/computer-graphics/ray-tracing"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<!-- The 2-D BVH traversal figure + the randomised quiz. All colours from the theme. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "bvhTrace",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, color, w = 2, dash = 0) =>
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillOpacity: 0, fixed: true, highlight: false, vertices: { visible: false },
+          borders: { strokeColor: color, strokeWidth: w, dash, highlight: false },
+        });
+      const tri = (x, y, color) =>
+        board.create("polygon", [[x, y], [x + 0.55, y], [x + 0.28, y + 0.5]], {
+          fillColor: color, fillOpacity: 0.35, fixed: true, highlight: false,
+          vertices: { visible: false }, borders: { strokeColor: color, strokeWidth: 1.5, highlight: false },
+        });
+      const T = (x, y, txt, color, size = 12) =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: size, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+
+      // ── Base: 12 triangles in 4 clusters + the ray. Always visible. ──
+      // Left child region: clusters L1 (upper) and L2 (lower). Right child: R1, R2.
+      const clusters = [
+        { x: 1.0, y: 6.2 },  // L1 — the ray will hit this leaf
+        { x: 1.4, y: 3.2 },  // L2
+        { x: 6.6, y: 5.8 },  // R1
+        { x: 7.0, y: 2.6 },  // R2
+      ];
+      for (const { x, y } of clusters)
+        for (let i = 0; i < 3; i++) tri(x + i * 0.75, y, colors.cat[0]);
+      // The ray: enters left, travels through the L1 cluster's height.
+      board.create("arrow", [[-1.4, 6.55], [10.6, 6.15]], {
+        strokeColor: colors.cat[3], strokeWidth: 2.5, fixed: true, highlight: false,
+      });
+      T(-1.15, 7.0, "ray", colors.cat[3], 13);
+
+      // Leaf / child / root extents.
+      const L1 = [0.8, 5.9, 3.5, 7.0], L2 = [1.2, 2.9, 3.9, 4.0];
+      const R1 = [6.4, 5.5, 9.1, 6.6], R2 = [6.8, 2.3, 9.5, 3.4];
+      const CL = [0.6, 2.7, 4.1, 7.2], CR = [6.2, 2.1, 9.7, 6.8];
+      const ROOT = [0.4, 1.9, 9.9, 7.4];
+
+      // Step 1: root box — hit.
+      step(sceneStrings("stepRoot"), () => {
+        box(...ROOT, colors.cat[1], 2.5);
+        T(5.1, 7.7, "root: HIT (1 box test)", colors.cat[1], 12);
+      });
+
+      // Step 2: children — left hit, right pruned.
+      step(sceneStrings("stepChildren"), () => {
+        box(...CL, colors.cat[2], 2.5);
+        box(...CR, colors.line, 1.5, 2);
+        T(2.35, 2.3, "left: HIT", colors.cat[2], 12);
+        T(7.95, 1.7, "right: MISS — subtree pruned", colors.line, 12);
+      });
+
+      // Step 3: leaves of the left child — L1 hit, L2 pruned.
+      step(sceneStrings("stepLeaves"), () => {
+        box(...L1, colors.cat[4], 2.5);
+        box(...L2, colors.line, 1.5, 2);
+        T(2.55, 4.35, "leaf: miss — pruned", colors.line, 11);
+      });
+
+      // Step 4: exact triangle tests in the surviving leaf.
+      step(sceneStrings("stepTris"), () => {
+        const { x, y } = clusters[0];
+        for (let i = 0; i < 3; i++) {
+          board.create("polygon", [[x + i * 0.75, y], [x + i * 0.75 + 0.55, y], [x + i * 0.75 + 0.28, y + 0.5]], {
+            fillColor: colors.cat[3], fillOpacity: 0.55, fixed: true, highlight: false,
+            vertices: { visible: false }, borders: { strokeColor: colors.cat[3], strokeWidth: 2, highlight: false },
+          });
+        }
+        T(5.1, 0.9, "5 box tests + 3 triangle tests  vs  12 brute-force triangle tests", colors.ink, 13);
+      });
+    },
+    { boundingbox: [-2.0, 8.3, 11.0, 0.3], title: () => makeStrings("bvhTrace")("title") },
+  );
+
+  registerQuiz("rtHardwareQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("bruteQ", v),
+      variables: "n=[200,500,800,1000] r=[2:9]",
+      answer: (v) => v.n * v.r,
+      keyboard: "geometry-lengths",
+    },
+    {
+      prompt: (v) => sceneStrings("bvhQ", v),
+      variables: "d=[3:8] t=[2:6]",
+      answer: (v) => 2 * v.d + v.t,
+      keyboard: "geometry-lengths",
+    },
+    {
+      prompt: (v) => sceneStrings("depthQ", v),
+      variables: "n=[64,256,1024,4096]",
+      answer: (v) => Math.log2(v.n),
+      keyboard: "geometry-lengths",
+    },
+    {
+      prompt: (v) => sceneStrings("ratioQ", v),
+      variables: "n=[1000,2000,4000] b=[10,20,40,50]",
+      answer: (v) => v.n / v.b,
+      keyboard: "geometry-lengths",
+    },
+    {
+      prompt: () => sceneStrings("roleQ"),
+      options: [
+        { text: () => sceneStrings("roleFixed"), correct: true },
+        { text: () => sceneStrings("roleShade"), correct: false },
+        { text: () => sceneStrings("roleBuild"), correct: false },
+        { text: () => sceneStrings("roleDenoise"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("splitQ"),
+      options: [
+        { text: () => sceneStrings("spShade"), correct: true },
+        { text: () => sceneStrings("spBox"), correct: false },
+        { text: () => sceneStrings("spStack"), correct: false },
+        { text: () => sceneStrings("spTri"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("divQ"),
+      options: [
+        { text: () => sceneStrings("dPaths"), correct: true },
+        { text: () => sceneStrings("dSlow"), correct: false },
+        { text: () => sceneStrings("dPrec"), correct: false },
+        { text: () => sceneStrings("dCount"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hybridQ"),
+      options: [
+        { text: () => sceneStrings("hPrimary"), correct: true },
+        { text: () => sceneStrings("hShadow"), correct: false },
+        { text: () => sceneStrings("hGi"), correct: false },
+        { text: () => sceneStrings("hNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("denoiseQ"),
+      options: [
+        { text: () => sceneStrings("dnBudget"), correct: true },
+        { text: () => sceneStrings("dnSharp"), correct: false },
+        { text: () => sceneStrings("dnBvh"), correct: false },
+        { text: () => sceneStrings("dnAudio"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("refitQ"),
+      options: [
+        { text: () => sceneStrings("rfCheap"), correct: true },
+        { text: () => sceneStrings("rfFree"), correct: false },
+        { text: () => sceneStrings("rfGpu"), correct: false },
+        { text: () => sceneStrings("rfNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("wallQ"),
+      options: [
+        { text: () => sceneStrings("wlLittle"), correct: true },
+        { text: () => sceneStrings("wlDouble"), correct: false },
+        { text: () => sceneStrings("wlMem"), correct: false },
+        { text: () => sceneStrings("wlNoise"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("reorderQ"),
+      options: [
+        { text: () => sceneStrings("roGroup"), correct: true },
+        { text: () => sceneStrings("roFewer"), correct: false },
+        { text: () => sceneStrings("roSkip"), correct: false },
+        { text: () => sceneStrings("roClock"), correct: false },
+      ],
+    },
+  ]);
+</script>

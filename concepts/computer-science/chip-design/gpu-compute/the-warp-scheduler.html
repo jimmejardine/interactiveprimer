@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>The Warp Scheduler</primer-title>
+
+    <primer-card>
+      <p>
+        Strip away everything else and a GPU's magic trick is performed by one small circuit, four times
+        per SM: the <strong>warp scheduler</strong>. Its job description fits in a sentence — <em>every
+        cycle, look at your dozen resident warps, pick one that is ready, and issue its next
+        instruction</em> — and that sentence is the entire mechanism of latency hiding. While one warp
+        waits three hundred cycles for DRAM, the scheduler simply keeps dealing instructions from the
+        others. No prediction, no out-of-order window, no cleverness about any single thread: just always
+        having <em>someone else</em> to run. This lesson is the heartbeat of the
+        <primer-ref to="computer-science/chip-design/gpu-compute/the-streaming-multiprocessor">SM</primer-ref>,
+        slowed down until you can see every tick.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Ready or not: the scoreboard</h2>
+      <p>
+        "Pick a <em>ready</em> warp" does all the work in that sentence, so what makes a warp ready? The
+        scheduler keeps a <strong>scoreboard</strong> — a little table of per-warp dependency state. A warp
+        is <em>not ready</em> when:
+      </p>
+      <ul>
+        <li>its next instruction needs a value from a <strong>load that hasn't returned</strong> yet (the
+          scoreboard marks the destination register "in flight" at issue and clears it when the data
+          arrives — possibly hundreds of cycles later);</li>
+        <li>it is waiting on a slow arithmetic result still in the pipeline;</li>
+        <li>the <strong>execution unit it needs is busy</strong> — the FP32 lanes, an SFU, a load/store
+          port — or it's parked at a barrier waiting for other warps.</li>
+      </ul>
+      <p>
+        Everyone else is fair game. Among the ready warps, real schedulers use simple policies:
+        <strong>loose round-robin</strong> (rotate through ready warps, keeping everyone moving evenly) or
+        <strong>greedy-then-oldest</strong> (keep issuing from the <em>same</em> warp until it stalls —
+        friendlier to its cache lines — then fall back to the oldest ready warp). Nothing fancier fits: the
+        decision must be made <em>every single cycle</em>, so it has to be almost free.
+      </p>
+      <primer-theorem name="The warp scheduler">
+        <ul>
+          <li>each cycle, each scheduler picks <strong>one ready warp</strong> and issues its next
+            instruction to an execution unit;</li>
+          <li><strong>scoreboarding</strong> tracks per-warp readiness: outstanding loads, pipeline
+            results, busy units;</li>
+          <li>switching warps costs <strong>zero cycles</strong>, because every resident warp's state
+            already lives in the register file;</li>
+          <li>latency is hidden by <strong>interleaving</strong>: enough ready warps ⇒ the issue slot never
+            goes idle.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The zero-cost context switch</h2>
+      <p>
+        Here is the trick that separates a GPU from every CPU threading scheme. When an operating system
+        switches threads, it <em>saves</em> one thread's registers to memory and <em>restores</em>
+        another's — thousands of cycles. When a CPU core with
+        <primer-ref to="computer-science/computer-architecture/multicore/simultaneous-multithreading">simultaneous
+        multithreading</primer-ref> switches between its two hardware threads, it avoids the save/restore
+        by keeping both threads' registers on-chip — the GPU's cousin, at width two. The SM takes that idea
+        to its logical extreme: <strong>all 48–64 resident warps' registers live permanently in the
+        register file</strong>. Nothing is ever saved or restored. "Switching" from warp 3 to warp 7 means
+        the scheduler's mux selects a different row of state — it is literally just <em>issuing a different
+        warp's instruction next cycle</em>. Free.
+      </p>
+      <p>
+        That's why the previous lesson made such a fuss about the SM <em>housing</em> its warps. The
+        multitude isn't kept anywhere convenient — it is wired directly into the machine, so that the
+        scheduler can flick between threads at cycle granularity. A CPU hides memory latency with caches
+        and out-of-order magic; the SM hides it by having the next warp's instruction ready before the
+        stalled warp has even finished stalling.
+      </p>
+    </primer-card>
+
+    <!-- Stepped cycle-grid of the worked schedule. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "schedGrid": {
+          "title": "Four warps hide an 8-cycle memory latency (C = compute, M = load)",
+          "stepW0": "Warp 0 alone: two issues, then an 8-cycle wait for its load — the issue slot sits idle",
+          "stepRest": "Warps 1–3 fill the empty cycles: the scheduler rotates through ready warps",
+          "stepBubble": "Cycles 8–11: every warp is waiting on memory — a 4-cycle bubble that 8 warps would fill",
+          "warpRow": "W",
+          "cycleAxis": "cycle",
+          "bubble": "all warps waiting"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Worked example: scheduling four warps by hand</h2>
+      <p>
+        Give every warp the same little program, over and over: one compute instruction
+        <strong>C</strong>, then a load <strong>M</strong> whose result the next C needs. A load's data
+        returns <strong>8 cycles</strong> after issue; the scheduler issues one instruction per cycle,
+        loose round-robin. With <strong>one warp</strong> the story is grim: it issues C, issues M, then
+        the scoreboard blocks it for 8 cycles — two busy cycles out of every nine,
+        <primer-math>\approx 22\%</primer-math> utilisation. Now watch <strong>four warps</strong>:
+      </p>
+      <primer-geometry scene="schedGrid" caption="A grid with one row per warp (W0 to W3) and one column per cycle (0 to 11). Warp 0 issues C at cycle 0 and M at cycle 4, then waits. Warps 1, 2 and 3 issue their C at cycles 1 to 3 and their M at cycles 5 to 7. Cycles 8 to 11 are an idle bubble in which every warp is waiting on its load."></primer-geometry>
+      <p>
+        Cycles 0–3: everyone's C. Cycles 4–7: everyone's M. Then the bubble — cycles 8–11 have no ready
+        warp, because warp 0's load (issued at cycle 4) only returns at cycle 12. Steady state: 8 issues
+        every 12 cycles, <primer-math>67\%</primer-math> utilisation. With <strong>eight warps</strong> the
+        bubble vanishes entirely — by the time warp 7 has issued its load, warp 0's data is back:
+        <primer-math>100\%</primer-math>. Same code, same latency; the only thing that changed is how much
+        <em>other work</em> the scheduler could deal while the memory system did its slow thing. That is
+        "latency hiding" at instruction level: nothing is faster, it is merely <strong>interleaved</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The scheduler in the simulator</h2>
+      <p>
+        Our two-phase pattern — settle, then snap — fits the scheduler perfectly: settling is scanning the
+        scoreboard for a ready warp; snapping is committing the issue and updating that warp's state. Here
+        is the whole thing, running the worked example for 1, 4 and 8 warps:
+      </p>
+      <primer-code run>
+        // A warp alternates: compute C (ready next cycle), load M (dependent instr ready after LATENCY).
+        interface Warp { id: number; nextIsLoad: boolean; readyAt: number }
+        const LATENCY = 8;
+
+        function simulate(numWarps: number, cycles: number, trace: boolean): number {
+          const warps: Warp[] = [];
+          for (let id = 0; id &lt; numWarps; id++) warps.push({ id, nextIsLoad: false, readyAt: 0 });
+          let rr = 0, issued = 0, line = "";
+
+          for (let c = 0; c &lt; cycles; c++) {
+            // settle: scan round-robin for the first READY warp (the scoreboard check)
+            let pick = -1;
+            for (let k = 0; k &lt; numWarps; k++) {
+              const w = warps[(rr + k) % numWarps];
+              if (w.readyAt &lt;= c) { pick = w.id; break; }
+            }
+            // snap: commit the issue and update that warp's scoreboard entry
+            if (pick &gt;= 0) {
+              const w = warps[pick];
+              line += w.nextIsLoad ? `M${w.id} ` : `C${w.id} `;
+              w.readyAt = w.nextIsLoad ? c + LATENCY : c + 1;
+              w.nextIsLoad = !w.nextIsLoad;
+              rr = (pick + 1) % numWarps;
+              issued++;
+            } else line += "--- ";   // no ready warp: the issue slot goes idle
+          }
+          if (trace) console.log(`  cycles 0..${cycles - 1}:  ${line}`);
+          return issued / cycles;
+        }
+
+        console.log("4 warps, first 12 cycles (Cn/Mn = warp n issues, --- = stall):");
+        simulate(4, 12, true);
+        console.log("");
+        for (const n of [1, 4, 8]) {
+          const u = simulate(n, 216, false);
+          console.log(`${n} warp(s): utilisation ${(u * 100).toFixed(0)}%`);
+        }
+      </primer-code>
+      <p>
+        Change <code>LATENCY</code> to 16 and watch 8 warps stop being enough — the required warp count
+        scales with the latency to be covered. That relationship gets its own capstone lesson at the end of
+        this module, under the name <em>occupancy</em>.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Who invented the scoreboard?">
+      <p>
+        Seymour Cray did — in 1964, for the CDC 6600, the first machine anyone called a supercomputer. Its
+        "scoreboard" was a unit that tracked which registers were waiting on which functional units so the
+        machine could keep issuing independent instructions instead of stalling — dependency tracking in
+        hardware, sixty years before your GPU. The CDC 6600 used it to keep <em>one</em> instruction stream
+        busy across ten functional units; an SM uses the same bookkeeping to juggle <em>dozens of warps</em>
+        across its lanes. Computer architecture recycles its best ideas: the scoreboard, born to extract
+        parallelism <em>within</em> a thread, was reborn as the referee <em>between</em> threads.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! More warps is not always better">
+      <p>
+        If 8 warps beat 4, surely 48 beat 8? No — once the latency is covered, utilisation is already 100%
+        and extra warps hide <em>nothing more</em>. They aren't free, either: every additional resident
+        warp takes its slice of the register file and dilutes each warp's share of the L1 and shared
+        memory, which can make the memory behaviour <em>worse</em>. Resident-warp count (occupancy) is a
+        <strong>means</strong> — the goal is <em>hidden latency</em>, and past the covering threshold you
+        are paying real resources for zero benefit. Keep this instinct warm: the final lesson of this
+        module turns it into an engineering method.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: RR schedule prediction, utilisation arithmetic, scoreboard + zero-cost switch reasoning. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "warpSchedQuiz@1": {
+          "intro": "Each cycle: pick one READY warp (scoreboard), issue one instruction. Warp state stays in the register file, so switching is free.",
+          "rrQ": "Four warps are all always ready. A strict round-robin scheduler issues warp 0 at cycle 0, warp 1 at cycle 1, and so on. Which warp issues at cycle {c}?",
+          "utilQ": "Each warp issues {i} instructions back-to-back, then waits {L} cycles for a load. With {w} resident warps and one issue per cycle, what is the steady-state issue-slot utilisation, in percent?",
+          "hideQ": "Each warp issues {i} instructions back-to-back, then waits {L} cycles for a load. How many resident warps (including the stalled one) are needed to keep the issue slot 100% busy?",
+          "oneWarpQ": "A single warp issues {i} instructions back-to-back, then waits {L} cycles for its load. What percentage of cycles does the issue slot stay busy?",
+          "earliestQ": "A warp issues a load at cycle {t}; the result returns {L} cycles later. What is the earliest cycle at which the instruction that uses the result can issue?",
+          "sbQ": "Which of these makes a warp NOT ready in the scoreboard?",
+          "sbA": "Its next instruction needs the result of a load that has not returned yet",
+          "sbB": "It has more than 16 registers allocated",
+          "sbC": "Another warp in the SM is also ready",
+          "sbD": "Its thread block index is odd",
+          "zeroQ": "Why does switching from one warp to another cost zero cycles on an SM?",
+          "zA": "Every resident warp's registers and program counter already live on-chip in the register file — nothing is saved or restored",
+          "zB": "The SM copies the warp's registers to DRAM using a spare memory port",
+          "zC": "Warps share a single set of registers, so there is nothing to switch",
+          "zD": "The compiler inserts special switch instructions that take zero time",
+          "gtoQ": "A greedy-then-oldest (GTO) scheduler…",
+          "gtoA": "keeps issuing from the same warp until it stalls, then switches to the oldest ready warp",
+          "gtoB": "always issues from the newest warp",
+          "gtoC": "picks a warp uniformly at random each cycle",
+          "gtoD": "issues from all warps simultaneously",
+          "smtQ": "What does the warp scheduler share with simultaneous multithreading (SMT) on a CPU?",
+          "smtA": "Both keep multiple hardware thread contexts resident on-chip and pick among the ready ones each cycle",
+          "smtB": "Both rely on the operating system to save and restore registers",
+          "smtC": "Both require exactly two threads",
+          "smtD": "Both use out-of-order execution to reorder one thread's instructions",
+          "beyondQ": "Utilisation is already 100% with 8 resident warps. What does raising residency to 32 warps do?",
+          "bA": "Nothing for latency hiding — it just shrinks each warp's share of the register file and cache",
+          "bB": "It quadruples the throughput",
+          "bC": "It reduces the memory latency itself",
+          "bD": "It lets each warp run at a higher clock frequency",
+          "ilQ": "At instruction level, \"latency hiding\" on an SM is really…",
+          "ilA": "interleaving: the issue stream weaves together independent warps' instructions so the slot never idles during a stall",
+          "ilB": "speculation: the scheduler guesses the loaded value and continues",
+          "ilC": "compression: instructions are made shorter so they finish sooner",
+          "ilD": "acceleration: stalled warps are moved to a faster SM",
+          "policyQ": "Why do warp schedulers use such simple policies (round-robin, greedy-then-oldest)?",
+          "pA": "The decision must be made every single cycle, so it has to be nearly free in time and hardware",
+          "pB": "Complex policies are patented",
+          "pC": "Warps must be issued in alphabetical order",
+          "pD": "The policy only runs once per kernel launch"
+        }
+      }
+    </script>
+
+    <primer-quiz name="warpSchedQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/gpu-compute/the-streaming-multiprocessor",
+      "computer-science/computer-architecture/multicore/simultaneous-multithreading"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The worked schedule as a cycle grid: rows = warps, columns = cycles. ──
+  registerGeometryScene(
+    "schedGrid",
+    ({ board, colors, step, sceneStrings }) => {
+      const CELL = 1, X0 = 1.2, Y0 = 0.6, CYCLES = 12, WARPS = 4;
+      const txt = (x, y, s, color, fs = 11, bold = false) =>
+        board.create("text", [x, y, s], {
+          strokeColor: color, fontSize: fs, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: bold ? "font-weight:600" : "",
+        });
+      const cell = (cyc, warp, fill, opacity) =>
+        board.create(
+          "polygon",
+          [
+            [X0 + cyc * CELL + 0.06, Y0 + (WARPS - 1 - warp) * CELL + 0.06],
+            [X0 + (cyc + 1) * CELL - 0.06, Y0 + (WARPS - 1 - warp) * CELL + 0.06],
+            [X0 + (cyc + 1) * CELL - 0.06, Y0 + (WARPS - warp) * CELL - 0.06],
+            [X0 + cyc * CELL + 0.06, Y0 + (WARPS - warp) * CELL - 0.06],
+          ],
+          {
+            fillColor: fill, fillOpacity: opacity, strokeColor: colors.line, strokeWidth: 1,
+            fixed: true, highlight: false, vertices: { visible: false },
+            borders: { strokeColor: colors.line, highlight: false },
+          },
+        );
+      const mark = (cyc, warp, s, color) =>
+        txt(X0 + cyc * CELL + 0.5, Y0 + (WARPS - 1 - warp) * CELL + 0.5, s, color, 12, true);
+
+      // Base: axes labels and the empty grid.
+      for (let w = 0; w < WARPS; w++)
+        txt(X0 - 0.55, Y0 + (WARPS - 1 - w) * CELL + 0.5, sceneStrings("warpRow") + w, colors.ink, 12, true);
+      for (let c = 0; c < CYCLES; c++) {
+        txt(X0 + c * CELL + 0.5, Y0 + WARPS * CELL + 0.4, String(c), colors.ink, 10);
+        for (let w = 0; w < WARPS; w++) cell(c, w, colors.bg, 0);
+      }
+      txt(X0 + (CYCLES * CELL) / 2, Y0 + WARPS * CELL + 1.0, sceneStrings("cycleAxis"), colors.ink, 11);
+
+      // Step 1: warp 0 alone — C at 0, M at 4, then waiting.
+      step(sceneStrings("stepW0"), () => {
+        cell(0, 0, colors.cat[0], 0.45); mark(0, 0, "C", colors.ink);
+        cell(4, 0, colors.cat[1], 0.45); mark(4, 0, "M", colors.ink);
+      });
+
+      // Step 2: warps 1–3 fill the round-robin slots.
+      step(sceneStrings("stepRest"), () => {
+        for (let w = 1; w < WARPS; w++) {
+          cell(w, w, colors.cat[0], 0.45); mark(w, w, "C", colors.ink);
+          cell(4 + w, w, colors.cat[1], 0.45); mark(4 + w, w, "M", colors.ink);
+        }
+      });
+
+      // Step 3: the bubble — cycles 8–11, nobody ready.
+      step(sceneStrings("stepBubble"), () => {
+        for (let c = 8; c < 12; c++)
+          for (let w = 0; w < WARPS; w++) cell(c, w, colors.cat[3], 0.18);
+        txt(X0 + 10 * CELL, Y0 - 0.45, sceneStrings("bubble"), colors.cat[3], 11, true);
+      });
+    },
+    { boundingbox: [-0.2, 6.6, 14.2, -0.6], keepAspect: false, title: () => makeStrings("schedGrid")("title") },
+  );
+
+  registerQuiz("warpSchedQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Round-robin prediction: warp = c mod 4.
+      prompt: (v) => sceneStrings("rrQ", v),
+      variables: "c=[5:30]",
+      answer: "c % 4",
+    },
+    {
+      // Utilisation % = min(100, 100·w·i/(i+L)) with L = i·k so it's always an integer.
+      prompt: (v) => sceneStrings("utilQ", { ...v, L: v.i * v.k }),
+      variables: "i=[2,4] k=[4,9] w=[1:5]",
+      answer: (v) => Math.min(100, (100 * v.w) / (1 + v.k)),
+    },
+    {
+      // Warps for full hiding: w·i ≥ i+L → 1+k.
+      prompt: (v) => sceneStrings("hideQ", { ...v, L: v.i * v.k }),
+      variables: "i=[2,4] k=[3,4,9]",
+      answer: (v) => 1 + v.k,
+    },
+    {
+      // One warp: 100/(1+k) %.
+      prompt: (v) => sceneStrings("oneWarpQ", { ...v, L: v.i * v.k }),
+      variables: "i=[2,4] k=[4,9]",
+      answer: (v) => 100 / (1 + v.k),
+    },
+    {
+      // Earliest dependent issue = t + L.
+      prompt: (v) => sceneStrings("earliestQ", v),
+      variables: "t=[3:20] L=[8,16,32]",
+      answer: "t + L",
+    },
+    {
+      prompt: () => sceneStrings("sbQ"),
+      options: [
+        { text: () => sceneStrings("sbA"), correct: true },
+        { text: () => sceneStrings("sbB"), correct: false },
+        { text: () => sceneStrings("sbC"), correct: false },
+        { text: () => sceneStrings("sbD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("zeroQ"),
+      options: [
+        { text: () => sceneStrings("zA"), correct: true },
+        { text: () => sceneStrings("zB"), correct: false },
+        { text: () => sceneStrings("zC"), correct: false },
+        { text: () => sceneStrings("zD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gtoQ"),
+      options: [
+        { text: () => sceneStrings("gtoA"), correct: true },
+        { text: () => sceneStrings("gtoB"), correct: false },
+        { text: () => sceneStrings("gtoC"), correct: false },
+        { text: () => sceneStrings("gtoD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("smtQ"),
+      options: [
+        { text: () => sceneStrings("smtA"), correct: true },
+        { text: () => sceneStrings("smtB"), correct: false },
+        { text: () => sceneStrings("smtC"), correct: false },
+        { text: () => sceneStrings("smtD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("beyondQ"),
+      options: [
+        { text: () => sceneStrings("bA"), correct: true },
+        { text: () => sceneStrings("bB"), correct: false },
+        { text: () => sceneStrings("bC"), correct: false },
+        { text: () => sceneStrings("bD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ilQ"),
+      options: [
+        { text: () => sceneStrings("ilA"), correct: true },
+        { text: () => sceneStrings("ilB"), correct: false },
+        { text: () => sceneStrings("ilC"), correct: false },
+        { text: () => sceneStrings("ilD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("policyQ"),
+      options: [
+        { text: () => sceneStrings("pA"), correct: true },
+        { text: () => sceneStrings("pB"), correct: false },
+        { text: () => sceneStrings("pC"), correct: false },
+        { text: () => sceneStrings("pD"), correct: false },
+      ],
+    },
+  ]);
+</script>
+</content>
+</invoke>

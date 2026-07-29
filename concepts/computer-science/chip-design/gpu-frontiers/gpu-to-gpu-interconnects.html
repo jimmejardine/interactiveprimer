@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>GPU-to-GPU Interconnects</primer-title>
+
+    <primer-card>
+      <p>
+        The <primer-ref to="computer-science/chip-design/gpu-frontiers/gddr-and-hbm">previous
+        lesson</primer-ref> ended with a GPU drinking terabytes per second from its own HBM. Here is the
+        uncomfortable sequel: <strong>one GPU is never enough</strong>. A frontier language model's weights
+        alone overflow any single device's memory; its training run wants thousands of GPUs computing
+        <em>as one machine</em> for months. And the moment two GPUs must act as one, a new organ appears on
+        the die and in the system — the <strong>interconnect</strong> — and it is designed with exactly the
+        same seriousness as the memory system, because it fails the same way: silently, by making
+        world-class arithmetic units <em>wait</em>.
+      </p>
+      <p>
+        This lesson climbs the ladder: the PCIe baseline and its ceiling, direct GPU-to-GPU links and the
+        switched fabrics built from them, and then the traffic pattern that shaped all of it — the
+        <strong>all-reduce</strong> — whose arithmetic is so tidy you can carry it in your pocket.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The baseline: PCIe, and its ceiling</h2>
+      <p>
+        Every GPU already has a link to the world: PCIe, the general-purpose peripheral bus. A generous
+        x16 Gen5 slot moves about <strong>64 GB/s</strong> each way — perfectly respectable for loading
+        textures or streaming datasets. Now put it next to the numbers it must serve: the GPU's own HBM runs
+        at several <em>thousand</em> GB/s. Traffic between two GPUs over PCIe typically also detours through
+        the CPU's root complex, sharing lanes with storage and NICs. The mismatch is roughly
+        <strong>two orders of magnitude</strong>: any algorithm that shuffles serious data between GPUs over
+        PCIe turns a computing machine into a waiting machine.
+      </p>
+      <p>
+        So GPU vendors did to the interconnect what they had already done to memory: built a dedicated one.
+        <strong>NVLink-class direct links</strong> (AMD's Infinity Fabric plays the same role) connect GPUs
+        point-to-point at <em>hundreds</em> of GB/s per GPU — modern parts aggregate close to a TB/s of
+        link bandwidth, within an order of magnitude of local HBM. And the links are
+        <strong>memory-semantic</strong>: a GPU can issue plain loads, stores and atomics <em>into a peer's
+        HBM</em>, as if it were a slightly-farther region of its own address space — no packet assembly, no
+        driver round-trip, no bounce buffer in host RAM. Peer memory becomes just another rung on the memory
+        hierarchy: registers, L1, L2, local HBM, <em>neighbour's HBM</em>.
+      </p>
+      <p>
+        Point-to-point links alone, though, give a fixed budget an awkward shape: with 8 GPUs and a handful
+        of links each, you cannot wire every pair directly at full rate. Enter the <strong>switch</strong>:
+        route every GPU's links into a crossbar chip (an NVSwitch, in NVIDIA's fabric), and every GPU can
+        talk to <em>every other</em> GPU at its full link rate, all at once — an all-to-all fabric inside the
+        chassis. This is the
+        <primer-ref to="computer-science/computer-architecture/accelerators/interconnection-networks">interconnection-network</primer-ref>
+        story you already know — topology, bisection bandwidth, routing — reincarnated with GPUs at the
+        endpoints and gradient tensors as the traffic.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The traffic that shaped the fabric: all-reduce</h2>
+      <p>
+        Why does GPU-to-GPU traffic deserve custom silicon? Because deep-learning training generates one
+        pattern above all. In data-parallel training (see
+        <primer-ref soft to="computer-science/deep-learning/training-at-scale/data-parallelism"></primer-ref>)
+        every GPU holds a full copy of the model and computes gradients on its own slice of the batch; before
+        anyone can take an optimiser step, all GPUs must <strong>average their gradients</strong> — every GPU
+        needs the sum of every GPU's array. That collective operation is the <strong>all-reduce</strong>, and
+        during training it fires after <em>every batch</em>, moving the entire gradient — gigabytes — each
+        time. (Tensor parallelism — see
+        <primer-ref soft to="computer-science/deep-learning/training-at-scale/tensor-parallelism"></primer-ref> —
+        adds collectives <em>inside every layer</em>, which is even less forgiving.)
+      </p>
+      <p>
+        The naive scheme is a disaster: every GPU sends its full <primer-math>D</primer-math>-byte array to
+        every other — <primer-math>D(N-1)</primer-math> bytes out of each GPU. The classic fix is the
+        <strong>ring all-reduce</strong>. Arrange the <primer-math>N</primer-math> GPUs in a logical ring and
+        chop each array into <primer-math>N</primer-math> chunks of <primer-math>D/N</primer-math> bytes:
+      </p>
+      <ul>
+        <li><strong>Reduce-scatter</strong> — for <primer-math>N-1</primer-math> steps, every GPU sends one
+          chunk to its right neighbour and <em>adds</em> the chunk arriving from its left into its own copy.
+          After <primer-math>N-1</primer-math> steps, each GPU holds one chunk of the <em>fully-summed</em>
+          result.</li>
+        <li><strong>All-gather</strong> — the finished chunks circulate around the same ring for another
+          <primer-math>N-1</primer-math> steps — pure copying, no more adding — until everyone has all of
+          them.</li>
+      </ul>
+      <p>
+        Count the traffic: <primer-math>2(N-1)</primer-math> steps, one <primer-math>D/N</primer-math>-byte
+        chunk sent per GPU per step:
+      </p>
+      <primer-math display>\text{bytes sent per GPU} \;=\; 2(N-1)\cdot\frac{D}{N} \;=\; \frac{2D(N-1)}{N} \;&lt;\; 2D</primer-math>
+      <primer-theorem name="Ring all-reduce is bandwidth-optimal">
+        <ul>
+          <li>per-GPU traffic is <primer-math>2D(N-1)/N</primer-math> — <strong>under
+            <primer-math>2D</primer-math> no matter how many GPUs join</strong>, versus
+            <primer-math>D(N-1)</primer-math> for the naive all-to-all;</li>
+          <li>any all-reduce must move at least <primer-math>\approx 2D(N-1)/N</primer-math> bytes per GPU
+            (each GPU's data must reach the sum, and the sum must reach each GPU) — the ring
+            <strong>meets the lower bound</strong>;</li>
+          <li>every link in the ring is busy on every step — no idle wires, no hot spot;</li>
+          <li>the price is <strong>latency</strong>: <primer-math>2(N-1)</primer-math> serial steps, painful
+            for small messages on large rings.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Feel it with numbers: 8 GPUs averaging an 8 GB gradient. Naive: each GPU sends
+        <primer-math>8 \times 7 = 56</primer-math> GB. Ring: <primer-math>2 \cdot 8 \cdot 7/8 = 14</primer-math> GB —
+        and at 400 GB/s of link bandwidth that's ~35 ms per batch, hidden further by overlapping
+        communication with the backward pass.
+      </p>
+    </primer-card>
+
+    <!-- Figure: ring all-reduce on 4 GPUs, stepped. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "ringAllReduce": {
+          "title": "Ring all-reduce: 4 GPUs, 4 chunks — reduce-scatter, then all-gather",
+          "stepSend": "Reduce-scatter, step 1: every GPU sends one D/4 chunk right and ADDS the chunk arriving from its left — every link busy at once",
+          "stepRs": "After N−1 = 3 such steps, each GPU holds ONE chunk of the fully-summed gradient (solid)",
+          "stepAg": "All-gather: the finished chunks circulate around the same ring — pure copying now, 3 more steps",
+          "stepDone": "Every GPU holds the whole sum. Sent per GPU: 2(N−1)·D/N = 2D(N−1)/N — under 2D at any N",
+          "gpu": "GPU"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Watch the ring turn</h2>
+      <p>
+        Four GPUs, each starting with its own 4-chunk gradient. Step through the two phases and watch where
+        the finished chunks appear.
+      </p>
+      <primer-geometry scene="ringAllReduce" caption="Four GPU boxes arranged in a ring, each containing four chunk cells. Arrows circulate clockwise. First each GPU sends one chunk to its neighbour while every link runs simultaneously. After three reduce-scatter steps each GPU holds exactly one fully-summed chunk, drawn solid. Then the all-gather phase circulates the finished chunks until all four GPUs hold all four solid chunks."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Beyond the ring: trees, switches that do maths, and NICs that skip the CPU</h2>
+      <p>
+        The ring's weakness is its <primer-math>2(N-1)</primer-math> serial steps: for a small tensor on a
+        thousand-GPU ring, latency — not bandwidth — dominates. So real systems keep a menu.
+        <strong>Tree all-reduce</strong> runs in <primer-math>O(\log N)</primer-math> steps — reduce up a
+        tree, broadcast back down — winning on latency at some cost in link balance.
+        <strong>Hierarchical</strong> schemes exploit the topology's tiers: a fast ring <em>inside</em> each
+        chassis over the switched fabric, then a tree <em>across</em> chassis over the cluster network, so
+        the slow wires carry only one chassis-worth of pre-reduced data.
+      </p>
+      <p>
+        Two further tricks push work off the GPUs entirely. <strong>In-network reduction</strong> teaches the
+        switch itself to add: gradient packets from many GPUs meet inside the switch, which sums them on the
+        fly and forwards one result — the data crosses the network once instead of circulating.
+        And across nodes, <strong>RDMA with GPUDirect</strong> lets the network card DMA straight out of one
+        GPU's HBM into a remote GPU's HBM — no copy into host memory, no CPU on the data path at all.
+      </p>
+      <p>
+        Stitching this together is the job of the <strong>collective-communication library</strong>
+        (NCCL and its cousins): at startup it discovers the topology — which GPUs share a switch, which NICs
+        sit near which GPUs, what the tiers look like — and <em>chooses the algorithm per call</em>: ring
+        here, tree there, hierarchical across the cluster, in-network where the switches offer it. The same
+        training script hits wildly different wire schedules on different machines, and never knows.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Simulate the ring</h2>
+      <p>
+        Twenty lines of TypeScript replace a wall of diagrams. The simulator walks both phases, counts what
+        each GPU sends, and checks the count against the formula. Try <code>N = 128</code> and watch the
+        per-GPU total creep towards — but never reach — <primer-math>2D</primer-math>.
+      </p>
+      <primer-code run>
+        function ringAllReduce(N: number, D: number): void {
+          const chunk = D / N; // GB per chunk
+          let sentPerGpu = 0;
+
+          console.log(`ring all-reduce: ${N} GPUs, D = ${D} GB, chunk = D/N = ${chunk} GB`);
+          console.log(`  reduce-scatter (${N - 1} steps):`);
+          for (let s = 1; s &lt;= N - 1; s++) {
+            sentPerGpu += chunk;
+            console.log(`    step ${s}: each GPU sends 1 chunk right, ADDS the one from its left`);
+          }
+          console.log(`  all-gather (${N - 1} steps):`);
+          for (let s = 1; s &lt;= N - 1; s++) {
+            sentPerGpu += chunk;
+            console.log(`    step ${s}: each GPU forwards a finished chunk (copy only)`);
+          }
+
+          const formula = (2 * D * (N - 1)) / N;
+          console.log(`  sent per GPU: ${sentPerGpu} GB   formula 2D(N-1)/N: ${formula} GB`);
+          console.log(`  naive all-to-all would send D(N-1) = ${D * (N - 1)} GB per GPU`);
+          console.log("");
+        }
+
+        ringAllReduce(4, 8);
+        ringAllReduce(8, 8);
+        // The per-GPU total approaches 2D but never reaches it:
+        ringAllReduce(128, 8);
+      </primer-code>
+    </primer-card>
+
+    <primer-vignette title="Why not one parameter server in the middle?">
+      <p>
+        Early distributed training did exactly that: workers mail gradients to a central <em>parameter
+        server</em>, which averages and mails back. The arithmetic kills it. With <primer-math>N</primer-math>
+        workers of <primer-math>D</primer-math> bytes each, the server's link must swallow
+        <primer-math>N \cdot D</primer-math> in and push <primer-math>N \cdot D</primer-math> out —
+        <em>every batch</em> — while every worker's own link idles at <primer-math>2D</primer-math>. One wire
+        becomes the whole machine's throttle, and adding workers makes it strictly worse. The ring's genius
+        is symmetry: no centre, every link loaded identically, per-GPU traffic <em>capped below</em>
+        <primer-math>2D</primer-math> forever. It is the same lesson interconnection networks teach again and
+        again: hot spots, not totals, are what kill you.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The fabric is a budget line, not plumbing">
+      <p>
+        The seductive fallacy: "training is slow — buy more GPUs." Double the GPUs and the compute per GPU
+        halves, but the all-reduce traffic per GPU <em>stays near</em> <primer-math>2D</primer-math> — it is
+        essentially independent of <primer-math>N</primer-math> — while the time available to hide it (the
+        now-halved backward pass) shrinks. If the fabric doesn't scale with the fleet, communication climbs
+        from 5% of step time to 30% to half, and your thousand-GPU cluster computes like six hundred.
+        The symptom is invisible on any single GPU — each one shows healthy utilisation punctuated by
+        "brief" collective waits. The cure is treating interconnect bandwidth as a <strong>first-class budget
+        line</strong> next to flops and HBM: system architects size the fabric <em>from</em> the model sizes
+        and step times they intend to serve, not from whatever links happened to fit. When someone shows you
+        a cluster spec, look at the network line first; it is the one that decides whether the GPU line was
+        worth buying.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: all-reduce arithmetic, PCIe-vs-NVLink, phases, topology reasoning. Bank of 12, draws 6. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "gpuFabricQuiz@1": {
+          "intro": "Ring all-reduce over N GPUs of a D-byte array: chunk = D/N, 2(N−1) steps, bytes sent per GPU = 2D(N−1)/N. PCIe ≈ 64 GB/s; NVLink-class fabrics reach hundreds of GB/s per GPU with memory-semantic access to peer HBM.",
+          "rrQ": "Ring all-reduce: {n} GPUs average a {d} GB gradient. Using 2D(N−1)/N, how many GB does each GPU send in total?",
+          "stepsQ": "A ring all-reduce over {n} GPUs takes how many steps in total (both phases)?",
+          "chunkQ": "In a ring all-reduce over {n} GPUs of a {d} GB array, how many GB is one chunk (D/N)?",
+          "timeQ": "A collective must move {d} GB per GPU and the per-GPU fabric bandwidth is {b} GB/s. Ignoring latency, how many seconds does it take?",
+          "naiveQ": "Naive all-to-all: each of {n} GPUs sends its full {d} GB array to every other GPU. How many GB does each GPU send?",
+          "phaseQ": "In what order do the ring all-reduce phases run, and what does each do?",
+          "phA": "Reduce-scatter first (chunks circulate and are summed, leaving each GPU one finished chunk), then all-gather (the finished chunks circulate by pure copying)",
+          "phB": "All-gather first to share the raw data, then reduce-scatter to sum it",
+          "phC": "Both phases run simultaneously on opposite ring directions",
+          "phD": "A single broadcast phase from GPU 0 does everything",
+          "memQ": "What does it mean that an NVLink-class link is 'memory-semantic'?",
+          "memA": "A GPU issues ordinary loads, stores and atomics directly into a peer's HBM, as another rung of its address space — no packets, drivers or host bounce buffers",
+          "memB": "The link stores data inside itself like a cache",
+          "memC": "It can only transfer whole memory pages",
+          "memD": "It uses the same DRAM chips as main memory",
+          "optQ": "Why is ring all-reduce called bandwidth-optimal?",
+          "optA": "Its 2D(N−1)/N per-GPU traffic meets the lower bound any all-reduce must move, and every link is busy on every step",
+          "optB": "It finishes in a single step regardless of N",
+          "optC": "It compresses the gradients before sending them",
+          "optD": "It uses only the fastest single link in the machine",
+          "swQ": "What does a switch (NVSwitch-class) add over direct point-to-point links among 8 GPUs?",
+          "swA": "All-to-all connectivity: every GPU reaches every other at its full link rate simultaneously, instead of splitting a few fixed links among 7 peers",
+          "swB": "It raises each individual link's clock rate",
+          "swC": "It adds error correction that the links otherwise lack",
+          "swD": "It converts NVLink traffic to PCIe so the CPU can join",
+          "inetQ": "What does in-network reduction (a switch that does maths) change?",
+          "inetA": "The switch sums gradient packets from many GPUs on the fly and forwards one result — the data crosses the network once instead of circulating",
+          "inetB": "It moves the optimiser step onto the switch",
+          "inetC": "It doubles the switch's port count",
+          "inetD": "It encrypts the gradients in flight",
+          "rdmaQ": "What do RDMA and GPUDirect buy for cross-node traffic?",
+          "rdmaA": "The NIC DMAs straight from one GPU's HBM to a remote GPU's HBM — no copy through host memory and no CPU on the data path",
+          "rdmaB": "They let the CPU inspect every packet for correctness",
+          "rdmaC": "They replace the network with shared disk storage",
+          "rdmaD": "They only work for messages under one kilobyte",
+          "topoQ": "Why does a collective library (NCCL-class) pick different algorithms on different machines?",
+          "topoA": "It discovers the topology at startup — rings inside a switched chassis, trees across the slower cluster tiers — and matches the algorithm to the wires per call",
+          "topoB": "Licensing restricts each algorithm to one vendor's hardware",
+          "topoC": "The algorithms give different numerical answers, so one must be chosen per model",
+          "topoD": "It picks randomly to spread wear across the links"
+        }
+      }
+    </script>
+
+    <primer-quiz name="gpuFabricQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/gpu-frontiers/gddr-and-hbm",
+      "computer-science/computer-architecture/accelerators/interconnection-networks"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<!-- Ring all-reduce figure + the randomised quiz. All colours from the theme. -->
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "ringAllReduce",
+    ({ board, colors, step, sceneStrings }) => {
+      const T = (x, y, txt, color, size = 12, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+      const rect = (x, y, w, h, stroke, fill, op, sw = 1.5) =>
+        board.create("polygon", [[x, y], [x + w, y], [x + w, y - h], [x, y - h]], {
+          fillColor: fill, fillOpacity: op, strokeColor: stroke, fixed: true, highlight: false,
+          vertices: { visible: false }, borders: { strokeColor: stroke, strokeWidth: sw, highlight: false },
+        });
+      const arrow = (from, to, color, w = 2) =>
+        board.create("arrow", [from, to], { strokeColor: color, strokeWidth: w, fixed: true, highlight: false });
+
+      // 4 GPU boxes (top-left corners), clockwise: G0 TL, G1 TR, G2 BR, G3 BL.
+      const BW = 3.1, BH = 1.7, CS = 0.55;
+      const pos = [ [0.6, 9.4], [7.9, 9.4], [7.9, 3.1], [0.6, 3.1] ];
+      const chunkXY = (g, c) => [pos[g][0] + 0.35 + c * (CS + 0.12), pos[g][1] - 0.85];
+
+      // Base: boxes, chunk cells (each GPU starts with its own copy of all 4 chunks), ring arrows.
+      for (let g = 0; g < 4; g++) {
+        rect(pos[g][0], pos[g][1], BW, BH, colors.line, colors.bg, 0, 2);
+        T(pos[g][0] + BW / 2, pos[g][1] + 0.35, sceneStrings("gpu") + " " + g, colors.ink, 13);
+        for (let c = 0; c < 4; c++) {
+          const [x, y] = chunkXY(g, c);
+          rect(x, y, CS, CS, colors.cat[c], colors.cat[c], 0.15);
+        }
+      }
+      // Ring arrows, clockwise: G0→G1 (top), G1→G2 (right), G2→G3 (bottom), G3→G0 (left).
+      arrow([pos[0][0] + BW + 0.25, pos[0][1] - BH / 2], [pos[1][0] - 0.25, pos[1][1] - BH / 2], colors.line);
+      arrow([pos[1][0] + BW / 2, pos[1][1] - BH - 0.25], [pos[2][0] + BW / 2, pos[2][1] + 0.25], colors.line);
+      arrow([pos[2][0] - 0.25, pos[2][1] - BH / 2], [pos[3][0] + BW + 0.25, pos[3][1] - BH / 2], colors.line);
+      arrow([pos[3][0] + BW / 2, pos[3][1] + 0.25], [pos[0][0] + BW / 2, pos[0][1] - BH - 0.25], colors.line);
+
+      // Step 1: reduce-scatter step 1 — each GPU sends chunk g to its clockwise neighbour.
+      step(sceneStrings("stepSend"), () => {
+        for (let g = 0; g < 4; g++) {
+          const [x, y] = chunkXY(g, g);
+          rect(x - 0.06, y + 0.06, CS + 0.12, CS + 0.12, colors.cat[g], colors.cat[g], 0);
+        }
+        arrow([pos[0][0] + BW + 0.25, pos[0][1] - BH / 2 + 0.35], [pos[1][0] - 0.25, pos[1][1] - BH / 2 + 0.35], colors.cat[0], 3);
+        arrow([pos[1][0] + BW + 0.15, pos[1][1] - BH - 0.25], [pos[2][0] + BW + 0.15, pos[2][1] + 0.25], colors.cat[1], 3);
+        arrow([pos[2][0] - 0.25, pos[2][1] - BH / 2 - 0.35], [pos[3][0] + BW + 0.25, pos[3][1] - BH / 2 - 0.35], colors.cat[2], 3);
+        arrow([pos[3][0] - 0.15, pos[3][1] + 0.25], [pos[0][0] - 0.15, pos[0][1] - BH - 0.25], colors.cat[3], 3);
+      });
+
+      // Step 2: after N−1 steps, GPU g holds finished chunk (g+1) mod 4 — draw it solid.
+      step(sceneStrings("stepRs"), () => {
+        for (let g = 0; g < 4; g++) {
+          const c = (g + 1) % 4;
+          const [x, y] = chunkXY(g, c);
+          rect(x, y, CS, CS, colors.cat[c], colors.cat[c], 0.85);
+          T(x + CS / 2, y - CS - 0.25, "Σ", colors.cat[c], 12);
+        }
+      });
+
+      // Step 3: all-gather — finished chunks circulate (arrows again).
+      step(sceneStrings("stepAg"), () => {
+        arrow([pos[0][0] + BW + 0.25, pos[0][1] - BH / 2 + 0.35], [pos[1][0] - 0.25, pos[1][1] - BH / 2 + 0.35], colors.cat[1], 3);
+        arrow([pos[1][0] + BW + 0.15, pos[1][1] - BH - 0.25], [pos[2][0] + BW + 0.15, pos[2][1] + 0.25], colors.cat[2], 3);
+        arrow([pos[2][0] - 0.25, pos[2][1] - BH / 2 - 0.35], [pos[3][0] + BW + 0.25, pos[3][1] - BH / 2 - 0.35], colors.cat[3], 3);
+        arrow([pos[3][0] - 0.15, pos[3][1] + 0.25], [pos[0][0] - 0.15, pos[0][1] - BH - 0.25], colors.cat[0], 3);
+      });
+
+      // Step 4: done — every GPU holds every finished chunk.
+      step(sceneStrings("stepDone"), () => {
+        for (let g = 0; g < 4; g++)
+          for (let c = 0; c < 4; c++) {
+            const [x, y] = chunkXY(g, c);
+            rect(x, y, CS, CS, colors.cat[c], colors.cat[c], 0.85);
+          }
+      });
+    },
+    { boundingbox: [-0.6, 10.6, 11.9, 0.4], title: () => makeStrings("ringAllReduce")("title") },
+  );
+
+  registerQuiz("gpuFabricQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // 2·d·(n−1)/n — integer for d ∈ {8,16,32}, n ∈ {2,4,8}
+      prompt: (v) => sceneStrings("rrQ", v),
+      variables: "n=[2,4,8] d=[8,16,32]",
+      answer: (v) => (2 * v.d * (v.n - 1)) / v.n,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // 2(N−1)
+      prompt: (v) => sceneStrings("stepsQ", v),
+      variables: "n=[4,8,16]",
+      answer: (v) => 2 * (v.n - 1),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // D/N
+      prompt: (v) => sceneStrings("chunkQ", v),
+      variables: "n=[4,8] d=[8,16,32]",
+      answer: (v) => v.d / v.n,
+      keyboard: "geometry-lengths",
+    },
+    {
+      prompt: (v) => sceneStrings("timeQ", v),
+      variables: "d=[100,200,400] b=[50,100]",
+      answer: (v) => v.d / v.b,
+      keyboard: "geometry-lengths",
+    },
+    {
+      // naive: d·(n−1)
+      prompt: (v) => sceneStrings("naiveQ", v),
+      variables: "n=[4,8] d=[4,8,16]",
+      answer: (v) => v.d * (v.n - 1),
+      keyboard: "geometry-lengths",
+    },
+    {
+      prompt: () => sceneStrings("phaseQ"),
+      options: [
+        { text: () => sceneStrings("phA"), correct: true },
+        { text: () => sceneStrings("phB"), correct: false },
+        { text: () => sceneStrings("phC"), correct: false },
+        { text: () => sceneStrings("phD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("memQ"),
+      options: [
+        { text: () => sceneStrings("memA"), correct: true },
+        { text: () => sceneStrings("memB"), correct: false },
+        { text: () => sceneStrings("memC"), correct: false },
+        { text: () => sceneStrings("memD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("optQ"),
+      options: [
+        { text: () => sceneStrings("optA"), correct: true },
+        { text: () => sceneStrings("optB"), correct: false },
+        { text: () => sceneStrings("optC"), correct: false },
+        { text: () => sceneStrings("optD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("swQ"),
+      options: [
+        { text: () => sceneStrings("swA"), correct: true },
+        { text: () => sceneStrings("swB"), correct: false },
+        { text: () => sceneStrings("swC"), correct: false },
+        { text: () => sceneStrings("swD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("inetQ"),
+      options: [
+        { text: () => sceneStrings("inetA"), correct: true },
+        { text: () => sceneStrings("inetB"), correct: false },
+        { text: () => sceneStrings("inetC"), correct: false },
+        { text: () => sceneStrings("inetD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rdmaQ"),
+      options: [
+        { text: () => sceneStrings("rdmaA"), correct: true },
+        { text: () => sceneStrings("rdmaB"), correct: false },
+        { text: () => sceneStrings("rdmaC"), correct: false },
+        { text: () => sceneStrings("rdmaD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("topoQ"),
+      options: [
+        { text: () => sceneStrings("topoA"), correct: true },
+        { text: () => sceneStrings("topoB"), correct: false },
+        { text: () => sceneStrings("topoC"), correct: false },
+        { text: () => sceneStrings("topoD"), correct: false },
+      ],
+    },
+  ]);
+</script>

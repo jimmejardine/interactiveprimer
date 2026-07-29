@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>The UVM Testbench</primer-title>
+
+    <primer-card>
+      <p>
+        You now own three weapons: constrained-random stimulus to generate scenarios, assertions to catch
+        protocol lies, and
+        <primer-ref to="computer-science/chip-design/verification/functional-coverage">functional coverage</primer-ref>
+        to measure what was tried. Point them at a real chip, though, and a new problem appears: the
+        testbench becomes a <em>program</em> — often larger than the design it verifies — and programs that
+        large need an architecture. The industry's answer is the <strong>UVM</strong>, the Universal
+        Verification Methodology. Ignore its reputation as a wall of SystemVerilog classes; underneath the
+        boilerplate sits one beautiful idea, and this lesson teaches the idea: <strong>separate what you
+        want to happen, from how it reaches the pins, from what actually happened, from whether that was
+        right</strong> — so that every piece can be reused on the next block, the next chip, the next
+        decade.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Think in transactions, not pins</h2>
+      <p>
+        The load-bearing abstraction is the <strong>transaction</strong>: one meaningful unit of work,
+        described at the level of intent. "Write <code>0xBEEF</code> to address <code>0x40</code>" is a
+        transaction; the forty clock cycles of address-phase, wait-states and byte-enables it takes on the
+        bus are its <em>pin-level</em> shadow. A test that thinks in transactions is short, readable, and —
+        crucially — <em>independent of the bus protocol</em>: swap the bus, keep the test. In UVM a
+        transaction is a small class of fields with constraints, and a <strong>sequence</strong> is a
+        little program that produces a stream of them:
+      </p>
+      <primer-code lang="text">
+        class bus_txn extends uvm_sequence_item;
+          rand bit         is_write;
+          rand bit  [31:0] addr;
+          rand bit  [31:0] data;
+          constraint aligned { addr[1:0] == 2'b00; }
+        endclass
+
+        class write_then_read extends uvm_sequence #(bus_txn);
+          task body();                       // pure INTENT — not a pin in sight
+            `uvm_do_with(req, { is_write == 1; })
+            `uvm_do_with(req, { is_write == 0; addr == req.addr; })
+          endtask
+        endclass
+      </primer-code>
+      <p>
+        Notice what the sequence does <em>not</em> know: which clock edge anything happens on, what the
+        handshake looks like, how wide the bus is. That ignorance is the point — it is what makes the
+        sequence portable.
+      </p>
+    </primer-card>
+
+    <!-- UVM block diagram: DUT centre, roles revealed one at a time. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "uvmBench": {
+          "title": "The UVM testbench: four roles around a DUT",
+          "lDut": "DUT",
+          "lSeq": "Sequences",
+          "lSqr": "Sequencer",
+          "lDrv": "Driver",
+          "lMon": "Monitor",
+          "lScb": "Scoreboard",
+          "lRef": "Reference model",
+          "lAgent": "Agent",
+          "lPins": "pin wiggles",
+          "lTxn": "transactions",
+          "sStim": "STIMULUS: sequences generate streams of transactions — pure intent, no pins",
+          "sDrive": "DRIVING: the sequencer hands each transaction to the driver, which turns it into cycle-by-cycle pin wiggles on the DUT's interface",
+          "sObserve": "OBSERVING: the monitor watches the same pins and reconstructs transactions from the wiggles — it never drives anything",
+          "sCheck": "CHECKING: the scoreboard compares what the monitor saw against what the reference model says should have happened",
+          "sAgent": "The AGENT bundles sequencer + driver + monitor for one interface — the reusable unit"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Four roles, one diagram</h2>
+      <p>
+        Everything else in UVM is scaffolding around four separated jobs. Step through them:
+      </p>
+      <primer-geometry scene="uvmBench" caption="A block diagram of a UVM testbench. The DUT sits at the centre. On the left, a sequences box feeds transactions down through a sequencer to a driver, which drives pin wiggles into the DUT; below, a monitor watches the DUT's pins and recovers transactions. On the right, a reference model receives the same transactions and feeds a scoreboard, which compares the model's prediction with what the monitor observed. A dashed boundary groups sequencer, driver and monitor into an agent."></primer-geometry>
+      <p>
+        Read the arrows and the whole methodology falls out. Transactions flow <em>down</em> the left side
+        and get translated into pin wiggles exactly once, in the <strong>driver</strong>. Pin wiggles get
+        translated back into transactions exactly once, in the <strong>monitor</strong>. Everything above
+        those two components — the sequences, the reference model, the <strong>scoreboard</strong> — lives
+        entirely at transaction level and never touches a pin. And the monitor is deliberately
+        <em>passive</em>: it does not peek at what the driver sent, it re-derives the truth from the wires,
+        because one day there will be no driver on those wires at all.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The agent, and the reuse payoff</h2>
+      <p>
+        The <strong>agent</strong> is the packaging: one agent per interface, bundling that interface's
+        sequencer, driver and monitor. Why this particular bundle? Because it is exactly the set of things
+        that understand one protocol — and it comes with a switch. In <strong>active</strong> mode the
+        agent drives the interface (block-level bench: your FIFO alone in a test harness, the agent
+        pretending to be the rest of the chip). In <strong>passive</strong> mode the driver and sequencer
+        stand down and only the monitor runs — because at SoC level the <em>real</em> neighbouring RTL now
+        drives those wires. Same agent, same monitor, same coverage, same scoreboard connections, zero
+        rewrites: <strong>the bench that verified the block standalone rides along to verify it inside the
+        chip</strong>. That single trick is why UVM conquered the industry.
+      </p>
+      <p>
+        Three pieces of machinery make the reuse mechanical rather than heroic:
+      </p>
+      <ul>
+        <li>the <strong>factory</strong> — components are created by asking the factory, not by calling
+          constructors, so a test can say "everywhere the bench makes a <code>bus_driver</code>, make my
+          <code>error_injecting_driver</code> instead" — a type override, no bench edits;</li>
+        <li>the <strong>configuration database</strong> — a bench-wide key–value store through which the
+          environment tells components their mode (active/passive), their virtual interface, their knobs —
+          so the same component works in different contexts;</li>
+        <li><strong>phases</strong> — every component steps through the same lifecycle in lockstep:
+          <strong>build</strong> (construct children, consulting factory and config),
+          <strong>connect</strong> (wire the transaction ports together), then <strong>run</strong> (time
+          starts, sequences flow). Construction is finished before any wiring, wiring before any traffic —
+          which is the only sane order for a bench assembled from parts that override each other.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>A whole UVM bench in forty lines</h2>
+      <p>
+        Strip away the class library and the architecture fits on a screen. Here is the full loop —
+        sequence → driver → DUT → monitor → scoreboard — with a bug planted in the DUT for the scoreboard
+        to catch:
+      </p>
+      <primer-code run>
+        // ── A miniature UVM bench: four roles, one flow. ──
+        type Txn = { a: number; b: number; op: "ADD" | "SUB" };
+
+        // SEQUENCE: pure intent — a stream of transactions, no pins in sight.
+        function sequence(n: number): Txn[] {
+          let s = 7;
+          const rnd = (m: number) =&gt; (s = (s * 1103515245 + 12345) &amp; 0x7fffffff) % m;
+          return Array.from({ length: n }, () =&gt; ({ a: rnd(100), b: rnd(100), op: rnd(100) &lt; 50 ? "ADD" : "SUB" }));
+        }
+
+        // DRIVER: transaction in, pin-level bus values out.
+        type Pins = { aBus: number; bBus: number; opPin: number };
+        const drive = (t: Txn): Pins =&gt; ({ aBus: t.a, bBus: t.b, opPin: t.op === "ADD" ? 0 : 1 });
+
+        // DUT (pin level) — with a planted bug: SUB clamps at zero instead of wrapping.
+        function dut(p: Pins): number {
+          if (p.opPin === 0) return p.aBus + p.bBus;
+          return p.aBus &gt;= p.bBus ? p.aBus - p.bBus : 0;   // BUG!
+        }
+
+        // MONITOR: watches pins, reconstructs the transaction it saw.
+        const monitor = (p: Pins): Txn =&gt; ({ a: p.aBus, b: p.bBus, op: p.opPin === 0 ? "ADD" : "SUB" });
+
+        // SCOREBOARD: compares the DUT against the reference model.
+        const model = (t: Txn): number =&gt; (t.op === "ADD" ? t.a + t.b : t.a - t.b);
+
+        let pass = 0, fail = 0;
+        for (const t of sequence(8)) {
+          const pins = drive(t);              // transaction -&gt; pin wiggles
+          const got = dut(pins);              // the design under test
+          const seen = monitor(pins);         // pin wiggles -&gt; transaction
+          const exp = model(seen);            // what SHOULD have happened
+          const ok = got === exp;
+          ok ? pass++ : fail++;
+          console.log(`${seen.a} ${seen.op} ${seen.b}  -&gt;  got ${got}, expected ${exp}${ok ? "" : "   &lt;-- MISMATCH"}`);
+        }
+        console.log(`scoreboard: ${pass} pass, ${fail} FAIL`);
+      </primer-code>
+      <p>
+        The scoreboard flags exactly the subtractions that go negative — the clamp bug — without any test
+        having been written <em>for</em> that bug: random intent flowed down, truth flowed back up, and the
+        reference model disagreed. Swap <code>dut</code> for a different design, or <code>drive</code> for
+        a different protocol, and every other role survives untouched. That is the architecture.
+      </p>
+      <primer-theorem name="The UVM testbench">
+        <ul>
+          <li><strong>separation of concerns</strong>: sequences generate <em>transactions</em> (stimulus);
+            the <strong>driver</strong> turns transactions into pin wiggles; the <strong>monitor</strong>
+            turns pin wiggles back into transactions; the <strong>scoreboard</strong> compares them against
+            a <strong>reference model</strong>;</li>
+          <li>an <strong>agent</strong> bundles sequencer + driver + monitor for one interface —
+            <strong>active</strong> drives the pins, <strong>passive</strong> only watches;</li>
+          <li>the <strong>factory</strong> (type overrides) and the <strong>config database</strong> make
+            the same components reusable in new contexts without edits;</li>
+          <li><strong>phases</strong> run every component in lockstep: build → connect → run;</li>
+          <li>the payoff is <strong>reuse</strong>: the agent that verified the block standalone verifies
+            it again, passively, inside the SoC.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Why is it called 'Universal'?">
+      <p>
+        Because it ended a war. Through the 2000s every EDA vendor pushed its own methodology — e/eRM,
+        VMM, AVM, OVM — and a verification engineer changing jobs changed religions. Teams could not share
+        components, vendors could not share customers, and everyone re-wrote the same bus agent for the
+        fifth time. UVM (2011, later IEEE 1800.2) was the peace treaty: one open class library, every
+        simulator, so that a USB agent written anywhere runs everywhere — an app store for verification
+        components. The treaty mattered because of who signs it: on a modern SoC team, verification
+        engineers outnumber designers roughly two-to-one, and the testbench is routinely the largest single
+        program in the company. When this course's capstone GPU feels hard to <em>build</em>, remember that
+        industry considers it harder to <em>check</em>.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The architecture is the point, not the class library">
+      <p>
+        UVM's dark side is cargo-culting: teams buried in <code>uvm_config_db</code> incantations, factory
+        registrations and phase-callback trivia — every macro perfectly deployed — whose scoreboard, when
+        you finally read it, checks <em>nothing</em> (or worse, is still a TODO). That bench is an elaborate
+        machine for generating unverified traffic. Judge any testbench, UVM or not, by the ideas of this
+        lesson: Is stimulus expressed as transactions? Is the pin knowledge confined to one driver and one
+        monitor? Is the monitor genuinely passive? Does an independent model predict, and a scoreboard
+        actually compare? A hundred-line bench with those properties is worth more than ten thousand lines
+        of ceremonially correct UVM without them. The boilerplate is scaffolding; the separation of
+        concerns is the building.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: role matching, transaction-vs-pin reasoning, reuse scenarios, phases. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "uvmQuiz@1": {
+          "intro": "Stimulus, driving, observing, checking — four separated roles, bundled for reuse.",
+          "cyclesQ": "A sequence generates {n} transactions and the driver needs {c} clock cycles of pin wiggles per transaction. How many clock cycles does driving the whole sequence take?",
+          "agentsQ": "An SoC bench instantiates {n} agents, one per interface, and each agent bundles a sequencer, a driver and a monitor. How many of these three component types exist in total?",
+          "driverQ": "Which component turns transactions into cycle-by-cycle pin wiggles?",
+          "aDriver": "The driver",
+          "aMonitor": "The monitor",
+          "aSequencer": "The sequencer",
+          "aScoreboard": "The scoreboard",
+          "monitorQ": "Which component watches the pins and reconstructs transactions from the wiggles?",
+          "checkQ": "Which component decides whether the DUT's behaviour was CORRECT, by comparing against the reference model?",
+          "bundleQ": "What exactly does a UVM agent bundle together?",
+          "buRight": "One interface's sequencer, driver and monitor — everything that understands that one protocol",
+          "buAll": "The DUT together with all its testbenches",
+          "buScb": "The scoreboard and the coverage model",
+          "buTests": "All the tests that target one block",
+          "passiveQ": "Why is the monitor built to re-derive transactions from the pins, instead of just being told what the driver sent?",
+          "paRight": "So it still works when there is no driver — in the SoC, real neighbouring RTL drives those wires and the passive monitor is all that remains",
+          "paFast": "Reading pins is faster than passing transactions",
+          "paSync": "Drivers cannot communicate with monitors in SystemVerilog",
+          "paCov": "Coverage can only be sampled from pins",
+          "reuseQ": "A FIFO's block-level agent is carried into the SoC bench, where real RTL now drives the FIFO's interface. What changes?",
+          "reRight": "The agent is switched to passive mode — driver and sequencer stand down, while the monitor, coverage and scoreboard connections keep working unchanged",
+          "reWrite": "The agent must be rewritten at pin level for the SoC",
+          "reBoth": "Both the agent's driver and the RTL drive the pins together",
+          "reDel": "The monitor is deleted, since the RTL is already verified",
+          "factoryQ": "A test needs every bus driver in the bench replaced by an error-injecting variant, without editing the bench. Which mechanism does this?",
+          "faRight": "The factory — a type override redirects every factory-made bus_driver to the new class",
+          "faCfg": "The configuration database",
+          "faPhase": "The run phase",
+          "faSeq": "A virtual sequence",
+          "cfgQ": "What is the configuration database for?",
+          "cfRight": "Passing settings down the bench — mode (active/passive), virtual interfaces, knobs — so the same component works in different contexts",
+          "cfLog": "Recording which tests passed and failed",
+          "cfPins": "Storing the DUT's pin values every cycle",
+          "cfCov": "Holding the coverage bins",
+          "phaseQ": "Put the UVM phases in order.",
+          "phRight": "Build (construct components) → connect (wire transaction ports) → run (time passes, sequences flow)",
+          "phWrong1": "Run → build → connect",
+          "phWrong2": "Connect → run → build",
+          "phWrong3": "Build → run → connect",
+          "txnQ": "Why are sequences written at transaction level ('write 0xBEEF to 0x40') rather than pin level?",
+          "txRight": "Intent stays independent of the protocol — the pin knowledge lives only in the driver and monitor, so tests survive a change of bus and stay short and readable",
+          "txSim": "Transaction-level code simulates the DUT more accurately",
+          "txSynth": "Pin-level sequences cannot be randomised",
+          "txSpeed": "Transactions make the DUT itself run faster",
+          "levelQ": "In the standard architecture, which two components are the ONLY ones that know the pin-level protocol?",
+          "leRight": "The driver and the monitor — each translates between transactions and wiggles exactly once",
+          "leSeqScb": "The sequence and the scoreboard",
+          "leRefDut": "The reference model and the DUT",
+          "leAll": "All components equally"
+        }
+      }
+    </script>
+
+    <primer-quiz name="uvmQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/verification/functional-coverage"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The UVM block diagram: DUT centre; roles revealed step by step. ──
+  registerGeometryScene(
+    "uvmBench",
+    ({ board, colors, step, sceneStrings }) => {
+      const stimC = colors.cat[0], obsC = colors.cat[1], chkC = colors.cat[2], dutC = colors.ink, agC = colors.line;
+      const box = (x1, y1, x2, y2, color, dash = 0) =>
+        board.create("polygon", [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], {
+          borders: { strokeColor: color, strokeWidth: 2, dash, highlight: false },
+          vertices: { visible: false }, fillColor: color, fillOpacity: 0.06, highlight: false,
+        });
+      const T = (x, y, key, color, size = 13) =>
+        board.create("text", [x, y, () => sceneStrings(key)], {
+          strokeColor: color, fontSize: size, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      const arrow = (p1, p2, color) =>
+        board.create("arrow", [p1, p2], { strokeColor: color, strokeWidth: 2, highlight: false });
+
+      // ── Base: the DUT, centre of the world. ──
+      box(5.5, 3, 8.5, 6, dutC);
+      T(7, 4.5, "lDut", dutC, 15);
+
+      // Step 1 — STIMULUS: sequences of transactions.
+      step(sceneStrings("sStim"), () => {
+        box(0.5, 8.5, 4.5, 10.1, stimC);
+        T(2.5, 9.3, "lSeq", stimC);
+      });
+
+      // Step 2 — DRIVING: sequencer → driver → pins.
+      step(sceneStrings("sDrive"), () => {
+        box(1, 6.3, 4, 7.5, stimC);
+        T(2.5, 6.9, "lSqr", stimC);
+        box(1, 4.2, 4, 5.4, stimC);
+        T(2.5, 4.8, "lDrv", stimC);
+        arrow([2.5, 8.5], [2.5, 7.5], stimC);
+        arrow([2.5, 6.3], [2.5, 5.4], stimC);
+        arrow([4, 4.8], [5.5, 4.8], stimC);
+        T(4.75, 5.3, "lPins", stimC, 11);
+      });
+
+      // Step 3 — OBSERVING: the monitor watches the pins.
+      step(sceneStrings("sObserve"), () => {
+        box(1, 1.4, 4, 2.6, obsC);
+        T(2.5, 2.0, "lMon", obsC);
+        arrow([5.5, 3.4], [4, 2.4], obsC);
+      });
+
+      // Step 4 — CHECKING: reference model + scoreboard.
+      step(sceneStrings("sCheck"), () => {
+        box(10, 5.2, 13.8, 6.8, chkC);
+        T(11.9, 6.0, "lRef", chkC);
+        box(10, 1.2, 13.8, 2.8, chkC);
+        T(11.9, 2.0, "lScb", chkC);
+        arrow([4.5, 9.3], [10, 6.6], chkC);          // transactions feed the model too
+        T(8.0, 8.6, "lTxn", chkC, 11);
+        arrow([4, 2.0], [10, 2.0], obsC);            // monitor -> scoreboard
+        arrow([11.9, 5.2], [11.9, 2.8], chkC);       // model -> scoreboard
+      });
+
+      // Step 5 — the AGENT boundary: the reusable bundle.
+      step(sceneStrings("sAgent"), () => {
+        box(0.6, 1.0, 4.4, 8.1, agC, 2);
+        T(2.5, 0.5, "lAgent", agC, 12);
+      });
+    },
+    { boundingbox: [-0.4, 10.7, 14.4, -0.2], title: () => makeStrings("uvmBench")("title") },
+  );
+
+  registerQuiz("uvmQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("cyclesQ", v),
+      variables: "n=[5:20] c=[2:8]",
+      answer: "n * c",
+    },
+    {
+      prompt: (v) => sceneStrings("agentsQ", v),
+      variables: "n=[2:7]",
+      answer: "3 * n",
+    },
+    {
+      prompt: () => sceneStrings("driverQ"),
+      options: [
+        { text: () => sceneStrings("aDriver"), correct: true },
+        { text: () => sceneStrings("aMonitor"), correct: false },
+        { text: () => sceneStrings("aSequencer"), correct: false },
+        { text: () => sceneStrings("aScoreboard"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("monitorQ"),
+      options: [
+        { text: () => sceneStrings("aMonitor"), correct: true },
+        { text: () => sceneStrings("aDriver"), correct: false },
+        { text: () => sceneStrings("aSequencer"), correct: false },
+        { text: () => sceneStrings("aScoreboard"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("checkQ"),
+      options: [
+        { text: () => sceneStrings("aScoreboard"), correct: true },
+        { text: () => sceneStrings("aDriver"), correct: false },
+        { text: () => sceneStrings("aMonitor"), correct: false },
+        { text: () => sceneStrings("aSequencer"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bundleQ"),
+      options: [
+        { text: () => sceneStrings("buRight"), correct: true },
+        { text: () => sceneStrings("buAll"), correct: false },
+        { text: () => sceneStrings("buScb"), correct: false },
+        { text: () => sceneStrings("buTests"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("passiveQ"),
+      options: [
+        { text: () => sceneStrings("paRight"), correct: true },
+        { text: () => sceneStrings("paFast"), correct: false },
+        { text: () => sceneStrings("paSync"), correct: false },
+        { text: () => sceneStrings("paCov"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("reuseQ"),
+      options: [
+        { text: () => sceneStrings("reRight"), correct: true },
+        { text: () => sceneStrings("reWrite"), correct: false },
+        { text: () => sceneStrings("reBoth"), correct: false },
+        { text: () => sceneStrings("reDel"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("factoryQ"),
+      options: [
+        { text: () => sceneStrings("faRight"), correct: true },
+        { text: () => sceneStrings("faCfg"), correct: false },
+        { text: () => sceneStrings("faPhase"), correct: false },
+        { text: () => sceneStrings("faSeq"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cfgQ"),
+      options: [
+        { text: () => sceneStrings("cfRight"), correct: true },
+        { text: () => sceneStrings("cfLog"), correct: false },
+        { text: () => sceneStrings("cfPins"), correct: false },
+        { text: () => sceneStrings("cfCov"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("phaseQ"),
+      options: [
+        { text: () => sceneStrings("phRight"), correct: true },
+        { text: () => sceneStrings("phWrong1"), correct: false },
+        { text: () => sceneStrings("phWrong2"), correct: false },
+        { text: () => sceneStrings("phWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("txnQ"),
+      options: [
+        { text: () => sceneStrings("txRight"), correct: true },
+        { text: () => sceneStrings("txSim"), correct: false },
+        { text: () => sceneStrings("txSynth"), correct: false },
+        { text: () => sceneStrings("txSpeed"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("levelQ"),
+      options: [
+        { text: () => sceneStrings("leRight"), correct: true },
+        { text: () => sceneStrings("leSeqScb"), correct: false },
+        { text: () => sceneStrings("leRefDut"), correct: false },
+        { text: () => sceneStrings("leAll"), correct: false },
+      ],
+    },
+  ]);
+</script>

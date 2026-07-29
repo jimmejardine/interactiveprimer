@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Clock Gating and Low-Power RTL</primer-title>
+
+    <primer-card>
+      <p>
+        Your design now meets timing. The next bill arrives:
+        <strong>power</strong>. You met
+        <primer-ref to="computer-science/computer-architecture/foundations/power-and-the-power-wall">the power
+        wall</primer-ref> as an architectural fact; front-end design is where you actually fight it, cycle by
+        cycle and net by net. Dynamic power obeys one formula worth tattooing somewhere:
+      </p>
+      <primer-math display>P_{\text{dyn}} \;=\; \alpha \, C \, V^2 f,</primer-math>
+      <p>
+        where <primer-math>f</primer-math> is the clock frequency, <primer-math>V</primer-math> the supply
+        voltage, <primer-math>C</primer-math> the capacitance being switched, and
+        <primer-math>\alpha</primer-math> the <strong>activity factor</strong> — the fraction of cycles a
+        given net actually toggles. Every charge-up of a net costs
+        <primer-math>\tfrac{1}{2}CV^2</primer-math> from the supply, dumped as heat on the way back down
+        (the deeper physics of that half-CV² — and the strange far horizon where computing needn't dissipate
+        at all — lives in
+        <primer-ref soft to="computer-science/reversible-computing/circuits/the-energy-cost-of-switching">the
+        energy cost of switching</primer-ref>). The front-end levers are <primer-math>\alpha</primer-math>
+        and <primer-math>C</primer-math>; the next lesson pulls the mighty <primer-math>V</primer-math> and
+        <primer-math>f</primer-math> levers. And one net towers over all others in
+        <primer-math>\alpha</primer-math>…
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The clock: the hungriest net on the chip</h2>
+      <p>
+        Data nets toggle when data changes — <primer-math>\alpha</primer-math> is typically 0.05–0.2. The
+        clock toggles <em>every single cycle, by definition</em>: <primer-math>\alpha = 1</primer-math>, the
+        maximum possible, into an enormous capacitance — the buffer tree spanning the die plus the clock pin
+        of every flip-flop. Multiply the biggest <primer-math>\alpha</primer-math> by one of the biggest
+        <primer-math>C</primer-math>s and you get the standard, slightly scandalous fact:
+        <strong>the clock network burns 30–50% of many chips' dynamic power</strong> — much of it delivered
+        to registers that are not even changing value. A register holding the same word for a thousand cycles
+        still receives, and pays for, a thousand clock edges.
+      </p>
+      <p>
+        Hence the biggest single power optimisation in digital design: <strong>clock gating</strong> — switch
+        the clock off for registers with nothing to do. Slide the sliders: the savings scale with how much of
+        the clock tree you can gate and how often those registers are genuinely idle.
+      </p>
+      <primer-chart scene="gatePower" caption="Total dynamic power, normalised to 1, versus the fraction of the clock tree behind clock gates. The gated line falls linearly from the ungated baseline; sliders set the clock tree's share of total power and the fraction of time the gated registers are actually idle."></primer-chart>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "glitchScene": {
+          "title": "Why a naive AND-gated clock glitches — and how the ICG cell avoids it",
+          "clkRow": "clk",
+          "enRow": "en",
+          "naiveRow": "clk & en",
+          "icgRow": "ICG out",
+          "runt": "runt pulse!",
+          "cEn": "The enable changes whenever the logic decides — here it rises while clk is already high",
+          "cNaive": "A plain AND passes the change straight through: a partial 'runt' pulse that downstream flops may see as a real edge",
+          "cIcg": "The ICG's latch only lets en change take effect while clk is low — every emitted pulse is full-width and clean"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Gating the clock without wrecking it</h2>
+      <p>
+        The obvious circuit is a trap. Write <code>assign gclk = clk &amp; en;</code> and whenever
+        <code>en</code> changes <em>while the clock is high</em>, the AND output changes mid-cycle — emitting
+        a partial-width <strong>runt pulse</strong> or truncating a real one. Downstream flip-flops may treat
+        the runt as a genuine clock edge and capture garbage — occasionally, unreproducibly, on every flop
+        downstream of the gate. The industrial fix is the <strong>integrated clock-gating cell (ICG)</strong>:
+        a level-sensitive latch, transparent while the clock is <em>low</em>, feeding the AND. The latch
+        freezes the enable for the entire high phase, so the gated clock can only ever produce full,
+        clean pulses:
+      </p>
+      <primer-geometry scene="glitchScene" caption="Four waveform rows: the clock; an enable that rises while the clock is high; the naive AND of the two, showing a partial runt pulse; and the ICG output, whose latch defers the enable to the next low phase so only full-width pulses emerge."></primer-geometry>
+      <p>
+        You almost never instantiate an ICG by hand. Write <strong>enable-based RTL</strong> and the tools
+        infer it:
+      </p>
+      <primer-code lang="text">
+        always_ff @(posedge clk) begin
+          if (en) q &lt;= d;      // "load only when en" — synthesis maps the whole
+        end                     // register bank onto an ICG cell from the library
+      </primer-code>
+      <p>
+        A register bank written this way tells synthesis exactly which cycles matter; the tool replaces the
+        per-bit feedback muxes with one ICG driving the bank's clock pin — hundreds of clock pins silenced by
+        one gate. This is the pleasing pattern of low-power design: <em>say what you mean in RTL, and let the
+        tool turn intent into savings</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Beyond the clock: making the data hold still</h2>
+      <p>
+        Once the clock is gated, the remaining dynamic power is data toggling — shrink
+        <primer-math>\alpha</primer-math> and <primer-math>C</primer-math> there too:
+      </p>
+      <ul>
+        <li><strong>Operand isolation</strong> — a big combinational block (a multiplier, say) whose result
+          is only used sometimes still ripples with every input twitch, burning power computing answers
+          nobody reads. Freeze its inputs (an AND mask or an enabled register) when the result is unused, and
+          the whole cloud goes quiet.</li>
+        <li><strong>Encoding choices</strong> — a one-hot state machine toggles exactly two bits per
+          transition; a dense binary encoding can toggle many at once (7 → 8 flips four). Buses that count or
+          step can use Gray code for the same reason it helped in the CDC lesson: fewer transitions, less
+          <primer-math>\alpha</primer-math>.</li>
+        <li><strong>Avoid wasteful recomputation</strong> — hoist the invariant work out of the
+          every-cycle path, exactly as you would hoist code out of a loop: compute once, register it, reuse
+          it.</li>
+      </ul>
+      <p>
+        And measure, don't guess: power tools re-run the netlist against <strong>switching-activity</strong>
+        data recorded from realistic simulations, producing a report of exactly which nets and clocks burn
+        what. Here is that style of accounting in miniature:
+      </p>
+      <primer-code run>
+        // A toy power report: P = alpha * C * V^2 * f per component, before and after gating.
+        const V = 0.8, f_GHz = 1.0;               // volts, GHz
+        const parts = [
+          { name: "clock tree ", alphaF: 1.00, C_pF: 800 },
+          { name: "datapath   ", alphaF: 0.15, C_pF: 1200 },
+          { name: "memory     ", alphaF: 0.05, C_pF: 900 },
+          { name: "control    ", alphaF: 0.10, C_pF: 300 },
+        ];
+        // P(mW) = alpha * C_pF * V^2 * f_GHz  (units: pF * V^2 * GHz = mW)
+        const power = (a: number, c: number) =&gt; a * c * V * V * f_GHz;
+
+        let total = 0;
+        for (const p of parts) total += power(p.alphaF, p.C_pF);
+        console.log("component    alpha   C(pF)   P(mW)   share");
+        for (const p of parts) {
+          const P = power(p.alphaF, p.C_pF);
+          console.log(p.name + "  " + p.alphaF.toFixed(2) + "   " + p.C_pF + "    " +
+                      P.toFixed(0).padStart(4) + "   " + ((100 * P) / total).toFixed(0) + "%");
+        }
+        console.log("total: " + total.toFixed(0) + " mW");
+        console.log("");
+
+        // Clock gating: 80% of the tree sits behind ICGs; those registers idle 70% of cycles.
+        const gatedFrac = 0.8, idleFrac = 0.7;
+        const clkP = power(1.0, 800);
+        const saved = clkP * gatedFrac * idleFrac;
+        console.log("clock gating saves " + saved.toFixed(0) + " mW  (" +
+                    ((100 * saved) / total).toFixed(0) + "% of the whole chip)");
+        console.log("new total: " + (total - saved).toFixed(0) + " mW");
+      </primer-code>
+      <primer-theorem name="Dynamic power at the front end">
+        <ul>
+          <li><primer-math>P_{\text{dyn}} = \alpha C V^2 f</primer-math>; each net toggle costs
+            <primer-math>\tfrac{1}{2}CV^2</primer-math> from the supply;</li>
+          <li>the clock has <primer-math>\alpha = 1</primer-math> into huge capacitance — often
+            <strong>30–50% of chip power</strong>;</li>
+          <li><strong>clock gating</strong> silences idle registers — always via the latch-based
+            <strong>ICG cell</strong> (a naive <code>clk &amp; en</code> glitches), usually inferred from
+            <code>if (en) q &lt;= d</code> RTL;</li>
+          <li><strong>operand isolation</strong> freezes unused datapath inputs; encoding choices (one-hot,
+            Gray) cut <primer-math>\alpha</primer-math>;</li>
+          <li>verify with <strong>switching-activity-annotated power reports</strong>, not intuition.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="How much of your phone's chip is switched off right now?">
+      <p>
+        Almost all of it, almost always. A modern mobile SoC is a masterpiece of aggressive gating: at any
+        instant, the video decoder, the neural engine, most CPU cores, and most of the GPU are receiving no
+        clock at all — hierarchies of ICG cells gate whole subsystems, then units, then individual register
+        banks, often with 95%+ of flops unclocked in a typical idle-ish second. Designers speak of "dark
+        silicon": the power wall means far more logic is fabricated than can ever be clocked simultaneously,
+        so the chip is a city at night where lights flick on only in the rooms being used. That is also why
+        <em>racing back to idle</em> matters — finishing a burst of work quickly so everything can be gated
+        again often beats trickling along — a theme the next lesson's voltage lever makes quantitative.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Never gate a clock with a bare AND in RTL">
+      <p>
+        The tempting one-liner <code>assign gclk = clk &amp; en;</code> is a classic silicon killer. If
+        <code>en</code> rises or falls while <code>clk</code> is high, the AND emits a runt pulse — a
+        partial-width edge that some downstream flip-flops will register and others will not, corrupting
+        state randomly across the whole gated domain. It will pass RTL simulation (which happily models ideal
+        edges), and fail in silicon, intermittently, at some voltages and temperatures. <strong>Always</strong>
+        use the library's ICG cell or — better — write enable-based RTL (<code>if (en) q &lt;= d</code>) and
+        let the tool infer proper gating. Most companies enforce this with lint rules that flag any logic on
+        a clock net; treat hand-rolled clock logic the way a chemist treats hand-rolled explosives.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "powerQuiz@1": {
+          "intro": "P_dyn = α·C·V²·f. The clock has α = 1 (toggles every cycle) and often burns 30–50% of chip power. Gate clocks only via the latch-based ICG cell.",
+          "vScaleQ": "Supply voltage is multiplied by {k} with everything else fixed. Dynamic power is multiplied by…",
+          "vFracQ": "Supply voltage drops to V/{k}, everything else fixed. The new dynamic power, as a percent of the original, is…",
+          "actQ": "A block burning {p} mW of dynamic power has its activity factor α cut by a factor of {k} (same C, V, f). Its new dynamic power, in mW, is…",
+          "gateSaveQ": "The clock tree burns {c} mW. Clock gating eliminates {g}% of that toggling. How many mW are saved?",
+          "alphaQ": "Why is the clock the highest-activity net on the chip?",
+          "aRight": "It toggles every cycle by definition — α = 1, the maximum — while data nets toggle only when values change",
+          "aWrong1": "It carries the largest voltage swing",
+          "aWrong2": "It is the longest wire, so signals travel fastest on it",
+          "aWrong3": "It is the only net connected to flip-flops",
+          "shareQ": "Roughly what share of many chips' dynamic power goes into the clock network?",
+          "sRight": "30–50%",
+          "sWrong1": "1–2%",
+          "sWrong2": "About 90%",
+          "sWrong3": "Essentially none — clocks are free",
+          "glitchQ": "What is wrong with gating a clock as `assign gclk = clk & en` in RTL?",
+          "gRight": "If en changes while clk is high, the AND emits runt pulses that downstream flops may take as real edges — corrupting state",
+          "gWrong1": "AND gates cannot switch fast enough for clock signals",
+          "gWrong2": "It works, but wastes one gate of area",
+          "gWrong3": "The synthesizer refuses to compile any logic on a clock",
+          "icgQ": "Inside an integrated clock-gating (ICG) cell is…",
+          "iRight": "A level-sensitive latch (transparent while the clock is low) feeding an AND — so the enable can only take effect between pulses",
+          "iWrong1": "Two flip-flops in series, like a synchronizer",
+          "iWrong2": "A resistor that weakens the clock when idle",
+          "iWrong3": "A small PLL that regenerates the clock",
+          "inferQ": "How do synthesis tools usually decide where to insert clock gates?",
+          "nRight": "From enable-based RTL like `if (en) q <= d` — the enable tells the tool exactly which cycles the register needs a clock",
+          "nWrong1": "By randomly sampling registers until power drops",
+          "nWrong2": "They cannot — every ICG must be hand-instantiated",
+          "nWrong3": "By removing registers that fail timing",
+          "isoQ": "Operand isolation saves power by…",
+          "oRight": "Freezing the inputs of an unused datapath block so its combinational logic stops rippling on every input twitch",
+          "oWrong1": "Running the block at a higher voltage",
+          "oWrong2": "Deleting the block from the netlist",
+          "oWrong3": "Moving the block into a faster clock domain",
+          "onehotQ": "Why can a one-hot state encoding burn less switching power than a dense binary one?",
+          "hRight": "One-hot transitions toggle exactly two bits, while a binary step like 7 → 8 can toggle many at once",
+          "hWrong1": "One-hot uses fewer flip-flops",
+          "hWrong2": "One-hot registers do not need a clock",
+          "hWrong3": "Binary encodings cannot be synthesized",
+          "measureQ": "Realistic power numbers come from…",
+          "mRight": "Power analysis annotated with switching activity recorded from realistic simulation — actual α per net, not guesses",
+          "mWrong1": "Counting the gates and multiplying by a constant",
+          "mWrong2": "The timing report's worst slack",
+          "mWrong3": "The RTL line count"
+        }
+      }
+    </script>
+
+    <primer-quiz name="powerQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/front-end/metastability-and-clock-domain-crossing",
+      "computer-science/computer-architecture/foundations/power-and-the-power-wall"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Power vs fraction of the clock tree gated. Baseline 1; gated line falls linearly. ──
+  registerCharts(
+    [{
+      name: "gatePower",
+      f: [
+        () => 1,                                       // ungated baseline
+        (x, s) => (1 - s.share) + s.share * (1 - x * s.idle),  // gating x of the tree
+      ],
+      line: (colors, i) =>
+        i === 0
+          ? { strokeColor: colors.line, strokeOpacity: 0.45, strokeWidth: 1.5, dash: 2 }
+          : { strokeColor: colors.cat[0], strokeWidth: 2.5 },
+      legend: ["ungated", "with clock gating"],
+    }],
+    { xmin: 0, xmax: 1, ymin: 0, ymax: 1.2, xaxisname: "fraction of clock tree gated", yaxisname: "power (norm.)" },
+    [
+      { name: "share", label: "clock share of total power", min: 0.2, max: 0.6, step: 0.05, value: 0.4 },
+      { name: "idle", label: "fraction of time idle", min: 0, max: 1, step: 0.05, value: 0.7 },
+    ],
+  );
+
+  // ── The glitch: clk, en, naive clk&en with a runt pulse, and the clean ICG output. ──
+  registerGeometryScene(
+    "glitchScene",
+    ({ board, colors, step, sceneStrings }) => {
+      const lab = (x, y, txt, col = colors.ink, size = 13, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: col, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+      const wave = (pts, base, amp, color) => {
+        for (let i = 0; i < pts.length - 1; i++) {
+          const [t0, v0] = pts[i], [t1, v1] = pts[i + 1];
+          board.create("segment", [[t0, base + v0 * amp], [t1, base + v0 * amp]], {
+            strokeColor: color, strokeWidth: 2.5, highlight: false,
+          });
+          if (v1 !== v0)
+            board.create("segment", [[t1, base + v0 * amp], [t1, base + v1 * amp]], {
+              strokeColor: color, strokeWidth: 2.5, highlight: false,
+            });
+        }
+      };
+      const amp = 0.8;
+
+      // Base: the clock row and row labels.
+      lab(0.35, 6.2, sceneStrings("clkRow"), colors.cat[0], 13, "right");
+      wave([[0.5, 0], [1, 1], [2, 0], [3, 1], [4, 0], [5, 1], [6, 0], [7, 1], [8, 0], [8.6, 0]], 5.8, amp, colors.cat[0]);
+
+      // Step 1: the enable, rising mid-high-phase.
+      step(sceneStrings("cEn"), () => {
+        lab(0.35, 4.6, sceneStrings("enRow"), colors.cat[2], 13, "right");
+        wave([[0.5, 0], [3.5, 1], [6.5, 0], [8.6, 0]], 4.2, amp, colors.cat[2]);
+      });
+
+      // Step 2: naive AND — a runt pulse from 3.5 to 4.
+      step(sceneStrings("cNaive"), () => {
+        lab(0.35, 3.0, sceneStrings("naiveRow"), colors.cat[1], 13, "right");
+        wave([[0.5, 0], [3.5, 1], [4, 0], [5, 1], [6, 0], [8.6, 0]], 2.6, amp, colors.cat[1]);
+        lab(3.75, 3.9, sceneStrings("runt"), colors.cat[1], 12);
+      });
+
+      // Step 3: ICG output — only the full pulse survives.
+      step(sceneStrings("cIcg"), () => {
+        lab(0.35, 1.4, sceneStrings("icgRow"), colors.cat[3], 13, "right");
+        wave([[0.5, 0], [5, 1], [6, 0], [8.6, 0]], 1.0, amp, colors.cat[3]);
+      });
+    },
+    { boundingbox: [-1.2, 7.2, 9.3, 0.4], keepAspect: false, title: () => makeStrings("glitchScene")("title") },
+  );
+
+  registerQuiz("powerQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // P ∝ V²: factor k².
+      prompt: (v) => sceneStrings("vScaleQ", v),
+      variables: "k=[2,3]",
+      answer: "k ^ 2",
+    },
+    {
+      // (1/k)² as a percent: 100/k².
+      prompt: (v) => sceneStrings("vFracQ", v),
+      variables: "k=[2,5,10]",
+      answer: "100 / (k ^ 2)",
+    },
+    {
+      // Linear in α: p/k, clean divisions.
+      prompt: (v) => sceneStrings("actQ", v),
+      variables: "p=[40,60,80,100] k=[2,4,5]",
+      answer: "p / k",
+    },
+    {
+      // Saving = c·g/100, clean combos.
+      prompt: (v) => sceneStrings("gateSaveQ", v),
+      variables: "c=[40,60,80] g=[25,50,75]",
+      answer: "c * g / 100",
+    },
+    {
+      prompt: () => sceneStrings("alphaQ"),
+      options: [
+        { text: () => sceneStrings("aRight"), correct: true },
+        { text: () => sceneStrings("aWrong1"), correct: false },
+        { text: () => sceneStrings("aWrong2"), correct: false },
+        { text: () => sceneStrings("aWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("shareQ"),
+      options: [
+        { text: () => sceneStrings("sRight"), correct: true },
+        { text: () => sceneStrings("sWrong1"), correct: false },
+        { text: () => sceneStrings("sWrong2"), correct: false },
+        { text: () => sceneStrings("sWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("glitchQ"),
+      options: [
+        { text: () => sceneStrings("gRight"), correct: true },
+        { text: () => sceneStrings("gWrong1"), correct: false },
+        { text: () => sceneStrings("gWrong2"), correct: false },
+        { text: () => sceneStrings("gWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("icgQ"),
+      options: [
+        { text: () => sceneStrings("iRight"), correct: true },
+        { text: () => sceneStrings("iWrong1"), correct: false },
+        { text: () => sceneStrings("iWrong2"), correct: false },
+        { text: () => sceneStrings("iWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("inferQ"),
+      options: [
+        { text: () => sceneStrings("nRight"), correct: true },
+        { text: () => sceneStrings("nWrong1"), correct: false },
+        { text: () => sceneStrings("nWrong2"), correct: false },
+        { text: () => sceneStrings("nWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("isoQ"),
+      options: [
+        { text: () => sceneStrings("oRight"), correct: true },
+        { text: () => sceneStrings("oWrong1"), correct: false },
+        { text: () => sceneStrings("oWrong2"), correct: false },
+        { text: () => sceneStrings("oWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("onehotQ"),
+      options: [
+        { text: () => sceneStrings("hRight"), correct: true },
+        { text: () => sceneStrings("hWrong1"), correct: false },
+        { text: () => sceneStrings("hWrong2"), correct: false },
+        { text: () => sceneStrings("hWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("measureQ"),
+      options: [
+        { text: () => sceneStrings("mRight"), correct: true },
+        { text: () => sceneStrings("mWrong1"), correct: false },
+        { text: () => sceneStrings("mWrong2"), correct: false },
+        { text: () => sceneStrings("mWrong3"), correct: false },
+      ],
+    },
+  ]);
+</script>

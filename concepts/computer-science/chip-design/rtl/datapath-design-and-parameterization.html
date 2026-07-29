@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Datapath Design and Parameterization</primer-title>
+
+    <primer-card>
+      <p>
+        Open up any serious digital design — a CPU, a crypto engine, a video scaler — and you will find the
+        same anatomy: a set of <strong>muscles</strong> that move and crunch data, and a small
+        <strong>brain</strong> telling the muscles what to do each cycle. The muscles are the
+        <strong>datapath</strong>: registers, multiplexers, and an
+        <primer-ref to="computer-science/computer-architecture/circuits/datapath-adders-and-the-alu">ALU or
+        adder</primer-ref>, all wide (8, 32, 64 bits). The brain is the <strong>controller</strong>: the
+        <primer-ref to="computer-science/chip-design/rtl/finite-state-machines-in-rtl">finite state
+        machine</primer-ref> from last lesson, issuing skinny one-bit orders — <em>select this mux input,
+        enable that register</em>. This split, plus SystemVerilog's tools for building hardware in any
+        width (<code>parameter</code> and <code>generate</code>), is how designs scale from toy to
+        product without being rewritten.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Parameters: one description, any width</h2>
+      <p>
+        You never write "a 32-bit adder". You write an <primer-math>N</primer-math>-bit adder and let the
+        instantiator choose <primer-math>N</primer-math>. The knob is a <strong><code>parameter</code></strong>,
+        and <strong><code>generate</code></strong> stamps out the repeated structure — here, a ripple-carry
+        adder built from the <code>full_adder</code> of Module&nbsp;1:
+      </p>
+      <primer-code lang="text">
+        module ripple_adder #(parameter WIDTH = 8) (
+          input  logic [WIDTH-1:0] a, b,
+          input  logic             cin,
+          output logic [WIDTH-1:0] sum,
+          output logic             cout
+        );
+          logic [WIDTH:0] carry;              // the carry chain: WIDTH+1 strands
+          assign carry[0] = cin;
+          assign cout     = carry[WIDTH];
+
+          generate
+            for (genvar i = 0; i &lt; WIDTH; i++) begin : bit_slice
+              full_adder fa (.a(a[i]), .b(b[i]), .cin(carry[i]),
+                             .sum(sum[i]), .cout(carry[i+1]));
+            end
+          endgenerate
+        endmodule
+      </primer-code>
+      <p>
+        The <code>generate</code>-for is <strong>not a loop that runs</strong> — it is a photocopier that
+        runs <em>at elaboration time</em>, when the tool flattens your design into gates. With
+        <code>WIDTH = 32</code> it stamps out thirty-two <code>full_adder</code> instances, wired nose to
+        tail through the carry chain, before the first simulation cycle ever ticks. Instantiators pick the
+        width at the point of use:
+      </p>
+      <primer-code lang="text">
+        ripple_adder #(.WIDTH(32)) pc_adder   (.a(pc),  .b(32'd4), .cin(1'b0), …);
+        ripple_adder #(.WIDTH(64)) wide_adder (.a(x),   .b(y),     .cin(c),    …);
+      </primer-code>
+      <p>
+        One source file, two different pieces of hardware. A cousin, <strong><code>localparam</code></strong>,
+        names a constant <em>derived inside</em> the module that instantiators cannot override — perfect for
+        things like counter widths: <code>localparam CNT_W = $clog2(WIDTH + 1);</code> (the ceiling-log
+        function every parameterized design leans on).
+      </p>
+    </primer-card>
+
+    <!-- Datapath block diagram: registers, mux, adder, controller — stepped. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "multDatapath": {
+          "title": "A shift-add multiplier: datapath (muscles) + controller (brain)",
+          "stepRegs": "The datapath: wide registers for the multiplicand, multiplier and accumulator, plus an adder and a mux",
+          "stepData": "Wide data buses wire them: the adder offers acc + mcand; the mux picks 'add it' or 'keep acc'",
+          "stepCtrl": "The controller FSM watches one bit (mplier[0]) and issues one-bit orders: the mux select and shift/load enables"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The decomposition, drawn</h2>
+      <p>
+        Here is the machine this lesson builds — a multiplier that computes
+        <primer-math>a \times b</primer-math> the way you were taught long multiplication, one binary digit
+        per clock cycle. Fat arrows carry data; thin dashed lines carry orders:
+      </p>
+      <primer-geometry scene="multDatapath" caption="A block diagram. Wide registers labelled mcand, mplier and acc, an adder computing acc + mcand, and a two-input mux feeding acc. Below, a controller box marked FSM sends dashed control lines (mux select, enables) up into the datapath, and reads the low bit of the mplier register."></primer-geometry>
+      <p>
+        The division of labour is strict. The datapath can add, shift and store — but it has no idea
+        <em>when</em> to. The controller knows exactly when — but touches no data wider than a bit. Every
+        cycle it reads a little status (here just <code>mplier[0]</code>: "is the current multiplier digit
+        a 1?") and sets the select and enable lines. Processors, GPUs and every non-trivial peripheral are
+        this picture at larger scale.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The shift-add multiplier in RTL</h2>
+      <p>
+        Long multiplication in base 2: for each bit of <primer-math>a</primer-math>, if the bit is 1, add
+        the (appropriately shifted) <primer-math>b</primer-math> into a running sum. One bit per cycle, so
+        an <primer-math>N</primer-math>-bit multiply takes <primer-math>N</primer-math> cycles — a classic
+        trade of time for silicon:
+      </p>
+      <primer-code lang="text">
+        module shift_add_mult #(parameter WIDTH = 8) (
+          input  logic                 clk, rst_n, start,
+          input  logic [WIDTH-1:0]     a, b,
+          output logic [2*WIDTH-1:0]   product,
+          output logic                 done
+        );
+          localparam CNT_W = $clog2(WIDTH + 1);
+
+          // ── Datapath registers (the muscles). ──
+          logic [2*WIDTH-1:0] acc, mcand;
+          logic [WIDTH-1:0]   mplier;
+          logic [CNT_W-1:0]   count;
+
+          // ── Controller (the brain): a two-state FSM. ──
+          typedef enum logic { IDLE, RUN } state_t;
+          state_t state;
+
+          always_ff @(posedge clk) begin
+            if (!rst_n) state &lt;= IDLE;
+            else if (state == IDLE &amp;&amp; start) begin      // load: seize the operands
+              acc &lt;= '0;  mcand &lt;= b;  mplier &lt;= a;  count &lt;= WIDTH;
+              state &lt;= RUN;
+            end else if (state == RUN) begin
+              if (mplier[0]) acc &lt;= acc + mcand;        // this digit is 1: add
+              mcand  &lt;= mcand &lt;&lt; 1;                     // next digit is worth double
+              mplier &lt;= mplier &gt;&gt; 1;                    // expose the next digit
+              count  &lt;= count - 1;
+              if (count == 1) state &lt;= IDLE;
+            end
+          end
+
+          assign product = acc;
+          assign done    = (state == IDLE);
+        endmodule
+      </primer-code>
+      <p>
+        Savour one subtlety, courtesy of non-blocking assignment: in a RUN cycle, <code>acc</code> adds the
+        <em>old</em> <code>mcand</code> while <code>mcand</code> simultaneously doubles — both right-hand
+        sides read the pre-edge world, so the add uses this digit's place value and the doubling prepares
+        the next. Settle, then snap, doing two jobs in one edge.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Watch it multiply</h2>
+      <p>
+        The two-phase simulator again — the state object is the four datapath registers, and
+        <code>next()</code> is one RUN cycle. Watch the partial products accumulate exactly like the columns
+        of long multiplication:
+      </p>
+      <primer-code run>
+        // ── The datapath registers and one RUN cycle of the controller's orders. ──
+        interface State { acc: number; mcand: number; mplier: number; count: number }
+
+        function next(s: State): State {
+          return {
+            acc:    (s.mplier &amp; 1) ? s.acc + s.mcand : s.acc,  // add when this digit is 1
+            mcand:  s.mcand * 2,                               // mcand <= mcand << 1
+            mplier: s.mplier &gt;&gt; 1,                             // mplier <= mplier >> 1
+            count:  s.count - 1,
+          };
+        }
+
+        const WIDTH = 4, a = 11, b = 13;                       // 1011 x 1101
+        let s: State = { acc: 0, mcand: b, mplier: a, count: WIDTH };   // the IDLE load
+
+        console.log(`${a} x ${b}, one multiplier bit per cycle:`);
+        console.log("cycle | bit | action        | acc");
+        console.log("------+-----+---------------+----");
+        for (let cycle = 1; s.count &gt; 0; cycle++) {
+          const bit = s.mplier &amp; 1;
+          const action = bit ? `acc += ${s.mcand}`.padEnd(13) : "hold".padEnd(13);
+          const after = next(s);
+          console.log(`  ${cycle}   |  ${bit}  | ${action} | ${after.acc}`);
+          s = after;
+        }
+        console.log(`done: product = ${s.acc}   (check: ${a} x ${b} = ${a * b})`);
+      </primer-code>
+      <p>
+        Four cycles, four digits, correct product. Re-parameterize to <code>WIDTH = 32</code> and the same
+        description multiplies 32-bit numbers in 32 cycles — no code changes, just a different photocopy
+        count at elaboration.
+      </p>
+      <primer-theorem name="Datapaths, controllers and parameters">
+        <ul>
+          <li>a design decomposes into a <strong>datapath</strong> (wide registers, muxes, ALU — the
+            muscles) and a <strong>controller</strong> FSM (the brain) issuing select/enable signals;</li>
+          <li><code>parameter</code> makes widths and sizes choosable per instance;
+            <code>localparam</code> names derived constants that cannot be overridden;</li>
+          <li><code>generate</code>-for stamps out repeated hardware <strong>at elaboration time</strong> —
+            a photocopier, not a loop that runs;</li>
+          <li>trading time for area is a design choice: a shift-add multiplier does an
+            <primer-math>N</primer-math>-bit multiply in <primer-math>N</primer-math> cycles with one
+            adder.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Why not just write acc = a * b?">
+      <p>
+        You can! Write <code>assign product = a * b;</code> and the synthesizer will build you a
+        <em>combinational</em> multiplier — a small city of AND gates and adder rows that computes the whole
+        product inside one cycle. It is enormously bigger than our one adder, and its long gate chains may
+        force your whole chip's clock to slow down. The shift-add version is the opposite corner of the same
+        trade: tiny, but <primer-math>N</primer-math> cycles per result. Real chips live all along this
+        spectrum — pipelined array multipliers, Booth encoding, digit-serial designs — and choosing a point
+        on it <em>is</em> the job. The datapath/controller decomposition is what makes the choice swappable:
+        the controller barely changes when the datapath gets a faster multiplier, because the brain never
+        cared how strong the muscles were, only what they could be told to do.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A parameter is not a variable">
+      <p>
+        <code>parameter WIDTH</code> looks like a variable, and newcomers duly try to <em>change</em> it at
+        runtime — "if the packet is short, make the bus 16 bits this cycle". No. Parameters exist only
+        <strong>at elaboration time</strong>: the moment the tool flattens your design, every parameter is
+        frozen into a number, every <code>generate</code> is expanded, and what remains is a fixed netlist
+        of gates. Silicon cannot grow flip-flops at runtime any more than a bridge can grow a lane at rush
+        hour. A "variable-width" design is really a <em>maximum-width</em> datapath plus control logic that
+        ignores the unused bits — width chosen once, at elaboration, forever. If you find yourself wishing a
+        parameter could change per clock cycle, what you actually want is a mux and a control signal: that
+        is the datapath/controller split telling you where the flexibility belongs.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: instance counts, gate scaling, cycle counts, parameter semantics. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "dpQuiz@1": {
+          "intro": "Datapath = wide muscles; controller = one-bit orders; parameters are frozen at elaboration.",
+          "faQ": "A ripple-carry adder module uses a generate-for to instantiate one full_adder per bit. Elaborated with WIDTH = {w}, how many full_adder instances result?",
+          "genQ": "A generate block contains for (genvar i = 0; i < {n}; i++) around one register instance. How many copies of the register does elaboration create?",
+          "gatesQ": "One full_adder synthesizes to {g} gates. How many gates does a {w}-bit ripple-carry adder built from them use?",
+          "cyclesQ": "A shift-add multiplier processes one multiplier bit per cycle. How many RUN cycles does a {n}-bit multiply take?",
+          "prodQ": "Two {n}-bit numbers are multiplied. How many bits must the product register have to never overflow?",
+          "selQ": "A datapath mux selects one of {n} inputs. How many select bits must the controller send it?",
+          "paramQ": "When is the value of a parameter like WIDTH fixed?",
+          "paramRight": "At elaboration time — the tool freezes it into the netlist before any clock ever ticks",
+          "paramClk": "At each clock edge, like any register",
+          "paramReset": "At reset, when the chip powers up",
+          "paramSim": "It can change at any time during simulation",
+          "localQ": "What distinguishes a localparam from a parameter?",
+          "localRight": "A localparam is a constant derived inside the module that instantiators cannot override",
+          "localFast": "A localparam synthesizes to faster logic",
+          "localSim": "A localparam exists only in simulation",
+          "localWide": "A localparam may only hold bit-widths",
+          "ctrlQ": "In the datapath/controller decomposition, what does the controller send to the datapath?",
+          "ctrlRight": "Skinny control signals — mux selects and register enables — telling the muscles what to do this cycle",
+          "ctrlData": "The wide data operands to be processed",
+          "ctrlClock": "The clock signal",
+          "ctrlParam": "New parameter values for each operation",
+          "stepQ": "In a shift-add multiplier's RUN cycle where the current multiplier bit is 1, what does the datapath do?",
+          "stepRight": "Adds the shifted multiplicand into the accumulator, while the multiplicand doubles and the multiplier shifts right",
+          "stepSkip": "Skips the cycle entirely to save power",
+          "stepMul": "Multiplies the two full operands in one step",
+          "stepClear": "Clears the accumulator and starts over",
+          "resizeQ": "A designer wants a bus whose width changes at runtime: 16 bits for short packets, 32 for long ones. What is the synthesizable reality?",
+          "resizeRight": "Build the maximum width and add control logic that ignores unused bits — hardware width is frozen at elaboration",
+          "resizeParam": "Drive the WIDTH parameter from a register",
+          "resizeGen": "Put the bus inside a generate block so it re-elaborates on the fly",
+          "resizeTool": "Modern synthesis tools support runtime-resizable wires directly",
+          "whoQ": "Which half of the design decides WHAT happens each cycle, and which does the wide-data work?",
+          "whoRight": "The controller FSM decides; the datapath does the wide-data work",
+          "whoBoth": "The datapath decides and the controller does the work",
+          "whoALU": "The ALU decides both",
+          "whoClock": "The clock decides; both halves just follow it"
+        }
+      }
+    </script>
+
+    <primer-quiz name="dpQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/rtl/finite-state-machines-in-rtl",
+      "computer-science/computer-architecture/circuits/datapath-adders-and-the-alu"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The shift-add multiplier block diagram: datapath then wiring then controller. ──
+  registerGeometryScene(
+    "multDatapath",
+    ({ board, colors, step, sceneStrings }) => {
+      const ink = colors.ink, wire = colors.line;
+      const regC = colors.cat[0], aluC = colors.cat[1], ctlC = colors.cat[2];
+      const T = (x, y, txt, color, size = 13, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+      const box = (x, y, w, h, label, color) => {
+        board.create("polygon", [[x, y], [x + w, y], [x + w, y - h], [x, y - h]], {
+          borders: { strokeColor: color, strokeWidth: 2, highlight: false },
+          fillOpacity: 0, vertices: { visible: false }, highlight: false,
+        });
+        T(x + w / 2, y - h / 2, label, color, 13);
+      };
+      const arrow = (a, b, color, dash = 0) =>
+        board.create("arrow", [a, b], { strokeColor: color, strokeWidth: dash ? 1.5 : 2.5, dash, highlight: false });
+
+      // Step 1: the datapath blocks.
+      step(sceneStrings("stepRegs"), () => {
+        box(0.4, 6.2, 1.9, 0.9, "mcand", regC);      // (0.4..2.3, 5.3..6.2)
+        box(0.4, 4.6, 1.9, 0.9, "mplier", regC);     // (0.4..2.3, 3.7..4.6)
+        box(3.4, 6.6, 1.5, 1.1, "+", aluC);          // adder (3.4..4.9, 5.5..6.6)
+        box(5.9, 6.5, 1.3, 1.6, "mux", aluC);        // (5.9..7.2, 4.9..6.5)
+        box(8.2, 6.2, 1.7, 0.9, "acc", regC);        // (8.2..9.9, 5.3..6.2)
+      });
+
+      // Step 2: the wide data buses.
+      step(sceneStrings("stepData"), () => {
+        arrow([2.3, 5.75], [3.4, 6.25], wire);                    // mcand → adder
+        arrow([4.9, 6.05], [5.9, 6.05], wire);                    // adder → mux (acc + mcand)
+        arrow([7.2, 5.7], [8.2, 5.7], wire);                      // mux → acc
+        // acc feedback: down, left, into the adder's other input and the mux's other input.
+        board.create("segment", [[9.05, 5.3], [9.05, 4.4]], { strokeColor: wire, strokeWidth: 2.5, highlight: false });
+        board.create("segment", [[9.05, 4.4], [2.9, 4.4]], { strokeColor: wire, strokeWidth: 2.5, highlight: false });
+        arrow([2.9, 4.4], [3.4, 5.75], wire);                     // acc → adder
+        arrow([5.5, 4.4], [5.9, 5.25], wire);                     // acc → mux ("keep")
+        T(6.1, 4.15, "acc (keep)", ink, 11);
+        T(4.7, 6.55, "acc + mcand", ink, 11, "left");
+      });
+
+      // Step 3: the controller and its one-bit orders.
+      step(sceneStrings("stepCtrl"), () => {
+        box(2.6, 2.9, 3.1, 1.2, "controller FSM", ctlC);          // (2.6..5.7, 1.7..2.9)
+        arrow([1.35, 3.7], [2.6, 2.6], ctlC, 2);                  // mplier[0] status in
+        T(0.9, 2.9, "mplier[0]", ctlC, 11, "left");
+        arrow([6.55, 2.6], [6.55, 4.9], ctlC, 2);                 // mux select
+        T(6.75, 3.4, "select", ctlC, 11, "left");
+        arrow([4.6, 2.9], [8.9, 5.3], ctlC, 2);                   // acc enable
+        T(8.0, 3.9, "enables", ctlC, 11, "left");
+        arrow([2.9, 2.9], [1.35, 5.3], ctlC, 2);                  // shift enable to mcand/mplier
+      });
+    },
+    { boundingbox: [-0.2, 7.1, 10.6, 1.2], title: () => makeStrings("multDatapath")("title") },
+  );
+
+  registerQuiz("dpQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // One full_adder per bit.
+      prompt: (v) => sceneStrings("faQ", v),
+      variables: "w=[8,12,16,24,32,48,64]",
+      answer: "w",
+    },
+    {
+      prompt: (v) => sceneStrings("genQ", v),
+      variables: "n=[3:12]",
+      answer: "n",
+    },
+    {
+      // Gate count scales linearly.
+      prompt: (v) => sceneStrings("gatesQ", v),
+      variables: "g=[5,6,9] w=[8,16,32]",
+      answer: "g * w",
+    },
+    {
+      // One bit per cycle.
+      prompt: (v) => sceneStrings("cyclesQ", v),
+      variables: "n=[4:32]",
+      answer: "n",
+    },
+    {
+      // n-bit x n-bit needs 2n bits.
+      prompt: (v) => sceneStrings("prodQ", v),
+      variables: "n=[4:32]",
+      answer: "2 * n",
+    },
+    {
+      // log2(n) select bits for a power-of-two mux.
+      prompt: (v) => sceneStrings("selQ", v),
+      variables: "n=[4,8,16,32,64]",
+      answer: (v) => Math.log2(v.n),
+    },
+    {
+      prompt: () => sceneStrings("paramQ"),
+      options: [
+        { text: () => sceneStrings("paramRight"), correct: true },
+        { text: () => sceneStrings("paramClk"), correct: false },
+        { text: () => sceneStrings("paramReset"), correct: false },
+        { text: () => sceneStrings("paramSim"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("localQ"),
+      options: [
+        { text: () => sceneStrings("localRight"), correct: true },
+        { text: () => sceneStrings("localFast"), correct: false },
+        { text: () => sceneStrings("localSim"), correct: false },
+        { text: () => sceneStrings("localWide"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ctrlQ"),
+      options: [
+        { text: () => sceneStrings("ctrlRight"), correct: true },
+        { text: () => sceneStrings("ctrlData"), correct: false },
+        { text: () => sceneStrings("ctrlClock"), correct: false },
+        { text: () => sceneStrings("ctrlParam"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("stepQ"),
+      options: [
+        { text: () => sceneStrings("stepRight"), correct: true },
+        { text: () => sceneStrings("stepSkip"), correct: false },
+        { text: () => sceneStrings("stepMul"), correct: false },
+        { text: () => sceneStrings("stepClear"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("resizeQ"),
+      options: [
+        { text: () => sceneStrings("resizeRight"), correct: true },
+        { text: () => sceneStrings("resizeParam"), correct: false },
+        { text: () => sceneStrings("resizeGen"), correct: false },
+        { text: () => sceneStrings("resizeTool"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whoQ"),
+      options: [
+        { text: () => sceneStrings("whoRight"), correct: true },
+        { text: () => sceneStrings("whoBoth"), correct: false },
+        { text: () => sceneStrings("whoALU"), correct: false },
+        { text: () => sceneStrings("whoClock"), correct: false },
+      ],
+    },
+  ]);
+</script>

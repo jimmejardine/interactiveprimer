@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Designing a Tiny GPU ISA</primer-title>
+
+    <primer-card>
+      <p>
+        Eleven modules ago this course promised that text becomes silicon. The capstone collects on that
+        promise: over the next five lessons we will design and simulate a complete, working GPU —
+        <strong>PrimerGPU</strong> — with SIMT cores, a block dispatcher and an honest, bottlenecked memory
+        system. And every machine ever built starts in the same place: not with gates, but with a
+        <strong>contract</strong>. Before a single flip-flop exists, someone writes down exactly what
+        software may ask the hardware to do — the instruction set architecture. We did this once before,
+        when we <primer-ref to="computer-science/chip-design/cpu/planning-a-cpu-the-rv32i-subset">planned a
+        CPU around an RV32I subset</primer-ref>; now we do it again for a machine whose whole reason to
+        exist is running one program as ten thousand threads. After touring real GPUs all the way out to
+        <primer-ref to="computer-science/chip-design/gpu-frontiers/chiplet-gpus">chiplet monsters</primer-ref>,
+        it is time to build our own — small enough to fit in your head, real enough to breathe.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Design goals: minimal, but sufficient</h2>
+      <p>
+        A good tiny ISA is ruthless about what it leaves out. Our contract has three clauses:
+      </p>
+      <ul>
+        <li><strong>Sufficient</strong> — it must express real data-parallel kernels: vector addition
+          and matrix multiplication, the two workloads that justify a GPU's existence. That forces
+          arithmetic, loads, stores, an immediate, a compare, and a conditional branch (matmul's inner
+          loop needs one).</li>
+        <li><strong>Minimal</strong> — nothing that isn't forced. Eleven instructions, 16-bit fixed-width
+          encodings, one flat data memory. No floats, no stacks, no interrupts, no modes.</li>
+        <li><strong>SIMT-native</strong> — the thread's <em>identity</em> is part of the architecture.
+          Three registers are hard-wired to tell each thread who it is. This clause is the one that makes
+          it a GPU ISA rather than a small CPU ISA, and it deserves its own section below.</li>
+      </ul>
+      <p>
+        Every choice from here on — 4-bit register fields, 8-bit immediates, a single condition-flag set —
+        follows from squeezing those clauses into sixteen bits.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The PrimerGPU ISA: eleven instructions</h2>
+      <p>
+        Each instruction is one 16-bit word: a 4-bit opcode in bits 15–12, then register or immediate
+        fields. <code>Rd</code> is the destination (bits 11–8), <code>Rs</code> and <code>Rt</code> are
+        sources (bits 7–4 and 3–0), <code>imm8</code> is an 8-bit unsigned immediate (bits 7–0):
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Instruction</th><th>15–12</th><th>11–8</th><th>7–4</th><th>3–0</th><th>Meaning</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>NOP</code></td><td>0000</td><td>—</td><td>—</td><td>—</td><td>do nothing for one instruction slot</td></tr>
+            <tr><td><code>BRnzp</code></td><td>0001</td><td>nzp·0</td><td colspan="2">imm8</td><td>if (flags ∧ nzp mask) ≠ 0, PC ← imm8</td></tr>
+            <tr><td><code>CMP</code></td><td>0010</td><td>—</td><td>Rs</td><td>Rt</td><td>set N/Z/P flags from Rs − Rt</td></tr>
+            <tr><td><code>ADD</code></td><td>0011</td><td>Rd</td><td>Rs</td><td>Rt</td><td>Rd ← Rs + Rt</td></tr>
+            <tr><td><code>SUB</code></td><td>0100</td><td>Rd</td><td>Rs</td><td>Rt</td><td>Rd ← Rs − Rt</td></tr>
+            <tr><td><code>MUL</code></td><td>0101</td><td>Rd</td><td>Rs</td><td>Rt</td><td>Rd ← Rs × Rt</td></tr>
+            <tr><td><code>DIV</code></td><td>0110</td><td>Rd</td><td>Rs</td><td>Rt</td><td>Rd ← Rs ÷ Rt (integer)</td></tr>
+            <tr><td><code>LDR</code></td><td>0111</td><td>Rd</td><td>Rs</td><td>—</td><td>Rd ← mem[Rs]</td></tr>
+            <tr><td><code>STR</code></td><td>1000</td><td>—</td><td>Rs</td><td>Rt</td><td>mem[Rs] ← Rt</td></tr>
+            <tr><td><code>CONST</code></td><td>1001</td><td>Rd</td><td colspan="2">imm8</td><td>Rd ← imm8</td></tr>
+            <tr><td><code>RET</code></td><td>1111</td><td>—</td><td>—</td><td>—</td><td>this thread is done</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Two entries repay a second look. <code>BRnzp</code> is a <strong>predicated branch</strong>
+        borrowed in spirit from the LC-3: <code>CMP</code> compares two registers and records whether the
+        result was <strong>N</strong>egative, <strong>Z</strong>ero or <strong>P</strong>ositive; the
+        branch carries a 3-bit mask saying which of those outcomes it fires on. <code>BRnzp n, #4</code>
+        branches to address 4 if the last compare came out negative — a loop condition in two
+        instructions. And <code>RET</code> is not "return a value"; it is a thread announcing <em>my work
+        here is done</em> — the signal the machinery of the next three lessons will collect, count, and
+        turn into "kernel complete".
+      </p>
+    </primer-card>
+
+    <!-- Stepped anatomy of one encoded instruction. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "encodingAnatomy": {
+          "title": "Anatomy of one word: ADD R6, R4, R5 = 0011 0110 0100 0101",
+          "stepOpc": "Bits 15–12: the opcode — 0011 means ADD",
+          "stepRd": "Bits 11–8: Rd, the destination — 0110 = R6",
+          "stepRs": "Bits 7–4: Rs, the first source — 0100 = R4",
+          "stepRt": "Bits 3–0: Rt, the second source — 0101 = R5",
+          "lblOpc": "opcode = ADD",
+          "lblRd": "Rd = R6",
+          "lblRs": "Rs = R4",
+          "lblRt": "Rt = R5",
+          "bitAxis": "bit"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Reading a word</h2>
+      <p>
+        Sixteen bits, four fields, no exceptions to memorise — here is instruction 9 of the kernel we are
+        about to write, taken apart:
+      </p>
+      <primer-geometry scene="encodingAnatomy" caption="A row of 16 bit cells holding 0011 0110 0100 0101, revealed field by field: bits 15 to 12 are the ADD opcode, bits 11 to 8 encode destination R6, bits 7 to 4 source R4, and bits 3 to 0 source R5."></primer-geometry>
+      <p>
+        Fixed fields are a gift to the decoder: bits 11–8 are <em>always</em> where a destination would
+        live, bits 7–4 always the first source. In the next lesson the decode logic will be a page of
+        combinational SystemVerilog precisely because we kept this table boring.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Sixteen registers — and the three that make it a GPU</h2>
+      <p>
+        Every <em>thread</em> owns sixteen 16-bit registers. Thirteen are ordinary scratch space. The last
+        three are the whole trick:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Registers</th><th>Name</th><th>Access</th><th>Contents</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>R0</code>–<code>R12</code></td><td>general purpose</td><td>read / write</td><td>whatever the kernel computes</td></tr>
+            <tr><td><code>R13</code></td><td><code>%blockIdx</code></td><td><strong>read-only</strong></td><td>which block this thread belongs to</td></tr>
+            <tr><td><code>R14</code></td><td><code>%blockDim</code></td><td><strong>read-only</strong></td><td>how many threads per block</td></tr>
+            <tr><td><code>R15</code></td><td><code>%threadIdx</code></td><td><strong>read-only</strong></td><td>this thread's position within its block</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        This is the SIMT index magic — <em>as architecture</em>. Every thread runs the same instruction
+        words, but each thread's <code>R13</code>–<code>R15</code> are wired to <em>its own</em>
+        coordinates by the hardware. The one expression every kernel opens with,
+      </p>
+      <primer-math display>i \;=\; \texttt{\%blockIdx} \times \texttt{\%blockDim} + \texttt{\%threadIdx},</primer-math>
+      <p>
+        therefore evaluates to a <em>different</em> number in every thread: thread 2 of block 1 with
+        4-thread blocks gets <primer-math>i = 1 \times 4 + 2 = 6</primer-math>, its neighbour gets 7.
+        One program text, ten thousand different executions — the entire
+        <primer-ref soft to="computer-science/chip-design/gpu-compute/the-streaming-multiprocessor">SIMT</primer-ref>
+        idea, delivered by three read-only registers. Addressing follows for free: with arrays laid out
+        flat in one data memory (say <code>a</code> at 0, <code>b</code> at 8, <code>c</code> at 16 for
+        8-element vectors), thread <primer-math>i</primer-math> touches <primer-math>a[i]</primer-math> at
+        address <primer-math>0+i</primer-math>, <primer-math>b[i]</primer-math> at
+        <primer-math>8+i</primer-math> — plain register arithmetic, no special addressing modes needed.
+      </p>
+      <primer-theorem name="The PrimerGPU contract">
+        <ul>
+          <li><strong>11 instructions</strong>, each one 16-bit word: 4-bit opcode + fixed register /
+            immediate fields;</li>
+          <li><strong>16 registers per thread</strong>; <code>R13</code>–<code>R15</code> are read-only
+            and hold <code>%blockIdx</code>, <code>%blockDim</code>, <code>%threadIdx</code>;</li>
+          <li>one <strong>flat data memory</strong>, addressed by register value; per-thread addresses are
+            computed from the index registers;</li>
+          <li>control flow = <code>CMP</code> setting N/Z/P flags + <code>BRnzp</code> predicated on
+            them; <code>RET</code> ends the thread.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The first kernel: vector add, line by line</h2>
+      <p>
+        Here is <primer-math>c[i] = a[i] + b[i]</primer-math> over 8 elements, as every thread of every
+        block will run it — 13 words, no loops, because the parallelism <em>is</em> the loop:
+      </p>
+      <primer-code lang="text">
+        MUL   R0, %blockIdx, %blockDim   ; R0 = blockIdx * blockDim
+        ADD   R0, R0, %threadIdx         ; R0 = i  — which element am I?
+        CONST R1, #0                     ; base address of a
+        CONST R2, #8                     ; base address of b
+        CONST R3, #16                    ; base address of c
+        ADD   R4, R1, R0                 ; R4 = &amp;a[i]
+        LDR   R4, R4                     ; R4 = a[i]
+        ADD   R5, R2, R0                 ; R5 = &amp;b[i]
+        LDR   R5, R5                     ; R5 = b[i]
+        ADD   R6, R4, R5                 ; R6 = a[i] + b[i]
+        ADD   R7, R3, R0                 ; R7 = &amp;c[i]
+        STR   R7, R6                     ; c[i] = R6
+        RET                              ; this thread is done
+      </primer-code>
+      <p>
+        Walk it as thread 3 of block 1 (blocks of 4): lines 1–2 compute
+        <primer-math>i = 1\times4+3 = 7</primer-math>; lines 3–5 pin down the memory layout; lines 6–9
+        fetch <primer-math>a[7]</primer-math> and <primer-math>b[7]</primer-math> (note the idiom
+        <code>LDR R4, R4</code> — the address goes in, the data comes out, reusing the register); line 10
+        adds; lines 11–12 store to <primer-math>c[7]</primer-math>; and <code>RET</code> reports the
+        thread finished. Launch this with 2 blocks of 4 threads and the eight copies each pick a distinct
+        <primer-math>i \in \{0,\dots,7\}</primer-math> — the whole vector is covered exactly once, with
+        no thread ever mentioning any other.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>An assembler in a screenful</h2>
+      <p>
+        A 16-bit fixed-format ISA is so regular that the assembler is barely a program: shift the opcode
+        up twelve, OR the fields in. Here it is, encoding the kernel and then <em>disassembling it back</em>
+        — the round trip is the proof the encoding loses nothing:
+      </p>
+      <primer-code run>
+        // ── The PrimerGPU assembler: mnemonics in, 16-bit words out — and back again. ──
+        const OPC: Record&lt;string, number&gt; = {
+          NOP: 0b0000, BRnzp: 0b0001, CMP: 0b0010, ADD: 0b0011, SUB: 0b0100,
+          MUL: 0b0101, DIV: 0b0110, LDR: 0b0111, STR: 0b1000, CONST: 0b1001, RET: 0b1111,
+        };
+        const SPECIALS: Record&lt;string, number&gt; = { "%blockIdx": 13, "%blockDim": 14, "%threadIdx": 15 };
+
+        function reg(tok: string): number {
+          if (tok in SPECIALS) return SPECIALS[tok];
+          return parseInt(tok.slice(1), 10);            // "R7" -&gt; 7
+        }
+
+        function assemble(line: string): number {
+          const [mn, ...ops] = line.replace(/,/g, " ").split(/\s+/).filter(Boolean);
+          const op = OPC[mn];
+          if (mn === "NOP" || mn === "RET") return op &lt;&lt; 12;
+          if (mn === "CONST") return (op &lt;&lt; 12) | (reg(ops[0]) &lt;&lt; 8) | parseInt(ops[1].slice(1), 10);
+          if (mn === "BRnzp") {                          // ops[0] = mask letters "nzp", ops[1] = "#imm"
+            const m = ops[0];
+            const mask = (m.includes("n") ? 4 : 0) | (m.includes("z") ? 2 : 0) | (m.includes("p") ? 1 : 0);
+            return (op &lt;&lt; 12) | (mask &lt;&lt; 9) | parseInt(ops[1].slice(1), 10);
+          }
+          if (mn === "CMP") return (op &lt;&lt; 12) | (reg(ops[0]) &lt;&lt; 4) | reg(ops[1]);
+          if (mn === "LDR") return (op &lt;&lt; 12) | (reg(ops[0]) &lt;&lt; 8) | (reg(ops[1]) &lt;&lt; 4);
+          if (mn === "STR") return (op &lt;&lt; 12) | (reg(ops[0]) &lt;&lt; 4) | reg(ops[1]);
+          // ADD, SUB, MUL, DIV: Rd, Rs, Rt
+          return (op &lt;&lt; 12) | (reg(ops[0]) &lt;&lt; 8) | (reg(ops[1]) &lt;&lt; 4) | reg(ops[2]);
+        }
+
+        function rname(r: number): string {
+          return r === 13 ? "%blockIdx" : r === 14 ? "%blockDim" : r === 15 ? "%threadIdx" : "R" + r;
+        }
+
+        function disassemble(w: number): string {
+          const op = w &gt;&gt; 12, rd = (w &gt;&gt; 8) &amp; 15, rs = (w &gt;&gt; 4) &amp; 15, rt = w &amp; 15, imm = w &amp; 255;
+          const name = Object.keys(OPC).find((k) =&gt; OPC[k] === op)!;
+          if (name === "NOP" || name === "RET") return name;
+          if (name === "CONST") return `CONST ${rname(rd)}, #${imm}`;
+          if (name === "BRnzp") {
+            const m = (rd &gt;&gt; 1);   // bits 11..9
+            const s = (m &amp; 4 ? "n" : "") + (m &amp; 2 ? "z" : "") + (m &amp; 1 ? "p" : "");
+            return `BRnzp ${s}, #${imm}`;
+          }
+          if (name === "CMP") return `CMP ${rname(rs)}, ${rname(rt)}`;
+          if (name === "LDR") return `LDR ${rname(rd)}, ${rname(rs)}`;
+          if (name === "STR") return `STR ${rname(rs)}, ${rname(rt)}`;
+          return `${name} ${rname(rd)}, ${rname(rs)}, ${rname(rt)}`;
+        }
+
+        // ── The vector-add kernel: c[i] = a[i] + b[i] for 8 elements (a@0, b@8, c@16). ──
+        const kernel = [
+          "MUL R0, %blockIdx, %blockDim",   // R0 = blockIdx * blockDim
+          "ADD R0, R0, %threadIdx",         // R0 = i, this thread's element index
+          "CONST R1, #0",                   // base address of a
+          "CONST R2, #8",                   // base address of b
+          "CONST R3, #16",                  // base address of c
+          "ADD R4, R1, R0",                 // R4 = &amp;a[i]
+          "LDR R4, R4",                     // R4 = a[i]
+          "ADD R5, R2, R0",                 // R5 = &amp;b[i]
+          "LDR R5, R5",                     // R5 = b[i]
+          "ADD R6, R4, R5",                 // R6 = a[i] + b[i]
+          "ADD R7, R3, R0",                 // R7 = &amp;c[i]
+          "STR R7, R6",                     // c[i] = R6
+          "RET",                            // this thread is done
+        ];
+
+        console.log("addr | binary            | hex  | disassembled");
+        console.log("-----+-------------------+------+---------------------------");
+        kernel.forEach((line, a) =&gt; {
+          const w = assemble(line);
+          const bin = w.toString(2).padStart(16, "0").replace(/(....)(?=.)/g, "$1 ");
+          const hex = w.toString(16).padStart(4, "0");
+          console.log(` ${String(a).padStart(2)}  | ${bin} | ${hex} | ${disassemble(w)}`);
+        });
+
+        // Round trip: re-assembling every disassembled line must give the same word.
+        const ok = kernel.every((line) =&gt; assemble(disassemble(assemble(line))) === assemble(line));
+        console.log(`\nround trip assemble(disassemble(w)) === w for all 13 words: ${ok}`);
+      </primer-code>
+      <p>
+        Twenty-six bytes of machine code. That is the entire program our GPU will spend the next four
+        lessons learning to execute — first in one core, then dispatched across several, then through a
+        realistic memory system, and finally end to end with every cycle accounted for.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why 16 bits, when RV32I gave us 32?">
+      <p>
+        Because the budget fits. RV32I needs 32-bit instructions largely to afford three 5-bit register
+        fields (32 registers) plus generous immediates. We chose 16 registers, so a register field costs
+        4 bits, and three of them plus a 4-bit opcode land on exactly sixteen — with the immediate formats
+        (<code>CONST</code>, <code>BRnzp</code>) fitting an 8-bit payload in the same width. Real GPU ISAs
+        make the opposite trade: NVIDIA's SASS instructions are 128 bits, spending lavish encoding space
+        on predication, operand caches and scheduling hints, because instruction fetch is shared by 32
+        threads at once and amortised into irrelevance. Our design keeps the fetch machinery small
+        instead — the right call for a GPU you must hold in your head. This "minimal but real" style is
+        borrowed from the open-source <em>tiny-gpu</em> project, which proved a working SIMT machine fits
+        in a few files of readable SystemVerilog.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! An ISA without thread indices is not a GPU ISA">
+      <p>
+        Delete <code>%blockIdx</code>, <code>%blockDim</code> and <code>%threadIdx</code> from the table
+        and everything still assembles — but you no longer have a GPU ISA; you have a slow CPU ISA that
+        happens to be replicated. Every copy of the kernel would compute the <em>same</em>
+        <primer-math>i</primer-math>, load the same two words, and store the same sum to the same address
+        eight times over. The index registers are the sole mechanism by which one program text becomes ten
+        thousand <em>different</em> executions: they are the only per-thread input, so they are the only
+        source of divergence in what threads do. When CUDA writes <code>threadIdx.x</code>, this is what
+        it compiles down to — a read of a register the hardware filled in. Miss this and you miss what a
+        GPU fundamentally is: not a fast chip, but a machine for turning indices into work.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: field packing, index arithmetic, immediates/opcodes, special registers, kernel reading. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "isaQuiz@1": {
+          "intro": "PrimerGPU: 16-bit words, 4-bit opcode + Rd/Rs/Rt fields, 16 registers per thread, R13–R15 = %blockIdx, %blockDim, %threadIdx (read-only).",
+          "fieldQ": "An ADD packs Rd into bits 11–8, Rs into bits 7–4 and Rt into bits 3–0. With Rd = R{d}, Rs = R{s}, Rt = R{t}, what is the value of the low 12 bits (bits 11–0) as a decimal number?",
+          "idxQ": "A thread runs with %blockIdx = {b}, %blockDim = {d} and %threadIdx = {t}. After MUL R0, %blockIdx, %blockDim followed by ADD R0, R0, %threadIdx, what does R0 hold?",
+          "immQ": "An unsigned immediate field {k} bits wide can hold values from 0 up to what maximum?",
+          "opcQ": "With a {n}-bit opcode field, at most how many distinct instructions can an ISA encode?",
+          "addrQ": "Array c starts at address {cb} in the flat data memory, and this thread computed i = {i}. What address does it store c[i] to?",
+          "specQ": "What makes R13–R15 special in PrimerGPU?",
+          "specA": "They are read-only, and the hardware fills each thread's copies with that thread's own block and thread coordinates",
+          "specB": "They are wider than the other registers, so they can hold larger addresses",
+          "specC": "They are shared between all threads to save register-file space",
+          "specD": "They are automatically zeroed after every instruction",
+          "ldrQ": "In the kernel, what does the idiom LDR R4, R4 do?",
+          "ldrA": "Uses the address currently in R4 to load a word from memory, then overwrites R4 with the loaded data",
+          "ldrB": "Loads the value 4 into R4",
+          "ldrC": "Copies R4 to memory at address R4",
+          "ldrD": "It is illegal — source and destination may not be the same register",
+          "strQ": "STR R7, R6 writes…",
+          "strA": "the value in R6 to memory at the address held in R7",
+          "strB": "the value in R7 to memory at the address held in R6",
+          "strC": "both R6 and R7 to consecutive addresses",
+          "strD": "the constant 76 to memory",
+          "brQ": "How does BRnzp decide whether to branch?",
+          "brA": "It ANDs its 3-bit mask against the N/Z/P flags set by the last CMP and branches if the result is non-zero",
+          "brB": "It branches if its destination register is non-zero",
+          "brC": "It always branches — the mask selects which register becomes the new PC",
+          "brD": "It asks the dispatcher whether the block has finished",
+          "magicQ": "Every thread executes the exact same 13 kernel words. Why do the threads nevertheless do different work?",
+          "magicA": "Each thread's read-only index registers hold different values, so the computed element index i differs — and with it every address the thread touches",
+          "magicB": "The dispatcher rewrites the kernel's immediates for each thread before launch",
+          "magicC": "Threads execute the instructions in different orders",
+          "magicD": "Each thread gets a private copy of the data memory",
+          "retQ": "What does RET mean in PrimerGPU?",
+          "retA": "This thread has finished its work — the signal the core and dispatcher collect to detect kernel completion",
+          "retB": "Return a value in R0 to the calling function",
+          "retC": "Pop a return address off the stack and jump to it",
+          "retD": "Restart the kernel from address 0",
+          "cmpQ": "What does CMP R4, R5 write, and where?",
+          "cmpA": "Nothing to any register — it sets the N/Z/P condition flags according to the sign of R4 − R5",
+          "cmpB": "The difference R4 − R5 into R4",
+          "cmpC": "A boolean 0 or 1 into R5",
+          "cmpD": "The larger of the two values into R4"
+        }
+      }
+    </script>
+
+    <primer-quiz name="isaQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/gpu-frontiers/chiplet-gpus",
+      "computer-science/chip-design/cpu/planning-a-cpu-the-rv32i-subset"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Anatomy of ADD R6, R4, R5 = 0011 0110 0100 0101, one field per step. ──
+  registerGeometryScene(
+    "encodingAnatomy",
+    ({ board, colors, step, sceneStrings }) => {
+      const BITS = "0011011001000101".split("");
+      const X0 = 0.6, Y0 = 2.0, W = 0.9;
+      const txt = (x, y, s, color, fs = 12, bold = false) =>
+        board.create("text", [x, y, s], {
+          strokeColor: color, fontSize: fs, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: bold ? "font-weight:600" : "",
+        });
+      const box = (i0, i1, fill, opacity) =>
+        board.create(
+          "polygon",
+          [
+            [X0 + i0 * W, Y0], [X0 + (i1 + 1) * W, Y0],
+            [X0 + (i1 + 1) * W, Y0 + 1], [X0 + i0 * W, Y0 + 1],
+          ],
+          {
+            fillColor: fill, fillOpacity: opacity, fixed: true, highlight: false,
+            vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+          },
+        );
+
+      // Base: the 16 cells with their bits and bit numbers (15 on the left, 0 on the right).
+      for (let i = 0; i < 16; i++) {
+        box(i, i, colors.bg, 0);
+        txt(X0 + i * W + W / 2, Y0 + 0.5, BITS[i], colors.ink, 13, true);
+        txt(X0 + i * W + W / 2, Y0 + 1.35, String(15 - i), colors.ink, 9);
+      }
+      txt(X0 + 8 * W, Y0 + 1.8, sceneStrings("bitAxis"), colors.ink, 10);
+
+      const field = (i0, i1, cat, key) => {
+        box(i0, i1, colors.cat[cat], 0.35);
+        txt(X0 + ((i0 + i1 + 1) / 2) * W, Y0 - 0.5, sceneStrings(key), colors.cat[cat], 12, true);
+      };
+      step(sceneStrings("stepOpc"), () => field(0, 3, 0, "lblOpc"));
+      step(sceneStrings("stepRd"), () => field(4, 7, 1, "lblRd"));
+      step(sceneStrings("stepRs"), () => field(8, 11, 2, "lblRs"));
+      step(sceneStrings("stepRt"), () => field(12, 15, 3, "lblRt"));
+    },
+    { boundingbox: [-0.3, 4.6, 15.9, 0.6], keepAspect: false, title: () => makeStrings("encodingAnatomy")("title") },
+  );
+
+  registerQuiz("isaQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Low 12 bits of an ADD: Rd·256 + Rs·16 + Rt.
+      prompt: (v) => sceneStrings("fieldQ", v),
+      variables: "d=[1:12] s=[1:12] t=[1:12]",
+      constraints: "d != s && s != t && d != t",
+      answer: "d * 256 + s * 16 + t",
+    },
+    {
+      // i = blockIdx · blockDim + threadIdx.
+      prompt: (v) => sceneStrings("idxQ", v),
+      variables: "b=[1:9] d=[4,8,16] t=[0:3]",
+      answer: "b * d + t",
+    },
+    {
+      // Max unsigned value of a k-bit field: 2^k − 1.
+      prompt: (v) => sceneStrings("immQ", v),
+      variables: "k=[6:10]",
+      answer: "(2 ^ k) - 1",
+    },
+    {
+      // 2^n opcodes.
+      prompt: (v) => sceneStrings("opcQ", v),
+      variables: "n=[3:6]",
+      answer: "2 ^ n",
+    },
+    {
+      // Address of c[i] = base + i.
+      prompt: (v) => sceneStrings("addrQ", v),
+      variables: "cb=[16,24,32,40] i=[0:7]",
+      answer: "cb + i",
+    },
+    {
+      prompt: () => sceneStrings("specQ"),
+      options: [
+        { text: () => sceneStrings("specA"), correct: true },
+        { text: () => sceneStrings("specB"), correct: false },
+        { text: () => sceneStrings("specC"), correct: false },
+        { text: () => sceneStrings("specD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ldrQ"),
+      options: [
+        { text: () => sceneStrings("ldrA"), correct: true },
+        { text: () => sceneStrings("ldrB"), correct: false },
+        { text: () => sceneStrings("ldrC"), correct: false },
+        { text: () => sceneStrings("ldrD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("strQ"),
+      options: [
+        { text: () => sceneStrings("strA"), correct: true },
+        { text: () => sceneStrings("strB"), correct: false },
+        { text: () => sceneStrings("strC"), correct: false },
+        { text: () => sceneStrings("strD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("brQ"),
+      options: [
+        { text: () => sceneStrings("brA"), correct: true },
+        { text: () => sceneStrings("brB"), correct: false },
+        { text: () => sceneStrings("brC"), correct: false },
+        { text: () => sceneStrings("brD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("magicQ"),
+      options: [
+        { text: () => sceneStrings("magicA"), correct: true },
+        { text: () => sceneStrings("magicB"), correct: false },
+        { text: () => sceneStrings("magicC"), correct: false },
+        { text: () => sceneStrings("magicD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("retQ"),
+      options: [
+        { text: () => sceneStrings("retA"), correct: true },
+        { text: () => sceneStrings("retB"), correct: false },
+        { text: () => sceneStrings("retC"), correct: false },
+        { text: () => sceneStrings("retD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cmpQ"),
+      options: [
+        { text: () => sceneStrings("cmpA"), correct: true },
+        { text: () => sceneStrings("cmpB"), correct: false },
+        { text: () => sceneStrings("cmpC"), correct: false },
+        { text: () => sceneStrings("cmpD"), correct: false },
+      ],
+    },
+  ]);
+</script>

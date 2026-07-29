@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>The Streaming Multiprocessor</primer-title>
+
+    <primer-card>
+      <p>
+        Look at a die photo of a modern GPU and squint. Underneath the marketing renders is something
+        almost agricultural: the <em>same rectangle</em>, stamped out in neat rows, over a hundred times.
+        That rectangle is the <strong>Streaming Multiprocessor</strong> — the SM — and it is the GPU's
+        entire personality in one repeatable tile. In
+        <primer-ref to="computer-science/chip-design/parallelism/measuring-gpu-performance">the last
+        module</primer-ref> you measured the machine from the outside: FLOP/s, bandwidth, the roofline.
+        This module opens the lid. Everything a GPU does — every warp scheduled, every register read,
+        every divergent branch and coalesced load — happens <em>inside an SM</em>, and the whole chip is
+        just that story times a hundred, plus a big L2 cache and some memory controllers to feed it.
+      </p>
+      <p>
+        Learn one SM thoroughly and you have learned the GPU. That is this lesson's tour.
+      </p>
+    </primer-card>
+
+    <!-- Stepped SM anatomy diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "smAnatomy": {
+          "title": "Anatomy of one Streaming Multiprocessor",
+          "smLabel": "Streaming Multiprocessor (SM)",
+          "stepParts": "The SM is split into four processing partitions — four near-identical quarter-SMs",
+          "stepUnits": "Each partition has its own scheduler, register-file slice, ALU lanes, tensor core, load/store units and SFUs",
+          "part": "Partition",
+          "sched": "warp scheduler",
+          "rf": "register file (64 KB)",
+          "alu": "32× FP32 / INT32 lanes",
+          "tensor": "tensor core (module 11)",
+          "ldstSfu": "LD/ST units + SFUs",
+          "stepShared": "Shared by all four partitions: the L1 / shared-memory block and the instruction cache",
+          "shmem": "L1 data cache / shared memory (128 KB)",
+          "icache": "instruction cache"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The tour: four partitions and a shared ground floor</h2>
+      <p>
+        A representative SM is organised as <strong>four processing partitions</strong> — think of them as
+        four quarter-SMs living in one building. Each partition owns, privately:
+      </p>
+      <ul>
+        <li>a <strong>warp scheduler</strong> — picks which warp issues an instruction this cycle (it gets
+          the whole next lesson);</li>
+        <li>a <strong>slice of the register file</strong> — the SRAM where its resident warps' registers
+          live permanently (lesson after that);</li>
+        <li><strong>32 ALU lanes</strong> for FP32 and INT32 arithmetic — one lane per thread of a warp, so
+          a warp's instruction occupies the partition for a cycle or two;</li>
+        <li>a <strong>tensor core</strong> — a matrix-multiply engine we name now and open in module 11;</li>
+        <li><strong>load/store units</strong> — the ports through which memory requests leave;</li>
+        <li><strong>SFUs</strong> (special function units) — a few lanes of hardware for the transcendentals:
+          <primer-math>\sin</primer-math>, <primer-math>\cos</primer-math>,
+          <primer-math>1/x</primer-math>, <primer-math>\sqrt{x}</primer-math>,
+          <primer-math>2^x</primer-math>, computed fast and slightly approximately.</li>
+      </ul>
+      <p>
+        Downstairs, <em>shared by all four partitions</em>, sit the <strong>L1 data cache / shared
+        memory</strong> block (one pool of SRAM, split between the two roles) and the
+        <strong>instruction cache</strong>. Step through the floor plan:
+      </p>
+      <primer-geometry scene="smAnatomy" caption="A block diagram of one SM. First it splits into four processing partitions; then each partition reveals its private units — warp scheduler, register-file slice, 32 FP32/INT32 lanes, a tensor core, and load/store plus special-function units; finally the shared L1/shared-memory block and instruction cache appear along the bottom, serving all four partitions."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The numbers, in one table</h2>
+      <p>
+        Vendors vary the exact figures generation to generation, but a representative modern SM looks like
+        this — worth absorbing, because every performance argument in this module is arithmetic over these
+        quantities:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Resource</th><th>Per partition</th><th>Per SM (×4)</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Warp schedulers</td><td>1</td><td>4</td></tr>
+            <tr><td>FP32 / INT32 lanes ("CUDA cores")</td><td>32</td><td>128</td></tr>
+            <tr><td>Register file</td><td>64 KB</td><td>256 KB</td></tr>
+            <tr><td>Tensor cores</td><td>1</td><td>4</td></tr>
+            <tr><td>Special function units (SFUs)</td><td>4</td><td>16</td></tr>
+            <tr><td>Load/store units</td><td>8</td><td>32</td></tr>
+            <tr><td>Resident warp slots</td><td>12</td><td>48 (some designs 64)</td></tr>
+            <tr><td>L1 / shared memory</td><td>—</td><td>128 KB (shared)</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Read the warp-slot row twice. An SM doesn't just <em>run</em> warps — it <strong>houses</strong>
+        them: up to 48 or 64 warps' complete state (program counters, registers, predicate masks) is held
+        on-chip <em>simultaneously</em>, all the time. That is
+        1,536–2,048 thread contexts resident in one tile. The "multitude of threads" you met when you first
+        saw SIMT is not a software abstraction — it is physically installed in the register file, which is
+        exactly what makes switching between warps free. The next two lessons are entirely about that fact.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>From tile to chip: why the GPU is a repeated rectangle</h2>
+      <p>
+        Zoom back out. A full GPU is <strong>dozens to hundreds of identical SMs</strong>, wired to a large
+        <strong>L2 cache</strong> (megabytes, shared by everyone) and a ring of <strong>memory
+        controllers</strong> talking to GDDR or HBM DRAM. That's the whole chip: tile × N, plus plumbing.
+        The tiling is not laziness — it is the business model:
+      </p>
+      <ul>
+        <li><strong>Scaling.</strong> Design and verify <em>one</em> SM, then choose the product by the
+          stamp count: 20 SMs for a laptop part, 80 for a gaming flagship, 140 for a datacentre card. Same
+          engineering, whole product line.</li>
+        <li><strong>Yield and binning.</strong> A huge die will have manufacturing defects — you learned in
+          the back-end module that yield falls fast with area. On a CPU, a defect in <em>the</em> core's
+          scheduler kills the chip. On a GPU, a defect usually lands inside one SM out of 84 — so the
+          vendor <strong>fuses that SM off and sells the die</strong> as the 80-SM model one shelf down.
+          Almost every "cut-down" graphics card you can buy is a flagship die with its scars disabled. The
+          repeated tile turns fatal defects into a discount SKU.</li>
+      </ul>
+      <p>
+        This is why GPU generations can double their SM count and just… work. Nothing inside the SM needed
+        to change; the tile was the unit of both design and repair.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Where did the SM come from?">
+      <p>
+        Until 2006, graphics chips had <em>different</em> hardware for vertex work and pixel work — and one
+        kind always sat idle while the other was the bottleneck. NVIDIA's G80 (the GeForce 8800) made the
+        bet that defines the modern GPU: replace both with one pool of identical, general-purpose
+        multiprocessors and schedule <em>any</em> work onto <em>any</em> tile. The unified tile needed a
+        name, and "Streaming Multiprocessor" stuck. The same bet made CUDA possible a year later: if the
+        tile is general enough to run vertex shaders <em>or</em> pixel shaders, it is general enough to run
+        your physics simulation — and, eventually, your neural network. Every SM you'll study in this
+        module is a descendant of that one decision.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A 'CUDA core' is not a core">
+      <p>
+        Spec sheets say things like "16,384 CUDA cores", and the CPU-trained brain hears "16,384 times a
+        CPU core". It isn't. A CUDA core is an <strong>ALU lane</strong> — one 32-bit arithmetic pipeline.
+        It has <em>no fetch, no decode, no scheduler, no program counter of its own</em>; thirty-two of
+        them execute one warp's single instruction together, steered by the partition's one scheduler. The
+        honest CPU analogy: a CPU core with two 8-wide AVX units also has "16 lanes", yet nobody sells it
+        as a 16-core chip. Comparing GPU "cores" to CPU cores by count is marketing arithmetic — the
+        comparable unit is the SM (or partition) versus the CPU core, and there are ~100 of those, not
+        16,000. Impressive enough without the inflation.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: SM resource arithmetic, unit roles, tiling/binning, lane-vs-core. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "smQuiz@1": {
+          "intro": "One SM = 4 partitions (scheduler, RF slice, 32 lanes, tensor core, LD/ST, SFUs each) + shared L1/shared memory. The GPU = that tile × N + L2 + memory controllers.",
+          "threadsQ": "An SM has {w} resident warp slots. With 32 threads per warp, how many thread contexts does it hold on-chip at once?",
+          "lanesQ": "An SM has {p} processing partitions with {l} FP32 lanes each. How many \"CUDA cores\" does the spec sheet claim for this SM?",
+          "gpuLanesQ": "A GPU has {s} SMs of 128 lanes each. What is its total \"CUDA core\" count?",
+          "slotsQ": "An SM's {w} warp slots are divided evenly among its 4 partitions. How many warp slots does each partition's scheduler manage?",
+          "gpuThreadsQ": "A GPU has {s} SMs, each with {w} warp slots of 32 threads. How many threads can be resident on the whole chip?",
+          "binQ": "A die is manufactured with {s} SMs but {d} of them have defects. The vendor fuses off the bad ones. How many SMs does the shipped product advertise?",
+          "sfuQ": "Which unit computes the transcendentals — sin, cos, 1/x, square root?",
+          "sfuA": "The SFU (special function unit) — a few dedicated lanes for fast, slightly approximate transcendentals",
+          "sfuB": "The tensor core",
+          "sfuC": "The load/store unit",
+          "sfuD": "The instruction cache",
+          "sharedQ": "Which resources are shared by all four partitions of an SM, rather than private to each?",
+          "shA": "The L1 / shared-memory block and the instruction cache",
+          "shB": "The warp schedulers and the register file",
+          "shC": "The FP32 lanes",
+          "shD": "The tensor cores",
+          "laneQ": "Why is comparing a GPU's \"CUDA core\" count to a CPU's core count misleading?",
+          "laneA": "A CUDA core is a single ALU lane with no fetch, decode or scheduler of its own — 32 of them execute one warp's instruction together",
+          "laneB": "CUDA cores run at exactly half the CPU's clock frequency",
+          "laneC": "CUDA cores can only do integer arithmetic",
+          "laneD": "GPUs miscount their cores due to a firmware bug",
+          "whyBinQ": "A defect lands inside one SM of a large GPU die. Why can the die still be sold?",
+          "wbA": "The SM is a repeated tile — the bad one is fused off and the die is sold as a lower model with fewer SMs",
+          "wbB": "GPU defects repair themselves during burn-in",
+          "wbC": "The L2 cache takes over the defective SM's work",
+          "wbD": "It cannot — any defect scraps the whole die",
+          "whyTileQ": "Why does building the GPU as one repeated SM tile make the product line scale so easily?",
+          "wtA": "Design and verify one tile once, then set the product tier by how many tiles are stamped onto the die",
+          "wtB": "Smaller tiles run at higher voltage",
+          "wtC": "Each tile can use a different instruction set",
+          "wtD": "Tiling removes the need for a memory system",
+          "outsideQ": "Besides the SMs themselves, what are the main components of a full GPU?",
+          "outA": "A large shared L2 cache and the memory controllers to GDDR/HBM DRAM",
+          "outB": "One giant shared register file for all SMs",
+          "outC": "A per-SM hard disk controller",
+          "outD": "Nothing — the chip is only SMs",
+          "residentQ": "What does it mean that an SM \"houses\" up to 48–64 warps?",
+          "resA": "All those warps' full state — program counters and registers — is physically resident on-chip simultaneously, so switching between them is free",
+          "resB": "The SM saves warps to DRAM and restores them on each switch, like OS threads",
+          "resC": "Only one warp exists; the others are simulated in software",
+          "resD": "Warps queue in the L2 cache until an SM is empty"
+        }
+      }
+    </script>
+
+    <primer-quiz name="smQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/parallelism/measuring-gpu-performance"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── SM anatomy: partitions → per-partition units → shared blocks, stepped. ──
+  registerGeometryScene(
+    "smAnatomy",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, fill, opacity = 0.2) =>
+        board.create(
+          "polygon",
+          [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+          {
+            fillColor: fill, fillOpacity: opacity, strokeColor: colors.line, strokeWidth: 1.2,
+            fixed: true, highlight: false, vertices: { visible: false },
+            borders: { strokeColor: colors.line, highlight: false },
+          },
+        );
+      const txt = (x, y, s, color, fs = 10, bold = false) =>
+        board.create("text", [x, y, s], {
+          strokeColor: color, fontSize: fs, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: bold ? "font-weight:600" : "",
+        });
+
+      // Base: the SM boundary and its label.
+      box(0, 0, 13, 9.6, colors.bg, 0);
+      txt(6.5, 9.15, sceneStrings("smLabel"), colors.ink, 13, true);
+
+      // Step 1: four partition columns.
+      const colX = [0.25, 3.45, 6.65, 9.85];
+      const colW = 2.95;
+      step(sceneStrings("stepParts"), () => {
+        colX.forEach((x, i) => {
+          box(x, 2.6, x + colW, 8.7, colors.cat[0], 0.12);
+          txt(x + colW / 2, 8.4, sceneStrings("part") + " " + i, colors.ink, 10, true);
+        });
+      });
+
+      // Step 2: the unit stack inside every partition.
+      const units = [
+        ["sched", colors.cat[3]],
+        ["rf", colors.cat[1]],
+        ["alu", colors.cat[0]],
+        ["tensor", colors.cat[4]],
+        ["ldstSfu", colors.cat[2]],
+      ];
+      step(sceneStrings("stepUnits"), () => {
+        colX.forEach((x) => {
+          units.forEach(([key, fill], r) => {
+            const y1 = 8.1 - r * 1.06;
+            const y0 = y1 - 0.94;
+            box(x + 0.12, y0, x + colW - 0.12, y1, fill, 0.28);
+            txt(x + colW / 2, (y0 + y1) / 2, sceneStrings(key), colors.ink, 8.5);
+          });
+        });
+      });
+
+      // Step 3: the shared ground floor.
+      step(sceneStrings("stepShared"), () => {
+        box(0.25, 0.35, 8.6, 2.15, colors.cat[2], 0.22);
+        txt(4.42, 1.25, sceneStrings("shmem"), colors.ink, 11);
+        box(8.8, 0.35, 12.8, 2.15, colors.cat[3], 0.22);
+        txt(10.8, 1.25, sceneStrings("icache"), colors.ink, 11);
+      });
+    },
+    { boundingbox: [-0.5, 10.2, 13.5, -0.4], keepAspect: false, title: () => makeStrings("smAnatomy")("title") },
+  );
+
+  registerQuiz("smQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Warp slots × 32 threads.
+      prompt: (v) => sceneStrings("threadsQ", v),
+      variables: "w=[32,40,48,64]",
+      answer: "w * 32",
+    },
+    {
+      // Partitions × lanes.
+      prompt: (v) => sceneStrings("lanesQ", v),
+      variables: "p=[2,4] l=[16,32,64]",
+      answer: "p * l",
+    },
+    {
+      // Whole-GPU lane count.
+      prompt: (v) => sceneStrings("gpuLanesQ", v),
+      variables: "s=[20:80]",
+      answer: "s * 128",
+    },
+    {
+      // Warp slots per partition.
+      prompt: (v) => sceneStrings("slotsQ", v),
+      variables: "w=[48,64]",
+      answer: "w / 4",
+    },
+    {
+      // Whole-GPU resident threads.
+      prompt: (v) => sceneStrings("gpuThreadsQ", v),
+      variables: "s=[10:20] w=[48,64]",
+      answer: "s * w * 32",
+    },
+    {
+      // Binning arithmetic.
+      prompt: (v) => sceneStrings("binQ", v),
+      variables: "s=[60:84] d=[2:6]",
+      answer: "s - d",
+    },
+    {
+      prompt: () => sceneStrings("sfuQ"),
+      options: [
+        { text: () => sceneStrings("sfuA"), correct: true },
+        { text: () => sceneStrings("sfuB"), correct: false },
+        { text: () => sceneStrings("sfuC"), correct: false },
+        { text: () => sceneStrings("sfuD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sharedQ"),
+      options: [
+        { text: () => sceneStrings("shA"), correct: true },
+        { text: () => sceneStrings("shB"), correct: false },
+        { text: () => sceneStrings("shC"), correct: false },
+        { text: () => sceneStrings("shD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("laneQ"),
+      options: [
+        { text: () => sceneStrings("laneA"), correct: true },
+        { text: () => sceneStrings("laneB"), correct: false },
+        { text: () => sceneStrings("laneC"), correct: false },
+        { text: () => sceneStrings("laneD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyBinQ"),
+      options: [
+        { text: () => sceneStrings("wbA"), correct: true },
+        { text: () => sceneStrings("wbB"), correct: false },
+        { text: () => sceneStrings("wbC"), correct: false },
+        { text: () => sceneStrings("wbD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyTileQ"),
+      options: [
+        { text: () => sceneStrings("wtA"), correct: true },
+        { text: () => sceneStrings("wtB"), correct: false },
+        { text: () => sceneStrings("wtC"), correct: false },
+        { text: () => sceneStrings("wtD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("outsideQ"),
+      options: [
+        { text: () => sceneStrings("outA"), correct: true },
+        { text: () => sceneStrings("outB"), correct: false },
+        { text: () => sceneStrings("outC"), correct: false },
+        { text: () => sceneStrings("outD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("residentQ"),
+      options: [
+        { text: () => sceneStrings("resA"), correct: true },
+        { text: () => sceneStrings("resB"), correct: false },
+        { text: () => sceneStrings("resC"), correct: false },
+        { text: () => sceneStrings("resD"), correct: false },
+      ],
+    },
+  ]);
+</script>
+</content>
+</invoke>

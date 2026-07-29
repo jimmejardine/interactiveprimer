@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>DMA and Peripherals</primer-title>
+
+    <primer-card>
+      <p>
+        Picture your SoC's expensive out-of-order CPU — the block that ate half the area budget —
+        spending its evening copying bytes. A network interface delivers a packet; the CPU loops:
+        load a byte, store a byte, load a byte, store a byte, a hundred million times a second, its
+        gigahertz pipeline reduced to a bucket brigade. Every cycle spent carrying data is a cycle
+        not spent computing. This lesson is about the two inventions that free it: giving every
+        peripheral a clean <strong>register-bank programming model</strong> so the CPU issues
+        <em>orders</em> instead of doing chores, and the <strong>DMA engine</strong> — a dumb,
+        tireless hardware memcpy that
+        <primer-ref to="computer-science/chip-design/soc/interconnect-fabrics-and-arbitration">masters
+        the fabric</primer-ref> all by itself and taps the CPU on the shoulder only when the job is
+        done.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A peripheral is a register bank with an attitude</h2>
+      <p>
+        From the CPU's point of view, <em>every</em> peripheral — UART, timer, SPI controller, the
+        DMA engine itself — is the same kind of object: a small bank of
+        <primer-ref to="computer-science/computer-architecture/datapath/memory-mapped-io-and-polling">memory-mapped
+        registers</primer-ref> sitting at some base address, reached through the fabric's address
+        decoder like any other slave. Let's design one. Here is a perfectly respectable minimal
+        UART:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Offset</th><th>Register</th><th>Read</th><th>Write</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>0x0</code></td><td><strong>CTRL</strong></td><td>current config</td><td>enable bit, interrupt-enable bit, baud divisor</td></tr>
+            <tr><td><code>0x4</code></td><td><strong>STAT</strong></td><td><code>TX_FULL</code>, <code>RX_READY</code> flags</td><td>— (read-only)</td></tr>
+            <tr><td><code>0x8</code></td><td><strong>TXDATA</strong></td><td>—</td><td>push a byte into the transmit FIFO</td></tr>
+            <tr><td><code>0xC</code></td><td><strong>RXDATA</strong></td><td>pop the oldest received byte</td><td>— (read-only)</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        In RTL this is one address decoder and a case statement: a write whose offset is
+        <code>0x8</code> pushes the low byte into the TX FIFO; a read at <code>0x4</code> muxes the
+        status flags onto the read-data bus. The deep point is that these are not memory locations
+        wearing addresses — they are <strong>commands and sensors</strong>. Writing TXDATA
+        <em>does</em> something; reading RXDATA <em>consumes</em> something (read it twice and the
+        second byte is different!). The address map is the peripheral's API, and the datasheet page
+        listing offsets and bit-fields is its documentation. Every device driver you have ever used
+        bottoms out in loads and stores to a table exactly like this one.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Who notices the data? Polling, interrupts, and the aggregator</h2>
+      <p>
+        A byte arrives and sets <code>RX_READY</code>. How does software find out? Option one is
+        <strong>polling</strong>: sit in a loop reading STAT until the flag flips. Simple,
+        lowest-latency, and a perfectly good choice when the wait is short and predictable — but as
+        a lifestyle it burns the CPU at 100% to watch a flag that flips once a millisecond. Option
+        two is the
+        <primer-ref to="computer-science/computer-architecture/datapath/interrupt-driven-io-and-exceptions">interrupt</primer-ref>:
+        the UART raises a wire, the CPU drops what it is doing, runs a handler that drains RXDATA,
+        and returns. The CPU pays attention <em>only when there is something to attend to</em>.
+      </p>
+      <p>
+        One detail scales badly: a real SoC has dozens of peripherals and the CPU has one or two
+        interrupt inputs. Between them sits the <strong>interrupt controller</strong> — a block
+        that aggregates all the device lines, latches which ones are pending, applies per-line
+        enables and priorities, and presents the CPU with a single interrupt plus a register that
+        answers "who was it?". The handler reads that register, dispatches to the right driver, and
+        acknowledges the line. (It is, of course, itself just another memory-mapped register bank.)
+      </p>
+      <p>
+        But interrupts alone don't fix the bucket brigade. A 1&nbsp;MB/s stream with one interrupt
+        per byte is a <em>million</em> handler invocations a second — the CPU drowns in entry/exit
+        overhead instead of load/store overhead. What we actually want is to hand the whole copy to
+        someone else.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>DMA: memcpy, cast in silicon</h2>
+      <p>
+        A <strong>DMA engine</strong> (direct memory access) is a hardware block that does one
+        thing: copy <primer-math>N</primer-math> bytes from address <primer-math>A</primer-math> to
+        address <primer-math>B</primer-math>. Its programming model is gloriously boring — a
+        register bank, naturally: <strong>SRC</strong> (source address), <strong>DST</strong>
+        (destination), <strong>LEN</strong> (byte count), <strong>CTRL</strong> (a GO bit,
+        interrupt enables), <strong>STAT</strong> (BUSY / DONE / error flags). The driver writes
+        four registers and sets GO. Then the interesting part happens: the DMA engine is a
+        <strong>bus master</strong>. It shows up at the fabric's arbiter as a requestor in its own
+        right — alongside the CPU — and issues its own read bursts from SRC and write bursts to
+        DST, beat after beat, until LEN is exhausted. Then it sets DONE and raises a
+        <em>completion interrupt</em>: one interrupt per <em>buffer</em>, not per byte.
+      </p>
+      <p>
+        Real engines add one more layer of delegation: <strong>descriptors</strong>. Instead of
+        registers holding a single (SRC, DST, LEN), the driver builds a linked list of little
+        structs <em>in memory</em> — each one a copy command, plus a pointer to the next — and
+        hands the engine the address of the first. The engine fetches each descriptor itself,
+        performs it, and follows the chain. This is <strong>scatter-gather</strong>: a network
+        packet spread across five non-contiguous buffers becomes one chain of five descriptors and
+        <em>zero</em> CPU copies. The CPU has been promoted from labourer to author of to-do
+        lists.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "dmaFlow": {
+          "title": "One DMA transfer, from GO to interrupt",
+          "cpu": "CPU",
+          "dma": "DMA engine — CTRL · STAT · SRC · DST · LEN",
+          "fabric": "Interconnect fabric (arbiter + decoder)",
+          "mem": "DRAM buffer",
+          "uart": "UART TX FIFO",
+          "lProg": "write SRC, DST, LEN; set GO",
+          "lMaster": "requests the bus as a master",
+          "lRead": "read beats",
+          "lWrite": "write beats",
+          "lIrq": "completion IRQ",
+          "stepProg": "The CPU programs the engine: four register writes through the fabric — source, destination, length, GO. Total CPU cost: a handful of stores",
+          "stepMaster": "The engine raises its request line at the arbiter: it is now a bus MASTER, competing for the fabric like the CPU does",
+          "stepMove": "Data streams: the engine issues read bursts from the DRAM buffer and write bursts into the UART FIFO, beat after beat — the CPU is free to run real code",
+          "stepIrq": "LEN bytes later, the engine sets STAT.DONE and raises the completion interrupt: one interrupt for the whole buffer, not one per byte"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The whole transaction, drawn</h2>
+      <p>
+        Step through one transfer. Notice who is doing the work in each phase — the CPU appears
+        only at the two ends:
+      </p>
+      <primer-geometry scene="dmaFlow" caption="A block diagram: a CPU and a DMA engine on the left, an interconnect fabric in the middle, a DRAM buffer and a UART FIFO on the right. Step one: the CPU writes the DMA engine's SRC, DST, LEN and CTRL registers. Step two: the DMA engine requests the fabric as a bus master. Step three: read beats flow from DRAM through the fabric and write beats flow into the UART FIFO. Step four: a dashed completion-interrupt arrow goes from the DMA engine back to the CPU."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Run the register model</h2>
+      <p>
+        Here is that diagram as executable behaviour: a register-level model of the engine. The
+        "driver" writes SRC/DST/LEN, sets GO, then polls STAT while the engine moves 4 bytes per
+        cycle behind its back:
+      </p>
+      <primer-code run>
+        // A DMA engine at the register level: program it, poll it, watch it copy.
+        const mem = new Uint8Array(64);
+        for (let i = 0; i &lt; 16; i++) mem[i] = 100 + i;   // the source buffer, at address 0
+
+        const dma = { ctrl: 0, stat: 0, src: 0, dst: 0, len: 0, done: 0 };
+        const W = 4;                                      // bytes the engine moves per bus cycle
+
+        function write(regName: string, value: number) {
+          console.log(`CPU:  write ${regName.toUpperCase().padEnd(4)} = ${value}`);
+          dma[regName] = value;
+          if (regName === "ctrl" &amp;&amp; (value &amp; 1)) { dma.stat = 1; dma.done = 0; } // GO -&gt; BUSY
+        }
+
+        function tick(cycle: number) {                    // one cycle of engine work
+          if (dma.stat !== 1) return;
+          const n = Math.min(W, dma.len - dma.done);
+          for (let i = 0; i &lt; n; i++) mem[dma.dst + dma.done + i] = mem[dma.src + dma.done + i];
+          dma.done += n;
+          console.log(`DMA:  cycle ${cycle}: mastered the bus, moved ${n} bytes (${dma.done}/${dma.len})`);
+          if (dma.done === dma.len) {
+            dma.stat = 2;                                 // DONE
+            console.log("DMA:  finished -&gt; STAT = DONE, raising the completion interrupt");
+          }
+        }
+
+        write("src", 0);
+        write("dst", 32);
+        write("len", 16);
+        write("ctrl", 1);                                 // GO!
+
+        let cycle = 0;
+        while (dma.stat === 1) {                          // the driver polls STAT...
+          console.log(`CPU:  poll STAT -&gt; ${dma.stat} (BUSY)`);
+          tick(++cycle);                                  // ...while the engine works
+        }
+        console.log(`CPU:  poll STAT -&gt; ${dma.stat} (DONE after ${cycle} cycles)`);
+        console.log(`dst buffer now: [${Array.from(mem.slice(32, 48)).join(", ")}]`);
+      </primer-code>
+      <p>
+        Change <code>W</code> to 8 (a wider bus) or <code>LEN</code> to 32 and rerun — the cycle
+        count follows <primer-math>\lceil \text{LEN}/W \rceil</primer-math>. In a real driver the
+        polling loop would be replaced by "go do something useful; the completion interrupt will
+        call me back".
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two disciplines that make DMA safe and fast</h2>
+      <p>
+        <strong>The coherence hazard.</strong> One honest paragraph, because this bug ships
+        constantly: the DMA engine reads and writes <em>DRAM</em>, but the CPU reads and writes its
+        <em>cache</em>. When DMA deposits a fresh network packet into a buffer, the CPU may still
+        hold stale cache lines for those addresses — and will happily read yesterday's bytes. In
+        the other direction, the CPU may have "written" a buffer that still lives only in a dirty
+        cache line, so the DMA engine transmits garbage from DRAM. Unless your SoC routes DMA
+        through a coherent port on the cache hierarchy, the driver must <em>flush</em> dirty lines
+        before an outbound transfer and <em>invalidate</em> lines before reading an inbound one.
+        This is not an optimisation; it is correctness.
+      </p>
+      <p>
+        <strong>Double-buffering.</strong> A transfer you wait for is a transfer that didn't buy
+        you much. The standard idiom uses two buffers in ping-pong: the DMA engine fills buffer
+        <em>B</em> while the CPU processes buffer <em>A</em>; at the completion interrupt they
+        swap. Transfer and computation now fully overlap, and as long as processing a buffer takes
+        no longer than filling one, the CPU <em>never waits for data</em>. The steady-state period
+        is <primer-math>\max(t_{\text{fill}}, t_{\text{process}})</primer-math> — the slower of
+        the two, not their sum.
+      </p>
+      <primer-theorem name="The DMA programming model">
+        <ul>
+          <li>a peripheral's API is its <strong>memory-mapped register bank</strong>: control,
+            status, and data registers at fixed offsets from a base address;</li>
+          <li><strong>polling</strong> spins on a status flag; an <strong>interrupt</strong> makes
+            the device call you — an <strong>interrupt controller</strong> aggregates many lines
+            into few, with pending/enable/priority state;</li>
+          <li>a <strong>DMA engine</strong> is a bus <strong>master</strong>: program SRC, DST,
+            LEN, set GO — it copies autonomously and raises one <strong>completion
+            interrupt</strong> per buffer;</li>
+          <li><strong>descriptors</strong> chain transfers into scatter-gather lists the engine
+            fetches itself;</li>
+          <li>DMA bypasses the cache: <strong>flush before sending, invalidate before
+            reading</strong> — and <strong>double-buffer</strong> to overlap transfer with
+            compute.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Why did 1985's coolest computer ship a second brain called the blitter?">
+      <p>
+        The Commodore Amiga stunned the world with animation its CPU could never have drawn alone —
+        because it wasn't drawing. Alongside the 7&nbsp;MHz 68000 sat the <em>blitter</em> (from
+        "block image transfer"), a dedicated engine that copied and combined rectangles of screen
+        memory on its own, while separate DMA channels fed audio samples to the speakers and
+        streamed sprites to the display, all stealing bus cycles the CPU wasn't using. Game
+        programmers learned to think like SoC architects: set up the blitter's source, destination
+        and modulo registers, kick it, and go compute the next frame's logic while the hardware
+        painted. Forty years later your phone does exactly this — camera ISP, display controller,
+        audio, radio and storage all run on DMA, and the "computer" is mostly a federation of copy
+        engines with a CPU as their manager. The Amiga was simply early.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! GO is not a synchronisation primitive">
+      <p>
+        The classic DMA bug: build a packet in a buffer, set GO — and transmit garbage. Two
+        versions of the same mistake. First, <strong>racing the producer</strong>: the code that
+        fills the buffer hasn't actually finished (a function still queued, a store still sitting
+        in a write buffer) when GO is written; the engine, reading at bus speed, overtakes the
+        producer and captures a half-written buffer. Second, <strong>racing the cache</strong>: the
+        buffer is "written" — but only into dirty cache lines that DRAM has never seen, so the
+        engine faithfully copies the <em>old</em> memory contents. Both failures are intermittent,
+        load-dependent, and invisible in the debugger, because by the time you look, the data has
+        arrived. The discipline is explicit ordering, not hope: finish all writes, execute the
+        cache flush (or use a coherent DMA port), issue a memory barrier so the flush completes
+        before the register write, <em>then</em> set GO. Symmetrically on receive: invalidate
+        before you read, and never touch a buffer the engine still owns.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "dmaQuiz@1": {
+          "intro": "SRC, DST, LEN, GO — the engine masters the bus itself and interrupts you once per buffer, not once per byte.",
+          "cyclesQ": "A DMA engine moves {n} bytes over a bus that carries {w} bytes per cycle. Ignoring setup, how many cycles does the copy take?",
+          "totalQ": "Programming the DMA registers costs {s} cycles of CPU stores; the engine then moves {n} bytes at {w} bytes per cycle. Total cycles from first store to DONE?",
+          "offQ": "A UART's register bank sits at base address {b}. CTRL is at offset 0, STAT at 4, TXDATA at 8 and RXDATA at 12. What address does the CPU access to reach {reg}?",
+          "irqQ": "A stream delivers {r} bytes per second. With one interrupt per byte, that is {r} interrupts per second. With a DMA engine raising one completion interrupt per {n}-byte buffer, how many interrupts per second?",
+          "sgQ": "A scatter-gather chain holds {k} descriptors, each describing a {c}-byte chunk. How many bytes does one kick of the engine move in total?",
+          "dbQ": "DMA fills a buffer in {f} ms and the CPU processes one in {p} ms. Double-buffered, the steady state finishes one buffer every how many ms?",
+          "masterQ": "What makes a DMA engine fundamentally different from a peripheral like a UART?",
+          "maMaster": "It is a bus MASTER: it issues its own reads and writes into the fabric's arbiter, instead of only answering the CPU's accesses",
+          "maFast": "Its registers are clocked faster than the CPU's",
+          "maCache": "It contains a large cache",
+          "maIsa": "It executes the CPU's instruction set",
+          "pollQ": "When is polling genuinely the RIGHT choice over interrupts?",
+          "poShort": "When the wait is short or latency is critical — a brief spin beats paying interrupt entry/exit overhead",
+          "poAlways": "Always — interrupts are legacy",
+          "poNever": "Never — polling is always wasteful",
+          "poSleep": "Only when the CPU is asleep",
+          "icQ": "What does the interrupt controller contribute?",
+          "icAgg": "It aggregates many device lines into the CPU's few, with pending, enable and priority state, and tells the handler WHICH device fired",
+          "icGen": "It generates interrupts on a fixed timer for every device",
+          "icDma": "It performs the DMA transfers itself",
+          "icOff": "It turns interrupts into polling loops",
+          "cohQ": "A DMA engine writes a fresh packet into a DRAM buffer while the CPU's cache still holds lines for those addresses. What does the CPU read from the buffer?",
+          "coStale": "The stale cached bytes — unless the driver invalidates those lines first (or the DMA path is hardware-coherent)",
+          "coFresh": "The fresh data — caches watch DRAM continuously",
+          "coZero": "Zeros — DMA clears the cache",
+          "coFault": "It always takes a bus fault",
+          "dbmQ": "Why double-buffer — DMA filling buffer B while the CPU processes buffer A?",
+          "dbOverlap": "It overlaps transfer with computation: the CPU never waits for data, provided processing a buffer takes no longer than filling one",
+          "dbSafe": "Two buffers are needed in case one has a parity error",
+          "dbHalf": "It halves the number of bytes moved",
+          "dbCache": "It keeps both buffers permanently in cache",
+          "statQ": "The driver writes SRC, DST and LEN, then sets GO in CTRL. Polling-style, how does it know the copy is finished?",
+          "stPoll": "Read STAT in a loop until the engine clears BUSY / sets DONE",
+          "stTime": "Wait a fixed number of microseconds and assume the best",
+          "stSrc": "Read SRC until it equals DST",
+          "stCtrl": "Write GO a second time and check for an error"
+        }
+      }
+    </script>
+
+    <primer-quiz name="dmaQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/soc/interconnect-fabrics-and-arbitration",
+      "computer-science/computer-architecture/datapath/memory-mapped-io-and-polling",
+      "computer-science/computer-architecture/datapath/interrupt-driven-io-and-exceptions"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The DMA transaction as a stepped block diagram. ──
+  registerGeometryScene(
+    "dmaFlow",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (x0, y0, x1, y1, fill, txt, bold = false) => {
+        board.create(
+          "polygon",
+          [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+          { fillColor: fill, fillOpacity: 0.22, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, strokeWidth: 1.5, highlight: false } },
+        );
+        board.create("text", [(x0 + x1) / 2, (y0 + y1) / 2, txt], {
+          strokeColor: colors.ink, fontSize: 11, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false, cssStyle: bold ? "font-weight:600" : "",
+        });
+      };
+      const arrow = (a, b, color, dash = 0) =>
+        board.create("arrow", [a, b], { strokeColor: color, strokeWidth: 2.5, dash, highlight: false });
+      const lab = (x, y, txt, color) =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+
+      // ── Base: the five blocks are always visible. ──
+      box(0.5, 8.5, 6.0, 10.5, colors.cat[0], sceneStrings("cpu"), true);
+      box(0.5, 2.5, 6.0, 5.0, colors.cat[1], sceneStrings("dma"), true);
+      box(8.8, 2.0, 13.2, 10.5, colors.cat[3], sceneStrings("fabric"));
+      box(16.0, 8.5, 21.5, 10.5, colors.cat[2], sceneStrings("mem"), true);
+      box(16.0, 2.5, 21.5, 5.0, colors.cat[4], sceneStrings("uart"), true);
+
+      // Step 1: the CPU programs the engine's registers.
+      step(sceneStrings("stepProg"), () => {
+        arrow([2.2, 8.5], [2.2, 5.0], colors.cat[0]);
+        lab(3.4, 6.7, sceneStrings("lProg"), colors.cat[0]);
+      });
+
+      // Step 2: the engine becomes a bus master.
+      step(sceneStrings("stepMaster"), () => {
+        arrow([6.0, 3.7], [8.8, 3.7], colors.cat[1]);
+        lab(7.4, 2.7, sceneStrings("lMaster"), colors.cat[1]);
+      });
+
+      // Step 3: read beats from DRAM, write beats to the UART.
+      step(sceneStrings("stepMove"), () => {
+        arrow([16.0, 9.5], [13.2, 9.5], colors.cat[2]);
+        lab(14.6, 10.1, sceneStrings("lRead"), colors.cat[2]);
+        arrow([13.2, 3.7], [16.0, 3.7], colors.cat[2]);
+        lab(14.6, 4.4, sceneStrings("lWrite"), colors.cat[2]);
+      });
+
+      // Step 4: the completion interrupt back to the CPU.
+      step(sceneStrings("stepIrq"), () => {
+        arrow([4.6, 5.0], [4.6, 8.5], colors.cat[4], 2);
+        lab(6.2, 7.8, sceneStrings("lIrq"), colors.cat[4]);
+      });
+    },
+    { boundingbox: [-0.3, 11.2, 22.3, 1.4], keepAspect: false, title: () => makeStrings("dmaFlow")("title") },
+  );
+
+  registerQuiz("dmaQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Transfer cycles = n / w (clean divisors by construction).
+      prompt: (v) => sceneStrings("cyclesQ", v),
+      variables: "n=[1024,2048,4096,8192] w=[4,8,16]",
+      answer: "n / w",
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Total = setup + n / w.
+      prompt: (v) => sceneStrings("totalQ", v),
+      variables: "s=[20,40,60] n=[512,1024,2048] w=[4,8]",
+      answer: "s + n / w",
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Register decode: address = base + offset; the register name is derived from the offset.
+      prompt: (v) => sceneStrings("offQ", { ...v, reg: ["CTRL", "STAT", "TXDATA", "RXDATA"][v.o / 4] }),
+      variables: "b=[4096,8192,16384,32768] o=[0,4,8,12]",
+      answer: "b + o",
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Interrupt rate with DMA buffering = r / n.
+      prompt: (v) => sceneStrings("irqQ", v),
+      variables: "r=[8000,16000,32000] n=[16,32,64]",
+      answer: "r / n",
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Scatter-gather total = k * c.
+      prompt: (v) => sceneStrings("sgQ", v),
+      variables: "k=[3:8] c=[256,512,1024]",
+      answer: "k * c",
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Double-buffered steady state = max(fill, process).
+      prompt: (v) => sceneStrings("dbQ", v),
+      variables: "f=[4:9] p=[4:9]",
+      answer: (v) => Math.max(v.f, v.p),
+      keyboard: "geometry-lengths",
+    },
+    {
+      prompt: () => sceneStrings("masterQ"),
+      options: [
+        { text: () => sceneStrings("maMaster"), correct: true },
+        { text: () => sceneStrings("maFast"), correct: false },
+        { text: () => sceneStrings("maCache"), correct: false },
+        { text: () => sceneStrings("maIsa"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pollQ"),
+      options: [
+        { text: () => sceneStrings("poShort"), correct: true },
+        { text: () => sceneStrings("poAlways"), correct: false },
+        { text: () => sceneStrings("poNever"), correct: false },
+        { text: () => sceneStrings("poSleep"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("icQ"),
+      options: [
+        { text: () => sceneStrings("icAgg"), correct: true },
+        { text: () => sceneStrings("icGen"), correct: false },
+        { text: () => sceneStrings("icDma"), correct: false },
+        { text: () => sceneStrings("icOff"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cohQ"),
+      options: [
+        { text: () => sceneStrings("coStale"), correct: true },
+        { text: () => sceneStrings("coFresh"), correct: false },
+        { text: () => sceneStrings("coZero"), correct: false },
+        { text: () => sceneStrings("coFault"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dbmQ"),
+      options: [
+        { text: () => sceneStrings("dbOverlap"), correct: true },
+        { text: () => sceneStrings("dbSafe"), correct: false },
+        { text: () => sceneStrings("dbHalf"), correct: false },
+        { text: () => sceneStrings("dbCache"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("statQ"),
+      options: [
+        { text: () => sceneStrings("stPoll"), correct: true },
+        { text: () => sceneStrings("stTime"), correct: false },
+        { text: () => sceneStrings("stSrc"), correct: false },
+        { text: () => sceneStrings("stCtrl"), correct: false },
+      ],
+    },
+  ]);
+</script>

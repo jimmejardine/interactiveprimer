@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>The Geometry Front End</primer-title>
+
+    <primer-card>
+      <p>
+        Before a single pixel exists, every frame begins with a stampede of geometry: a modern game pushes
+        <strong>millions of vertices</strong> through the GPU in a few milliseconds. The <strong>geometry
+        front end</strong> is the run of hardware that receives that stampede — fetching vertices from
+        memory, dispatching their shading, then clipping, culling and measuring each triangle — and its
+        one goal is to hand the rasterizer a tidy stream of <em>screen-space triangles with their maths
+        precomputed</em>. Everything here is about doing the least work possible: shade each vertex once
+        (not six times), and throw away every triangle you can <em>before</em> anyone rasterizes it.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Vertex fetch: never shade the same vertex twice</h2>
+      <p>
+        A mesh arrives as two buffers: a <strong>vertex buffer</strong> (the actual positions, normals,
+        UVs) and an <strong>index buffer</strong> (triangles described as triples of indices into it). The
+        indices are the efficiency machine. In a typical grid-like mesh, each vertex is shared by around
+        <strong>six triangles</strong> — so naively shading three vertices per triangle would run the
+        vertex shader six times on the same data. The input assembler's fix is a small
+        <strong>post-transform vertex cache</strong>: when a triangle references index 4217, the hardware
+        first checks whether vertex 4217 was shaded recently; on a hit it reuses the stored result and the
+        vertex shader never runs. With cache-friendly index order, a mesh of <primer-math>T</primer-math>
+        triangles costs close to <primer-math>T/2</primer-math> shader invocations instead of
+        <primer-math>3T</primer-math> — a ~6× saving from a lookup table.
+      </p>
+      <p>
+        The shading itself is not fixed-function at all: the assembler bundles un-cached vertices into
+        warps and dispatches them to the SM pool (as
+        <primer-ref to="computer-science/chip-design/graphics-hardware/the-graphics-pipeline-in-silicon">the
+        previous lesson</primer-ref> mapped out), where your vertex shader runs
+        <primer-ref to="applied-mathematics/game-development-math/projection/the-mvp-pipeline">the MVP
+        pipeline</primer-ref>: model, view and projection matrices carrying each position into clip space.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Clip, cull, divide, place</h2>
+      <p>
+        Shaded vertices return from the SMs in
+        <primer-ref to="applied-mathematics/game-development-math/projection/clip-space-and-the-perspective-divide">clip
+        space</primer-ref>, and now the fixed-function machinery takes over, applying four tests-and-transforms
+        in quick succession:
+      </p>
+      <ul>
+        <li><strong>Clipping.</strong> A triangle poking outside the frustum is trimmed against its
+          planes. Most cases are cheap accepts or rejects; the interesting one is the <strong>near
+          plane</strong>, where the hardware must <em>generate new vertices</em> at the intersection
+          points — a clipped triangle can come out as a quad or a small fan of triangles.</li>
+        <li><strong>Backface culling.</strong> A closed object's away-facing triangles can never be seen,
+          so the hardware computes each screen triangle's <strong>signed area</strong> — a single
+          <primer-math>2\times 2</primer-math> determinant,
+          <primer-math display>2A = (x_B-x_A)(y_C-y_A) - (y_B-y_A)(x_C-x_A),</primer-math>
+          and discards the triangle if the sign says its vertices wind the wrong way on screen. One
+          multiply-subtract circuit deletes roughly <strong>half of all geometry</strong>.</li>
+        <li><strong>Degenerate rejection.</strong> <primer-math>2A = 0</primer-math> means a zero-area
+          sliver (three collinear or coincident vertices) — nothing to draw, discard. Triangles wholly
+          outside the frustum are likewise rejected outright rather than clipped.</li>
+        <li><strong>Perspective divide and viewport transform.</strong> Survivors get the divide by
+          <primer-math>w</primer-math> and the mapping into pixel coordinates — from here on, everything
+          is in screen space.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>Primitive setup: the handoff artefact</h2>
+      <p>
+        The front end's last act is <strong>primitive setup</strong>: for each surviving triangle it
+        precomputes exactly the numbers the rasterizer will consume millions of times — the three
+        <strong>edge-equation coefficients</strong> <primer-math>(a, b, c)</primer-math> for each edge
+        (so that inside/outside becomes a sign check of <primer-math>ax + by + c</primer-math>), and the
+        <strong>attribute gradients</strong> — how much each interpolated value (depth, UVs, colour)
+        changes per pixel-step in <primer-math>x</primer-math> and <primer-math>y</primer-math>. Setup is
+        done <em>once per triangle</em> so the rasterizer can spend <em>zero</em> per-pixel effort
+        rederiving it. This little packet — edges plus gradients — is the entire interface between the
+        geometry world and the pixel world.
+      </p>
+      <p>
+        And it has a price: setup costs the same whether the triangle covers ten thousand pixels or
+        <strong>one</strong>. As artists push geometric density toward pixel-sized triangles, per-triangle
+        overhead stops being noise and becomes the bill — the "small-triangle problem", and the one-line
+        motivation for the modern mesh-shader pipelines that batch tiny triangles more cleverly.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "frontEnd": {
+          "title": "One frame's geometry, meeting the front end",
+          "stepFetch": "Fetched and shaded: two triangles arrive in screen space — one pokes outside the view, one faces away from the camera",
+          "stepClip": "Clipping trims triangle ABC against the view edge, GENERATING two new vertices where its edges cross the boundary",
+          "stepCull": "Backface culling: triangle DEF's signed area is negative — wrong winding, facing away — one determinant discards it whole",
+          "stepSetup": "Primitive setup: the survivor's edge equations and attribute gradients are precomputed — the packet the rasterizer will feed on"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Watch it happen</h2>
+      <p>
+        Step through one tiny frame's worth of front-end work: two triangles arrive, one leaves — clipped,
+        measured and packaged for the rasterizer.
+      </p>
+      <primer-geometry scene="frontEnd" caption="A rectangular view region with two triangles: triangle ABC extends past the left edge and is clipped, gaining two new vertices on the boundary; triangle DEF is back-facing and is struck through and culled; the surviving clipped polygon is annotated with its edge equations, ready for primitive setup."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Count the savings yourself</h2>
+      <p>
+        Here is the front end's bookkeeping in miniature: a small indexed grid mesh runs through backface
+        culling and the vertex cache, and the counters show why both circuits exist. Try flipping some
+        winding orders or shrinking the cache-free path in your head first — then run it.
+      </p>
+      <primer-code run>
+        // A 3×2 grid of quads → 12 triangles sharing a 4×3 grid of 12 vertices.
+        // Vertices: positions on a grid; a few triangles are wound backwards on purpose.
+        const W = 4, H = 3;
+        const verts: [number, number][] = [];
+        for (let y = 0; y &lt; H; y++)
+          for (let x = 0; x &lt; W; x++) verts.push([x, y]);
+
+        const tris: [number, number, number][] = [];
+        for (let y = 0; y &lt; H - 1; y++) {
+          for (let x = 0; x &lt; W - 1; x++) {
+            const i = y * W + x;
+            tris.push([i, i + 1, i + W]);          // counter-clockwise (front-facing)
+            tris.push([i + 1, i + W + 1, i + W]);  // counter-clockwise (front-facing)
+          }
+        }
+        // Sabotage: flip the winding of two triangles → back-facing.
+        tris[3] = [tris[3][0], tris[3][2], tris[3][1]];
+        tris[8] = [tris[8][0], tris[8][2], tris[8][1]];
+
+        // Backface culling: signed area 2A = (Bx−Ax)(Cy−Ay) − (By−Ay)(Cx−Ax); keep 2A > 0.
+        function signedArea2(t: [number, number, number]): number {
+          const [A, B, C] = t.map((i) =&gt; verts[i]);
+          return (B[0] - A[0]) * (C[1] - A[1]) - (B[1] - A[1]) * (C[0] - A[0]);
+        }
+        const kept = tris.filter((t) =&gt; signedArea2(t) &gt; 0);
+        console.log(`triangles in:  ${tris.length}`);
+        console.log(`culled (2A ≤ 0): ${tris.length - kept.length}`);
+        console.log(`to rasterizer: ${kept.length}`);
+
+        // Vertex-shader invocations: naive (3 per triangle) vs perfect post-transform cache.
+        const naive = kept.length * 3;
+        const unique = new Set(kept.flat()).size;
+        console.log(`\nvertex shader runs, no cache:      ${naive}`);
+        console.log(`vertex shader runs, perfect cache: ${unique}`);
+        console.log(`reuse factor: ${(naive / unique).toFixed(2)}×`);
+      </primer-code>
+      <p>
+        Twelve vertices serve over thirty vertex-shader slots — the cache converts sharing in the mesh
+        into shading you never pay for. On a real million-vertex mesh the same two counters are the
+        difference between a frame that fits its budget and one that does not.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why do tiny triangles terrify GPU architects?">
+      <p>
+        Setup builds a fixed-size packet per triangle, and the rasterizer stamps out pixels in parallel
+        blocks — machinery that shines when a triangle covers hundreds of pixels. Film-quality assets
+        invert the ratio: a statue scanned at sub-millimetre detail can average <em>less than one pixel
+        per triangle</em>. Now the per-triangle cost (fetch, cache lookup, cull test, setup) dominates,
+        the wide parallel pixel hardware stamps mostly-empty blocks, and effective throughput collapses —
+        some hardware loses an order of magnitude of fill efficiency on pixel-sized triangles. That is why
+        the newest pipelines add <strong>mesh shaders</strong> (compute-style shaders that cull and emit
+        small batches of triangles wholesale) and why engines like Nanite rasterize their tiniest
+        triangles in <em>software</em> on the SMs — when triangles shrink to pixels, the specialised
+        hardware's assumptions dissolve, and the pendulum swings back toward programmability.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Culling happens AFTER vertex shading">
+      <p>
+        It feels obvious that the GPU should skip shading for triangles it will throw away. It
+        <strong>cannot</strong>: facing is decided by the <em>screen-space</em> signed area, and screen
+        positions are the vertex shader's <em>output</em>. The positions must exist before the determinant
+        can be computed. So every back-facing triangle — typically <em>half your mesh</em> — pays the full
+        vertex-shading bill and is then discarded. With a heavyweight vertex shader (skinning, morph
+        targets, elaborate animation), that is real money burned on invisible geometry. This is exactly
+        why engines cull <em>coarsely and early</em> on the CPU or in a compute pre-pass — frustum-testing
+        whole objects, occlusion-testing clusters — so the hardware front end only ever sees geometry with
+        a fighting chance of being drawn. The hardware cull is the last line of defence, not the plan.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "frontEndQuiz@1": {
+          "intro": "The geometry front end fetches and shades each vertex once, clips and culls triangles, and hands the rasterizer precomputed edge equations and gradients.",
+          "areaQ": "A screen triangle has A = ({ax}, {ay}), B = ({bx}, {by}), C = ({cx}, {cy}). Compute its signed-area determinant 2A = (Bx−Ax)(Cy−Ay) − (By−Ay)(Cx−Ax).",
+          "naiveQ": "An indexed mesh sends {t} triangles to the vertex stage. With NO vertex cache (3 invocations per triangle), how many times does the vertex shader run?",
+          "cacheQ": "The same {t}-triangle mesh has only {u} unique vertices. With a perfect post-transform cache, how many vertex-shader invocations are needed?",
+          "saveQ": "A mesh has {t} triangles and {u} unique vertices. How many vertex-shader invocations does a perfect cache SAVE compared with shading 3 per triangle?",
+          "clipCullQ": "What is the difference between clipping and culling?",
+          "clipCullA": "Clipping trims a triangle against the view boundary (possibly creating new vertices); culling discards a whole triangle untouched",
+          "clipCullB": "They are two names for the same operation",
+          "clipCullC": "Clipping discards whole triangles; culling trims them at the boundary",
+          "clipCullD": "Clipping happens per pixel; culling happens per frame",
+          "nearQ": "Why is the near plane the interesting case for the clipper?",
+          "nearA": "Clipping there must generate NEW vertices where edges cross the plane — one triangle can become a quad or fan",
+          "nearB": "Triangles near the camera are always discarded",
+          "nearC": "The near plane is the only plane a triangle can touch",
+          "nearD": "It flips the triangle's winding order",
+          "setupQ": "What does primitive setup precompute and hand to the rasterizer?",
+          "setupA": "Each edge's equation coefficients (a, b, c) plus per-pixel attribute gradients",
+          "setupB": "The final colour of every pixel the triangle covers",
+          "setupC": "The triangle's texture, fully filtered",
+          "setupD": "A fresh copy of the vertex buffer",
+          "degQ": "A triangle's signed area comes out exactly 0. The hardware…",
+          "degA": "rejects it — zero area means a degenerate sliver with nothing to draw",
+          "degB": "rasterizes it as a single pixel",
+          "degC": "sends it back to the vertex shader",
+          "degD": "clips it against the near plane",
+          "orderQ": "Why can't the GPU skip vertex shading for back-facing triangles?",
+          "orderA": "Facing is decided from screen-space positions, which are the vertex shader's OUTPUT — culling can only run after shading",
+          "orderB": "The API forbids skipping any work",
+          "orderC": "Back-facing triangles are visible half the time",
+          "orderD": "The vertex cache would overflow",
+          "cullFracQ": "For a typical closed mesh, roughly what fraction of triangles does backface culling remove?",
+          "cullFracA": "About half",
+          "cullFracB": "Almost none",
+          "cullFracC": "About 99%",
+          "cullFracD": "Exactly one third",
+          "smallQ": "Why do pixel-sized triangles hurt front-end efficiency?",
+          "smallA": "Setup and per-triangle overhead cost the same regardless of coverage — at ~1 pixel per triangle the overhead dominates the useful work",
+          "smallB": "Small triangles need more clipping planes",
+          "smallC": "The vertex cache cannot store small triangles",
+          "smallD": "They fail the depth test more often",
+          "divQ": "Immediately after clipping and culling, which two fixed-function transforms place the triangle into pixel coordinates?",
+          "divA": "The perspective divide (by w), then the viewport transform",
+          "divB": "The model transform, then the view transform",
+          "divC": "Rasterization, then blending",
+          "divD": "The projection matrix, then the model matrix",
+          "engineQ": "Why do engines also cull objects on the CPU or in a compute pre-pass, if the hardware culls anyway?",
+          "engineA": "Hardware culling runs after per-vertex shading — coarse early culls avoid ever paying that shading for invisible geometry",
+          "engineB": "The hardware cull frequently makes mistakes",
+          "engineC": "CPU culling is needed to keep the index buffer sorted",
+          "engineD": "Compute shaders cannot issue draw calls otherwise"
+        }
+      }
+    </script>
+
+    <primer-quiz name="frontEndQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/graphics-hardware/the-graphics-pipeline-in-silicon",
+      "applied-mathematics/game-development-math/projection/the-mvp-pipeline",
+      "applied-mathematics/game-development-math/projection/clip-space-and-the-perspective-divide"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "frontEnd",
+    ({ board, colors, step, sceneStrings, label }) => {
+      const ink = colors.ink, wire = colors.line;
+      const triC = colors.cat[0], newC = colors.cat[1], cullC = colors.cat[2];
+
+      const seg = (a, b, c, w = 2, dash = 0) =>
+        board.create("segment", [a, b], { strokeColor: c, strokeWidth: w, dash, highlight: false, fixed: true });
+      const dot = (p, c, name) =>
+        board.create("point", p, { name: name ?? "", size: 2.5, strokeColor: c, fillColor: c, fixed: true, highlight: false, label: { strokeColor: ink, fontSize: 12 } });
+      const txt = (x, y, t, c, size = 12, ax = "middle") =>
+        board.create("text", [x, y, t], { strokeColor: c, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false });
+
+      // ── Base: the view rectangle (the screen / frustum boundary in 2-D). ──
+      const L = 0, R = 8, B0 = 0, T0 = 6;
+      board.create("polygon", [[L, B0], [R, B0], [R, T0], [L, T0]], {
+        fillOpacity: 0, borders: { strokeColor: wire, strokeWidth: 2, highlight: false },
+        vertices: { visible: false }, highlight: false, fixed: true,
+      });
+      txt(R - 0.15, T0 - 0.3, "view", wire, 11, "right");
+
+      // Triangle ABC: pokes out of the left edge. A(−2,3) B(3,5) C(2,1).
+      const A = [-2, 3], Bv = [3, 5], Cv = [2, 1];
+      // Edge AB crosses x=0 at (0, 3.8); edge AC crosses x=0 at (0, 2).
+      const P1 = [0, 3.8], P2 = [0, 2];
+      // Triangle DEF: back-facing (clockwise winding). D(5,1) E(5.5,4) F(7,2).
+      const D = [5, 1], E = [5.5, 4], F = [7, 2];
+
+      step(sceneStrings("stepFetch"), () => {
+        dot(A, triC, "A"); dot(Bv, triC, "B"); dot(Cv, triC, "C");
+        seg(A, Bv, triC); seg(Bv, Cv, triC); seg(Cv, A, triC);
+        dot(D, cullC, "D"); dot(E, cullC, "E"); dot(F, cullC, "F");
+        seg(D, E, cullC); seg(E, F, cullC); seg(F, D, cullC);
+      });
+
+      step(sceneStrings("stepClip"), () => {
+        // The clipped polygon: P1 → B → C → P2, filled; the outside part goes dashed.
+        board.create("polygon", [P1, Bv, Cv, P2], {
+          fillColor: triC, fillOpacity: 0.2,
+          borders: { strokeColor: triC, strokeWidth: 2.5, highlight: false },
+          vertices: { visible: false }, highlight: false, fixed: true,
+        });
+        dot(P1, newC); dot(P2, newC);
+        txt(0.35, 4.15, "new", newC, 11, "left");
+        txt(0.35, 1.65, "new", newC, 11, "left");
+        seg(A, P1, wire, 1.5, 2); seg(A, P2, wire, 1.5, 2);
+      });
+
+      step(sceneStrings("stepCull"), () => {
+        // Strike DEF through: culled.
+        seg([4.8, 0.8], [7.2, 4.1], cullC, 2.5);
+        seg([4.8, 4.1], [7.2, 0.8], cullC, 2.5);
+        txt(6.1, 0.45, "2A < 0 — culled", cullC, 12);
+      });
+
+      step(sceneStrings("stepSetup"), () => {
+        txt(3.4, 5.5, "E₀(x,y) = a₀x + b₀y + c₀", ink, 12, "left");
+        txt(3.6, 3.0, "edges + gradients", ink, 12, "left");
+        txt(3.6, 2.55, "→ to the rasterizer", ink, 12, "left");
+      });
+    },
+    { boundingbox: [-2.9, 6.6, 8.9, -0.4], title: () => makeStrings("frontEnd")("title") },
+  );
+
+  registerQuiz("frontEndQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Signed area determinant on tiny coordinates.
+      prompt: (v) => sceneStrings("areaQ", v),
+      variables: "ax=[-3:3] ay=[-3:3] bx=[-3:3] by=[-3:3] cx=[-3:3] cy=[-3:3]",
+      constraints: "(bx-ax)*(cy-ay)-(by-ay)*(cx-ax) != 0",
+      answer: "(bx-ax)*(cy-ay)-(by-ay)*(cx-ax)",
+    },
+    {
+      prompt: (v) => sceneStrings("naiveQ", v),
+      variables: "t=[8:40]",
+      answer: "3*t",
+    },
+    {
+      prompt: (v) => sceneStrings("cacheQ", v),
+      variables: "t=[10:40] u=[6:24]",
+      constraints: "u < 3*t",
+      answer: "u",
+    },
+    {
+      prompt: (v) => sceneStrings("saveQ", v),
+      variables: "t=[10:40] u=[6:24]",
+      constraints: "u < 3*t",
+      answer: "3*t-u",
+    },
+    {
+      prompt: () => sceneStrings("clipCullQ"),
+      options: [
+        { text: () => sceneStrings("clipCullA"), correct: true },
+        { text: () => sceneStrings("clipCullB"), correct: false },
+        { text: () => sceneStrings("clipCullC"), correct: false },
+        { text: () => sceneStrings("clipCullD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("nearQ"),
+      options: [
+        { text: () => sceneStrings("nearA"), correct: true },
+        { text: () => sceneStrings("nearB"), correct: false },
+        { text: () => sceneStrings("nearC"), correct: false },
+        { text: () => sceneStrings("nearD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("setupQ"),
+      options: [
+        { text: () => sceneStrings("setupA"), correct: true },
+        { text: () => sceneStrings("setupB"), correct: false },
+        { text: () => sceneStrings("setupC"), correct: false },
+        { text: () => sceneStrings("setupD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("degQ"),
+      options: [
+        { text: () => sceneStrings("degA"), correct: true },
+        { text: () => sceneStrings("degB"), correct: false },
+        { text: () => sceneStrings("degC"), correct: false },
+        { text: () => sceneStrings("degD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("orderQ"),
+      options: [
+        { text: () => sceneStrings("orderA"), correct: true },
+        { text: () => sceneStrings("orderB"), correct: false },
+        { text: () => sceneStrings("orderC"), correct: false },
+        { text: () => sceneStrings("orderD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cullFracQ"),
+      options: [
+        { text: () => sceneStrings("cullFracA"), correct: true },
+        { text: () => sceneStrings("cullFracB"), correct: false },
+        { text: () => sceneStrings("cullFracC"), correct: false },
+        { text: () => sceneStrings("cullFracD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("smallQ"),
+      options: [
+        { text: () => sceneStrings("smallA"), correct: true },
+        { text: () => sceneStrings("smallB"), correct: false },
+        { text: () => sceneStrings("smallC"), correct: false },
+        { text: () => sceneStrings("smallD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("divQ"),
+      options: [
+        { text: () => sceneStrings("divA"), correct: true },
+        { text: () => sceneStrings("divB"), correct: false },
+        { text: () => sceneStrings("divC"), correct: false },
+        { text: () => sceneStrings("divD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("engineQ"),
+      options: [
+        { text: () => sceneStrings("engineA"), correct: true },
+        { text: () => sceneStrings("engineB"), correct: false },
+        { text: () => sceneStrings("engineC"), correct: false },
+        { text: () => sceneStrings("engineD"), correct: false },
+      ],
+    },
+  ]);
+</script>

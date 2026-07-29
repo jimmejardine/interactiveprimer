@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Occupancy and Latency Hiding</primer-title>
+
+    <primer-card>
+      <p>
+        Every lesson in this module has been circling one question. The
+        <primer-ref to="computer-science/chip-design/gpu-compute/the-warp-scheduler">scheduler</primer-ref>
+        hides latency <em>if it has enough ready warps</em>; the
+        <primer-ref to="computer-science/chip-design/gpu-compute/gpu-caches-and-memory-hierarchy">caches</primer-ref>
+        don't hide it at all; registers and
+        <primer-ref to="computer-science/chip-design/gpu-compute/shared-memory-and-bank-conflicts">shared
+        memory</primer-ref> are both wonderful and both, we kept hinting, "a currency". This capstone
+        cashes the hints. <strong>Occupancy</strong> — the fraction of an SM's warp slots actually filled —
+        is the number that connects your kernel's resource appetite to the scheduler's ability to hide
+        latency, and it is governed by an equation humble enough to compute on paper and consequential
+        enough that every GPU vendor ships a calculator for it. By the end of this lesson you will
+        <em>be</em> that calculator — and, more importantly, know when to ignore it.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>One SM, three budgets</h2>
+      <p>
+        An SM has a fixed stock of the things a resident thread block consumes. A block <em>runs</em> only
+        if all of its appetites fit simultaneously — so residency is a <primer-math>\min</primer-math>
+        over independent budgets:
+      </p>
+      <primer-theorem name="Occupancy">
+        <ul>
+          <li><primer-math display>\text{occupancy} = \frac{\text{resident warps}}{\text{max warp slots}}</primer-math></li>
+          <li>resident warps = <primer-math>\min</primer-math> over <strong>three budgets</strong>:
+            <strong>registers</strong> (register file ÷ registers per thread),
+            <strong>shared memory</strong> (per-SM pool ÷ per-block request), and
+            <strong>slots</strong> (hard caps on warps and blocks per SM);</li>
+          <li>whichever budget produces the minimum is the <strong>binding constraint</strong> — spending
+            less of <em>it</em> is the only change that raises occupancy;</li>
+          <li>occupancy is a <strong>means</strong>: enough warps to cover latency — not a score to
+            maximise.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Worked example, all three budgets. Take a representative SM — <strong>65,536 registers</strong>,
+        <strong>96 KB</strong> of shared memory, <strong>48 warp slots</strong>, 16 block slots — and a
+        kernel launched in blocks of <strong>256 threads</strong> (8 warps) using <strong>64 registers per
+        thread</strong> and <strong>12 KB of shared memory per block</strong>:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Budget</th><th>Arithmetic</th><th>Allows</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Registers</td><td>65,536 ÷ (64 × 32 per warp) = 32 warps</td><td><strong>32 warps</strong></td></tr>
+            <tr><td>Shared memory</td><td>⌊96 ÷ 12⌋ = 8 blocks × 8 warps</td><td>64 warps</td></tr>
+            <tr><td>Slots</td><td>hard cap</td><td>48 warps</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Residency <primer-math>= \min(32, 64, 48) = 32</primer-math> warps; occupancy
+        <primer-math>= 32/48 \approx 67\%</primer-math>, and the <strong>binding budget is
+        registers</strong>. That last fact is the actionable one: shrinking shared memory would change
+        nothing, but coaxing the compiler down from 64 to 42 registers per thread would lift residency to
+        48 warps. The tuning loop is exactly this, iterated: <em>profile → identify the binding budget →
+        trade some of it → re-measure</em>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>How many warps are "enough"? Little's law</h2>
+      <p>
+        The <primer-ref to="computer-science/computer-architecture/foundations/the-iron-law-of-performance">Iron
+        Law</primer-ref> taught you to decompose time; its queueing-theory cousin,
+        <strong>Little's law</strong>, tells you how much concurrency a latency demands:
+      </p>
+      <primer-math display>\text{bytes in flight} = \text{bandwidth} \times \text{latency}.</primer-math>
+      <p>
+        To sustain <primer-math>2000</primer-math> GB/s of DRAM bandwidth against a
+        <primer-math>400</primer-math> ns memory latency, the chip must have
+        <primer-math>2000 \times 400 \approx 800{,}000</primer-math> bytes — <strong>800 KB</strong> —
+        of loads in flight <em>at every instant</em>. Split over 100 SMs, each SM owes the memory system
+        <strong>8 KB of outstanding requests</strong>; at 128 bytes per coalesced warp access, that is
+        <strong>64 requests in flight per SM</strong>. If a typical warp keeps two loads outstanding, you
+        need <strong>32 resident warps</strong> busy issuing — right around our 67%-occupancy example.
+        This is the honest job description of occupancy: <em>supply the concurrency Little's law
+        demands</em>. The scheduler's zero-cost switching provides the mechanism; occupancy provides the
+        raw material.
+      </p>
+      <p>
+        Two corollaries follow immediately. <strong>Memory-bound kernels feel occupancy keenly</strong> —
+        halve the warps and you halve the in-flight bytes, and the DRAM pipe runs half-empty.
+        <strong>Compute-bound kernels barely notice</strong>: if the ALUs are already saturated at 50%
+        occupancy, more warps add nothing but cache pressure. And warps are not the only source of
+        in-flight requests: a single warp whose loop is <strong>unrolled</strong> can have four or eight
+        independent loads outstanding at once — <strong>instruction-level parallelism substituting for
+        occupancy</strong>. Some of the fastest kernels ever written run at 25% occupancy with huge
+        register budgets, each warp streaming like a freight train.
+      </p>
+    </primer-card>
+
+    <!-- Chart: occupancy vs registers per thread, shared-memory slider. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "occCliffs": {
+          "title": "Occupancy vs registers per thread (256-thread blocks)",
+          "smemLabel": "Shared memory per block (KB)"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The cliffs</h2>
+      <p>
+        Occupancy is a staircase, not a slope: warps are whole, blocks are whole, so residency falls in
+        cliffs as per-thread appetite grows. The dashed curve is the register budget alone; the solid
+        curve is the actual <primer-math>\min</primer-math> of all three. Drag the shared-memory slider
+        and watch the binding constraint <em>switch</em> — the flat ceiling that appears at high
+        shared-memory use is the shared budget taking over from registers:
+      </p>
+      <primer-chart scene="occCliffs" caption="A step-function chart of occupancy in percent against registers per thread from 16 to 128. Occupancy holds at 100 percent until about 43 registers, then descends in cliffs to about 33 percent at 128 registers. A slider sets shared memory per block; raising it imposes a flat ceiling that caps the curve, showing the binding budget switching from registers to shared memory."></primer-chart>
+      <primer-chart-sliders name="occSliders"></primer-chart-sliders>
+      <p>
+        Note the plateaus: between two cliffs, spending <em>more</em> registers is free. If the compiler
+        is using 50 registers, occupancy is identical at 60 — a fact that matters in the Watch out below.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The occupancy calculator, executable</h2>
+      <p>
+        The vendor tool that every GPU programmer eventually meets is a few lines of
+        <primer-math>\min</primer-math> and <primer-math>\lfloor\cdot\rfloor</primer-math>. Here it is,
+        sweeping register counts for our worked-example kernel and naming the binding budget at each step:
+      </p>
+      <primer-code run>
+        // The occupancy calculator: three budgets, one min.
+        const SM = { regs: 65536, smemKB: 96, warpSlots: 48, blockSlots: 16 };
+
+        function occupancy(regsPerThread: number, smemPerBlockKB: number, threadsPerBlock: number) {
+          const wpb = threadsPerBlock / 32;                       // warps per block
+          const byRegs = Math.floor(SM.regs / (regsPerThread * 32));
+          const bySmem = Math.floor(SM.smemKB / smemPerBlockKB) * wpb;
+          const bySlots = Math.min(SM.warpSlots, SM.blockSlots * wpb);
+          const budgets: [string, number][] = [
+            ["registers", byRegs], ["shared mem", bySmem], ["slots", bySlots],
+          ];
+          const cap = Math.min(byRegs, bySmem, bySlots);
+          const warps = Math.floor(cap / wpb) * wpb;              // blocks are all-or-nothing
+          const binding = budgets.find(([, w]) =&gt; w === cap)![0];
+          return { warps, pct: Math.round((100 * warps) / SM.warpSlots), binding };
+        }
+
+        console.log("256-thread blocks, 12 KB shared per block:");
+        console.log("regs/thread   warps   occupancy   binding budget");
+        for (let r = 32; r &lt;= 128; r += 16) {
+          const o = occupancy(r, 12, 256);
+          console.log(`   ${String(r).padStart(3)}         ${String(o.warps).padStart(2)}      ${String(o.pct).padStart(3)}%      ${o.binding}`);
+        }
+        console.log("");
+        console.log("same kernel, but 24 KB shared per block:");
+        for (const r of [32, 64]) {
+          const o = occupancy(r, 24, 256);
+          console.log(`   ${String(r).padStart(3)}         ${String(o.warps).padStart(2)}      ${String(o.pct).padStart(3)}%      ${o.binding}`);
+        }
+      </primer-code>
+      <p>
+        Read the sweep like a tuning session: the 48-register row and the 32-register row land on
+        different budgets, and once shared memory doubles, the register knob stops mattering entirely —
+        turning the <em>wrong</em> knob is the classic wasted optimisation, and the calculator exists to
+        point at the right one.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="The most influential spreadsheet in high-performance computing">
+      <p>
+        For years the official "CUDA Occupancy Calculator" was, literally, an Excel spreadsheet — a
+        yellow-and-green grid shipped with the CUDA toolkit where you typed three numbers (registers per
+        thread, shared memory per block, threads per block) and a bar chart told you your occupancy and
+        which budget bound it. It became the shared ritual of an entire field: conference talks showed
+        screenshots of it; forum advice began "open the calculator". Its logic — the same dozen lines you
+        just ran — now lives inside the profiler and even inside the runtime API, but the spreadsheet
+        deserves its footnote in history: it taught a generation of programmers that GPU performance
+        tuning starts not with cleverness but with an inventory.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 100% occupancy is a beginner's trophy">
+      <p>
+        Occupancy is the rare metric that is <em>dangerous to maximise</em>. Past the point where latency
+        is covered, extra warps hide nothing more — the scheduler's issue slot was already never idle —
+        but they keep costing: every additional resident warp <strong>dilutes each warp's share of the
+        register file, L1 and shared memory</strong>, which can force the compiler to spill registers to
+        memory and turn a compute-bound kernel into a memory-bound one. Chasing 100% typically means
+        starving each thread down to ~42 registers and forgoing the unrolling that gives you ILP — trading
+        away per-warp strength for warm-body count you didn't need. The professionals' rule:
+        <strong>occupancy must be <em>sufficient</em>, not maximal</strong> — enough warps to satisfy
+        Little's law for your kernel's actual traffic, and beyond that, spend the budgets on making each
+        warp faster. Ship the fastest kernel, not the fullest SM.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>The module, in one breath</h2>
+      <p>
+        You can now tell the whole story of this module as one causal chain. The SM
+        <em>houses</em> dozens of warps; the scheduler <em>interleaves</em> them to hide latency;
+        divergence and un-coalesced access <em>waste</em> the lanes and the bandwidth the interleaving is
+        supposed to feed; shared memory <em>multiplies</em> arithmetic intensity so less bandwidth is
+        needed; the caches <em>filter</em> what traffic remains; and occupancy — three budgets, one
+        <primer-math>\min</primer-math>, Little's law — decides whether the scheduler has enough warps to
+        make the whole trick work. Everything else in GPU performance engineering is these six sentences,
+        applied.
+      </p>
+    </primer-card>
+
+    <!-- Quiz: three-budget min, Little's law plug-ins, when occupancy matters, ILP. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "occupancyQuiz@1": {
+          "intro": "Occupancy = resident warps ÷ warp slots. Residency = min(register budget, shared-memory budget, slot caps). Little's law: bytes in flight = bandwidth × latency.",
+          "minQ": "On one SM, the register budget allows {a} resident warps, the shared-memory budget {b}, and the slot cap is {c}. How many warps are resident?",
+          "occQ": "An SM has 48 warp slots and {w} resident warps. What is the occupancy, as a percentage?",
+          "regsQ": "An SM has 65,536 registers and the kernel uses {r} registers per thread. How many warps (32 threads each) does the register budget allow?",
+          "smemQ": "An SM has 96 KB of shared memory and each block requests {s} KB. How many blocks can be resident?",
+          "smemWarpsQ": "Each resident block has {w} warps, and the shared-memory budget allows {b} blocks. How many warps does shared memory allow?",
+          "littleQ": "A GPU sustains {b} bytes of DRAM traffic per nanosecond, and memory latency is {L} ns. By Little's law, how many KB must be in flight at all times (1 KB = 1000 B here)?",
+          "reqQ": "An SM must keep {n} bytes of loads in flight, in coalesced 128-byte requests. How many requests is that?",
+          "warpsNeedQ": "An SM needs {q} memory requests in flight, and each warp sustains {o} outstanding requests. How many resident warps does Little's law demand?",
+          "blockQ": "A block has {t} threads. How many warps is that?",
+          "whenQ": "For which kernel does raising occupancy from 50% to 100% help most?",
+          "whenA": "A memory-bound kernel — more resident warps mean more requests in flight, filling the DRAM pipe",
+          "whenB": "A compute-bound kernel already saturating the ALUs at 50%",
+          "whenC": "Any kernel — occupancy always scales performance linearly",
+          "whenD": "A kernel that only uses shared memory",
+          "ilpQ": "A kernel runs well at only 25% occupancy. What is the usual explanation?",
+          "ilpA": "Instruction-level parallelism substitutes for warps: unrolled loops keep several independent loads in flight per warp, meeting Little's law with fewer warps",
+          "ilpB": "The GPU secretly raised its clock frequency",
+          "ilpC": "Occupancy below 50% disables the memory system",
+          "ilpD": "The scheduler duplicates each warp four times",
+          "goalQ": "Why is chasing 100% occupancy often a mistake?",
+          "goalA": "Past the latency-covering point extra warps hide nothing, while shrinking each warp's register, L1 and shared-memory share — sufficiency, not maximality, is the goal",
+          "goalB": "Occupancy above 90% causes the SM to overheat",
+          "goalC": "100% occupancy is physically impossible",
+          "goalD": "High occupancy forces the kernel to diverge",
+          "bindQ": "The 'binding budget' of a kernel's occupancy is…",
+          "bindA": "whichever of the three budgets produces the minimum — the only one whose reduction can raise residency",
+          "bindB": "always the register file",
+          "bindC": "the budget with the largest allowance",
+          "bindD": "a contractual limit set by the driver licence",
+          "knobQ": "A kernel's occupancy is bound by shared memory. Which change can raise its occupancy?",
+          "knobA": "Requesting less shared memory per block — reducing register use changes nothing while another budget binds",
+          "knobB": "Reducing registers per thread",
+          "knobC": "Increasing the DRAM clock",
+          "knobD": "Adding more __syncthreads() barriers"
+        }
+      }
+    </script>
+
+    <primer-quiz name="occupancyQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/gpu-compute/gpu-caches-and-memory-hierarchy",
+      "computer-science/computer-architecture/foundations/the-iron-law-of-performance"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerChartSliders, registerQuiz, makeStrings } from "primer";
+
+  // ── Occupancy staircase: register cliffs + the shared-memory ceiling. ──
+  const SM = { regs: 65536, smemKB: 96, warpSlots: 48, warpsPerBlock: 8 }; // 256-thread blocks
+
+  registerChartSliders("occSliders", [
+    {
+      name: "smem",
+      label: () => makeStrings("occCliffs")("smemLabel"),
+      min: 4,
+      max: 32,
+      step: 4,
+      value: 8,
+    },
+  ]);
+
+  registerCharts(
+    [
+      {
+        name: "occCliffs",
+        f: [
+          // Register budget alone (dashed reference).
+          (x) => {
+            const r = Math.max(16, Math.round(x));
+            const w = Math.min(SM.warpSlots, Math.floor(SM.regs / (32 * r)));
+            return (100 * w) / SM.warpSlots;
+          },
+          // Actual occupancy: min(registers, shared memory, slots), whole blocks.
+          (x, s) => {
+            const r = Math.max(16, Math.round(x));
+            const byRegs = Math.floor(SM.regs / (32 * r));
+            const bySmem = Math.floor(SM.smemKB / s.smem) * SM.warpsPerBlock;
+            const cap = Math.min(SM.warpSlots, byRegs, bySmem);
+            const warps = Math.floor(cap / SM.warpsPerBlock) * SM.warpsPerBlock;
+            return (100 * warps) / SM.warpSlots;
+          },
+        ],
+        line: (colors, i) =>
+          i === 0
+            ? { strokeColor: colors.line, strokeOpacity: 0.4, dash: 2 }
+            : { strokeColor: colors.cat[0], strokeWidth: 2.5 },
+        legend: ["register budget alone", "occupancy = min of all budgets"],
+      },
+    ],
+    {
+      xmin: 14,
+      xmax: 132,
+      ymin: 0,
+      ymax: 110,
+      xticks: 16,
+      yticks: 25,
+      xaxisname: "regs/thread",
+      yaxisname: "%",
+      title: () => makeStrings("occCliffs")("title"),
+    },
+    "occSliders",
+  );
+
+  registerQuiz("occupancyQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Residency = min of the three budgets.
+      prompt: (v) => sceneStrings("minQ", v),
+      variables: "a=[16,24,32,40] b=[24,32,48,64] c=[48,64]",
+      answer: (v) => Math.min(v.a, v.b, v.c),
+    },
+    {
+      // Occupancy % out of 48 slots — clean thirds/quarters.
+      prompt: (v) => sceneStrings("occQ", v),
+      variables: "w=[12,24,36,48]",
+      answer: "100 * w / 48",
+    },
+    {
+      // Register budget in warps: 65536 / (32r) = 2048/r.
+      prompt: (v) => sceneStrings("regsQ", v),
+      variables: "r=[32,64,128]",
+      answer: "2048 / r",
+    },
+    {
+      // Shared budget in blocks.
+      prompt: (v) => sceneStrings("smemQ", v),
+      variables: "s=[12,16,24,32]",
+      answer: "96 / s",
+    },
+    {
+      // Blocks × warps per block.
+      prompt: (v) => sceneStrings("smemWarpsQ", v),
+      variables: "w=[4,8] b=[3,4,6,8]",
+      answer: "w * b",
+    },
+    {
+      // Little's law: b B/ns × L ns → KB.
+      prompt: (v) => sceneStrings("littleQ", v),
+      variables: "b=[500,1000,2000] L=[200,400]",
+      answer: "b * L / 1000",
+    },
+    {
+      // Bytes in flight → 128-B requests.
+      prompt: (v) => sceneStrings("reqQ", v),
+      variables: "n=[4096,8192,16384]",
+      answer: "n / 128",
+    },
+    {
+      // Requests ÷ outstanding-per-warp.
+      prompt: (v) => sceneStrings("warpsNeedQ", v),
+      variables: "q=[32,64,128] o=[2,4,8]",
+      answer: "q / o",
+    },
+    {
+      // Threads → warps.
+      prompt: (v) => sceneStrings("blockQ", v),
+      variables: "t=[64,128,256,512]",
+      answer: "t / 32",
+    },
+    {
+      prompt: () => sceneStrings("whenQ"),
+      options: [
+        { text: () => sceneStrings("whenA"), correct: true },
+        { text: () => sceneStrings("whenB"), correct: false },
+        { text: () => sceneStrings("whenC"), correct: false },
+        { text: () => sceneStrings("whenD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ilpQ"),
+      options: [
+        { text: () => sceneStrings("ilpA"), correct: true },
+        { text: () => sceneStrings("ilpB"), correct: false },
+        { text: () => sceneStrings("ilpC"), correct: false },
+        { text: () => sceneStrings("ilpD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("goalQ"),
+      options: [
+        { text: () => sceneStrings("goalA"), correct: true },
+        { text: () => sceneStrings("goalB"), correct: false },
+        { text: () => sceneStrings("goalC"), correct: false },
+        { text: () => sceneStrings("goalD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bindQ"),
+      options: [
+        { text: () => sceneStrings("bindA"), correct: true },
+        { text: () => sceneStrings("bindB"), correct: false },
+        { text: () => sceneStrings("bindC"), correct: false },
+        { text: () => sceneStrings("bindD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("knobQ"),
+      options: [
+        { text: () => sceneStrings("knobA"), correct: true },
+        { text: () => sceneStrings("knobB"), correct: false },
+        { text: () => sceneStrings("knobC"), correct: false },
+        { text: () => sceneStrings("knobD"), correct: false },
+      ],
+    },
+  ]);
+</script>

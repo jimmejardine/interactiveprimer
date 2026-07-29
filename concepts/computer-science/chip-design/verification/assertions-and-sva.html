@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Assertions and SVA</primer-title>
+
+    <primer-card>
+      <p>
+        A specification that lives in a Word document is a rumour: nobody executes it, nobody notices when
+        the design drifts away from it. SystemVerilog's answer is to make the spec <strong>executable</strong>:
+        <strong>assertions</strong> are statements of intent — "this must always hold" — written into the
+        code, checked automatically on every cycle of every
+        <primer-ref to="computer-science/chip-design/verification/testbenches-and-simulation">simulation</primer-ref>
+        you ever run. The dialect for writing them, <strong>SystemVerilog Assertions (SVA)</strong>, is a
+        little temporal-logic language for saying things like <em>"every request is granted within three
+        cycles"</em> — sentences about <em>time</em>, which ordinary boolean expressions cannot utter. Learn
+        to write them well and your design carries its own spec around, machine-checked, forever.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Immediate assertions: sanity checks in the bench</h2>
+      <p>
+        The simple kind first. An <strong>immediate assertion</strong> is a boolean check at a point in
+        procedural code — a testbench's way of saying "at this moment, this had better be true":
+      </p>
+      <primer-code lang="text">
+        // In a testbench, right after driving inputs and waiting:
+        assert (sum === a + b) else $error("adder wrong: %0d + %0d gave %0d", a, b, sum);
+      </primer-code>
+      <p>
+        This is the self-checking idea from last lesson wearing its official uniform: the
+        <code>assert … else $error</code> pattern is how checks are spelled in professional benches (note
+        <code>===</code>, the four-valued equality that refuses to call <code>x</code> a match). Useful — but
+        it only checks one instant. The interesting bugs live <em>across</em> instants.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Concurrent assertions: properties that live in time</h2>
+      <p>
+        A <strong>concurrent assertion</strong> is evaluated at every clock edge, watching signals
+        <em>unfold over cycles</em>. Its vocabulary:
+      </p>
+      <ul>
+        <li><strong><code>##N</code></strong> — "N cycles later"; <code>##[1:3]</code> — "between 1 and 3
+          cycles later" (a window);</li>
+        <li><strong><code>|-&gt;</code></strong> — <strong>implication</strong>: "whenever the left side (the
+          <strong>antecedent</strong>) occurs, the right side (the <strong>consequent</strong>) must
+          follow", checked starting <em>the same cycle</em>;</li>
+        <li><strong><code>disable iff (…)</code></strong> — "don't check while this holds" (universally:
+          during reset).</li>
+      </ul>
+      <p>
+        The canonical example — an arbiter that must answer requests promptly:
+      </p>
+      <primer-code lang="text">
+        property req_gets_grant;
+          @(posedge clk) disable iff (!rst_n)
+            req |-&gt; ##[1:3] grant;          // every request: a grant within 1 to 3 cycles
+        endproperty
+        assert property (req_gets_grant);
+
+        // No grant may appear out of thin air:
+        assert property (@(posedge clk) grant |-&gt; $past(req));
+
+        // A FIFO must never be pushed while full:
+        assert property (@(posedge clk) disable iff (!rst_n) !(push &amp;&amp; full));
+      </primer-code>
+      <p>
+        Read the first one aloud: <em>at every clock edge (except during reset), if <code>req</code> is
+        high, then at 1, 2 or 3 edges later <code>grant</code> must be high at least once.</em> Three lines
+        of spec-English, now machine-checked on every run. The other two show the pattern's range: a
+        backward-looking rule (<code>$past</code> reads last cycle's value) and a pure invariant with no
+        temporal window at all — "never both".
+      </p>
+    </primer-card>
+
+    <!-- Waveform figure: req, the [1:3] window, grant — stepped. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "reqGrantWave": {
+          "title": "req |-> ##[1:3] grant, on a waveform",
+          "stepReq": "The antecedent: req fires at cycle 2, arming the property",
+          "stepWindow": "The consequent's window: grant must arrive during cycles 3, 4 or 5",
+          "stepGrant": "grant lands at cycle 4 — inside the window, so this attempt PASSES; at cycle 6 it would have failed"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The property, on a waveform</h2>
+      <primer-geometry scene="reqGrantWave" caption="A timing diagram with cycle numbers 0 to 7. The req signal pulses high at cycle 2. A shaded window marks cycles 3 to 5, labelled 'grant must arrive here'. The grant signal pulses high at cycle 4, inside the window."></primer-geometry>
+      <p>
+        Every <code>req</code> pulse starts a fresh <strong>attempt</strong> of the property, with its own
+        window counted from its own cycle. A busy trace has many attempts in flight at once — the simulator
+        tracks them all, and one late grant fails only the attempts whose windows it missed.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Be the assertion engine</h2>
+      <p>
+        An SVA checker is a simple machine: scan the trace; at each antecedent, open a window; report any
+        window that closes unsatisfied. Here it is in forty lines, run against a clean trace and a buggy
+        one:
+      </p>
+      <primer-code run>
+        // One recorded cycle of the DUT's signals.
+        interface Cyc { req: number; grant: number }
+
+        // Check:  req |-> ##[min:max] grant   over a whole trace.
+        function check(name: string, trace: Cyc[], min: number, max: number): void {
+          let violations = 0, attempts = 0;
+          trace.forEach((c, t) =&gt; {
+            if (!c.req) return;
+            attempts++;
+            const win = trace.slice(t + min, t + max + 1);       // the consequent's window
+            const hit = win.findIndex((w) =&gt; w.grant === 1);
+            if (hit &lt; 0) {
+              violations++;
+              console.log(`  VIOLATION: req at cycle ${t}, no grant in cycles ${t + min}..${t + max}`);
+            } else {
+              console.log(`  ok: req at cycle ${t} → grant at cycle ${t + min + hit}`);
+            }
+          });
+          if (attempts === 0) console.log("  no req ever fired — property passed VACUOUSLY (it checked nothing!)");
+          console.log(`${name}: ${attempts} attempts, ${violations} violations\n`);
+        }
+
+        const r = (req: number, grant: number): Cyc =&gt; ({ req, grant });
+
+        // A well-behaved arbiter: each req answered 2 cycles later.
+        const goodTrace = [r(0,0), r(1,0), r(0,0), r(1,1), r(0,0), r(1,1), r(0,0), r(0,1)];
+        check("good trace", goodTrace, 1, 3);
+
+        // A lazy arbiter: the second req's grant arrives 4 cycles late.
+        const badTrace  = [r(0,0), r(1,0), r(0,1), r(1,0), r(0,0), r(0,0), r(0,0), r(0,1)];
+        check("bad trace", badTrace, 1, 3);
+
+        // A trace where req never fires at all:
+        check("idle trace", [r(0,0), r(0,0), r(0,0), r(0,0)], 1, 3);
+      </primer-code>
+      <p>
+        The third run is the quiet trap: <strong>no antecedent, no check</strong>. The property "passed",
+        having examined nothing — a <strong>vacuous pass</strong>. Assertion tools count and report vacuity
+        for exactly this reason; a green assertion that never triggered is a smoke alarm with no battery.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Assertions as embedded documentation</h2>
+      <p>
+        Assertions do not only live in benches. Designers embed them <strong>inside the RTL itself</strong> —
+        next to the FIFO, an assertion that it never overflows; next to the FSM, that its one-hot state
+        register stays one-hot; at a module boundary, the interface's handshake rules. Embedded assertions
+        are the best documentation in the building: unlike comments, they cannot go stale silently, because
+        every simulation re-checks them. Two siblings complete the family: <strong><code>assume</code></strong>
+        declares what the <em>environment</em> promises (constraining legal inputs), and
+        <strong><code>cover</code></strong> asks "did this scenario ever actually happen?" — a question the
+        <primer-ref forward to="computer-science/chip-design/verification/functional-coverage">coverage
+        lesson</primer-ref> turns into a discipline. And the same properties get a second, more spectacular
+        life in
+        <primer-ref forward to="computer-science/chip-design/verification/formal-property-verification">formal
+        verification</primer-ref>, where a tool <em>proves</em> them instead of sampling them.
+      </p>
+      <primer-theorem name="SystemVerilog Assertions">
+        <ul>
+          <li><strong>immediate</strong> assertions check a boolean at a point in procedural code;
+            <strong>concurrent</strong> assertions check properties at every clock edge;</li>
+          <li>vocabulary: <code>##N</code> / <code>##[m:n]</code> delays, <code>|-&gt;</code> implication
+            (antecedent → consequent), <code>disable iff</code> for reset;</li>
+          <li>each antecedent occurrence starts its own <strong>attempt</strong> with its own window;</li>
+          <li>an attempt-free run is a <strong>vacuous pass</strong> — green, but it checked nothing;</li>
+          <li><code>assert</code> claims, <code>assume</code> constrains the environment,
+            <code>cover</code> asks "did it happen?"; embed assertions in the RTL as living spec.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Where did this temporal logic come from?">
+      <p>
+        From philosophy, of all places. Temporal logic — a formal calculus for "always", "eventually",
+        "until" — was developed by the logician Arthur Prior in the 1950s to analyse statements about time
+        in language and metaphysics. In 1977 Amir Pnueli realised it was exactly the right mathematics for
+        reasoning about programs that never terminate — operating systems, protocols, and (it turned out)
+        hardware, whose whole life is one endless loop of cycles. That insight won Pnueli the Turing Award,
+        and its industrial descendants are the property languages of chip design: SVA and its cousin PSL
+        are temporal logic in engineer's clothing. When you write <code>req |-&gt; ##[1:3] grant</code>, you
+        are using a notation whose family tree passes through modal logic seminars — one of the cleanest
+        pipelines from pure philosophy to fabbed silicon in all of engineering.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! |-> versus |=> — the off-by-one that rewrites your spec">
+      <p>
+        SVA has two implication arrows, one character apart, one clock cycle apart.
+        <strong><code>|-&gt;</code></strong> (overlapping) starts checking the consequent <em>in the same
+        cycle</em> as the antecedent; <strong><code>|=&gt;</code></strong> (non-overlapping) starts
+        <em>one cycle later</em> — it is exactly <code>|-&gt; ##1</code>. So <code>req |-&gt; grant</code>
+        demands the grant <em>this very cycle</em>, while <code>req |=&gt; grant</code> demands it next
+        cycle. Mix them up and your assertion checks a different spec than the one in your head: an
+        off-by-one that either fails good designs (the assertion is one cycle too eager) or — far worse —
+        passes bad ones (one cycle too lenient, quietly blessing late grants). This is the classic SVA bug,
+        and the defence is ritual: when writing any implication, say the sentence aloud with cycle numbers
+        ("req at cycle T, so grant must be high at cycle T+…?") and pick the arrow that matches. Then check
+        it against a hand-drawn waveform — two minutes that regularly save two weeks.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: windows, arrows, vacuity, operator meanings. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "svaQuiz@1": {
+          "intro": "Assertions are executable spec: antecedent fires, consequent must follow in its window.",
+          "lateQ": "The property req |-> ##[1:{k}] grant is armed by a req at cycle {c}. What is the LATEST cycle at which grant may arrive and still satisfy this attempt?",
+          "earlyQ": "The property req |-> ##[1:{k}] grant is armed by a req at cycle {c}. What is the EARLIEST cycle at which grant can satisfy this attempt?",
+          "winQ": "In the window ##[1:{k}], how many distinct cycles could satisfy the consequent?",
+          "sameQ": "The property is req |-> ##[2:2] grant, and req fires at cycle {c}. At exactly which cycle must grant be high?",
+          "arrowQ": "What is the difference between |-> and |=> ?",
+          "arRight": "|-> starts checking the consequent in the same cycle as the antecedent; |=> starts one cycle later (it equals |-> ##1)",
+          "arSame": "They are interchangeable synonyms",
+          "arDir": "|-> checks forwards in time, |=> checks backwards",
+          "arSim": "|-> works in simulation only, |=> in formal only",
+          "vacQ": "A regression finishes green, but one assertion's antecedent never fired in any test. What happened?",
+          "vaRight": "A vacuous pass — the property checked nothing, so the green result carries no evidence about the consequent",
+          "vaProven": "The property is proven for all time",
+          "vaFail": "The simulator reports it as a failure",
+          "vaDelete": "The tool deletes the assertion from the design",
+          "anteQ": "In req |-> ##[1:3] grant, which part is the antecedent and which the consequent?",
+          "anRight": "req is the antecedent that arms the check; ##[1:3] grant is the consequent that must follow",
+          "anSwap": "grant is the antecedent; req is the consequent",
+          "anBoth": "Both are antecedents; the consequent is implicit",
+          "anClk": "The clock is the antecedent; everything else is consequent",
+          "disQ": "What does disable iff (!rst_n) do in a property?",
+          "diRight": "Suspends checking while reset is asserted, so start-up garbage cannot raise false violations",
+          "diOff": "Permanently disables the assertion at elaboration",
+          "diInv": "Inverts the property's pass/fail result",
+          "diClk": "Stops the clock while the property is checked",
+          "immQ": "What distinguishes an immediate assertion from a concurrent one?",
+          "imRight": "Immediate checks a boolean at one point in procedural code; concurrent watches a temporal property at every clock edge",
+          "imSpeed": "Immediate assertions run faster in silicon",
+          "imSynth": "Immediate assertions are synthesizable, concurrent are not",
+          "imBench": "Concurrent assertions may only appear in testbenches",
+          "covQ": "What does a cover directive ask?",
+          "cvRight": "Whether the described scenario ever actually occurred in simulation — evidence the interesting cases were exercised",
+          "cvMust": "That the scenario must never occur",
+          "cvArea": "How much silicon area the scenario consumes",
+          "cvSynth": "Whether the scenario is synthesizable",
+          "assumeQ": "What does an assume directive declare?",
+          "asRight": "A promise about the environment — the legal-input rules the DUT's surroundings are trusted to obey",
+          "asHope": "A property the designer hopes is true but cannot check",
+          "asWave": "A request to record the signal in the waveform dump",
+          "asRand": "A random value to inject each cycle",
+          "fifoQ": "Which property correctly states 'the FIFO never overflows'?",
+          "fiRight": "assert property (@(posedge clk) !(push && full));",
+          "fiWrong1": "assert property (@(posedge clk) push |-> full);",
+          "fiWrong2": "assert property (@(posedge clk) full |-> push);",
+          "fiWrong3": "cover property (@(posedge clk) push && full);",
+          "pastQ": "What does grant |-> $past(req) demand?",
+          "paRight": "Whenever grant is high, req must have been high one cycle earlier — no grant out of thin air",
+          "paNext": "Whenever grant is high, req must go high one cycle later",
+          "paSame": "grant and req must always be high together",
+          "paNever": "grant must never follow req"
+        }
+      }
+    </script>
+
+    <primer-quiz name="svaQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/verification/testbenches-and-simulation"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── req / grant waveform with the [1:3] window, stepped. ──
+  registerGeometryScene(
+    "reqGrantWave",
+    ({ board, colors, step, sceneStrings }) => {
+      const ink = colors.ink, guide = colors.line;
+      const reqC = colors.cat[0], winC = colors.cat[1], gntC = colors.cat[2];
+      const T = (x, y, txt, color, size = 12, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+      // Waveform from [time, level] change-points on a baseline.
+      const wave = (pts, base, amp, color) => {
+        for (let i = 0; i < pts.length - 1; i++) {
+          const [t0, v0] = pts[i], [t1, v1] = pts[i + 1];
+          board.create("segment", [[t0, base + v0 * amp], [t1, base + v0 * amp]], {
+            strokeColor: color, strokeWidth: 2.5, highlight: false,
+          });
+          if (v1 !== v0)
+            board.create("segment", [[t1, base + v0 * amp], [t1, base + v1 * amp]], {
+              strokeColor: color, strokeWidth: 2.5, highlight: false,
+            });
+        }
+      };
+
+      // ── Base: cycle ruler 0..7 with tick guides. ──
+      for (let t = 0; t <= 7; t++) {
+        T(t + 0.5, 0.55, String(t), ink, 11);
+        board.create("segment", [[t, 0.9], [t, 4.9]], {
+          strokeColor: guide, strokeWidth: 1, dash: 2, strokeOpacity: 0.4, highlight: false,
+        });
+      }
+      board.create("segment", [[8, 0.9], [8, 4.9]], {
+        strokeColor: guide, strokeWidth: 1, dash: 2, strokeOpacity: 0.4, highlight: false,
+      });
+      T(-0.25, 4.3, "req", reqC, 13, "right");
+      T(-0.25, 1.7, "grant", gntC, 13, "right");
+
+      // Step 1: req pulses in cycle 2.
+      step(sceneStrings("stepReq"), () => {
+        wave([[0, 0], [2, 1], [3, 0], [8, 0]], 3.9, 0.8, reqC);
+      });
+
+      // Step 2: the [1:3] window = cycles 3, 4, 5.
+      step(sceneStrings("stepWindow"), () => {
+        board.create("polygon", [[3, 0.95], [6, 0.95], [6, 4.85], [3, 4.85]], {
+          borders: { strokeColor: winC, strokeWidth: 1.5, dash: 2, highlight: false },
+          fillColor: winC, fillOpacity: 0.12, vertices: { visible: false }, highlight: false,
+        });
+        T(4.5, 5.15, "##[1:3]: grant must arrive here", winC, 12);
+      });
+
+      // Step 3: grant lands in cycle 4 — inside.
+      step(sceneStrings("stepGrant"), () => {
+        wave([[0, 0], [4, 1], [5, 0], [8, 0]], 1.3, 0.8, gntC);
+        T(4.5, 2.55, "✓", gntC, 16);
+      });
+    },
+    { boundingbox: [-1.3, 5.6, 8.6, 0.2], title: () => makeStrings("reqGrantWave")("title") },
+  );
+
+  registerQuiz("svaQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Latest = c + k.
+      prompt: (v) => sceneStrings("lateQ", v),
+      variables: "c=[3:12] k=[2:5]",
+      answer: "c + k",
+    },
+    {
+      // Earliest = c + 1.
+      prompt: (v) => sceneStrings("earlyQ", v),
+      variables: "c=[3:12] k=[2:5]",
+      answer: "c + 1",
+    },
+    {
+      // Window [1:k] spans k cycles.
+      prompt: (v) => sceneStrings("winQ", v),
+      variables: "k=[2:6]",
+      answer: "k",
+    },
+    {
+      // Exactly c + 2.
+      prompt: (v) => sceneStrings("sameQ", v),
+      variables: "c=[2:15]",
+      answer: "c + 2",
+    },
+    {
+      prompt: () => sceneStrings("arrowQ"),
+      options: [
+        { text: () => sceneStrings("arRight"), correct: true },
+        { text: () => sceneStrings("arSame"), correct: false },
+        { text: () => sceneStrings("arDir"), correct: false },
+        { text: () => sceneStrings("arSim"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("vacQ"),
+      options: [
+        { text: () => sceneStrings("vaRight"), correct: true },
+        { text: () => sceneStrings("vaProven"), correct: false },
+        { text: () => sceneStrings("vaFail"), correct: false },
+        { text: () => sceneStrings("vaDelete"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("anteQ"),
+      options: [
+        { text: () => sceneStrings("anRight"), correct: true },
+        { text: () => sceneStrings("anSwap"), correct: false },
+        { text: () => sceneStrings("anBoth"), correct: false },
+        { text: () => sceneStrings("anClk"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("disQ"),
+      options: [
+        { text: () => sceneStrings("diRight"), correct: true },
+        { text: () => sceneStrings("diOff"), correct: false },
+        { text: () => sceneStrings("diInv"), correct: false },
+        { text: () => sceneStrings("diClk"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("immQ"),
+      options: [
+        { text: () => sceneStrings("imRight"), correct: true },
+        { text: () => sceneStrings("imSpeed"), correct: false },
+        { text: () => sceneStrings("imSynth"), correct: false },
+        { text: () => sceneStrings("imBench"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("covQ"),
+      options: [
+        { text: () => sceneStrings("cvRight"), correct: true },
+        { text: () => sceneStrings("cvMust"), correct: false },
+        { text: () => sceneStrings("cvArea"), correct: false },
+        { text: () => sceneStrings("cvSynth"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("assumeQ"),
+      options: [
+        { text: () => sceneStrings("asRight"), correct: true },
+        { text: () => sceneStrings("asHope"), correct: false },
+        { text: () => sceneStrings("asWave"), correct: false },
+        { text: () => sceneStrings("asRand"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fifoQ"),
+      options: [
+        { text: () => sceneStrings("fiRight"), correct: true },
+        { text: () => sceneStrings("fiWrong1"), correct: false },
+        { text: () => sceneStrings("fiWrong2"), correct: false },
+        { text: () => sceneStrings("fiWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pastQ"),
+      options: [
+        { text: () => sceneStrings("paRight"), correct: true },
+        { text: () => sceneStrings("paNext"), correct: false },
+        { text: () => sceneStrings("paSame"), correct: false },
+        { text: () => sceneStrings("paNever"), correct: false },
+      ],
+    },
+  ]);
+</script>

@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Tile-Based Rendering</primer-title>
+
+    <primer-card>
+      <p>
+        Every lesson in this module so far described the desktop GPU's dataflow, which architects call
+        <strong>immediate-mode rendering</strong>: a triangle enters the pipeline and flows straight
+        through — transformed, rasterized, shaded, blended — with its fragments landing wherever on the
+        screen they land. The
+        <primer-ref to="computer-science/chip-design/graphics-hardware/render-output-units">ROPs</primer-ref>
+        soften the blow with caches and compression, but the framebuffer fundamentally lives in DRAM, and
+        every overdrawn, blended, depth-tested pixel hammers it. On a desktop card with a 300-watt budget
+        and a dedicated memory system, that's a fine trade.
+      </p>
+      <p>
+        Now design a GPU for a phone. Your power budget is <em>two or three watts</em> — for the whole
+        chip — and the single most expensive thing you can do, by an order of magnitude, is
+        <strong>move a byte to DRAM</strong>: external memory access costs hundreds of times the energy of
+        on-chip SRAM access. The framebuffer traffic that desktop architecture shrugs off is now your
+        biggest power line-item. So mobile GPU architects (PowerVR first, then ARM, Qualcomm, Apple)
+        redesigned the <em>dataflow itself</em> around one goal: <strong>make the framebuffer stop
+        touching DRAM</strong>. The result — tile-based rendering — is the best case study in this whole
+        course of the same logical pipeline rebuilt in the opposite direction because the physics changed.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two phases: bin everything, then render tile by tile</h2>
+      <p>
+        A tile-based GPU splits the frame into two phases separated by a full pass over the scene:
+      </p>
+      <ul>
+        <li><strong>Phase 1 — binning.</strong> Run <em>all</em> the frame's geometry through vertex
+          shading and a coarse rasterizer, but shade nothing. For each screen tile (say
+          <primer-math>32\times 32</primer-math> pixels), build a <strong>bin list</strong>: the set of
+          triangles that touch it. The lists go to memory — compact geometry references, a small fraction
+          of framebuffer traffic.</li>
+        <li><strong>Phase 2 — per-tile render.</strong> For each tile in turn: load its bin list,
+          rasterize, depth-test, shade and blend <em>everything that touches this tile</em> — entirely
+          inside a small <strong>on-chip tile memory</strong> (SRAM holding the tile's colour and depth).
+          All the overdraw, all the blending read–modify–writes, all the depth traffic happens at SRAM
+          speed and SRAM energy. When the tile is finished, write its final pixels to DRAM
+          <strong>once</strong>, and move on.</li>
+        </ul>
+      <p>
+        Count what DRAM sees per frame: the geometry (written and read once for binning) and
+        <strong>each framebuffer pixel exactly once</strong>, at the end. Overdraw never reaches memory.
+        Blending never reads memory. And the depth buffer — consulted per fragment, needed by no one after
+        the frame — can live and <em>die entirely on-chip</em>, never written to DRAM at all. On a phone
+        screen at 60 fps, that is the difference between a warm pocket and a dead battery.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "dataflows": {
+          "title": "Immediate-mode vs tile-based dataflow",
+          "immTitle": "immediate-mode (desktop)",
+          "tbTitle": "tile-based (mobile)",
+          "dramLbl": "DRAM (expensive: every byte costs real energy)",
+          "geomLbl": "geometry",
+          "rasLbl": "raster · shade · blend",
+          "binLbl": "phase 1: binning",
+          "listLbl": "bin lists",
+          "tileLbl": "phase 2: tile render — colour + depth in on-chip SRAM",
+          "rmwLbl": "every fragment: depth + blend RMW, × overdraw",
+          "flushLbl": "one write per pixel",
+          "stepImm": "Immediate mode: triangles flow straight through, and every fragment's depth test and blend is a read–modify–write against the DRAM framebuffer — multiplied by overdraw",
+          "stepBin": "Tile-based, phase 1: ALL geometry is transformed and binned into per-tile lists — a small, geometry-sized trickle to DRAM",
+          "stepTile": "Phase 2: one tile at a time, everything is rasterized, depth-tested, shaded and blended inside on-chip tile memory — overdraw, depth and blending never leave the chip",
+          "stepFlush": "Each finished tile is written to DRAM exactly once; the depth buffer may never touch DRAM at all"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The two dataflows, drawn</h2>
+      <p>
+        Same logical pipeline, opposite plumbing. Watch where the fat arrows point.
+      </p>
+      <primer-geometry scene="dataflows" caption="Two columns above a wide DRAM bar. Left, immediate mode: geometry flows into a raster-shade-blend box with a thick double-headed arrow hammering DRAM, labelled every fragment read-modify-write times overdraw. Right, tile-based: geometry flows into a binning box with a thin arrow writing bin lists to DRAM, then a tile-render box holding colour and depth in on-chip SRAM, with a single thin arrow writing each finished tile to DRAM once."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>TBDR: since we have the whole tile's geometry anyway…</h2>
+      <p>
+        Binning creates a luxury immediate mode never has: before shading a single fragment, the hardware
+        holds <em>the complete list of every triangle touching this tile</em>. PowerVR's
+        <strong>tile-based deferred rendering</strong> (TBDR — the architecture in every iPhone) spends
+        that luxury on perfect occlusion: rasterize the whole tile's geometry depth-only first, keeping
+        for each pixel just the identity of the winning fragment — then shade <strong>only the
+        winners</strong>. Opaque overdraw costs zero shading, in <em>any</em> draw order — no front-to-back
+        sorting, no depth pre-pass, none of the early-Z choreography from three lessons ago. Hidden-surface
+        removal stops being the app's optimisation problem and becomes a property of the machine.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The bill: nothing is free</h2>
+      <p>
+        Tiling buys its bandwidth win with real costs, and they all trace back to the same clause:
+        <em>the whole scene must be binned before any pixel can finish</em>.
+      </p>
+      <ul>
+        <li><strong>A full geometry pass, plus memory for the lists.</strong> Every frame's geometry is
+          transformed and written out as bin lists, then read back — fine when geometry is small next to
+          pixels, which is the mobile norm.</li>
+        <li><strong>The pathological case: geometry-heavy scenes.</strong> Crank up triangle counts or
+          tessellation and the binned data swells; a triangle spanning many tiles enters many lists. Push
+          far enough and the binning traffic rivals the framebuffer traffic tiling was built to avoid —
+          the win inverts. (Desktop scenes live much closer to this regime, one reason desktops kept
+          immediate mode.)</li>
+        <li><strong>A frame-long latency bubble.</strong> Phase 2 cannot start until phase 1 has seen the
+          last triangle — the two phases pipeline across <em>different</em> frames, deepening latency.</li>
+      </ul>
+      <p>
+        The design points meet in the middle, too: since the mid-2010s desktop GPUs quietly bin small
+        batches of geometry and rasterize them tile-by-tile <em>while the tile's pixels sit in L2</em>
+        ("tiled caching") — not full two-phase tiling, but the same bandwidth instinct. Meanwhile mobile
+        chips grow ever better at the geometry-heavy cases. The poles remain, but both camps have stolen
+        each other's tricks.
+      </p>
+      <primer-theorem name="tile-based rendering">
+        <ul>
+          <li><strong>immediate mode</strong>: triangles flow straight through; framebuffer RMW traffic
+            (× overdraw) goes to DRAM;</li>
+          <li><strong>tile-based</strong>: phase 1 <em>bins</em> all geometry into per-tile lists; phase 2
+            renders each tile wholly in <strong>on-chip tile memory</strong>, writing DRAM once per pixel —
+            depth may never touch DRAM;</li>
+          <li><strong>TBDR</strong> adds perfect per-tile hidden-surface removal before shading;</li>
+          <li>costs: a full-scene binning pass, bin-list memory, and a pathological regime at very high
+            geometry/tessellation;</li>
+          <li>the lesson: same logical pipeline, <strong>opposite dataflow</strong> — bandwidth-vs-battery
+            physics picks the architecture.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Be the bandwidth accountant</h2>
+      <p>
+        Put numbers on the whole argument: one frame, both architectures, DRAM bytes counted. Play with
+        <code>overdraw</code> and <code>tris</code> and find the crossover where binning stops paying.
+      </p>
+      <primer-code run>
+        // One frame's DRAM traffic, immediate vs tiled (a deliberately simple model).
+        const W = 2560, H = 1600;          // a tablet screen
+        const overdraw = 3;                // fragments per pixel, on average
+        const tris = 300_000;              // triangles in the frame
+        const bppColour = 4, bppDepth = 4; // bytes per pixel
+        const bytesPerBinnedTri = 32;      // position + references in the bin lists
+        const MB = (b: number) =&gt; (b / 1e6).toFixed(1).padStart(8) + " MB";
+
+        const pixels = W * H;
+        const frags = pixels * overdraw;
+
+        // Immediate mode: every fragment depth-tests (read + write) and writes colour, in DRAM.
+        const immDepth = frags * bppDepth * 2;
+        const immColour = frags * bppColour;
+        const immTotal = immDepth + immColour;
+
+        // Tiled: bin lists written then read; colour written once per pixel; depth stays on-chip.
+        const binTraffic = tris * bytesPerBinnedTri * 2;
+        const tiledColour = pixels * bppColour;
+        const tiledTotal = binTraffic + tiledColour;
+
+        console.log(`frame: ${W}×${H}, overdraw ${overdraw}, ${tris} triangles\n`);
+        console.log(`IMMEDIATE  depth RMW   ${MB(immDepth)}`);
+        console.log(`           colour      ${MB(immColour)}`);
+        console.log(`           total       ${MB(immTotal)}\n`);
+        console.log(`TILED      bin lists   ${MB(binTraffic)}`);
+        console.log(`           colour (×1) ${MB(tiledColour)}`);
+        console.log(`           depth       ${MB(0)}   (never leaves the chip)`);
+        console.log(`           total       ${MB(tiledTotal)}\n`);
+        console.log(`tiled uses ${(immTotal / tiledTotal).toFixed(1)}× less DRAM traffic`);
+        console.log(`at 60 fps that saves ${((immTotal - tiledTotal) * 60 / 1e9).toFixed(1)} GB/s of DRAM bandwidth`);
+      </primer-code>
+      <p>
+        Now set <code>tris = 20_000_000</code> (a tessellation storm): the bin lists alone dwarf the
+        framebuffer, and the tiled "total" loses. Architecture is a bet about workloads, and this slider
+        is the bet.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! Performance folklore doesn't survive a dataflow change">
+      <p>
+        Mobile-graphics guides are full of commandments like "never read the framebuffer mid-frame" or
+        "avoid switching render targets". These are not general truths — they are <em>consequences of
+        tiling</em>. A mid-frame read of pixels that only exist in half-finished tile memory forces the
+        GPU to <strong>flush every tile to DRAM and reload it</strong> — the exact round-trip the whole
+        architecture exists to avoid; the same operation on an immediate-mode desktop card is a cheap L2
+        hit. The reverse bites too: desktop wisdom like "sort opaque objects front-to-back for early-Z"
+        buys almost nothing on a TBDR chip that removes hidden surfaces perfectly anyway — effort spent
+        optimising for the wrong machine. Performance advice is <em>architecture-specific</em>: before you
+        obey a rule, ask which dataflow it was written for. (And profile on the device, not the dev
+        workstation — it is running a different machine.)
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Why did the desert island GPUs evolve differently?">
+      <p>
+        Immediate-mode and tile-based GPUs implement the <em>same</em> API — same shaders, same triangles,
+        same pixels out — yet their silicon moves data in opposite directions. Nothing in graphics theory
+        decides between them; <em>joules</em> do. A desktop card ships with GDDR memory burning tens of
+        watts as a line-item nobody reads; a phone SoC shares one LPDDR bus with the CPU, modem and camera,
+        inside a glass slab with no fan, where DRAM traffic is measured against battery-hours. Same maths,
+        different physics, different optimal machine — evolution on separate islands. It is the cleanest
+        instance of this course's oldest theme: <strong>architecture follows physics</strong>. Wherever
+        computing goes next — datacentre accelerators rebuilt around interconnect power, or whatever
+        replaces DRAM — expect the same play: when the cost model flips, the dataflow flips with it, and
+        the "obvious" design was only ever obvious for one set of numbers.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "tbrQuiz@1": {
+          "intro": "Immediate mode streams every fragment's RMW to DRAM; tile-based GPUs bin geometry per tile, render each tile in on-chip SRAM, and write DRAM once per pixel.",
+          "immBwQ": "A {m} Mpixel frame, {b} bytes per pixel of colour, average overdraw {o}. In immediate mode, every fragment's colour write reaches DRAM. How many MB of colour traffic is that?",
+          "tiledBwQ": "The same frame — {m} Mpixels, {b} bytes per pixel, overdraw {o} — on a tile-based GPU: tile memory absorbs the overdraw and each pixel is written once. How many MB of colour traffic reach DRAM?",
+          "ratioQ": "With overdraw {o}, immediate mode writes each pixel's colour {o} times to DRAM while a tiled GPU writes it once. How many times more colour-write traffic does immediate mode generate?",
+          "tileMemQ": "A tile is {t}×{t} pixels and tile memory holds {b} bytes per pixel (colour + depth). How many bytes of on-chip tile memory does one tile need?",
+          "tileCountQ": "A {W}×{H} pixel screen is divided into {t}×{t} tiles. How many tiles must phase 2 render?",
+          "binQ": "What does the BINNING phase of a tile-based GPU produce?",
+          "binA": "A per-tile list of the triangles that touch each screen tile, written to memory before any shading happens",
+          "binB": "The final image, one tile at a time",
+          "binC": "A compressed copy of every texture in the scene",
+          "binD": "A histogram of fragment shader run-times",
+          "renderQ": "During the per-tile RENDER phase, where do the tile's colour and depth values live?",
+          "renderA": "In a small on-chip SRAM tile memory — DRAM only sees the tile's final pixels, written once at the end",
+          "renderB": "In DRAM, updated after every fragment as usual",
+          "renderC": "In the vertex buffers, overwritten in place",
+          "renderD": "In the display panel's own memory",
+          "tbdrQ": "What does the 'deferred' in tile-based deferred rendering (TBDR) add?",
+          "tbdrA": "Per-tile hidden-surface removal before shading: depth-resolve the whole tile's geometry first, then shade only the visible fragments — opaque overdraw costs no shading in any draw order",
+          "tbdrB": "Rendering is deferred to the next frame to save power",
+          "tbdrC": "Vertex shading is deferred until after blending",
+          "tbdrD": "Texture fetches are deferred to the CPU",
+          "whyQ": "Why did mobile GPUs adopt tile-based rendering while desktops stayed immediate-mode?",
+          "whyA": "DRAM traffic is a dominant energy cost in a phone's power budget — tiling collapses framebuffer bandwidth, at the price of a binning pass that mobile-scale geometry keeps cheap",
+          "whyB": "Phone screens are square, which suits square tiles",
+          "whyC": "Mobile APIs cannot express immediate-mode rendering",
+          "whyD": "Tiling makes textures load faster over mobile networks",
+          "costQ": "Which workload turns tile-based rendering's advantage into a liability?",
+          "costA": "Very heavy geometry or tessellation — the bin lists swell (triangles enter many tiles' lists) until binning traffic rivals the framebuffer traffic tiling was meant to avoid",
+          "costB": "High screen resolutions",
+          "costC": "Scenes containing many different colours",
+          "costD": "Any use of the depth buffer",
+          "folkQ": "\"Never read the framebuffer mid-frame\" is standard mobile advice. Why does the same operation cost little on a desktop GPU?",
+          "folkA": "On a tiler, a mid-frame read forces every half-finished tile to flush to DRAM and reload; on an immediate-mode GPU the framebuffer is already live in the memory hierarchy, so it's typically an L2 hit — the advice encodes the dataflow, not a universal law",
+          "folkB": "Desktop GPUs keep two copies of the framebuffer at all times",
+          "folkC": "Desktop drivers silently skip mid-frame reads",
+          "folkD": "It is equally catastrophic on both — the advice applies everywhere",
+          "depthQ": "Why can a tile-based GPU often avoid ever writing the depth buffer to DRAM?",
+          "depthA": "Each tile's depth values live in on-chip tile memory during rendering, and once the tile's final colours are resolved nobody needs them again — they are simply discarded",
+          "depthB": "Tile-based GPUs do not perform depth testing",
+          "depthC": "The depth buffer is stored inside the display cable",
+          "depthD": "Depth values are recomputed from the final image when needed"
+        }
+      }
+    </script>
+
+    <primer-quiz name="tbrQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/graphics-hardware/render-output-units"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "dataflows",
+    ({ board, colors, step, sceneStrings }) => {
+      const immC = colors.cat[0], tbC = colors.cat[1], sramC = colors.cat[2], dramC = colors.cat[3], ink = colors.ink;
+
+      const box = (cx, cy, hw, hh, key, c, fill) => {
+        board.create("polygon", [[cx - hw, cy - hh], [cx + hw, cy - hh], [cx + hw, cy + hh], [cx - hw, cy + hh]], {
+          fillColor: fill || colors.bg, fillOpacity: fill ? 0.25 : 0.9, highlight: false, fixed: true,
+          borders: { strokeColor: c, strokeWidth: 2.5, highlight: false },
+          vertices: { visible: false },
+        });
+        board.create("text", [cx, cy, () => sceneStrings(key)], {
+          anchorX: "middle", anchorY: "middle", fontSize: 11, strokeColor: ink, fixed: true, highlight: false,
+        });
+      };
+      const arrow = (a, b, c, w, both) => board.create("arrow", [a, b], {
+        strokeColor: c, strokeWidth: w, lastArrow: { type: 2, size: 5 + w },
+        firstArrow: both ? { type: 2, size: 5 + w } : false, highlight: false, fixed: true,
+      });
+      const txt = (x, y, key, c) =>
+        board.create("text", [x, y, () => sceneStrings(key)], {
+          anchorX: "middle", fontSize: 10, strokeColor: c, fixed: true, highlight: false,
+        });
+
+      // ── Base: the DRAM bar along the bottom, and the two column titles. ──
+      box(6.6, 0.5, 6.2, 0.5, "dramLbl", dramC, dramC);
+      board.create("text", [3.0, 8.6, () => sceneStrings("immTitle")], {
+        anchorX: "middle", fontSize: 13, strokeColor: immC, cssStyle: "font-weight: bold;", fixed: true, highlight: false,
+      });
+      board.create("text", [10.2, 8.6, () => sceneStrings("tbTitle")], {
+        anchorX: "middle", fontSize: 13, strokeColor: tbC, cssStyle: "font-weight: bold;", fixed: true, highlight: false,
+      });
+
+      // Step 1: immediate mode — straight through, fat RMW pipe to DRAM.
+      step(sceneStrings("stepImm"), () => {
+        box(3.0, 7.6, 1.4, 0.5, "geomLbl", immC);
+        arrow([3.0, 7.1], [3.0, 6.3], immC, 2);
+        box(3.0, 5.7, 1.9, 0.6, "rasLbl", immC);
+        arrow([3.0, 5.1], [3.0, 1.0], immC, 6, true);      // the fat double-headed RMW pipe
+        txt(3.0, 3.0, "rmwLbl", immC);
+      });
+
+      // Step 2: tile-based phase 1 — binning, a thin trickle of lists to DRAM.
+      step(sceneStrings("stepBin"), () => {
+        box(8.6, 7.6, 1.3, 0.5, "geomLbl", tbC);
+        arrow([8.6, 7.1], [8.6, 6.4], tbC, 2);
+        box(8.6, 5.8, 1.4, 0.55, "binLbl", tbC);
+        arrow([8.6, 5.25], [8.6, 1.0], tbC, 1.5, true);    // thin: lists written, then read back
+        txt(8.6, 3.0, "listLbl", tbC);
+      });
+
+      // Step 3: phase 2 — the tile render loop inside on-chip SRAM.
+      step(sceneStrings("stepTile"), () => {
+        box(11.4, 4.0, 1.55, 0.9, "tileLbl", sramC, sramC);
+        arrow([9.7, 5.6], [10.6, 4.9], tbC, 2);            // bin lists feed the tile renderer
+      });
+
+      // Step 4: one write per pixel — a single thin flush per finished tile.
+      step(sceneStrings("stepFlush"), () => {
+        arrow([11.4, 3.1], [11.4, 1.0], sramC, 2);
+        txt(11.9, 2.1, "flushLbl", sramC);
+      });
+    },
+    { boundingbox: [-0.4, 9.2, 13.6, -0.6], title: () => makeStrings("dataflows")("title") },
+  );
+
+  registerQuiz("tbrQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("immBwQ", v),
+      variables: "m=[1,2,4] b=[4,8] o=[2:5]",
+      answer: "m*b*o",
+    },
+    {
+      prompt: (v) => sceneStrings("tiledBwQ", v),
+      variables: "m=[1,2,4] b=[4,8] o=[2:5]",
+      answer: "m*b",
+    },
+    {
+      prompt: (v) => sceneStrings("ratioQ", v),
+      variables: "o=[2:6]",
+      answer: "o",
+    },
+    {
+      prompt: (v) => sceneStrings("tileMemQ", v),
+      variables: "t=[16,32] b=[8,12,16]",
+      answer: "t^2*b",
+    },
+    {
+      // Screen dimensions are exact multiples of the tile size: W = mt·t, H = nt·t.
+      prompt: (v) => sceneStrings("tileCountQ", { ...v, W: v.mt * v.t, H: v.nt * v.t }),
+      variables: "t=[16,32] mt=[10:20] nt=[8:15]",
+      answer: "mt*nt",
+    },
+    {
+      prompt: () => sceneStrings("binQ"),
+      options: [
+        { text: () => sceneStrings("binA"), correct: true },
+        { text: () => sceneStrings("binB"), correct: false },
+        { text: () => sceneStrings("binC"), correct: false },
+        { text: () => sceneStrings("binD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("renderQ"),
+      options: [
+        { text: () => sceneStrings("renderA"), correct: true },
+        { text: () => sceneStrings("renderB"), correct: false },
+        { text: () => sceneStrings("renderC"), correct: false },
+        { text: () => sceneStrings("renderD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tbdrQ"),
+      options: [
+        { text: () => sceneStrings("tbdrA"), correct: true },
+        { text: () => sceneStrings("tbdrB"), correct: false },
+        { text: () => sceneStrings("tbdrC"), correct: false },
+        { text: () => sceneStrings("tbdrD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("whyA"), correct: true },
+        { text: () => sceneStrings("whyB"), correct: false },
+        { text: () => sceneStrings("whyC"), correct: false },
+        { text: () => sceneStrings("whyD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("costQ"),
+      options: [
+        { text: () => sceneStrings("costA"), correct: true },
+        { text: () => sceneStrings("costB"), correct: false },
+        { text: () => sceneStrings("costC"), correct: false },
+        { text: () => sceneStrings("costD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("folkQ"),
+      options: [
+        { text: () => sceneStrings("folkA"), correct: true },
+        { text: () => sceneStrings("folkB"), correct: false },
+        { text: () => sceneStrings("folkC"), correct: false },
+        { text: () => sceneStrings("folkD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("depthQ"),
+      options: [
+        { text: () => sceneStrings("depthA"), correct: true },
+        { text: () => sceneStrings("depthB"), correct: false },
+        { text: () => sceneStrings("depthC"), correct: false },
+        { text: () => sceneStrings("depthD"), correct: false },
+      ],
+    },
+  ]);
+</script>

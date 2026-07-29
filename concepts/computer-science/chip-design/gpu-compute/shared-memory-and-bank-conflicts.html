@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Shared Memory and Bank Conflicts</primer-title>
+
+    <primer-card>
+      <p>
+        <primer-ref to="computer-science/chip-design/gpu-compute/memory-coalescing">Coalescing</primer-ref>
+        taught you to spend global-memory bandwidth wisely. This lesson is about not spending it at all.
+        Every SM contains a block of SRAM — on the order of <strong>100 KB</strong> — that the hardware
+        will hand over to <em>you</em>: <strong>shared memory</strong>, a programmer-managed scratchpad
+        with roughly <strong>20× the bandwidth and a tiny fraction of the latency</strong> of global
+        memory. No cache heuristics, no eviction surprises: you explicitly copy data in, every thread of
+        the <em>block</em> can see it, and you explicitly decide when it is stale. It is the only memory
+        in the machine whose behaviour you fully control — and the deal has exactly two clauses in the
+        fine print: a barrier you must not misuse, and thirty-two <strong>banks</strong> you must not
+        collide in.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The canonical use: tiled matrix multiply</h2>
+      <p>
+        Why does a scratchpad matter so much? Because of <strong>reuse</strong>. Recall from the
+        <primer-ref to="computer-science/chip-design/parallelism/measuring-gpu-performance">roofline</primer-ref>
+        that a kernel's fate is set by its arithmetic intensity — FLOPs per byte of DRAM traffic. Naive
+        matrix multiply is the textbook bandwidth victim: computing one output element reads a whole row
+        of <primer-math>A</primer-math> and column of <primer-math>B</primer-math>, and neighbouring
+        outputs re-read <em>almost exactly the same data</em> from global memory, again and again.
+      </p>
+      <p>
+        The fix is the most famous kernel structure in GPU computing. Carve the matrices into
+        <primer-math>T \times T</primer-math> <strong>tiles</strong>, and let each block stage one tile of
+        <primer-math>A</primer-math> and one of <primer-math>B</primer-math> in shared memory:
+      </p>
+      <primer-code lang="text">
+        tiled multiply, C = A·B          (T = 32; the block is T×T threads)
+
+        for m in 0 .. K/T - 1:                    # march tile-pairs along the K dimension
+            Asub[ty][tx] = A[row][m·T + tx]       # each thread loads ONE element of each tile
+            Bsub[ty][tx] = B[m·T + ty][col]       #   (coalesced!) into shared memory
+            __syncthreads()                       # barrier: both tiles fully loaded
+
+            for k in 0 .. T - 1:
+                acc += Asub[ty][k] * Bsub[k][tx]  # 2·T reads per thread — ALL from shared
+            __syncthreads()                       # barrier: everyone done before reloading
+
+        C[row][col] = acc
+      </primer-code>
+      <p>
+        Count the traffic. Each element loaded into <code>Asub</code> is subsequently read by all
+        <primer-math>T</primer-math> threads of its row; each element of <code>Bsub</code> by all
+        <primer-math>T</primer-math> threads of its column. One global load now feeds
+        <primer-math>T</primer-math> uses — with <primer-math>T = 32</primer-math>, global traffic drops
+        <strong>32×</strong> and arithmetic intensity rises 32×, which on the roofline is the difference
+        between crawling along the bandwidth slope and reaching the compute plateau. This is the pattern
+        to internalise: <strong>shared memory is an arithmetic-intensity multiplier</strong> — stage once,
+        reuse many times, synchronise at the seams.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Thirty-two banks</h2>
+      <p>
+        Fast for thirty-two lanes at once — how? Shared memory is not one SRAM but
+        <strong>32 independent banks</strong>, interleaved by 4-byte word: word address
+        <primer-math>w</primer-math> lives in bank <primer-math>w \bmod 32</primer-math>. Words 0–31 sit
+        in banks 0–31, word 32 wraps back to bank 0, and so on. Each bank serves <strong>one word per
+        cycle</strong> — so if the warp's 32 lanes hit 32 <em>different</em> banks, all 32 requests
+        complete in a single cycle. That is the parallel jackpot the layout is designed for.
+      </p>
+      <primer-theorem name="Bank conflicts">
+        <ul>
+          <li>word <primer-math>w</primer-math> → bank <primer-math>w \bmod 32</primer-math>; each bank
+            serves one word per cycle;</li>
+          <li>an <primer-math>n</primer-math>-way <strong>conflict</strong> — <primer-math>n</primer-math>
+            lanes, <em>different words</em>, same bank — serialises into <primer-math>n</primer-math>
+            cycles: <primer-math>n\times</primer-math> slower;</li>
+          <li><strong>broadcast exception</strong>: lanes reading the <em>same word</em> are served
+            together in one cycle — no conflict;</li>
+          <li>conflict degree for a stride-<primer-math>s</primer-math> access =
+            <primer-math>\gcd(s, 32)</primer-math> — odd strides never conflict.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        The classic self-inflicted wound: a <primer-math>32 \times 32</primer-math> tile stored row-major,
+        accessed <em>by column</em>. Lane <primer-math>t</primer-math> reads
+        <code>tile[t][c]</code> — word address <primer-math>32t + c</primer-math> — and
+        <primer-math>(32t + c) \bmod 32 = c</primer-math> for every lane: all 32 lanes pile into the
+        <strong>same bank</strong>, wanting 32 different words. A 32-way conflict; the "one-cycle"
+        scratchpad quietly runs 32× slower, precisely in the transpose-flavoured kernels where column
+        access is natural.
+      </p>
+      <p>
+        The cure costs one wasted column: <strong>pad the row to 33 words</strong>. With
+        <code>tile[t][c]</code> at address <primer-math>33t + c</primer-math>, lane
+        <primer-math>t</primer-math> maps to bank <primer-math>(33t + c) \bmod 32 = (t + c) \bmod
+        32</primer-math> — thirty-two consecutive banks, conflict-free, for 3% more SRAM. One of the best
+        exchange rates in performance engineering.
+      </p>
+    </primer-card>
+
+    <!-- Stepped bank-mapping diagram (8-bank mini version). -->
+    <script type="application/json" class="scene-strings">
+      {
+        "bankMap": {
+          "title": "Row, column and padded-column access (8-bank mini shared memory)",
+          "bankHdr": "bank",
+          "plainLabel": "width 8 (= bank count)",
+          "padLabel": "width 9 (padded)",
+          "stepRow": "Row access: the 8 lanes read one row — 8 different banks, all served in ONE cycle",
+          "stepCol": "Column access: every lane's word lands in bank 0 — different words, same bank: serialised over 8 cycles (8-way conflict)",
+          "stepPad": "Pad each row by one word (width 9): the same column access now touches 8 different banks — parallel again",
+          "rowTag": "1 cycle",
+          "colTag": "8 cycles!",
+          "padTag": "1 cycle"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Seeing the banks</h2>
+      <p>
+        Here is the whole story on a mini shared memory with 8 banks (the real one is this times four).
+        Each cell shows the bank its word maps to; watch which cells light up for each access pattern:
+      </p>
+      <primer-geometry scene="bankMap" caption="Two grids of memory words labelled with their bank numbers, 0 to 7. In the left grid, 8 words wide, a highlighted row touches banks 0 through 7 and is served in one cycle, but a highlighted column touches bank 0 in every row — an 8-way conflict served over 8 cycles. In the right grid, padded to 9 words wide, the bank numbers shift by one each row, so the same column access touches 8 different banks and is parallel again."></primer-geometry>
+      <p>
+        The padding trick is visible at a glance: adding one dead word per row shears the bank pattern
+        diagonally, so columns — which used to stack in one bank — now sweep across all of them.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The conflict counter, executable</h2>
+      <p>
+        A bank conflict is just bucket-counting: map each lane's word address to its bank, and the cost in
+        cycles is the largest number of <em>distinct words</em> any one bank must serve. Four patterns,
+        graded:
+      </p>
+      <primer-code run>
+        // Bank-conflict counter: cost (cycles) = max distinct WORDS in any one bank.
+        const BANKS = 32, WIDTH = 32;
+        const lanes = [...Array(32).keys()];
+
+        function cost(addrs: number[]): number {
+          const perBank = new Map&lt;number, Set&lt;number&gt;&gt;();
+          for (const a of addrs) {
+            const bank = a % BANKS;
+            if (!perBank.has(bank)) perBank.set(bank, new Set());
+            perBank.get(bank)!.add(a);            // distinct words only — same word = broadcast
+          }
+          let worst = 1;
+          for (const words of perBank.values()) worst = Math.max(worst, words.size);
+          return worst;
+        }
+
+        const patterns: [string, (t: number) =&gt; number][] = [
+          ["row access     tile[0][t]           ", (t) =&gt; 0 * WIDTH + t],
+          ["column access  tile[t][0], width 32 ", (t) =&gt; t * WIDTH + 0],
+          ["padded column  tile[t][0], width 33 ", (t) =&gt; t * 33 + 0],
+          ["stride 2       tile2[2*t]           ", (t) =&gt; 2 * t],
+          ["broadcast      tile[0][0]           ", () =&gt; 0],
+        ];
+        for (const [name, f] of patterns) {
+          const c = cost(lanes.map(f));
+          console.log(`${name} ${String(c).padStart(2)}x  (${c === 1 ? "parallel — 1 cycle" : c + "-way conflict — " + c + " cycles"})`);
+        }
+      </primer-code>
+      <p>
+        Try stride 4 and stride 8 (degree = <primer-math>\gcd(s,32)</primer-math> — so 4 and 8), then
+        stride 3 or 5: odd strides land on <primer-math>\gcd = 1</primer-math>, conflict-free. And check
+        the broadcast line: 32 lanes, one word, one cycle — the hardware fans the value out for free.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The other occupancy currency</h2>
+      <p>
+        Shared memory is fast, but it is a fixed pot: the ~100 KB per SM is <em>divided among all the
+        blocks resident on that SM</em>. Ask for 48 KB per block and at most two blocks fit; their warps
+        are all the scheduler has to hide latency with. Shared memory thus joins registers as a currency
+        that buys per-thread capability at the price of thread <em>count</em> — a tension this module
+        resolves properly in the
+        <primer-ref forward to="computer-science/chip-design/gpu-compute/occupancy-and-latency-hiding">occupancy
+        capstone</primer-ref>.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Haven't we seen 'banks' somewhere before?">
+      <p>
+        Everywhere — banking is how hardware fakes a multi-ported memory on the cheap. A true 32-port SRAM
+        (32 simultaneous arbitrary reads) would be enormous and slow; 32 single-ported banks with an
+        interleaved address map deliver the same bandwidth <em>as long as the addresses spread out</em>.
+        DRAM itself is banked, vector supercomputers interleaved their memory across banks in the 1970s
+        (Cray programmers dreaded stride-8 arrays for exactly the gcd reason you just learned), and
+        register files are banked too. The GPU's shared memory just puts the mechanism unusually close to
+        the programmer: you get the multi-port illusion, and you get the address arithmetic that can break
+        it.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Barriers and branches don't mix">
+      <p>
+        <code>__syncthreads()</code> is a <em>block-wide</em> barrier: every warp of the block must arrive
+        before anyone proceeds. Put it inside a divergent <code>if</code> — where some threads of the
+        block take the branch and others don't — and the threads that skipped it never arrive; the ones
+        waiting wait forever. <strong>Deadlock</strong>, or on some hardware, silent
+        corruption as the barrier miscounts. The rule is absolute: a barrier must sit at a point
+        <em>every</em> thread of the block reaches — hoist it out of the conditional, or restructure so
+        the condition is uniform across the block. (This is divergence's nastiest interaction with shared
+        memory: the tile pattern is <em>load, sync, use, sync</em> — and both syncs must be in
+        straight-line code.)
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: bank arithmetic, conflict degrees, padding, reuse factors, barrier rule. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "bankQuiz@1": {
+          "intro": "Word w → bank w mod 32; one word per bank per cycle. n-way conflict = n cycles; same word = broadcast (free). Stride s conflicts with degree gcd(s, 32).",
+          "bankQ": "Shared-memory word address {a}: which bank does it live in?",
+          "byteQ": "A 4-byte word sits at BYTE address {b} in shared memory. Which bank serves it?",
+          "strideQ": "A warp's 32 lanes read shared-memory words with stride {s}: lane $t$ reads word ${s} \\cdot t$. What is the conflict degree — how many cycles does the access take?",
+          "oddQ": "A warp's 32 lanes read words with stride {s} (an odd stride). How many cycles does the access take?",
+          "colQ": "A ${w} \\times {w}$ row-major tile ({w} a multiple of 32) is read by column: lane $t$ reads word ${w}t + c$. What is the conflict degree?",
+          "padQ": "A tile is padded to a row width of 33 words. What is the word address of element (row {r}, column {c})?",
+          "padBankQ": "With row width padded to 33, lane {r} reads column {c}: word address $33 \\cdot {r} + {c}$. Which bank is that?",
+          "reuseQ": "In a tiled matrix multiply with ${T} \\times {T}$ tiles, each element staged into shared memory is read by how many threads?",
+          "trafficQ": "Tiling a matrix multiply with ${T} \\times {T}$ shared-memory tiles reduces global-memory traffic by what factor?",
+          "nwayQ": "A shared-memory access suffers an {n}-way bank conflict. How many cycles does it take, compared with 1 for a conflict-free access?",
+          "bcastQ": "All 32 lanes of a warp read the SAME shared-memory word. What happens?",
+          "bcastA": "Broadcast: the hardware serves all 32 lanes from one bank access in a single cycle — no conflict",
+          "bcastB": "A 32-way conflict: 32 cycles",
+          "bcastC": "The access is rejected and must be replayed",
+          "bcastD": "Only lane 0 receives the value",
+          "barQ": "Why must __syncthreads() never sit inside a branch that only some threads of a block take?",
+          "barA": "It is a block-wide barrier — threads that skip it never arrive, so the threads waiting at it deadlock (or the barrier miscounts and corrupts data)",
+          "barB": "Barriers inside branches consume double the shared memory",
+          "barC": "The compiler silently deletes barriers inside branches",
+          "barD": "It is fine as long as at least one warp reaches the barrier",
+          "propQ": "Which description of shared memory is correct?",
+          "propA": "Per-SM programmer-managed SRAM, visible to all threads of a block, with roughly 20× the bandwidth of global memory",
+          "propB": "A per-thread private cache managed automatically by the hardware",
+          "propC": "A region of DRAM reserved for the operating system",
+          "propD": "Memory shared between the CPU and GPU over PCIe"
+        }
+      }
+    </script>
+
+    <primer-quiz name="bankQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/gpu-compute/memory-coalescing"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Bank map: two word-grids (width 8 and padded width 9), 8-bank mini model. ──
+  registerGeometryScene(
+    "bankMap",
+    ({ board, colors, step, sceneStrings }) => {
+      const BANKS = 8, ROWS = 4, CELL = 1;
+      const txt = (x, y, s, color, fs = 10, bold = false) =>
+        board.create("text", [x, y, s], {
+          strokeColor: color, fontSize: fs, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: bold ? "font-weight:600" : "",
+        });
+      const cell = (x0, y0, fill, opacity) =>
+        board.create(
+          "polygon",
+          [[x0 + 0.05, y0 + 0.05], [x0 + CELL - 0.05, y0 + 0.05],
+           [x0 + CELL - 0.05, y0 + CELL - 0.05], [x0 + 0.05, y0 + CELL - 0.05]],
+          {
+            fillColor: fill, fillOpacity: opacity, strokeColor: colors.line, strokeWidth: 1,
+            fixed: true, highlight: false, vertices: { visible: false },
+            borders: { strokeColor: colors.line, highlight: false },
+          },
+        );
+      // Draw a word grid at origin (gx, gy): width w words, bank = (w·r + c) mod 8.
+      // Rows drawn top-down (row 0 at the top).
+      const grid = (gx, gy, w, labelKey) => {
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < w; c++) {
+            const y0 = gy + (ROWS - 1 - r) * CELL;
+            cell(gx + c * CELL, y0, colors.bg, 0);
+            txt(gx + c * CELL + 0.5, y0 + 0.5, String((w * r + c) % BANKS), colors.line, 9);
+          }
+          txt(gx - 0.55, gy + (ROWS - 1 - r) * CELL + 0.5, "r" + r, colors.ink, 9);
+        }
+        txt(gx + (w * CELL) / 2, gy + ROWS * CELL + 0.4, sceneStrings(labelKey), colors.ink, 10, true);
+      };
+      // Highlight one word cell of a grid (row r, col c) with a bank label recoloured.
+      const hi = (gx, gy, w, r, c, fill) => {
+        const y0 = gy + (ROWS - 1 - r) * CELL;
+        cell(gx + c * CELL, y0, fill, 0.45);
+        txt(gx + c * CELL + 0.5, y0 + 0.5, String((w * r + c) % BANKS), colors.ink, 9, true);
+      };
+
+      // Base: both grids.
+      const LX = 0.8, RX = 11.0, GY = 0.8;
+      grid(LX, GY, 8, "plainLabel");
+      grid(RX, GY, 9, "padLabel");
+
+      // Step 1: row access on the plain grid — banks 0..7, parallel.
+      step(sceneStrings("stepRow"), () => {
+        for (let c = 0; c < 8; c++) hi(LX, GY, 8, 0, c, colors.cat[0]);
+        txt(LX + 4, GY - 0.45, sceneStrings("rowTag"), colors.cat[0], 11, true);
+      });
+
+      // Step 2: column access on the plain grid — all bank 0, serialised.
+      step(sceneStrings("stepCol"), () => {
+        for (let r = 0; r < ROWS; r++) hi(LX, GY, 8, r, 0, colors.cat[3]);
+        txt(LX - 0.6, GY - 0.45, sceneStrings("colTag"), colors.cat[3], 11, true);
+      });
+
+      // Step 3: the padded grid's column — banks 0,1,2,3…, parallel again.
+      step(sceneStrings("stepPad"), () => {
+        for (let r = 0; r < ROWS; r++) hi(RX, GY, 9, r, 0, colors.cat[1]);
+        txt(RX - 0.6, GY - 0.45, sceneStrings("padTag"), colors.cat[1], 11, true);
+      });
+    },
+    { boundingbox: [-0.4, 6.5, 20.6, -0.9], keepAspect: false, title: () => makeStrings("bankMap")("title") },
+  );
+
+  registerQuiz("bankQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Word address → bank.
+      prompt: (v) => sceneStrings("bankQ", v),
+      variables: "a=[33:250]",
+      answer: "a % 32",
+    },
+    {
+      // Byte address b = 4a → bank (b/4) mod 32.
+      prompt: (v) => sceneStrings("byteQ", { b: 4 * v.a }),
+      variables: "a=[10:120]",
+      answer: "a % 32",
+    },
+    {
+      // Power-of-two stride: degree = gcd(s, 32) = s.
+      prompt: (v) => sceneStrings("strideQ", v),
+      variables: "s=[2,4,8,16]",
+      answer: "s",
+    },
+    {
+      // Odd stride: gcd(s, 32) = 1 — conflict-free.
+      prompt: (v) => sceneStrings("oddQ", v),
+      variables: "s=[3,5,7,9]",
+      answer: 1,
+    },
+    {
+      // Column of a width-multiple-of-32 tile: full 32-way pile-up.
+      prompt: (v) => sceneStrings("colQ", v),
+      variables: "w=[32,64]",
+      answer: 32,
+    },
+    {
+      // Padded addressing arithmetic.
+      prompt: (v) => sceneStrings("padQ", v),
+      variables: "r=[1:20] c=[0:30]",
+      answer: "33 * r + c",
+    },
+    {
+      // Padded column bank: (33r + c) mod 32 = (r + c) mod 32.
+      prompt: (v) => sceneStrings("padBankQ", v),
+      variables: "r=[0:31] c=[0:10]",
+      answer: "(33 * r + c) % 32",
+    },
+    {
+      // Each staged element is read by T threads.
+      prompt: (v) => sceneStrings("reuseQ", v),
+      variables: "T=[8,16,32]",
+      answer: "T",
+    },
+    {
+      // Global traffic falls by the tile width.
+      prompt: (v) => sceneStrings("trafficQ", v),
+      variables: "T=[16,32]",
+      answer: "T",
+    },
+    {
+      // n-way conflict = n cycles.
+      prompt: (v) => sceneStrings("nwayQ", v),
+      variables: "n=[2:16]",
+      answer: "n",
+    },
+    {
+      prompt: () => sceneStrings("bcastQ"),
+      options: [
+        { text: () => sceneStrings("bcastA"), correct: true },
+        { text: () => sceneStrings("bcastB"), correct: false },
+        { text: () => sceneStrings("bcastC"), correct: false },
+        { text: () => sceneStrings("bcastD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("barQ"),
+      options: [
+        { text: () => sceneStrings("barA"), correct: true },
+        { text: () => sceneStrings("barB"), correct: false },
+        { text: () => sceneStrings("barC"), correct: false },
+        { text: () => sceneStrings("barD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("propQ"),
+      options: [
+        { text: () => sceneStrings("propA"), correct: true },
+        { text: () => sceneStrings("propB"), correct: false },
+        { text: () => sceneStrings("propC"), correct: false },
+        { text: () => sceneStrings("propD"), correct: false },
+      ],
+    },
+  ]);
+</script>

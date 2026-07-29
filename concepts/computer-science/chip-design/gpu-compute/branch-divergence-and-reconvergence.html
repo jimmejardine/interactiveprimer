@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Branch Divergence and Reconvergence</primer-title>
+
+    <primer-card>
+      <p>
+        The <primer-ref to="computer-science/chip-design/gpu-compute/the-warp-scheduler">warp
+        scheduler</primer-ref> issues <em>one instruction</em> for <em>thirty-two threads</em> — that is
+        the whole economy of SIMT. But those thirty-two threads run real programs, and real programs
+        contain <code>if</code>. The moment a warp reaches
+        <code>if (x[i] &lt; 0)</code> on data where some lanes say <em>yes</em> and some say <em>no</em>,
+        the fiction of lockstep meets its awkward question: one program counter, two opinions. The
+        hardware's answer is blunt and beautiful — <strong>run both paths, one after the other, switching
+        off the lanes that shouldn't be there</strong> — and it is enforced by two small mechanisms: the
+        <strong>active mask</strong> and the <strong>reconvergence stack</strong>. Understanding them is
+        understanding why some GPU code runs at full speed and some at a thirty-second of it, on the same
+        hardware, for the same instruction count.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The active mask: 32 switches on one engine</h2>
+      <p>
+        Alongside the warp's shared program counter lives a 32-bit <strong>active mask</strong> — one bit
+        per lane. Bit <primer-math>i</primer-math> set means lane <primer-math>i</primer-math>
+        <em>participates</em> in the current instruction: it reads its registers, computes, writes back.
+        Bit clear means lane <primer-math>i</primer-math> is a passenger: the instruction still occupies
+        its slot in the ALU, but that lane's write-back is suppressed. The lane burns the cycle and
+        produces nothing.
+      </p>
+      <p>
+        Now the branch. Suppose lanes 0–15 evaluate the condition true and lanes 16–31 false. The warp
+        cannot go both ways at once, so it goes both ways <em>in turn</em>:
+      </p>
+      <ul>
+        <li><strong>Pass 1 — the if-side.</strong> Mask
+          <code>0x0000FFFF</code> (bits 0–15 set): lanes 0–15 execute the if-body while lanes 16–31 ride
+          along disabled.</li>
+        <li><strong>Pass 2 — the else-side.</strong> Mask flips to <code>0xFFFF0000</code>: lanes 16–31
+          execute the else-body while lanes 0–15 are switched off.</li>
+        <li><strong>Reconvergence.</strong> Both passes done, the mask is restored to
+          <code>0xFFFFFFFF</code> and the warp marches on, whole again.</li>
+      </ul>
+      <p>
+        Count the cost. If each body is <primer-math>n</primer-math> instructions, the warp issues
+        <primer-math>2n</primer-math> instructions but every one of them runs at half occupancy: 16 active
+        lanes out of 32. Useful lane-work <primer-math>= 32n</primer-math> out of
+        <primer-math>64n</primer-math> lane-slots — <strong>50% efficiency</strong>, no matter how the 16/16
+        split falls. And the split doesn't even have to be even: <em>one</em> disagreeing lane out of 32
+        already forces both passes.
+      </p>
+      <primer-theorem name="Divergent execution">
+        <ul>
+          <li>a warp has <strong>one PC</strong> and a 32-bit <strong>active mask</strong>; masked-off
+            lanes occupy the ALU but write nothing;</li>
+          <li>a data-dependent branch where lanes disagree is executed by running <strong>each path
+            serially</strong> under its own mask;</li>
+          <li>the passes' instruction counts <strong>add</strong>; lane efficiency is the active-lane
+            fraction averaged over all passes;</li>
+          <li>at the <strong>reconvergence point</strong> the saved mask is restored and lockstep
+            resumes.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <!-- Stepped divergence flow diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "divergeFlow": {
+          "title": "One warp meets a data-dependent branch (8-lane mini-warp)",
+          "warpLabel": "warp arrives — mask 11111111, all 8 lanes active",
+          "branchLabel": "is x negative?",
+          "stepSplit": "The condition splits the lanes: odd lanes say yes, even lanes say no — the hardware pushes the join point and the masks onto the reconvergence stack",
+          "thenLabel": "pass 1 — then-path, mask .#.#.#.# (4/8 lanes)",
+          "stepThen": "Pass 1: the then-path runs with only the 'yes' lanes enabled — the grey lanes ride along doing nothing",
+          "elseLabel": "pass 2 — else-path, mask #.#.#.#. (4/8 lanes)",
+          "stepElse": "Pass 2: the mask flips and the else-path runs with the 'no' lanes — again half the engine idles",
+          "joinLabel": "reconverged — stack popped, mask 11111111 restored",
+          "stepJoin": "At the join point (the immediate post-dominator) the stack is popped, the full mask returns, and lockstep resumes"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Watching a warp split</h2>
+      <p>
+        Here is the whole life cycle on an 8-lane mini-warp (everything scales by 4 for the real thing).
+        The data gives lanes 1, 3, 5 and 7 negative values, so the warp splits down the middle:
+      </p>
+      <primer-geometry scene="divergeFlow" caption="A flow diagram. A row of eight active lane squares meets a branch. It splits into two paths: the then-path runs with lanes 1, 3, 5, 7 active and the rest greyed out, then the else-path runs with the complementary lanes. Finally the paths merge into a reconverged row with all eight lanes active again."></primer-geometry>
+      <p>
+        Note what the diagram is <em>not</em> showing: parallelism between the two paths. There is none.
+        The then-pass and the else-pass are <strong>serial</strong> — the same 8-lane engine runs twice,
+        each time half-empty. That serialisation, not the branch instruction itself, is the cost of
+        divergence.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The reconvergence stack</h2>
+      <p>
+        How does the hardware know where to put the warp back together? At a divergent branch it pushes an
+        entry onto a small per-warp <strong>reconvergence stack</strong>: the address of the
+        <strong>join point</strong> plus the masks still owed. The join point chosen is the branch's
+        <strong>immediate post-dominator</strong> — the first instruction that <em>every</em> path out of
+        the branch must eventually reach. The warp then runs one side; when it reaches the join address it
+        pops the stack, swaps in the other side's mask, and jumps back to run that; when the second side
+        arrives at the join, the pop restores the full mask and execution continues as one.
+      </p>
+      <p>
+        A stack, not a register — because divergence <strong>nests</strong>. An <code>if</code> inside an
+        <code>if</code> splits an already-split warp: 16 active lanes become 8 and 8, each pass now
+        running at a quarter occupancy, with two entries stacked. Every level of disagreement halves the
+        active fraction and doubles the pass count, and the floor is grim: worst case, the lanes disagree
+        about <em>everything</em> and the warp decays into 32 serial passes of one lane each —
+        <primer-math>1/32 \approx 3\%</primer-math> efficiency. You can write that program in one line: a
+        32-way <code>switch</code> on the lane id. It runs; it just runs like a very expensive
+        single-threaded machine, thirty-two times over.
+      </p>
+      <p>
+        Loops diverge too, and more sneakily. A data-dependent trip count —
+        <code>while (v[i] &gt; eps)</code> — keeps the warp iterating until the <strong>last</strong> lane
+        is done. A lane that finishes after 3 trips waits, masked out, while a stubborn neighbour grinds
+        through 40; the warp's loop cost is the <em>maximum</em> trip count, not the average. One outlier
+        lane holds thirty-one hostages.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The mask machine, executable</h2>
+      <p>
+        The mechanism fits in a page of TypeScript: an interpreter with an active mask, executing both
+        sides of every divergent branch under complementary masks, recursing for nesting (the recursion
+        depth <em>is</em> the reconvergence stack). The kernel below branches on sign and then, inside the
+        negative side, branches again on magnitude — watch the mask thin out and the passes pile up:
+      </p>
+      <primer-code run>
+        // A tiny SIMT mask machine: 8 lanes, one shared PC, an active mask.
+        // "#" = lane active, "." = lane masked off.
+        const LANES = 8;
+        type Mask = boolean[];
+        const show = (m: Mask) =&gt; m.map((b) =&gt; (b ? "#" : ".")).join("");
+        const pop = (m: Mask) =&gt; m.filter(Boolean).length;
+
+        interface Exec { kind: "exec"; name: string }
+        interface Branch {
+          kind: "branch"; test: string;
+          cond: (lane: number) =&gt; boolean; then: Op[]; other: Op[];
+        }
+        type Op = Exec | Branch;
+        const E = (name: string): Exec =&gt; ({ kind: "exec", name });
+
+        function makeKernel(x: number[]): Op[] {
+          return [
+            E("t = x[lane]"),
+            { kind: "branch", test: "t &lt; 0", cond: (l) =&gt; x[l] &lt; 0,
+              then: [
+                E("t = -t"),
+                { kind: "branch", test: "t &gt; 4", cond: (l) =&gt; -x[l] &gt; 4,
+                  then: [E("t = t - 4")], other: [E("t = t + 1")] },
+              ],
+              other: [E("t = t * t")] },
+            E("y[lane] = t"),
+          ];
+        }
+
+        function simulate(x: number[], verbose: boolean): { issues: number; work: number } {
+          const s = { issues: 0, work: 0 };
+          const issue = (mask: Mask, depth: number, text: string) =&gt; {
+            s.issues++; s.work += pop(mask);
+            if (verbose) console.log(`${"  ".repeat(depth)}${show(mask)} (${pop(mask)}/8)  ${text}`);
+          };
+          const run = (ops: Op[], mask: Mask, depth: number): void =&gt; {
+            for (const op of ops) {
+              if (op.kind === "exec") { issue(mask, depth, op.name); continue; }
+              issue(mask, depth, `branch ${op.test} — push join + masks`);
+              const t = mask.map((m, l) =&gt; m &amp;&amp; op.cond(l));
+              const f = mask.map((m, l) =&gt; m &amp;&amp; !op.cond(l));
+              if (t.some(Boolean)) run(op.then, t, depth + 1);   // pass 1
+              if (f.some(Boolean)) run(op.other, f, depth + 1);  // pass 2
+              if (verbose) console.log(`${"  ".repeat(depth)}${show(mask)} (${pop(mask)}/8)  reconverge — pop, mask restored`);
+            }
+          };
+          run(makeKernel(x), new Array(LANES).fill(true), 0);
+          return s;
+        }
+
+        console.log("divergent data (lanes 1,3,5,7 negative):");
+        const d = simulate([5, -3, 8, -1, 2, -7, 4, -6], true);
+        console.log("");
+        const u = simulate([5, 3, 8, 1, 2, 7, 4, 6], false);   // uniform: nobody branches
+        console.log(`divergent: ${d.issues} issues, efficiency ${d.work}/${d.issues * LANES} = ${(100 * d.work / (d.issues * LANES)).toFixed(0)}%`);
+        console.log(`uniform:   ${u.issues} issues, efficiency ${u.work}/${u.issues * LANES} = ${(100 * u.work / (u.issues * LANES)).toFixed(0)}%`);
+      </primer-code>
+      <p>
+        Same kernel, same lane count — the uniform warp does the whole job in half the issues at 100%
+        efficiency, because it never has to pay for a path its lanes didn't take. Try making <em>all</em>
+        eight values negative: the warp diverges only at the inner branch, and the numbers land in
+        between.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>After Volta: independent thread scheduling</h2>
+      <p>
+        Since the Volta generation, each thread carries its <strong>own program counter and call
+        stack</strong>, and the hardware may interleave the two sides of a divergent branch rather than
+        strictly finishing one first. This exists for <em>correctness</em>, not speed: with per-thread
+        PCs, a lane spinning on a lock held by a lane in the other path can make progress instead of
+        deadlocking — a <strong>progress guarantee</strong> that pre-Volta warps could not offer.
+        Do not mistake it for free divergence. Execution is still SIMT: in any given cycle the warp issues
+        one instruction under one mask, and lanes on the other path still sit out. The bookkeeping got
+        smarter; the <em>physics</em> — serial passes, thinned masks, lane-slots burned — is exactly the
+        arithmetic you just learned.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Writing around it</h2>
+      <p>
+        Divergence is a data-layout problem wearing a control-flow costume, and the standard cures all
+        amount to <em>making warps agree</em>:
+      </p>
+      <ul>
+        <li><strong>Sort or bucket work by condition.</strong> If items needing treatment A are grouped
+          together and items needing B follow, whole warps land on one side of the branch. A cheap
+          pre-sort often pays for itself many times over.</li>
+        <li><strong>Align boundaries to warps.</strong> Make block and tile sizes multiples of 32, so a
+          boundary check like <code>if (i &lt; N)</code> is uniform within almost every warp — only the
+          final partial warp diverges.</li>
+        <li><strong>Go branchless for tiny bodies.</strong> For a one-liner each side, compute
+          <em>both</em> values and select:
+          <code>y = c ? a : b</code> compiles to a predicated select — every lane does a little wasted
+          work, but there is one pass, no split, no stack. Two serialised passes only beat that when the
+          bodies are big.</li>
+      </ul>
+    </primer-card>
+
+    <primer-vignette title="Why not just give every lane its own program counter and be done?">
+      <p>
+        Because then you would have built a CPU — thirty-two of them. Fetch, decode, branch handling and
+        scheduling per lane is exactly the overhead
+        SIMT exists to amortise: one front end serving 32 ALUs is the deal that buys the GPU its lane
+        count. The mask-and-stack trick is the minimal patch that lets one front end <em>pretend</em> each
+        lane has free will, paying only when lanes actually disagree. It is also a genuinely old idea —
+        the ILLIAC IV in the 1970s let each of its 64 processing elements switch itself off with a
+        <em>mode bit</em> so they could sit out an instruction, and vector machines carried mask registers
+        for the same reason. The GPU's contribution was automating the bookkeeping: the compiler and the
+        reconvergence stack manage the masks so the programmer can just write <code>if</code>.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Divergence is a within-warp crime only">
+      <p>
+        "My kernel has a big <code>if</code> — half the threads take each side — so I lose half my
+        performance." Not necessarily! The mask machinery only engages when lanes <em>of the same
+        warp</em> disagree. If warp 3's thirty-two threads all take the if-side and warp 7's all take the
+        else-side, <strong>nothing is serialised</strong>: each warp runs exactly one path under a full
+        mask, and the scheduler interleaves them like any other pair of warps. Divergence between warps is
+        free. That is why the avoidance patterns above are all really <em>alignment</em> patterns: you
+        rarely eliminate the branch — you arrange the data so the disagreement falls <em>between</em>
+        warps instead of <em>inside</em> them. A condition like <code>threadIdx.x &lt; 32</code> splits
+        cleanly on a warp boundary and costs nothing; the same test on <code>threadIdx.x &lt; 16</code>
+        cuts a warp in half and costs a pass.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: pass counts, mask arithmetic, nesting/loop worst cases, within-vs-across-warp. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "divergenceQuiz@1": {
+          "intro": "One warp = one PC + a 32-bit active mask. Divergent branch: run each side serially under its mask; reconverge at the immediate post-dominator (stack pop).",
+          "passesQ": "In a 32-lane warp, {k} lanes take the if-side of a branch and the other {r} take the else-side. How many serialised passes does the warp make over the branch bodies?",
+          "slotsQ": "A warp diverges at an if/else whose if-body has {a} instructions and whose else-body has {b}. How many instructions does the warp issue for the two bodies in total?",
+          "wasteQ": "During a {a}-instruction pass, only {k} of the warp's 32 lanes are active. How many lane-slots are wasted in that pass?",
+          "maskQ": "Only lanes 0 through {m} of a warp participate in the current pass. What is the value of the active mask, as a decimal number?",
+          "fracQ": "An active mask has {k} of its 32 bits set. What percentage of the warp's lane-slots do useful work during that pass?",
+          "nestedQ": "{d} two-way branches nest inside one another, and the lanes disagree at every level. In the worst case, how many serialised passes execute the innermost bodies?",
+          "switchQ": "A {w}-way switch splits a warp's lanes evenly across all {w} cases (equal-length bodies). What percentage of the lane-slots spent in the case bodies is useful work?",
+          "loopQ": "Within one warp, per-lane loop trip counts range from {a} to {b}. For how many iterations does the warp keep issuing the loop body?",
+          "loopWasteQ": "Within one warp, per-lane loop trip counts range from {a} to {b}. For how many iterations does the fastest lane sit masked out, waiting?",
+          "acrossQ": "Warp 3's threads all take the if-side of a branch; warp 7's threads all take the else-side. What divergence penalty is paid?",
+          "acrossA": "None — the mask machinery only engages when lanes of the same warp disagree; whole warps taking different paths are just independently scheduled warps",
+          "acrossB": "Both warps run both paths, for a 4× slowdown",
+          "acrossC": "The two warps must be merged into one before continuing",
+          "acrossD": "Warp 7 stalls until warp 3 finishes the if-side",
+          "joinQ": "Where does the hardware reconverge a diverged warp?",
+          "joinA": "At the branch's immediate post-dominator — the first instruction that every path out of the branch must reach",
+          "joinB": "At the next backward branch",
+          "joinC": "At the end of the kernel, always",
+          "joinD": "At a random instruction chosen by the scheduler",
+          "voltaQ": "What did Volta's independent thread scheduling (per-thread program counters) actually change?",
+          "voltaA": "Correctness: lanes on different paths can make forward progress (no cross-path deadlock) — but masked serial execution still costs the same lane-slots",
+          "voltaB": "Divergence became free: both paths now execute simultaneously on different lanes",
+          "voltaC": "Warps were abolished; every thread now has its own fetch and decode hardware",
+          "voltaD": "The active mask was widened to 64 bits",
+          "tinyQ": "An if/else has a single cheap instruction on each side. What is the standard way to avoid paying for divergence?",
+          "tinyA": "Go branchless: compute both values and use a predicated select — one pass, no split, a little wasted work per lane",
+          "tinyB": "Move the if-side to a different kernel",
+          "tinyC": "Unroll the branch 32 times",
+          "tinyD": "Mark the branch as volatile so the compiler removes it"
+        }
+      }
+    </script>
+
+    <primer-quiz name="divergenceQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/gpu-compute/the-warp-scheduler"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Divergence flow: warp row → branch → two masked passes → reconvergence. ──
+  registerGeometryScene(
+    "divergeFlow",
+    ({ board, colors, step, sceneStrings }) => {
+      const xvals = [5, -3, 8, -1, 2, -7, 4, -6]; // lanes 1,3,5,7 negative
+      const CELL = 1;
+      const txt = (x, y, s, color, fs = 10, bold = false) =>
+        board.create("text", [x, y, s], {
+          strokeColor: color, fontSize: fs, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: bold ? "font-weight:600" : "",
+        });
+      const cell = (x0, y0, fill, opacity, stroke) =>
+        board.create(
+          "polygon",
+          [[x0 + 0.05, y0 + 0.05], [x0 + CELL - 0.05, y0 + 0.05],
+           [x0 + CELL - 0.05, y0 + CELL - 0.05], [x0 + 0.05, y0 + CELL - 0.05]],
+          {
+            fillColor: fill, fillOpacity: opacity, strokeColor: stroke, strokeWidth: 1,
+            fixed: true, highlight: false, vertices: { visible: false },
+            borders: { strokeColor: stroke, highlight: false },
+          },
+        );
+      // A row of 8 lane cells; active(l) says whether lane l is enabled.
+      const laneRow = (x0, y0, active, fill) => {
+        for (let l = 0; l < 8; l++) {
+          const on = active(l);
+          cell(x0 + l * CELL, y0, on ? fill : colors.line, on ? 0.45 : 0.08, colors.line);
+          txt(x0 + l * CELL + 0.5, y0 + 0.5, String(xvals[l]), on ? colors.ink : colors.line, 9);
+        }
+      };
+      const arrow = (from, to) =>
+        board.create("arrow", [from, to], {
+          strokeColor: colors.line, strokeWidth: 1.5, fixed: true, highlight: false,
+        });
+
+      // Base: the full warp and the branch box.
+      laneRow(5.5, 10.6, () => true, colors.cat[0]);
+      txt(9.5, 12.0, sceneStrings("warpLabel"), colors.ink, 11, true);
+      arrow([9.5, 10.5], [9.5, 9.6]);
+      board.create(
+        "polygon",
+        [[7.3, 8.6], [11.7, 8.6], [11.7, 9.5], [7.3, 9.5]],
+        {
+          fillColor: colors.cat[3], fillOpacity: 0.15, strokeColor: colors.line, strokeWidth: 1.2,
+          fixed: true, highlight: false, vertices: { visible: false },
+          borders: { strokeColor: colors.line, highlight: false },
+        },
+      );
+      txt(9.5, 9.05, sceneStrings("branchLabel"), colors.ink, 10, true);
+
+      // Step 1: the split — arrows out to the two path positions.
+      step(sceneStrings("stepSplit"), () => {
+        arrow([7.3, 8.9], [4.6, 7.6]);
+        arrow([11.7, 8.9], [14.4, 7.6]);
+      });
+
+      // Step 2: pass 1, then-path (negative lanes 1,3,5,7 active).
+      step(sceneStrings("stepThen"), () => {
+        txt(4.6, 7.2, sceneStrings("thenLabel"), colors.ink, 10, true);
+        laneRow(0.6, 5.8, (l) => xvals[l] < 0, colors.cat[1]);
+      });
+
+      // Step 3: pass 2, else-path (the complementary lanes).
+      step(sceneStrings("stepElse"), () => {
+        txt(14.4, 7.2, sceneStrings("elseLabel"), colors.ink, 10, true);
+        laneRow(10.4, 5.8, (l) => xvals[l] >= 0, colors.cat[2]);
+      });
+
+      // Step 4: reconvergence — both paths merge, full mask restored.
+      step(sceneStrings("stepJoin"), () => {
+        arrow([4.6, 5.6], [8.6, 4.3]);
+        arrow([14.4, 5.6], [10.4, 4.3]);
+        laneRow(5.5, 2.6, () => true, colors.cat[0]);
+        txt(9.5, 2.1, sceneStrings("joinLabel"), colors.ink, 11, true);
+      });
+    },
+    { boundingbox: [-0.3, 12.7, 19.3, 1.2], keepAspect: false, title: () => makeStrings("divergeFlow")("title") },
+  );
+
+  registerQuiz("divergenceQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Any disagreement → exactly 2 passes for an if/else.
+      prompt: (v) => sceneStrings("passesQ", { ...v, r: 32 - v.k }),
+      variables: "k=[1:31]",
+      answer: 2,
+    },
+    {
+      // Serial passes add: a + b issued instructions.
+      prompt: (v) => sceneStrings("slotsQ", v),
+      variables: "a=[3:12] b=[3:12]",
+      answer: "a + b",
+    },
+    {
+      // Wasted lane-slots in one pass: (32 - k) · a.
+      prompt: (v) => sceneStrings("wasteQ", v),
+      variables: "k=[1:31] a=[2:10]",
+      answer: "(32 - k) * a",
+    },
+    {
+      // Mask for lanes 0..m: 2^(m+1) − 1.
+      prompt: (v) => sceneStrings("maskQ", v),
+      variables: "m=[2:7]",
+      answer: "2^(m+1) - 1",
+    },
+    {
+      // Active fraction as a percentage.
+      prompt: (v) => sceneStrings("fracQ", v),
+      variables: "k=[8,16,24]",
+      answer: "100 * k / 32",
+    },
+    {
+      // Nested worst case: 2^d passes.
+      prompt: (v) => sceneStrings("nestedQ", v),
+      variables: "d=[2:5]",
+      answer: "2^d",
+    },
+    {
+      // w-way switch, even split: efficiency 100/w %.
+      prompt: (v) => sceneStrings("switchQ", v),
+      variables: "w=[4,8,16,32]",
+      answer: "100 / w",
+    },
+    {
+      // Loop runs to the MAX trip count.
+      prompt: (v) => sceneStrings("loopQ", v),
+      variables: "a=[2:15] b=[16:40]",
+      answer: "b",
+    },
+    {
+      // The fastest lane idles for b − a iterations.
+      prompt: (v) => sceneStrings("loopWasteQ", v),
+      variables: "a=[2:15] b=[16:40]",
+      answer: "b - a",
+    },
+    {
+      prompt: () => sceneStrings("acrossQ"),
+      options: [
+        { text: () => sceneStrings("acrossA"), correct: true },
+        { text: () => sceneStrings("acrossB"), correct: false },
+        { text: () => sceneStrings("acrossC"), correct: false },
+        { text: () => sceneStrings("acrossD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("joinQ"),
+      options: [
+        { text: () => sceneStrings("joinA"), correct: true },
+        { text: () => sceneStrings("joinB"), correct: false },
+        { text: () => sceneStrings("joinC"), correct: false },
+        { text: () => sceneStrings("joinD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("voltaQ"),
+      options: [
+        { text: () => sceneStrings("voltaA"), correct: true },
+        { text: () => sceneStrings("voltaB"), correct: false },
+        { text: () => sceneStrings("voltaC"), correct: false },
+        { text: () => sceneStrings("voltaD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tinyQ"),
+      options: [
+        { text: () => sceneStrings("tinyA"), correct: true },
+        { text: () => sceneStrings("tinyB"), correct: false },
+        { text: () => sceneStrings("tinyC"), correct: false },
+        { text: () => sceneStrings("tinyD"), correct: false },
+      ],
+    },
+  ]);
+</script>

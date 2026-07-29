@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Hazards and Forwarding in RTL</primer-title>
+
+    <primer-card>
+      <p>
+        Last lesson ended on a cliffhanger: our beautiful
+        <primer-ref to="computer-science/chip-design/cpu/pipelining-the-cpu-in-rtl">five-stage pipeline</primer-ref>
+        computed <code>0</code> where the answer was <code>12</code>. Nothing was miswired. The machine did
+        exactly what we built: <code>add x3, x1, x2</code> read its sources in ID at cycle 3, while the
+        <code>addi</code> writing <code>x1</code> was still two stages from write-back. The value existed —
+        it was sitting right there in a pipeline register — but nobody had built a road to it. This is a
+        <strong>RAW (read-after-write) data hazard</strong>, and this lesson builds the roads: a
+        <strong>forwarding unit</strong> of comparators and muxes, a one-cycle <strong>stall</strong> for
+        the one case forwarding cannot save, and a <strong>flush</strong> for branches. All of it is
+        hardware — the
+        <primer-ref to="computer-science/computer-architecture/pipelining/data-hazards-and-forwarding">hazard
+        theory</primer-ref> you know, now as gates.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The broken trace, dissected</h2>
+      <p>
+        Watch the dependent pair move through the pipeline. <code>addi x1, x0, 5</code> (call it I0)
+        reaches WB at cycle 4. But <code>add x3, x1, x2</code> (I2) read the register file back in cycle
+        3 — it got the <em>stale</em> <code>x1 = 0</code>, and by cycle 4 it is in EX faithfully adding
+        garbage. The fix is hiding in plain sight: at the moment I2's ALU fires (cycle 4), I0's freshly
+        computed 5 is sitting in the MEM/WB pipeline register, and I1's 7 is sitting in EX/MEM. The correct
+        values are <em>on the chip, centimetres of wire away</em> — just not in the register file yet.
+        So: don't wait for the register file. Wire the pipeline registers straight back to the ALU inputs.
+        That road is called a <strong>bypass</strong>, or forwarding path.
+      </p>
+    </primer-card>
+
+    <!-- The forwarding-and-stall figure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "fwdPaths": {
+          "title": "Forwarding paths and the one stall they cannot remove",
+          "i0": "addi x1, x0, 5",
+          "i1": "addi x2, x0, 7",
+          "i2": "add x3, x1, x2",
+          "lw": "lw x4, 0(x0)",
+          "use": "add x5, x4, x3",
+          "bubble": "bubble",
+          "exmemLbl": "EX/MEM → EX",
+          "memwbLbl": "MEM/WB → EX",
+          "lwLbl": "MEM/WB → EX (after the stall)",
+          "stepProblem": "The RAW pair: add is in EX at cycle 4, but its sources only reach WB at cycles 4 and 5",
+          "stepExMem": "Bypass 1: the EX/MEM register forwards x2 (one instruction ahead) straight into the ALU",
+          "stepMemWb": "Bypass 2: the MEM/WB register forwards x1 (two ahead) — both operands arrive fresh",
+          "stepStall": "Load-use: lw's data leaves memory only at the END of MEM — too late for the next EX. Freeze IF/ID one cycle and inject a bubble",
+          "stepLwFwd": "After one bubble, MEM/WB forwards the loaded value into EX — one cycle lost, not three"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The picture: roads back through time</h2>
+      <p>
+        Here is the standard diagram every architect doodles — instructions as rows, cycles as columns,
+        and the forwarding paths as arrows running <em>backwards</em> against the flow:
+      </p>
+      <primer-geometry scene="fwdPaths" caption="Two pipeline timelines. Top: three instructions where add x3 receives x2 via a forwarding arrow from the EX/MEM register and x1 via an arrow from the MEM/WB register, both landing on its EX stage. Bottom: a load followed by a dependent add, showing a one-cycle bubble in the consumer's timeline before a MEM/WB forwarding arrow delivers the loaded value."></primer-geometry>
+      <p>
+        Note what the arrows land on: always the <strong>EX stage of the consumer</strong>. Forwarding
+        serves the ALU; that is where values are consumed, so that is where the muxes live.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The forwarding unit: comparators and muxes</h2>
+      <p>
+        As hardware, forwarding is almost humble: for each ALU operand, compare the consumer's source
+        register against the destination of the instructions ahead, and steer a mux. In RTL:
+      </p>
+      <primer-code lang="text">
+// The forwarding unit: comparators steering muxes. Note the THREE-part
+// qualification: the producer must write, its rd must match, and rd != x0.
+always_comb begin
+  fwd_a = 2'b00;                                   // default: the RF value
+  if (ex_mem.ctl.reg_write &amp;&amp; ex_mem.rd != 5'd0
+      &amp;&amp; ex_mem.rd == id_ex.rs1)
+    fwd_a = 2'b10;                                 // newest wins: EX/MEM first
+  else if (mem_wb.ctl.reg_write &amp;&amp; mem_wb.rd != 5'd0
+      &amp;&amp; mem_wb.rd == id_ex.rs1)
+    fwd_a = 2'b01;
+end                                                // (fwd_b: same, with rs2)
+
+// The bypass mux sits right in front of the ALU's A input:
+assign alu_a = (fwd_a == 2'b10) ? ex_mem.alu_out   // one cycle ahead of the RF
+             : (fwd_a == 2'b01) ? mem_wb.wb_data   // two cycles ahead
+             :                    id_ex.a;         // no hazard: the RF was right
+      </primer-code>
+      <p>
+        Two subtleties are doing heavy lifting. <strong>Priority:</strong> if <em>both</em> older
+        instructions match (<code>add x1,…</code> then <code>add x1,…</code> then a reader of
+        <code>x1</code>), EX/MEM must win — it is the <em>younger</em> of the two producers, holding the
+        newest value. And <strong>qualification:</strong> a match on register number alone is not enough —
+        more on that in the warning below, where a single missing term becomes this module's favourite bug.
+      </p>
+      <primer-vignette title="Watch out! Forward only from instructions that really write">
+        <p>
+          The comparator <code>ex_mem.rd == id_ex.rs1</code> is a liar unless you qualify it twice.
+          <strong>Qualify with <code>reg_write</code>:</strong> <code>SW</code> and <code>BEQ</code> write
+          no register, and for them the bits at position 11:7 are <em>immediate</em> bits — an unqualified
+          match happily forwards a store's address offset into someone's ALU. <strong>Qualify with
+          <code>rd != x0</code>:</strong> <code>jal x0, loop</code> and friends "write" <code>x0</code>;
+          an instruction that legitimately reads <code>x0</code> (expecting a rock-solid 0) would be handed
+          the jump's link address instead. Three terms, always:
+          <em>writes ∧ rd ≠ 0 ∧ rd = rs</em>. Drop one and the CPU passes every simple test — dependent
+          arithmetic works! — then corrupts a register the first time a program jumps with <code>x0</code>.
+          The final lesson injects exactly this bug on purpose, and watches the verification machinery
+          catch it.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>The stall: when the value does not exist yet</h2>
+      <p>
+        Forwarding moves values through space; it cannot move them backwards in time. <code>LW</code>'s
+        data leaves the data memory at the <em>end</em> of its MEM stage — but a consumer in the very next
+        slot needs it in EX <em>during that same cycle</em>. No wire fixes that. The only cure is to make
+        the consumer <strong>wait one cycle</strong>:
+      </p>
+      <primer-code lang="text">
+// Load-use detection: the instruction in EX is a load whose rd matches a
+// source of the instruction still in ID. Nothing can forward what does not
+// exist yet -- so stall one cycle.
+assign load_use = id_ex.ctl.mem_read &amp;&amp; id_ex.rd != 5'd0 &amp;&amp;
+                  (id_ex.rd == if_id_rs1 || id_ex.rd == if_id_rs2);
+
+// Stalling = freeze the front, bubble the middle:
+//   pc     &lt;= pc;         if_id &lt;= if_id;      (hold: replay the same fetch)
+//   id_ex  &lt;= '0;                              (inject NOP controls into EX)
+
+// Taken branch, resolved in EX: squash the two younger instructions.
+assign flush = ex_branch_taken;
+//   pc     &lt;= branch_target;
+//   if_id  &lt;= '0;         id_ex &lt;= '0;         (both become bubbles)
+      </primer-code>
+      <p>
+        A stall is three coordinated acts, all in <code>always_ff</code> enables: the <code>pc</code> and
+        <code>IF/ID</code> register <em>hold</em> (the stalled instruction replays its decode), and the
+        <code>ID/EX</code> register receives an all-zero control bundle — a <strong>bubble</strong>, an
+        instruction-shaped nothing that flows harmlessly down the pipe. One cycle later the load's data is
+        in MEM/WB and ordinary forwarding finishes the job. Compilers help by scheduling an unrelated
+        instruction into the load's shadow, but the hardware interlock must exist regardless.
+      </p>
+      <p>
+        Branches are the same medicine at a different address. Our <code>BEQ</code> resolves in EX — by
+        which time the two instructions behind it (predicted <em>not taken</em>, fetched sequentially) are
+        already in IF and ID. If the branch is taken, both are <strong>flushed</strong>: converted to
+        bubbles, their side effects never having happened, while the <code>pc</code> redirects to the
+        target. A taken branch thus costs two dead cycles — the seed of the entire
+        <primer-ref to="computer-science/computer-architecture/pipelining/control-hazards-and-branches">branch-prediction
+        industry</primer-ref>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The complete pipeline, healed</h2>
+      <p>
+        Everything at once now: the simulator gains a forwarding unit (with its three-term qualification),
+        load-use detection, and branch flush — then runs the program that broke last lesson, extended with
+        a store, a genuine load-use pair, and a taken branch with two doomed instructions in its shadow.
+        Every forward, stall and flush is logged as it happens:
+      </p>
+      <primer-code run>
+const FORWARDING = true;   // flip to false to relive lesson 38's bug
+
+// -- Assembler + decoder + control (compact recap). --
+function R(f7: number, f3: number, rd: number, rs1: number, rs2: number): number {
+  return ((f7 &lt;&lt; 25) | (rs2 &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | (rd &lt;&lt; 7) | 0x33) | 0;
+}
+function I(op: number, f3: number, rd: number, rs1: number, imm: number): number {
+  return (((imm &amp; 0xfff) &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | (rd &lt;&lt; 7) | op) | 0;
+}
+function S(f3: number, rs2: number, rs1: number, imm: number): number {
+  return ((((imm &gt;&gt; 5) &amp; 0x7f) &lt;&lt; 25) | (rs2 &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | ((imm &amp; 0x1f) &lt;&lt; 7) | 0x23) | 0;
+}
+function B(f3: number, rs1: number, rs2: number, imm: number): number {
+  return ((((imm &gt;&gt; 12) &amp; 1) &lt;&lt; 31) | (((imm &gt;&gt; 5) &amp; 0x3f) &lt;&lt; 25) | (rs2 &lt;&lt; 20) | (rs1 &lt;&lt; 15) |
+          (f3 &lt;&lt; 12) | (((imm &gt;&gt; 1) &amp; 0xf) &lt;&lt; 8) | (((imm &gt;&gt; 11) &amp; 1) &lt;&lt; 7) | 0x63) | 0;
+}
+const asm = {
+  ADD:  (rd: number, rs1: number, rs2: number) =&gt; R(0x00, 0, rd, rs1, rs2),
+  ADDI: (rd: number, rs1: number, imm: number) =&gt; I(0x13, 0, rd, rs1, imm),
+  LW:   (rd: number, rs1: number, imm: number) =&gt; I(0x03, 2, rd, rs1, imm),
+  SW:   (rs2: number, rs1: number, imm: number) =&gt; S(2, rs2, rs1, imm),
+  BEQ:  (rs1: number, rs2: number, imm: number) =&gt; B(0, rs1, rs2, imm),
+};
+interface Decoded { name: string; rd: number; rs1: number; rs2: number; imm: number; useRs1: boolean; useRs2: boolean }
+function decode(w: number): Decoded {
+  const opcode = w &amp; 0x7f, rd = (w &gt;&gt; 7) &amp; 0x1f, f3 = (w &gt;&gt; 12) &amp; 7;
+  const rs1 = (w &gt;&gt; 15) &amp; 0x1f, rs2 = (w &gt;&gt; 20) &amp; 0x1f, f7 = (w &gt;&gt;&gt; 25) &amp; 0x7f;
+  const immI = w &gt;&gt; 20;
+  const immS = ((w &gt;&gt; 25) &lt;&lt; 5) | ((w &gt;&gt; 7) &amp; 0x1f);
+  const immB = ((w &gt;&gt; 31) &lt;&lt; 12) | (((w &gt;&gt; 7) &amp; 1) &lt;&lt; 11) | (((w &gt;&gt; 25) &amp; 0x3f) &lt;&lt; 5) | (((w &gt;&gt; 8) &amp; 0xf) &lt;&lt; 1);
+  if (opcode === 0x33)
+    return { name: f3 === 0 ? (f7 === 0x20 ? "SUB" : "ADD") : f3 === 7 ? "AND" : "OR", rd, rs1, rs2, imm: 0, useRs1: true, useRs2: true };
+  if (opcode === 0x13) return { name: "ADDI", rd, rs1, rs2, imm: immI, useRs1: true, useRs2: false };
+  if (opcode === 0x03) return { name: "LW",   rd, rs1, rs2, imm: immI, useRs1: true, useRs2: false };
+  if (opcode === 0x23) return { name: "SW",   rd: 0, rs1, rs2, imm: immS, useRs1: true, useRs2: true };
+  return { name: "BEQ", rd: 0, rs1, rs2, imm: immB, useRs1: true, useRs2: true };
+}
+interface Ctl { RegWrite: number; ALUSrc: number; ALUOp: string; MemRead: number; MemWrite: number; MemToReg: number; Branch: number }
+function control(d: Decoded): Ctl {
+  const n = d.name;
+  return {
+    RegWrite: n === "SW" || n === "BEQ" ? 0 : 1,
+    ALUSrc: n === "ADDI" || n === "LW" || n === "SW" ? 1 : 0,
+    ALUOp: n === "SUB" || n === "BEQ" ? "SUB" : n === "AND" ? "AND" : n === "OR" ? "OR" : "ADD",
+    MemRead: n === "LW" ? 1 : 0,
+    MemWrite: n === "SW" ? 1 : 0,
+    MemToReg: n === "LW" ? 1 : 0,
+    Branch: n === "BEQ" ? 1 : 0,
+  };
+}
+
+interface IFID  { pc: number; word: number }
+interface IDEX  { pc: number; name: string; rd: number; rs1: number; rs2: number; useRs1: boolean; useRs2: boolean; a: number; b: number; imm: number; c: Ctl }
+interface EXMEM { pc: number; name: string; rd: number; alu: number; storeVal: number; c: Ctl }
+interface MEMWB { pc: number; name: string; rd: number; val: number; c: Ctl }
+interface State {
+  pc: number; regs: number[]; mem: number[];
+  if_id: IFID | null; id_ex: IDEX | null; ex_mem: EXMEM | null; mem_wb: MEMWB | null;
+}
+
+function next(s: State, imem: number[], ev: string[]): State {
+  const regs = s.regs.slice(), mem = s.mem.slice();
+  // -- WB (first half): write, so ID reads fresh values. --
+  if (s.mem_wb &amp;&amp; s.mem_wb.c.RegWrite &amp;&amp; s.mem_wb.rd !== 0) regs[s.mem_wb.rd] = s.mem_wb.val;
+  // -- MEM. --
+  let mem_wb: MEMWB | null = null;
+  if (s.ex_mem) {
+    const m = s.ex_mem;
+    let val = m.alu;
+    if (m.c.MemWrite) mem[m.alu &gt;&gt; 2] = m.storeVal;
+    if (m.c.MemRead) val = mem[m.alu &gt;&gt; 2] | 0;
+    mem_wb = { pc: m.pc, name: m.name, rd: m.rd, val, c: m.c };
+  }
+  // -- EX, with the forwarding unit in front of the ALU. --
+  let ex_mem: EXMEM | null = null;
+  let taken = false, target = 0;
+  if (s.id_ex) {
+    const e = s.id_ex;
+    // The three-term comparison: rd matches, rd is not x0, and the instruction really writes.
+    const fwd = (rs: number, used: boolean, which: string): number | null =&gt; {
+      if (!FORWARDING || !used || rs === 0) return null;
+      if (s.ex_mem &amp;&amp; s.ex_mem.c.RegWrite &amp;&amp; s.ex_mem.rd !== 0 &amp;&amp; s.ex_mem.rd === rs) {
+        ev.push(`EX/MEM-&gt;${which}`); return s.ex_mem.alu;
+      }
+      if (s.mem_wb &amp;&amp; s.mem_wb.c.RegWrite &amp;&amp; s.mem_wb.rd !== 0 &amp;&amp; s.mem_wb.rd === rs) {
+        ev.push(`MEM/WB-&gt;${which}`); return s.mem_wb.val;
+      }
+      return null;
+    };
+    const fa = fwd(e.rs1, e.useRs1, "a"), fb = fwd(e.rs2, e.useRs2, "b");
+    const a = fa === null ? e.a : fa;
+    const bReg = fb === null ? e.b : fb;
+    const b = e.c.ALUSrc ? e.imm : bReg;
+    const alu = e.c.ALUOp === "SUB" ? (a - b) | 0 : e.c.ALUOp === "AND" ? a &amp; b : e.c.ALUOp === "OR" ? a | b : (a + b) | 0;
+    if (e.c.Branch &amp;&amp; a === bReg) { taken = true; target = e.pc + e.imm; }
+    ex_mem = { pc: e.pc, name: e.name, rd: e.rd, alu, storeVal: bReg, c: e.c };
+  }
+  // -- Hazard detection: load-use -&gt; stall; taken branch -&gt; flush. --
+  const d = s.if_id ? decode(s.if_id.word) : null;
+  const loadUse = !!(d &amp;&amp; s.id_ex &amp;&amp; s.id_ex.c.MemRead &amp;&amp; s.id_ex.rd !== 0 &amp;&amp;
+    ((d.useRs1 &amp;&amp; d.rs1 === s.id_ex.rd) || (d.useRs2 &amp;&amp; d.rs2 === s.id_ex.rd)));
+  if (taken) {
+    ev.push(`BEQ taken -&gt; flush 2, pc=${target}`);
+    return { pc: target, regs, mem, if_id: null, id_ex: null, ex_mem, mem_wb };
+  }
+  if (loadUse) {
+    ev.push("load-use -&gt; stall (bubble into EX)");
+    return { pc: s.pc, regs, mem, if_id: s.if_id, id_ex: null, ex_mem, mem_wb };
+  }
+  // -- ID and IF as usual. --
+  let id_ex: IDEX | null = null;
+  if (d &amp;&amp; s.if_id)
+    id_ex = { pc: s.if_id.pc, name: d.name, rd: d.rd, rs1: d.rs1, rs2: d.rs2, useRs1: d.useRs1, useRs2: d.useRs2,
+              a: regs[d.rs1], b: regs[d.rs2], imm: d.imm, c: control(d) };
+  const word = imem[s.pc &gt;&gt; 2];
+  const if_id: IFID | null = word === undefined ? null : { pc: s.pc, word };
+  return { pc: s.pc + 4, regs, mem, if_id, id_ex, ex_mem, mem_wb };
+}
+
+// -- The dependent program that broke lesson 38 -- plus a store, a load-use, and a taken branch. --
+const imem = [
+  asm.ADDI(1, 0, 5),   // I0  0: x1 = 5
+  asm.ADDI(2, 0, 7),   // I1  4: x2 = 7
+  asm.ADD(3, 1, 2),    // I2  8: x3 = x1 + x2       &lt;- RAW on x1 AND x2
+  asm.SW(3, 0, 0),     // I3 12: mem[0] = x3         &lt;- RAW on x3
+  asm.LW(4, 0, 0),     // I4 16: x4 = mem[0]
+  asm.ADD(5, 4, 3),    // I5 20: x5 = x4 + x3        &lt;- load-use on x4!
+  asm.BEQ(5, 5, 12),   // I6 24: if x5 == x5 goto 36 (always taken)
+  asm.ADDI(6, 0, 99),  // I7 28: x6 = 99   -- must be squashed
+  asm.ADDI(6, 0, 88),  // I8 32: x6 = 88   -- must be squashed
+  asm.ADDI(7, 0, 1),   // I9 36: x7 = 1
+];
+const tag = (x: { pc: number } | null) =&gt; (x ? "I" + (x.pc &gt;&gt; 2) : ".");
+
+let s: State = { pc: 0, regs: new Array(32).fill(0), mem: new Array(16).fill(0), if_id: null, id_ex: null, ex_mem: null, mem_wb: null };
+console.log("cycle |  IF  ID  EX MEM  WB | events");
+console.log("------+---------------------+-------");
+for (let cycle = 0; cycle &lt; 40; cycle++) {
+  const fetching = imem[s.pc &gt;&gt; 2] !== undefined ? { pc: s.pc } : null;
+  const row = [fetching, s.if_id, s.id_ex, s.ex_mem, s.mem_wb].map((x) =&gt; tag(x as { pc: number } | null).padStart(3)).join(" ");
+  if (!fetching &amp;&amp; !s.if_id &amp;&amp; !s.id_ex &amp;&amp; !s.ex_mem &amp;&amp; !s.mem_wb) { console.log(`  ${String(cycle).padStart(2)}  | ${row} |`); break; }
+  const ev: string[] = [];
+  s = next(s, imem, ev);
+  console.log(`  ${String(cycle).padStart(2)}  | ${row} | ${ev.join(", ")}`);
+}
+console.log(`\nx1=${s.regs[1]} x2=${s.regs[2]} x3=${s.regs[3]} x4=${s.regs[4]} x5=${s.regs[5]} x6=${s.regs[6]} x7=${s.regs[7]}  mem[0]=${s.mem[0]}`);
+console.log("expected: x1=5 x2=7 x3=12 x4=12 x5=24 x6=0 x7=1 mem[0]=12");
+      </primer-code>
+      <p>
+        Sixteen cycles, and every register lands right: the RAW pair is healed by two simultaneous
+        bypasses at cycle 4 (<code>MEM/WB→a</code>, <code>EX/MEM→b</code> — the exact arrows from the
+        figure), the load-use pair costs precisely one bubble at cycle 6, and the taken <code>BEQ</code>
+        at cycle 9 flushes I7 and I8 — <code>x6</code> stays 0, untouched by the two squashed writes. Flip
+        <code>FORWARDING</code> to <code>false</code> at the top and run it again: same program, wrong
+        registers everywhere — a one-keystroke reminder of how load-bearing those comparators are.
+      </p>
+      <primer-vignette title="Why not let the compiler dodge the hazards instead?">
+        <p>
+          The original MIPS said exactly that — the name stood for <em>Microprocessor without Interlocked
+          Pipeline Stages</em>: no stall hardware, and a "delay slot" after every load and branch that the
+          compiler had to fill (with a NOP if it found nothing better). It worked — until the pipeline
+          changed. The delay slot was the <em>implementation</em> leaking into the <em>contract</em>: when
+          later MIPS chips went superscalar and deeper, the one-slot assumption was wrong, yet every shipped
+          binary encoded it, and the hardware had to fake the old pipeline forever. RISC-V, designed three
+          decades wiser, has no delay slots — hazards are the hardware's private problem, which is why our
+          forwarding unit and interlocks exist at all. It is the ISA-is-a-contract lesson with teeth:
+          never let this year's microarchitecture write itself into the spec.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <!-- Quiz. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "hazQuiz@1": {
+          "intro": "Comparators, bypass muxes, one unavoidable bubble, and two flushed fetches: hazards, as hardware.",
+          "fwd1Q": "An ADD writes x{r}; the very NEXT instruction reads x{r} in EX. Where is the producer at that moment, and which path saves the day?",
+          "fwd1A": "The producer is in MEM; the EX/MEM register forwards its ALU result to the consumer's EX",
+          "fwd1B": "The producer is in WB; the register file supplies the value normally",
+          "fwd1C": "The producer is still in ID; the consumer must flush",
+          "fwd1D": "The producer is in IF; no forwarding is possible",
+          "fwd2Q": "An ADD writes x{r}; the instruction TWO slots later reads x{r} in EX (one unrelated instruction sits between). Which path forwards?",
+          "fwd2A": "MEM/WB → EX: the producer is in WB while the consumer is in EX",
+          "fwd2B": "EX/MEM → EX: the producer is one stage ahead",
+          "fwd2C": "None — two slots is far enough for the register file",
+          "fwd2D": "IF/ID → EX",
+          "dist3Q": "An ADD writes x{r}; the consumer sits THREE slots later. What hardware is needed?",
+          "dist3A": "None — the producer completes WB (writing in the first half-cycle) before the consumer's ID read in the second half",
+          "dist3B": "EX/MEM forwarding",
+          "dist3C": "A one-cycle stall",
+          "dist3D": "A two-cycle flush",
+          "stallQ": "With full forwarding, how many bubble cycles does a load followed immediately by a consumer of its result cost?",
+          "flushQ": "Our BEQ resolves in EX with predict-not-taken fetching. How many younger instructions are flushed when it IS taken?",
+          "cycQ": "A program of {n} instructions hits {s} load-use stalls (one bubble each) and no branches. Total cycles on the 5-stage pipeline (n + 4 fill, plus bubbles)?",
+          "brQ": "A program of {n} instructions includes {b} taken branches (each flushing 2 fetches) and no other stalls. Total cycles (n + 4 fill, plus flush penalties)?",
+          "priQ": "Both EX/MEM.rd and MEM/WB.rd match the consumer's rs1. Which value must the mux pick, and why?",
+          "priA": "EX/MEM — the younger producer holds the NEWEST value; picking MEM/WB would resurrect a stale one",
+          "priB": "MEM/WB — older instructions have priority",
+          "priC": "Either — they are guaranteed equal",
+          "priD": "Neither — stall until only one matches",
+          "x0Q": "Why must the forwarding comparison include rd != x0?",
+          "x0A": "Instructions like jal x0 'write' x0; without the check, a consumer reading x0 gets the link address forwarded instead of the architectural 0",
+          "x0B": "x0 comparisons are electrically slower",
+          "x0C": "x0 cannot appear as a source register",
+          "x0D": "It saves one comparator of area",
+          "rwQ": "Why must the forwarding comparison also require the producer's RegWrite to be set?",
+          "rwA": "SW and BEQ write nothing, and their bits 11:7 are immediate bits — an unqualified rd match would forward garbage",
+          "rwB": "RegWrite doubles as the clock enable for the ALU",
+          "rwC": "It is only needed in simulation, not synthesis",
+          "rwD": "Because RegWrite selects between the two read ports",
+          "lwQ": "Why can no forwarding path eliminate the load-use stall?",
+          "lwA": "The loaded value only exists at the END of the load's MEM stage — the consumer's EX in that same cycle would need it before it exists",
+          "lwB": "Data memory has no output wires to spare",
+          "lwC": "Loads write x0, which cannot be forwarded",
+          "lwD": "The compiler forbids adjacent dependent instructions",
+          "pntQ": "What does static predict-not-taken mean in our pipeline?",
+          "pntA": "Keep fetching sequentially past every branch; if the branch turns out taken, flush the two wrongly fetched instructions",
+          "pntB": "Never take any branch",
+          "pntC": "Stall fetch until every branch resolves",
+          "pntD": "Predict backwards branches taken and forward ones not taken"
+        }
+      }
+    </script>
+
+    <primer-quiz name="hazQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/cpu/pipelining-the-cpu-in-rtl",
+      "computer-science/computer-architecture/pipelining/data-hazards-and-forwarding",
+      "computer-science/computer-architecture/pipelining/control-hazards-and-branches"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Forwarding arrows and the load-use bubble. ──
+  registerGeometryScene(
+    "fwdPaths",
+    ({ board, colors, step, sceneStrings }) => {
+      const stages = ["IF", "ID", "EX", "MEM", "WB"];
+      const cx = (c) => 1.6 + c * 1.75;                 // x of cycle column c
+      const cell = (c, y, txt, col, bold = false) =>
+        board.create("text", [cx(c), y, txt], {
+          anchorX: "middle", anchorY: "middle", strokeColor: col, fontSize: bold ? 13 : 12,
+          cssStyle: bold ? "font-weight: 700" : "", fixed: true, highlight: false,
+        });
+      const rowLabel = (y, key, col) =>
+        board.create("text", [-3.4, y, () => sceneStrings(key)], {
+          anchorX: "left", anchorY: "middle", strokeColor: col, fontSize: 12, fixed: true, highlight: false,
+        });
+      const row = (startC, y, key, col, hot = -1) => {
+        rowLabel(y, key, col);
+        stages.forEach((s, i) => cell(startC + i, y, s, i === hot ? col : colors.ink, i === hot));
+      };
+      const arrow = (c1, y1, c2, y2, col) =>
+        board.create("arrow", [[cx(c1) + 0.45, y1 - 0.18], [cx(c2) - 0.5, y2 + 0.22]], {
+          strokeColor: col, strokeWidth: 2.5, highlight: false,
+        });
+      const note = (x, y, key, col) =>
+        board.create("text", [x, y, () => sceneStrings(key)], {
+          anchorX: "left", anchorY: "middle", strokeColor: col, fontSize: 11, fixed: true, highlight: false,
+        });
+
+      // Base: cycle headers.
+      for (let c = 0; c <= 6; c++)
+        board.create("text", [cx(c), 9.2, "c" + c], {
+          anchorX: "middle", anchorY: "middle", strokeColor: colors.line, fontSize: 11, fixed: true, highlight: false,
+        });
+
+      step(sceneStrings("stepProblem"), () => {
+        row(0, 8.4, "i0", colors.cat[0]);
+        row(1, 7.5, "i1", colors.cat[1]);
+        row(2, 6.6, "i2", colors.cat[2], 2);            // I2's EX (cycle 4) is the hot spot
+      });
+      step(sceneStrings("stepExMem"), () => {
+        arrow(3, 7.5, 4, 6.6, colors.cat[1]);           // I1 EX(c3) → I2 EX(c4)
+        note(cx(4) + 0.3, 7.15, "exmemLbl", colors.cat[1]);
+      });
+      step(sceneStrings("stepMemWb"), () => {
+        arrow(3, 8.4, 4, 6.6, colors.cat[0]);           // I0 MEM(c3) → I2 EX(c4)
+        note(cx(4) + 0.3, 7.8, "memwbLbl", colors.cat[0]);
+      });
+      step(sceneStrings("stepStall"), () => {
+        row(0, 4.6, "lw", colors.cat[3]);
+        rowLabel(3.7, "use", colors.cat[4]);
+        cell(1, 3.7, "IF", colors.ink);
+        cell(2, 3.7, "ID", colors.ink);
+        cell(3, 3.7, () => sceneStrings("bubble"), colors.cat[3], true);
+        cell(4, 3.7, "EX", colors.cat[4], true);
+        cell(5, 3.7, "MEM", colors.ink);
+        cell(6, 3.7, "WB", colors.ink);
+      });
+      step(sceneStrings("stepLwFwd"), () => {
+        arrow(3, 4.6, 4, 3.7, colors.cat[3]);           // lw MEM(c3) → consumer EX(c4)
+        note(cx(4) + 0.3, 4.35, "lwLbl", colors.cat[3]);
+      });
+    },
+    { boundingbox: [-3.6, 10, 13.4, 2.6], title: () => makeStrings("fwdPaths")("title") },
+  );
+
+  registerQuiz("hazQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("fwd1Q", v),
+      variables: "r=[1:9]",
+      options: [
+        { text: () => sceneStrings("fwd1A"), correct: true },
+        { text: () => sceneStrings("fwd1B"), correct: false },
+        { text: () => sceneStrings("fwd1C"), correct: false },
+        { text: () => sceneStrings("fwd1D"), correct: false },
+      ],
+    },
+    {
+      prompt: (v) => sceneStrings("fwd2Q", v),
+      variables: "r=[1:9]",
+      options: [
+        { text: () => sceneStrings("fwd2A"), correct: true },
+        { text: () => sceneStrings("fwd2B"), correct: false },
+        { text: () => sceneStrings("fwd2C"), correct: false },
+        { text: () => sceneStrings("fwd2D"), correct: false },
+      ],
+    },
+    {
+      prompt: (v) => sceneStrings("dist3Q", v),
+      variables: "r=[1:9]",
+      options: [
+        { text: () => sceneStrings("dist3A"), correct: true },
+        { text: () => sceneStrings("dist3B"), correct: false },
+        { text: () => sceneStrings("dist3C"), correct: false },
+        { text: () => sceneStrings("dist3D"), correct: false },
+      ],
+    },
+    { prompt: () => sceneStrings("stallQ"), answer: 1 },
+    { prompt: () => sceneStrings("flushQ"), answer: 2 },
+    {
+      prompt: (v) => sceneStrings("cycQ", v),
+      variables: "n=[10:30] s=[1:4]",
+      answer: "n + 4 + s",
+    },
+    {
+      prompt: (v) => sceneStrings("brQ", v),
+      variables: "n=[10:30] b=[1:4]",
+      answer: "n + 4 + 2 * b",
+    },
+    {
+      prompt: () => sceneStrings("priQ"),
+      options: [
+        { text: () => sceneStrings("priA"), correct: true },
+        { text: () => sceneStrings("priB"), correct: false },
+        { text: () => sceneStrings("priC"), correct: false },
+        { text: () => sceneStrings("priD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("x0Q"),
+      options: [
+        { text: () => sceneStrings("x0A"), correct: true },
+        { text: () => sceneStrings("x0B"), correct: false },
+        { text: () => sceneStrings("x0C"), correct: false },
+        { text: () => sceneStrings("x0D"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rwQ"),
+      options: [
+        { text: () => sceneStrings("rwA"), correct: true },
+        { text: () => sceneStrings("rwB"), correct: false },
+        { text: () => sceneStrings("rwC"), correct: false },
+        { text: () => sceneStrings("rwD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lwQ"),
+      options: [
+        { text: () => sceneStrings("lwA"), correct: true },
+        { text: () => sceneStrings("lwB"), correct: false },
+        { text: () => sceneStrings("lwC"), correct: false },
+        { text: () => sceneStrings("lwD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pntQ"),
+      options: [
+        { text: () => sceneStrings("pntA"), correct: true },
+        { text: () => sceneStrings("pntB"), correct: false },
+        { text: () => sceneStrings("pntC"), correct: false },
+        { text: () => sceneStrings("pntD"), correct: false },
+      ],
+    },
+  ]);
+</script>

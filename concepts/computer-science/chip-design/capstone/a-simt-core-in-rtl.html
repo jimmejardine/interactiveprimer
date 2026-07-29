@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>A SIMT Core in RTL</primer-title>
+
+    <primer-card>
+      <p>
+        The <primer-ref to="computer-science/chip-design/capstone/designing-a-tiny-gpu-isa">contract is
+        signed</primer-ref>; now we build the machine that honours it. A PrimerGPU core is the smallest
+        hardware embodiment of the SIMT bargain we studied in the
+        <primer-ref to="computer-science/chip-design/gpu-compute/the-streaming-multiprocessor">streaming
+        multiprocessor</primer-ref>: <strong>one</strong> program counter, <strong>one</strong> fetch
+        unit and <strong>one</strong> decoder — feeding <strong>four lanes</strong> that execute every
+        instruction in lockstep. Four threads, one brain. The entire economy of a GPU is visible in that
+        ratio: the expensive thinking machinery (what should happen next?) is bought once and amortised,
+        while the cheap doing machinery (ALUs, registers) is stamped out per thread. This lesson wires it
+        up — a control FSM, a shared front end, and four almost-identical lane columns whose one
+        difference turns out to be everything.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The six-state heartbeat</h2>
+      <p>
+        Our core is a <strong>multi-cycle</strong> machine: each instruction walks through six FSM states,
+        one per clock. This is deliberately humbler than a pipeline — states, not stages — because the
+        capstone's goal is a machine you can watch think:
+      </p>
+      <primer-math display>\text{FETCH} \to \text{DECODE} \to \text{REQUEST} \to \text{WAIT} \to \text{EXECUTE} \to \text{UPDATE} \to \text{FETCH} \to \cdots</primer-math>
+      <ul>
+        <li><strong>FETCH</strong> — read the instruction word at <code>PC</code> from program memory;</li>
+        <li><strong>DECODE</strong> — split it into opcode and fields (pure combinational unpacking —
+          our boring encoding table pays off here);</li>
+        <li><strong>REQUEST</strong> — for <code>LDR</code>/<code>STR</code>, each lane computes its own
+          address and issues a memory request;</li>
+        <li><strong>WAIT</strong> — hold until the memory answers. For now memory replies in one cycle;
+          in two lessons, when the memory system becomes real, this state is where cores will visibly
+          idle — the FSM already has the waiting room built;</li>
+        <li><strong>EXECUTE</strong> — all four ALUs compute, all at once, on their own lane's
+          registers;</li>
+        <li><strong>UPDATE</strong> — commit: write results into the lane register files, set the flags,
+          advance (or branch) the shared <code>PC</code>.</li>
+      </ul>
+      <p>In SystemVerilog the spine is a dozen lines:</p>
+      <primer-code lang="text">
+        typedef enum logic [2:0] {FETCH, DECODE, REQUEST, WAIT, EXECUTE, UPDATE} state_t;
+        state_t st;
+
+        always_ff @(posedge clk) begin
+          if (!rst_n) st &lt;= FETCH;
+          else unique case (st)
+            FETCH:   st &lt;= DECODE;
+            DECODE:  st &lt;= REQUEST;
+            REQUEST: st &lt;= WAIT;
+            WAIT:    st &lt;= mem_pending ? WAIT : EXECUTE;   // the stall lives HERE
+            EXECUTE: st &lt;= UPDATE;
+            UPDATE:  st &lt;= FETCH;
+          endcase
+        end
+      </primer-code>
+      <p>
+        Every instruction visits every state — even a <code>NOP</code> strolls through the memory states
+        doing nothing. Wasteful? Slightly. Simple enough to trust completely? Absolutely — and when the
+        dispatcher and memory controller arrive in the next lessons, this predictable six-beat rhythm is
+        what will make whole-machine traces readable.
+      </p>
+    </primer-card>
+
+    <!-- Stepped block diagram of the core. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "coreDiagram": {
+          "title": "One brain, four lanes: the PrimerGPU core",
+          "stepFront": "The shared front end: one PC, one fetcher, one decoder — bought once for all four threads",
+          "stepLanes": "Four lane columns, stamped out by a generate loop: each has its own ALU, register file and LSU",
+          "stepWiring": "The only per-lane difference: each register file's R13–R15 are wired to that lane's own thread coordinates",
+          "lblPC": "PC + FETCH",
+          "lblDec": "DECODE (FSM)",
+          "lblLane": "lane",
+          "lblAlu": "ALU",
+          "lblRf": "regs",
+          "lblLsu": "LSU",
+          "lblWire": "R13=blk R14=dim R15="
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The floor plan</h2>
+      <p>
+        Here is the whole core as a block diagram — watch how little of it is "thinking" and how much is
+        "doing":
+      </p>
+      <primer-geometry scene="coreDiagram" caption="Block diagram of a PrimerGPU core. A shared box at the top holds the program counter, fetch unit and decoder. Below it hang four identical lane columns, each containing an ALU, a 16-entry register file and a load-store unit. Highlighted wiring shows each lane's registers R13 to R15 tied to its own block index, block dimension and thread index."></primer-geometry>
+      <p>
+        The four columns come from a <code>generate</code> loop — hardware's version of stamping out
+        copies — and the loop variable itself becomes each lane's identity:
+      </p>
+      <primer-code lang="text">
+        for (genvar l = 0; l &lt; LANES; l++) begin : lane
+          regfile rf (
+            .clk        (clk),
+            .block_idx  (block_idx),     // R13: which block this core is running
+            .block_dim  (BLOCK_DIM),     // R14: threads per block
+            .thread_idx (4'(l)),         // R15: the genvar IS the thread index!
+            .rd(rd), .rs(rs), .rt(rt), .we(reg_we), .wdata(lane_result[l]),
+            .rs_val(rs_val[l]), .rt_val(rt_val[l])
+          );
+          alu  alu_i (.op(alu_op), .a(rs_val[l]), .b(rt_val[l]), .y(alu_y[l]));
+          lsu  lsu_i (.addr(rs_val[l]), .wdata(rt_val[l]), .req(mem_req), ...);
+        end
+      </primer-code>
+      <p>
+        Read the <code>thread_idx</code> line twice: the elaboration-time constant <code>l</code> is
+        baked into lane <primer-math>l</primer-math>'s register file as the value its <code>R15</code>
+        forever returns. Silicon has no loop at runtime — there are simply four register files, physically
+        wired to answer "who are you?" four different ways. That single wiring difference is what makes
+        the shared instruction stream compute four different array indices, fetch four different elements,
+        and store four different sums. Everything else in the columns is copy-paste.
+      </p>
+      <primer-theorem name="The SIMT core">
+        <ul>
+          <li><strong>shared</strong>: one PC, one fetch, one decode, one six-state control FSM —
+            the cost of "what next?" is paid once;</li>
+          <li><strong>per lane</strong>: ALU, 16-entry register file, LSU, N/Z/P flags — the cost of
+            "do it" is paid per thread;</li>
+          <li>lanes differ <strong>only</strong> in the hard-wired values of
+            <code>R13</code>–<code>R15</code>;</li>
+          <li>memory instructions issue per-lane requests in REQUEST and stall the whole core in WAIT
+            until every lane's answer is back.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Predication — and one honest shortcut</h2>
+      <p>
+        Control flow is where lockstep gets philosophically interesting. <code>CMP</code> executes in
+        <em>every</em> lane, and each lane keeps its <em>own</em> N/Z/P flags — lane 0 might record
+        "negative" while lane 3 records "positive", because they compared different data. So what should
+        <code>BRnzp</code> do when the lanes disagree? There is only <strong>one</strong> PC — the lanes
+        cannot go separate ways.
+      </p>
+      <p>
+        Real GPUs answer with divergence machinery: mask off the lanes that didn't take the branch, run
+        both paths one after the other, reconverge — the elaborate apparatus of
+        <primer-ref soft to="computer-science/chip-design/gpu-compute/branch-divergence-and-reconvergence">branch
+        divergence and reconvergence</primer-ref>. Our toy takes a documented shortcut:
+        <strong>PrimerGPU branches when lane 0's predicate holds</strong>, and the other lanes follow.
+        This is honest for the kernels we run — vector add has no branches at all, and matmul's loop
+        condition depends only on the loop counter, which is <em>uniform</em> (identical in every lane,
+        since it never touches <code>R15</code>) — so lane 0 speaks for everyone. But be clear about what
+        we gave up: a kernel that branches on per-thread <em>data</em> would silently do the wrong thing
+        in lanes 1–3. Real divergence support is the single biggest gap between our core and a real SM,
+        and it is first on the upgrade list in the final lesson's gap audit.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The core in the simulator</h2>
+      <p>
+        Now the payoff for learning the two-phase pattern back in the
+        <primer-ref to="computer-science/chip-design/rtl/sequential-logic-and-always-ff">sequential-logic
+        lesson</primer-ref>: the whole core is one <code>State</code> object and one
+        <code>next()</code> function — settle, then snap. State is the FSM state, the PC, the instruction
+        register, four lanes of registers, and memory. Below, one core runs the lesson-72 vector-add
+        kernel (rebased for 4 elements: <code>a</code>@0, <code>b</code>@4, <code>c</code>@8) as one
+        4-thread block. Watch the FSM tick through its six beats, and watch the lane brackets — four
+        different values from one instruction, every time:
+      </p>
+      <primer-code run>
+        // ── One SIMT core: ONE pc + FSM, FOUR lanes marching in lockstep. ──
+        // Vector add over 4 elements (one block): a@0, b@4, c@8. Ideal 1-cycle memory for now.
+        const PROG = [0x50de, 0x300f, 0x9100, 0x9204, 0x9308, 0x3410, 0x7440, 0x3520, 0x7550, 0x3645, 0x3730, 0x8076, 0xf000];
+        const NAMES = ["NOP", "BRnzp", "CMP", "ADD", "SUB", "MUL", "DIV", "LDR", "STR", "CONST", "?", "?", "?", "?", "?", "RET"];
+        type Fsm = "FETCH" | "DECODE" | "REQUEST" | "WAIT" | "EXECUTE" | "UPDATE";
+        const STEP: Record&lt;Fsm, Fsm&gt; = {
+          FETCH: "DECODE", DECODE: "REQUEST", REQUEST: "WAIT", WAIT: "EXECUTE", EXECUTE: "UPDATE", UPDATE: "FETCH",
+        };
+
+        interface Lane { regs: number[]; nzp: number; addr: number; data: number }
+        interface State { st: Fsm; pc: number; ir: number; done: boolean; lanes: Lane[]; mem: number[] }
+
+        function makeState(blockIdx: number, blockDim: number, mem: number[]): State {
+          const lanes: Lane[] = [];
+          for (let t = 0; t &lt; 4; t++) {
+            const regs = new Array(16).fill(0);
+            regs[13] = blockIdx; regs[14] = blockDim; regs[15] = t;   // each lane's ONLY difference
+            lanes.push({ regs, nzp: 0, addr: 0, data: 0 });
+          }
+          return { st: "FETCH", pc: 0, ir: 0, done: false, lanes, mem };
+        }
+
+        // The combinational logic: old state in, next state out. Settle, then snap.
+        function next(s: State): State {
+          const n: State = {
+            ...s, st: STEP[s.st], mem: [...s.mem],
+            lanes: s.lanes.map((l) =&gt; ({ ...l, regs: [...l.regs] })),
+          };
+          const w = s.ir, op = w &gt;&gt; 12, rd = (w &gt;&gt; 8) &amp; 15, rs = (w &gt;&gt; 4) &amp; 15, rt = w &amp; 15, imm = w &amp; 255;
+          if (s.st === "FETCH") n.ir = PROG[s.pc];
+          if (s.st === "REQUEST" &amp;&amp; (op === 7 || op === 8))
+            n.lanes.forEach((l) =&gt; { l.addr = l.regs[rs]; });         // each lane computes ITS address
+          if (s.st === "WAIT") {
+            if (op === 7) n.lanes.forEach((l) =&gt; { l.data = s.mem[l.addr]; });      // ideal memory: LDR data back
+            if (op === 8) n.lanes.forEach((l) =&gt; { n.mem[l.addr] = l.regs[rt]; });  // STR performs the write
+          }
+          if (s.st === "EXECUTE") n.lanes.forEach((l) =&gt; {
+            const a = l.regs[rs], b = l.regs[rt];
+            if (op === 3) l.data = a + b;
+            if (op === 4) l.data = a - b;
+            if (op === 5) l.data = a * b;
+            if (op === 6) l.data = Math.floor(a / b);
+            if (op === 9) l.data = imm;
+            if (op === 2) l.nzp = a - b &lt; 0 ? 4 : a - b === 0 ? 2 : 1;
+          });
+          if (s.st === "UPDATE") {
+            if ((op &gt;= 3 &amp;&amp; op &lt;= 7) || op === 9)
+              n.lanes.forEach((l) =&gt; { if (rd &lt; 13) l.regs[rd] = l.data; });        // R13–R15 stay read-only
+            if (op === 15) n.done = true;
+            n.pc = op === 1 &amp;&amp; (s.lanes[0].nzp &amp; (rd &gt;&gt; 1)) !== 0 ? imm : s.pc + 1; // branch: lane 0 decides (toy!)
+          }
+          return n;
+        }
+
+        // ── Run one block (blockIdx = 0, blockDim = 4) and watch the FSM march. ──
+        const mem = [10, 20, 30, 40, 1, 2, 3, 4, 0, 0, 0, 0];        // a | b | c
+        let s = makeState(0, 4, mem);
+        s.lanes.forEach((l, t) =&gt; console.log(`lane ${t}:  %blockIdx=${l.regs[13]}  %blockDim=${l.regs[14]}  %threadIdx=${l.regs[15]}`));
+        console.log("");
+
+        const dis = (w: number) =&gt; {
+          const op = w &gt;&gt; 12, rd = (w &gt;&gt; 8) &amp; 15, rs = (w &gt;&gt; 4) &amp; 15, rt = w &amp; 15, imm = w &amp; 255;
+          if (op === 15 || op === 0) return NAMES[op];
+          if (op === 9) return `CONST R${rd}, #${imm}`;
+          if (op === 7) return `LDR R${rd}, R${rs}`;
+          if (op === 8) return `STR R${rs}, R${rt}`;
+          return `${NAMES[op]} R${rd}, R${rs}, R${rt}`;
+        };
+
+        let cycle = 0;
+        while (!s.done) {
+          const label = s.st === "FETCH" ? `pc=${s.pc}` : dis(s.ir);
+          let line = `c${String(cycle).padStart(2, "0")}  ${s.st.padEnd(7)}  ${label}`;
+          const nx = next(s);
+          if (s.st === "UPDATE") {                                    // show what the edge committed, per lane
+            const rd = (s.ir &gt;&gt; 8) &amp; 15, op = s.ir &gt;&gt; 12;
+            if (((op &gt;= 3 &amp;&amp; op &lt;= 7) || op === 9) &amp;&amp; rd &lt; 13)
+              line += `   -&gt; R${rd} = [${nx.lanes.map((l) =&gt; l.regs[rd]).join(", ")}]`;
+            if (op === 8) line += `   -&gt; mem = [${nx.mem.join(", ")}]`;
+          }
+          console.log(line);
+          s = nx;
+          cycle++;
+        }
+        console.log(`\ndone in ${cycle} cycles (13 instructions x 6 FSM states)`);
+        console.log(`c = [${s.mem.slice(8).join(", ")}]   (expected 11, 22, 33, 44)`);
+      </primer-code>
+      <p>
+        Read the trace like a hardware engineer. Cycle 11's <code>ADD R0, R0, R15</code> commits
+        <code>R0 = [0, 1, 2, 3]</code> — four different indices from one instruction, the index magic
+        happening live. Cycle 41's <code>LDR</code> returns <code>[10, 20, 30, 40]</code> — four
+        different memory words from one opcode. And the whole 13-instruction kernel lands on exactly
+        <primer-math>13 \times 6 = 78</primer-math> cycles with <primer-math>c = [11, 22, 33, 44]</primer-math>.
+        One core down. Next lesson: a dispatcher that feeds blocks to several of them.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Six states? A pipelined CPU only needed five stages…">
+      <p>
+        The classic RISC pipeline's five <em>stages</em> and our six <em>states</em> look like cousins,
+        but they are different animals. A pipeline has all five stages busy at once — five instructions
+        in flight, one finishing per cycle; our multi-cycle FSM works on one instruction at a time, six
+        cycles each. So is PrimerGPU's core just a bad CPU? Per <em>thread</em>, yes — gloriously bad.
+        But look at what each cycle accomplishes: EXECUTE fires <em>four</em> ALUs, REQUEST issues
+        <em>four</em> memory addresses. The GPU wager, visible even at this toy scale, is that width
+        beats depth: rather than heroically overlapping one thread's instructions, just do four threads
+        plainly — then, in the coming lessons, eight, twenty-four, thousands. Real GPU cores eventually
+        pipeline too (why not both?), but their souls remain wide-and-simple, and per-thread performance
+        remains the metric GPUs cheerfully lose.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Four lanes need four genuinely separate register files">
+      <p>
+        A tempting "simplification": since all lanes run the same instruction, let them share one
+        register file and save three-quarters of the flip-flops. This breaks on the <em>first</em>
+        instruction, not eventually — because in SIMT, every instruction writes the same register
+        <em>number</em> with a different <em>value</em> in each lane. When
+        <code>ADD R0, R0, %threadIdx</code> commits, lane 0 must hold <code>R0 = 0</code> while lane 3
+        holds <code>R0 = 3</code>; with one shared <code>R0</code>, the last writer wins and all four
+        threads become thread 3 — vector add fills <primer-math>c</primer-math> with four copies of
+        <primer-math>a[3]+b[3]</primer-math>. "Same register name" in SIMT means same <em>role</em>,
+        never same <em>storage</em>: <primer-math>4 \times 16 = 64</primer-math> physical registers, no
+        negotiation. Scaled up, this is why real SMs carry those outlandish 256&nbsp;KB register files —
+        thousands of threads, each owning its private copy of "R0".
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: FSM sequencing, resource arithmetic, index wiring, shortcut-vs-real reasoning. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "simtCoreQuiz@1": {
+          "intro": "PrimerGPU core: one PC/fetch/decode + six-state FSM shared by 4 lanes; per-lane ALU, register file (R13–R15 hard-wired to the lane's indices) and LSU.",
+          "cyclesQ": "Every instruction walks all six FSM states, one cycle each, and memory answers in one cycle (no extra stalls). How many cycles does a {n}-instruction kernel take?",
+          "bitsQ": "A core has {l} lanes, each with 16 registers of 16 bits. How many bits of register storage does the core hold in total?",
+          "execQ": "During a {n}-instruction kernel (no stalls), how many cycles in total does the FSM spend in the EXECUTE state?",
+          "updQ": "Instructions are numbered from 0 and each takes exactly 6 cycles, starting at cycle 0. At which cycle does instruction number {k} perform its UPDATE (the 6th state of its walk)?",
+          "wireQ": "Lane {t} sits in a core that has been assigned block {b}, with %blockDim = {d}. After the kernel's opening MUL/ADD pair computes i = %blockIdx × %blockDim + %threadIdx, what is lane {t}'s R0?",
+          "sharedQ": "Which parts of the PrimerGPU core exist exactly once, shared by all four lanes?",
+          "sharedA": "The program counter, the fetch unit, the decoder and the control FSM",
+          "sharedB": "The ALUs — arithmetic is expensive, so the lanes take turns",
+          "sharedC": "The register files — registers are the biggest structure, so they are pooled",
+          "sharedD": "Nothing — each lane is a complete independent processor",
+          "diffQ": "At reset, what is the ONLY difference between the four lane columns?",
+          "diffA": "The hard-wired values their register files return for R13–R15 — each lane's own thread coordinates",
+          "diffB": "Each lane has a different subset of the 11 instructions",
+          "diffC": "Each lane runs at a different clock frequency",
+          "diffD": "Each lane has its own program counter",
+          "branchQ": "PrimerGPU resolves BRnzp by letting lane 0's predicate decide for everyone. When is this shortcut actually safe?",
+          "branchA": "When the branch condition is uniform — computed identically in every lane, never touching per-thread data or %threadIdx — as in a matmul loop counter",
+          "branchB": "Always — lanes execute in lockstep, so their flags are always equal",
+          "branchC": "Never — it is wrong for every possible kernel",
+          "branchD": "Only when exactly one lane is active",
+          "realQ": "How does a real GPU handle lanes that disagree about a branch?",
+          "realA": "It masks off the lanes on the not-taken path, executes both paths one after the other, and reconverges afterwards",
+          "realB": "It gives each lane its own program counter and lets them run fully independently",
+          "realC": "It cancels the kernel and reports a divergence error",
+          "realD": "It averages the lanes' N/Z/P flags and branches on the result",
+          "nzpQ": "Why does each lane keep its own N/Z/P flags rather than sharing one set?",
+          "nzpA": "CMP compares each lane's own register values, so the outcome can genuinely differ from lane to lane",
+          "nzpB": "Flags are too small to be worth sharing",
+          "nzpC": "The flags double as each lane's thread index",
+          "nzpD": "Shared flags would need four times the wiring",
+          "waitQ": "What is the WAIT state for?",
+          "waitA": "Holding the core until every lane's memory request has been answered — the built-in room where real memory latency will later make cores visibly stall",
+          "waitB": "Giving the decoder time to cool down between instructions",
+          "waitC": "Waiting for the dispatcher's permission to execute",
+          "waitD": "It is unused padding to make the state count even",
+          "lockQ": "\"The four lanes run in lockstep\" means…",
+          "lockA": "One fetched instruction drives all four lanes' ALUs in the same cycle, each on its own lane's data",
+          "lockB": "The lanes take turns executing, one instruction each per cycle",
+          "lockC": "All lanes compute identical results, which are compared for errors",
+          "lockD": "The lanes share a single set of registers",
+          "roQ": "During UPDATE, the register-write logic skips destinations R13–R15. What would go wrong without that guard?",
+          "roA": "A kernel could overwrite a thread's identity registers, corrupting every later index computation built on them",
+          "roB": "Nothing — writes to those registers are harmless because they are never read",
+          "roC": "The FSM would deadlock in the UPDATE state",
+          "roD": "The program counter would stop advancing"
+        }
+      }
+    </script>
+
+    <primer-quiz name="simtCoreQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/capstone/designing-a-tiny-gpu-isa",
+      "computer-science/chip-design/gpu-compute/the-streaming-multiprocessor"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The core floor plan: shared front end above four lane columns. ──
+  registerGeometryScene(
+    "coreDiagram",
+    ({ board, colors, step, sceneStrings }) => {
+      const txt = (x, y, s, color, fs = 11, bold = false) =>
+        board.create("text", [x, y, s], {
+          strokeColor: color, fontSize: fs, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: bold ? "font-weight:600" : "",
+        });
+      const box = (x0, y0, x1, y1, stroke, fill, opacity) =>
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: fill, fillOpacity: opacity, fixed: true, highlight: false,
+          vertices: { visible: false }, borders: { strokeColor: stroke, strokeWidth: 1.5, highlight: false },
+        });
+      const wire = (x0, y0, x1, y1, color, dash = 0) =>
+        board.create("segment", [[x0, y0], [x1, y1]], {
+          strokeColor: color, strokeWidth: 1.5, dash, highlight: false,
+        });
+
+      // Step 1: the shared front end.
+      step(sceneStrings("stepFront"), () => {
+        box(0.5, 6.2, 5.0, 7.4, colors.cat[0], colors.cat[0], 0.18);
+        txt(2.75, 6.8, sceneStrings("lblPC"), colors.cat[0], 12, true);
+        box(5.6, 6.2, 11.5, 7.4, colors.cat[0], colors.cat[0], 0.18);
+        txt(8.55, 6.8, sceneStrings("lblDec"), colors.cat[0], 12, true);
+        wire(5.0, 6.8, 5.6, 6.8, colors.line);
+      });
+
+      // Step 2: the four lane columns.
+      step(sceneStrings("stepLanes"), () => {
+        for (let l = 0; l < 4; l++) {
+          const x = 0.5 + l * 3.0;
+          box(x, 1.4, x + 2.4, 5.4, colors.line, colors.bg, 0);
+          txt(x + 1.2, 5.05, sceneStrings("lblLane") + " " + l, colors.ink, 11, true);
+          box(x + 0.25, 3.9, x + 2.15, 4.6, colors.cat[1], colors.cat[1], 0.18);
+          txt(x + 1.2, 4.25, sceneStrings("lblAlu"), colors.cat[1], 10, true);
+          box(x + 0.25, 2.9, x + 2.15, 3.6, colors.cat[2], colors.cat[2], 0.18);
+          txt(x + 1.2, 3.25, sceneStrings("lblRf"), colors.cat[2], 10, true);
+          box(x + 0.25, 1.7, x + 2.15, 2.6, colors.cat[3], colors.cat[3], 0.18);
+          txt(x + 1.2, 2.15, sceneStrings("lblLsu"), colors.cat[3], 10, true);
+          wire(x + 1.2, 6.2, x + 1.2, 5.4, colors.line);   // decode broadcast down into each lane
+        }
+      });
+
+      // Step 3: the index wiring — the one per-lane difference.
+      step(sceneStrings("stepWiring"), () => {
+        for (let l = 0; l < 4; l++) {
+          const x = 0.5 + l * 3.0;
+          wire(x + 0.25, 0.7, x + 0.7, 2.9, colors.cat[4], 2);
+          txt(x + 1.2, 0.45, sceneStrings("lblWire") + l, colors.cat[4], 9, true);
+        }
+      });
+    },
+    { boundingbox: [-0.3, 7.9, 12.3, -0.2], keepAspect: false, title: () => makeStrings("coreDiagram")("title") },
+  );
+
+  registerQuiz("simtCoreQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // 6n cycles.
+      prompt: (v) => sceneStrings("cyclesQ", v),
+      variables: "n=[5:20]",
+      answer: "6 * n",
+    },
+    {
+      // l lanes × 16 regs × 16 bits.
+      prompt: (v) => sceneStrings("bitsQ", v),
+      variables: "l=[2,4,8,16]",
+      answer: "l * 256",
+    },
+    {
+      // One EXECUTE cycle per instruction.
+      prompt: (v) => sceneStrings("execQ", v),
+      variables: "n=[7:25]",
+      answer: "n",
+    },
+    {
+      // UPDATE of instruction k lands at cycle 6k+5.
+      prompt: (v) => sceneStrings("updQ", v),
+      variables: "k=[1:12]",
+      answer: "6 * k + 5",
+    },
+    {
+      // i = b·d + t for that lane.
+      prompt: (v) => sceneStrings("wireQ", v),
+      variables: "t=[0:3] b=[1:9] d=[4,8]",
+      answer: "b * d + t",
+    },
+    {
+      prompt: () => sceneStrings("sharedQ"),
+      options: [
+        { text: () => sceneStrings("sharedA"), correct: true },
+        { text: () => sceneStrings("sharedB"), correct: false },
+        { text: () => sceneStrings("sharedC"), correct: false },
+        { text: () => sceneStrings("sharedD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("diffQ"),
+      options: [
+        { text: () => sceneStrings("diffA"), correct: true },
+        { text: () => sceneStrings("diffB"), correct: false },
+        { text: () => sceneStrings("diffC"), correct: false },
+        { text: () => sceneStrings("diffD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("branchQ"),
+      options: [
+        { text: () => sceneStrings("branchA"), correct: true },
+        { text: () => sceneStrings("branchB"), correct: false },
+        { text: () => sceneStrings("branchC"), correct: false },
+        { text: () => sceneStrings("branchD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("realQ"),
+      options: [
+        { text: () => sceneStrings("realA"), correct: true },
+        { text: () => sceneStrings("realB"), correct: false },
+        { text: () => sceneStrings("realC"), correct: false },
+        { text: () => sceneStrings("realD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("nzpQ"),
+      options: [
+        { text: () => sceneStrings("nzpA"), correct: true },
+        { text: () => sceneStrings("nzpB"), correct: false },
+        { text: () => sceneStrings("nzpC"), correct: false },
+        { text: () => sceneStrings("nzpD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("waitQ"),
+      options: [
+        { text: () => sceneStrings("waitA"), correct: true },
+        { text: () => sceneStrings("waitB"), correct: false },
+        { text: () => sceneStrings("waitC"), correct: false },
+        { text: () => sceneStrings("waitD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lockQ"),
+      options: [
+        { text: () => sceneStrings("lockA"), correct: true },
+        { text: () => sceneStrings("lockB"), correct: false },
+        { text: () => sceneStrings("lockC"), correct: false },
+        { text: () => sceneStrings("lockD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("roQ"),
+      options: [
+        { text: () => sceneStrings("roA"), correct: true },
+        { text: () => sceneStrings("roB"), correct: false },
+        { text: () => sceneStrings("roC"), correct: false },
+        { text: () => sceneStrings("roD"), correct: false },
+      ],
+    },
+  ]);
+</script>

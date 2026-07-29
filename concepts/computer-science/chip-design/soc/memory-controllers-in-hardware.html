@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Memory Controllers in Hardware</primer-title>
+
+    <primer-card>
+      <p>
+        Every master we've put on the fabric — CPU,
+        <primer-ref to="computer-science/chip-design/soc/dma-and-peripherals">DMA engines</primer-ref>,
+        GPU — ultimately funnels into one place: the DRAM. And DRAM, as
+        <primer-ref to="computer-science/computer-architecture/memory/dram-and-memory-controllers">you
+        already know</primer-ref>, is a diva. It is organised as banks of rows of columns; before
+        you can read a byte you must <em>activate</em> its row (copy a whole row into the bank's
+        row buffer, waiting <primer-math>t_{RCD}</primer-math>), then issue the column access
+        (waiting <primer-math>t_{CAS}</primer-math>); to touch a <em>different</em> row you must
+        first <em>precharge</em> the bank (<primer-math>t_{RP}</primer-math>) and start over. A
+        <strong>row hit</strong> costs one cheap column access; a <strong>row conflict</strong>
+        costs the whole precharge–activate–access ritual — several times more. And every few
+        microseconds the whole chip demands a refresh or it forgets your data.
+      </p>
+      <p>
+        The prerequisite taught you the diva's personality. <em>This</em> lesson builds her
+        handler: the <strong>memory controller</strong>, the hardware block that accepts a chaotic
+        stream of requests from the fabric and turns it into a legal, ruthlessly optimised command
+        schedule. It is one of the most consequential blocks on the die — the difference between a
+        naive controller and a good one is often 2× on delivered bandwidth, for free, forever.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Anatomy: queues, counters, and a scheduler</h2>
+      <p>
+        Open the hood and the controller has three organs:
+      </p>
+      <ul>
+        <li><strong>Per-bank request queues.</strong> Arriving reads and writes are decoded
+          (address → bank, row, column) and parked in a queue <em>per bank</em>. Why per bank?
+          Because banks are independent little machines: while bank 0 is busy transferring data,
+          bank 2 can be activating a row. Separate queues let the scheduler see — and exploit —
+          that <strong>bank-level parallelism</strong>.</li>
+        <li><strong>The timing FSM.</strong> Every JEDEC parameter becomes a hardware counter: on
+          <code>ACT</code>, a per-bank counter loads <primer-math>t_{RCD}</primer-math> and counts
+          down; the FSM simply refuses to issue a column command for that bank until it hits zero.
+          Another counter enforces <primer-math>t_{RP}</primer-math> after <code>PRE</code>,
+          another <primer-math>t_{CAS}</primer-math> from column command to data, others the dozen
+          further constraints. Correctness by construction: no command can be emitted while any
+          governing counter is non-zero.</li>
+        <li><strong>The scheduler.</strong> Each cycle, it looks across all the bank queues and
+          asks: of every command that is <em>legal right now</em>, which one do I send? This tiny
+          combinational decision is where the performance lives.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>The scheduler: FR-FCFS, and the page-policy bet</h2>
+      <p>
+        The classic answer is <strong>FR-FCFS</strong> — <em>first-ready, first-come-first-served</em>:
+      </p>
+      <ul>
+        <li><strong>first-ready:</strong> prefer requests that are ready to go <em>cheaply</em> —
+          above all, requests that hit a currently open row (a column command now beats an
+          activate-then-column later);</li>
+        <li><strong>first-come:</strong> among equally-ready candidates, oldest wins.</li>
+      </ul>
+      <p>
+        The effect: if the open row has three hits scattered through the queue, the scheduler
+        serves all three <em>before</em> paying the conflict that closes the row — even though a
+        conflicting request arrived earlier. Requests are reordered for row-hit rate and spread
+        across banks for parallelism. It is out-of-order execution, reinvented for memory.
+      </p>
+      <p>
+        Underneath sits a bet called the <strong>page policy</strong>. <strong>Open-page</strong>:
+        after an access, leave the row open, gambling that the next request wants the same row
+        (great for streaming and DMA traffic — hits galore). <strong>Closed-page</strong>:
+        precharge immediately after each access, gambling that the next request wants a
+        <em>different</em> row, so the <primer-math>t_{RP}</primer-math> is pre-paid and hidden
+        (great for scattered, random traffic). Modern controllers hedge adaptively — track recent
+        hit rate per bank and switch bets.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "bankSched": {
+          "title": "Two banks under FR-FCFS: hits stream, banks overlap, conflicts pay",
+          "b0": "Bank 0",
+          "b1": "Bank 1",
+          "time": "cycles",
+          "lOpen": "row 7 open",
+          "lPar": "overlaps bank 0's data",
+          "lConf": "row conflict: PRE + ACT + RD",
+          "stepAct": "A request for bank 0, row 7 arrives at an idle bank: the scheduler issues ACT and the tRCD counter starts — no column command until it reaches zero",
+          "stepHits": "Row 7 is open: three queued requests for that row are served back-to-back — each a single cheap column read (tCAS). This is the row-hit payoff FR-FCFS reorders for",
+          "stepPar": "Meanwhile bank 1 activates row 2 in parallel: its tRCD hides under bank 0's data transfers. Per-bank queues make this overlap visible to the scheduler",
+          "stepConf": "Now a request for bank 0, row 1: a conflict. The bank must precharge (tRP), activate the new row (tRCD), then read — seven cycles where a hit took one. Every conflict the scheduler avoids is this rectangle saved"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The schedule, drawn</h2>
+      <p>
+        Step through a few cycles of two banks under FR-FCFS. Compare the width of a hit
+        (<code>RD</code>) with the width of the conflict at the end — that ratio is why the
+        scheduler exists:
+      </p>
+      <primer-geometry scene="bankSched" caption="A timeline with two lanes, bank 0 and bank 1, and a cycle axis. Bank 0 shows an ACT command opening row 7, then three narrow back-to-back RD boxes, which are row hits. Bank 1's ACT for row 2 and its reads overlap bank 0's activity, showing bank-level parallelism. Finally bank 0 pays a row conflict: a wide precharge box, a new activate for row 1, and only then a read — several times wider than a single hit."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Race the schedulers</h2>
+      <p>
+        Here are both schedulers on the same seeded request trace against one bank: plain in-order
+        FCFS versus FR-FCFS. Same requests, same DRAM timings — only the <em>order</em> differs:
+      </p>
+      <primer-code run>
+        // One DRAM bank, two schedulers, one seeded trace.
+        const tCAS = 10, tRCD = 12, tRP = 13;
+        const HIT = tCAS;                    // row already open
+        const OPEN = tRCD + tCAS;            // bank idle: activate, then read
+        const CONFLICT = tRP + tRCD + tCAS;  // wrong row open: precharge, activate, read
+
+        let seed = 2026;
+        const rand = () =&gt; { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
+
+        // 14 requests over 4 rows, with the burstiness real traffic has.
+        const trace: { id: number; row: number }[] = [];
+        let row = 0;
+        for (let i = 0; i &lt; 14; i++) {
+          if (rand() &lt; 0.45) row = Math.floor(rand() * 4);   // sometimes wander to a new row
+          trace.push({ id: i, row });
+        }
+        console.log("arrival order, by row: " + trace.map((t) =&gt; t.row).join(" "));
+
+        function run(name: string, pick: (q: { id: number; row: number }[], open: number) =&gt; number) {
+          const q = trace.slice();
+          let open = -1, cycles = 0, hits = 0, misses = 0;
+          const order: number[] = [];
+          while (q.length &gt; 0) {
+            const req = q.splice(pick(q, open), 1)[0];
+            order.push(req.row);
+            if (req.row === open) { hits++; cycles += HIT; }
+            else { misses++; cycles += open === -1 ? OPEN : CONFLICT; open = req.row; }
+          }
+          console.log(`\n${name}`);
+          console.log(`  served order, by row: ${order.join(" ")}`);
+          console.log(`  ${hits} row hits, ${misses} activates -&gt; ${cycles} cycles`);
+          return cycles;
+        }
+
+        const a = run("In-order (FCFS):", () =&gt; 0);
+        const b = run("FR-FCFS:", (q, open) =&gt; {
+          const hit = q.findIndex((r) =&gt; r.row === open); // oldest ready row-hit first...
+          return hit &gt;= 0 ? hit : 0;                      // ...otherwise oldest request
+        });
+        console.log(`\nSame requests, same DRAM - FR-FCFS is ${a - b} cycles faster (${Math.round((1 - b / a) * 100)}%).`);
+      </primer-code>
+      <p>
+        Look at the two "served order" lines: FR-FCFS has quietly sorted the stream into runs of
+        equal rows. Nudge the <code>0.45</code> down (more locality) or up (more chaos) and watch
+        the gap move.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Many masters, and the road back</h2>
+      <p>
+        A real controller serves several requestors at once, and they want <em>opposite</em>
+        things. The CPU wants <strong>latency</strong>: its next hundred instructions are stalled
+        on one load. The GPU and the DMA engines want <strong>bandwidth</strong>: nobody is
+        blocked on any single beat, but the aggregate rate must be huge. A scheduler that
+        maximises pure row-hit rate will happily serve a thousand-beat GPU streak while the CPU's
+        lone, row-conflicting load ages in the queue. So practical schedulers layer
+        <strong>policy</strong> on top of FR-FCFS: priority classes per requestor, age counters
+        that escalate starving requests, sometimes per-class bandwidth quotas. Remember this shape
+        — a scheduler is a policy, and every policy chooses losers.
+      </p>
+      <p>
+        Finally, the road back. Because the controller reorders, read data emerges in
+        <em>schedule</em> order, not <em>request</em> order. Every request carried an
+        <primer-ref soft to="computer-science/chip-design/soc/the-axi-protocol">ID</primer-ref>
+        from the fabric, so each returning beat is tagged with its ID, and the return path either
+        obeys the protocol's per-ID ordering rules or carries a small reorder buffer to restore
+        what each master is owed. Reordering inside, promises kept outside.
+      </p>
+      <primer-theorem name="The memory controller">
+        <ul>
+          <li><strong>per-bank queues</strong> expose bank-level parallelism; the address decode
+            splits every request into (bank, row, column);</li>
+          <li>the <strong>timing FSM</strong> enforces <primer-math>t_{RCD}</primer-math>,
+            <primer-math>t_{RP}</primer-math>, <primer-math>t_{CAS}</primer-math> (and friends) as
+            per-bank down-counters — no command issues while a counter is live;</li>
+          <li><strong>FR-FCFS</strong> scheduling: ready row-hits first, then oldest — reordering
+            for hit rate and parallelism;</li>
+          <li><strong>open-page</strong> bets on locality (hits), <strong>closed-page</strong>
+            pre-pays the precharge for scattered traffic;</li>
+          <li>requestor <strong>arbitration</strong> balances CPU latency against GPU/DMA
+            bandwidth via priorities and age escalation;</li>
+          <li>the <strong>read-return path</strong> tags data with request IDs and restores each
+            master's expected order.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Why did moving one block on-die make computers visibly faster?">
+      <p>
+        For decades the memory controller didn't live on the processor at all — it sat in the
+        "northbridge", a separate chipset package a few centimetres of motherboard away. Every
+        cache miss took a round trip: off the CPU, across a board-level bus, through the
+        northbridge's controller, out to DRAM, and all the way back. In 2003 AMD's Opteron/Athlon 64
+        pulled the controller <em>onto the CPU die</em>, and memory latency dropped by tens of
+        nanoseconds overnight — one of the clearest single-change performance wins of that era,
+        and a genuine competitive crisis for Intel, who followed in 2008 with Nehalem. Since then
+        the controller has been a first-class citizen of the SoC, co-designed with the cache
+        hierarchy and fabric — which is exactly why it gets a lesson in a chip-design course: it's
+        <em>your</em> block now, not the motherboard's.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The bandwidth-optimal scheduler that ruins the chip">
+      <p>
+        Here is a seductive wrong idea: "delivered bandwidth is the metric, so schedule purely for
+        row hits and long bursts." Build that, and your benchmark bandwidth number is spectacular —
+        while the product stutters. The GPU's endless streaming keeps whole banks' rows open and
+        hit-friendly, so the pure-bandwidth scheduler keeps choosing it; the CPU's single pointer-
+        chasing load — a row conflict, of course — waits, and with it waits <em>every instruction
+        behind it</em>. The display controller, which must refresh the panel on a hard deadline,
+        misses its window and the screen glitches. Nothing is broken in RTL; the <em>policy</em> is
+        broken. A scheduler is a resource allocator, and every allocator has losers — the
+        engineering is choosing them on purpose: priority for latency-critical clients, real-time
+        guarantees for the display, age counters so no request starves, and only <em>then</em>
+        row-hit greed. When a datasheet brags about peak bandwidth, ask the embarrassing question:
+        <em>at what worst-case latency, for whom?</em>
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "memctlQuiz@1": {
+          "intro": "Row hit = tCAS. Row conflict = tRP + tRCD + tCAS. FR-FCFS: ready row-hits first, then oldest.",
+          "confQ": "A controller runs with tRP = {p}, tRCD = {r} and tCAS = {c} cycles. How many cycles does a row CONFLICT cost (precharge, then activate, then column read)?",
+          "saveQ": "On this chip a row conflict costs {k} cycles and a row hit {c} cycles. The scheduler's reordering turns {m} would-be conflicts into hits. How many cycles does that save?",
+          "totQ": "A burst of requests schedules as {h} row hits at {c} cycles each and {m} conflicts at {k} cycles each. Total cycles spent?",
+          "refQ": "Refresh makes the bank unavailable for {r} cycles out of every {t}. What percentage of time is lost to refresh?",
+          "frQ": "One bank's queue holds, oldest first: A → row 3, B → row 8, C → row 3. Row 3 is currently open. In which order does FR-FCFS serve them?",
+          "frRight": "A, C, B — both row-3 hits first (oldest hit first), then B pays the one conflict",
+          "frFcfs": "A, B, C — strictly oldest first, always",
+          "frYoung": "C, A, B — youngest hit first",
+          "frBig": "B, A, C — conflicts first to get them over with",
+          "openQ": "When does an OPEN-page policy win?",
+          "opLoc": "When traffic has row locality — the next request often wants the row already open, so leaving it open harvests cheap hits",
+          "opRand": "When every access goes to a random row",
+          "opRef": "Only during refresh",
+          "opWrite": "Only for writes",
+          "closedQ": "A CLOSED-page policy (precharge immediately after every access) is the better bet when…",
+          "clRand": "accesses are scattered with little row locality — the precharge is pre-paid and hidden before the next, likely-different-row request",
+          "clStream": "traffic is perfectly sequential streaming",
+          "clNever": "never — open-page always wins",
+          "clCpu": "the requestor is a CPU, regardless of traffic",
+          "fsmQ": "How does the controller enforce tRCD (activate-to-column delay) in hardware?",
+          "fsCount": "A per-bank down-counter loads on ACT; the FSM refuses to issue that bank's column command until it reaches zero",
+          "fsSw": "The device driver inserts software delays",
+          "fsClock": "The DRAM clock is slowed during activation",
+          "fsHope": "It retries the command until the DRAM stops returning errors",
+          "arbQ": "The CPU wants low latency; the GPU wants bandwidth. A scheduler that maximises ONLY row-hit rate will…",
+          "arStarve": "starve latency-critical CPU reads behind long hit-friendly GPU streaks — policies need priorities and age escalation, because every policy has losers",
+          "arFair": "automatically be fair to both",
+          "arCpu": "always favour the CPU",
+          "arSlow": "reduce total bandwidth",
+          "retQ": "The controller services requests out of order. How does read data get back to the right master, in the right order?",
+          "reId": "Every request carries an ID; returning data is tagged with it, and per-ID ordering rules or a reorder buffer restore what each master expects",
+          "reWait": "The fabric blocks all masters until each response returns",
+          "reAddr": "Masters re-issue reads until the data looks right",
+          "reLuck": "Responses happen to come back in order",
+          "bankQ": "Why per-BANK request queues rather than one big queue?",
+          "bqPar": "Banks operate independently — separate queues let the scheduler overlap one bank's activate with another bank's data transfer",
+          "bqSize": "Many small queues are cheaper than one large one",
+          "bqRef": "Refresh requires it",
+          "bqOrder": "It guarantees in-order service"
+        }
+      }
+    </script>
+
+    <primer-quiz name="memctlQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/soc/dma-and-peripherals",
+      "computer-science/computer-architecture/memory/dram-and-memory-controllers"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Two banks on a command timeline: hits, parallelism, then a conflict. ──
+  registerGeometryScene(
+    "bankSched",
+    ({ board, colors, step, sceneStrings }) => {
+      const box = (t0, t1, base, fill, txt) => {
+        board.create(
+          "polygon",
+          [[t0, base], [t1, base], [t1, base + 1.1], [t0, base + 1.1]],
+          { fillColor: fill, fillOpacity: 0.3, fixed: true, highlight: false, vertices: { visible: false }, borders: { strokeColor: colors.line, strokeWidth: 1.2, highlight: false } },
+        );
+        board.create("text", [(t0 + t1) / 2, base + 0.55, txt], {
+          strokeColor: colors.ink, fontSize: 10, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      };
+      const lab = (x, y, txt, color, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: 10, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+
+      // ── Base: lane labels and the cycle axis. ──
+      lab(-0.4, 7.05, sceneStrings("b0"), colors.ink, "right");
+      lab(-0.4, 4.05, sceneStrings("b1"), colors.ink, "right");
+      board.create("arrow", [[0, 2.3], [20.6, 2.3]], { strokeColor: colors.line, strokeWidth: 1.5, highlight: false });
+      for (let t = 0; t <= 20; t += 5) {
+        board.create("segment", [[t, 2.15], [t, 2.45]], { strokeColor: colors.line, strokeWidth: 1.5, highlight: false });
+        lab(t, 1.7, String(t), colors.ink);
+      }
+      lab(20.6, 1.7, sceneStrings("time"), colors.ink, "right");
+
+      // Step 1: bank 0 activates row 7 (tRCD wide).
+      step(sceneStrings("stepAct"), () => {
+        box(0, 3, 6.5, colors.cat[1], "ACT r7");
+        lab(3.3, 8.15, sceneStrings("lOpen"), colors.cat[1]);
+      });
+
+      // Step 2: three back-to-back row hits.
+      step(sceneStrings("stepHits"), () => {
+        box(3, 4, 6.5, colors.cat[0], "RD");
+        box(4, 5, 6.5, colors.cat[0], "RD");
+        box(5, 6, 6.5, colors.cat[0], "RD");
+      });
+
+      // Step 3: bank 1 activates and reads in parallel.
+      step(sceneStrings("stepPar"), () => {
+        box(1, 4, 3.5, colors.cat[1], "ACT r2");
+        box(4, 5, 3.5, colors.cat[0], "RD");
+        box(6, 7, 3.5, colors.cat[0], "RD");
+        lab(4, 5.15, sceneStrings("lPar"), colors.cat[2]);
+      });
+
+      // Step 4: the conflict — precharge, activate the new row, read.
+      step(sceneStrings("stepConf"), () => {
+        box(6, 9, 6.5, colors.cat[3], "PRE");
+        box(9, 12, 6.5, colors.cat[1], "ACT r1");
+        box(12, 13, 6.5, colors.cat[0], "RD");
+        lab(9.5, 8.15, sceneStrings("lConf"), colors.cat[3]);
+      });
+    },
+    { boundingbox: [-3.4, 8.9, 21.2, 1.1], keepAspect: false, title: () => makeStrings("bankSched")("title") },
+  );
+
+  registerQuiz("memctlQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Conflict = tRP + tRCD + tCAS.
+      prompt: (v) => sceneStrings("confQ", v),
+      variables: "p=[10:15] r=[10:15] c=[10:15]",
+      answer: "p + r + c",
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Conflict cost k = c + d; saving per converted request is d, so total = m * d.
+      prompt: (v) => sceneStrings("saveQ", { ...v, k: v.c + v.d }),
+      variables: "m=[4:12] c=[10:15] d=[20:30]",
+      answer: "m * d",
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Total = h*c + m*k.
+      prompt: (v) => sceneStrings("totQ", v),
+      variables: "h=[5:10] m=[2:5] c=[10,12,15] k=[40,45,50]",
+      answer: "h * c + m * k",
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Refresh overhead % = r*100/t (values chosen to divide cleanly or to one decimal).
+      prompt: (v) => sceneStrings("refQ", v),
+      variables: "r=[40,80] t=[2000,4000,8000]",
+      answer: "r * 100 / t",
+      keyboard: "geometry-lengths",
+    },
+    {
+      prompt: () => sceneStrings("frQ"),
+      options: [
+        { text: () => sceneStrings("frRight"), correct: true },
+        { text: () => sceneStrings("frFcfs"), correct: false },
+        { text: () => sceneStrings("frYoung"), correct: false },
+        { text: () => sceneStrings("frBig"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("openQ"),
+      options: [
+        { text: () => sceneStrings("opLoc"), correct: true },
+        { text: () => sceneStrings("opRand"), correct: false },
+        { text: () => sceneStrings("opRef"), correct: false },
+        { text: () => sceneStrings("opWrite"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("closedQ"),
+      options: [
+        { text: () => sceneStrings("clRand"), correct: true },
+        { text: () => sceneStrings("clStream"), correct: false },
+        { text: () => sceneStrings("clNever"), correct: false },
+        { text: () => sceneStrings("clCpu"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fsmQ"),
+      options: [
+        { text: () => sceneStrings("fsCount"), correct: true },
+        { text: () => sceneStrings("fsSw"), correct: false },
+        { text: () => sceneStrings("fsClock"), correct: false },
+        { text: () => sceneStrings("fsHope"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("arbQ"),
+      options: [
+        { text: () => sceneStrings("arStarve"), correct: true },
+        { text: () => sceneStrings("arFair"), correct: false },
+        { text: () => sceneStrings("arCpu"), correct: false },
+        { text: () => sceneStrings("arSlow"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("retQ"),
+      options: [
+        { text: () => sceneStrings("reId"), correct: true },
+        { text: () => sceneStrings("reWait"), correct: false },
+        { text: () => sceneStrings("reAddr"), correct: false },
+        { text: () => sceneStrings("reLuck"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bankQ"),
+      options: [
+        { text: () => sceneStrings("bqPar"), correct: true },
+        { text: () => sceneStrings("bqSize"), correct: false },
+        { text: () => sceneStrings("bqRef"), correct: false },
+        { text: () => sceneStrings("bqOrder"), correct: false },
+      ],
+    },
+  ]);
+</script>

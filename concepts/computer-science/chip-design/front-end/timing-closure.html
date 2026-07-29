@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Timing Closure</primer-title>
+
+    <primer-card>
+      <p>
+        <primer-ref to="computer-science/chip-design/front-end/static-timing-analysis">STA</primer-ref> hands
+        you a report full of negative slack. Now what? <strong>Timing closure</strong> is the negotiation that
+        follows — between you, the tools, and physics — until every path's slack is non-negative at the target
+        clock. It is where chip design stops feeling like programming and starts feeling like diplomacy: you
+        state your terms, the tool counters with what silicon can actually do, and you both make concessions
+        until the report reads all zeros and pluses. Whole tape-out schedules live or die on how this
+        negotiation goes.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Constraints: the contract</h2>
+      <p>
+        The negotiation starts from a written contract — the <strong>constraints file</strong> (SDC). Its
+        clauses:
+      </p>
+      <ul>
+        <li><code>create_clock</code> — the clock's period and source: the headline demand ("1.25 ns,
+          please").</li>
+        <li><strong>input/output delays</strong> — how much of the period is already spent outside this block,
+          so boundary paths are budgeted honestly.</li>
+        <li><strong>false paths</strong> — paths that exist in the gates but never in the <em>function</em>:
+          between two mutually-exclusive modes, from a configuration register written once at boot, across a
+          handshake that guarantees stability. Declaring one tells STA "do not check this"; the path vanishes
+          from the report and stops throttling optimisation.</li>
+        <li><strong>multicycle paths</strong> — data legitimately allowed <primer-math>N \ge 2</primer-math>
+          cycles to cross, because the receiving logic samples only every <primer-math>N</primer-math>th
+          edge. The check relaxes to <primer-math>N \cdot T_{\text{clk}}</primer-math>.</li>
+      </ul>
+      <p>
+        Exceptions are power tools: each one deletes checks. Wielded correctly they recover real performance
+        that pessimism was wasting; wielded sloppily they hide real failures — see the Watch out below.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The fix toolbox, in escalating order</h2>
+      <p>
+        A path misses timing. The remedies come in a natural escalation — cheapest and most automatic first:
+      </p>
+      <ul>
+        <li><strong>Let the tools try harder.</strong> <em>Upsize drive strength</em> (swap a cell for its
+          beefier sibling — faster, at some area and power); <em>buffer</em> long wires; <em>restructure
+          logic</em> (rebalance a lopsided gate tree, factor differently, duplicate a gate to split its
+          load). Synthesis and the physical tools do all of this automatically when pushed.</li>
+        <li><strong>Pipeline the path.</strong> Add a register in the middle — the RTL move you already know
+          from the sequential-logic lessons: throughput is kept (one result per cycle), latency grows by one
+          cycle, and each half only has to fit half the logic in a period. This changes cycle-level behaviour,
+          so it is a <em>designer</em> decision, not a tool's.</li>
+        <li><strong>Retime.</strong> Slide <em>existing</em> registers through logic — moving a register from
+          a gate's output to all of its inputs (or vice versa) preserves the function while rebalancing the
+          stage delays. Tools do this legally and automatically when allowed; unlike pipelining it adds no
+          latency.</li>
+        <li><strong>Restructure the algorithm.</strong> When no amount of pushing gates helps, change the
+          maths: a ripple-carry adder's delay grows linearly in width, a carry-select or parallel-prefix
+          adder's logarithmically. The biggest timing wins in history are algorithm swaps, not gate
+          tweaks.</li>
+        <li><strong>Floorplan hints.</strong> Sometimes the delay is wire: two talkative blocks placed far
+          apart. Telling the back-end to keep them adjacent shortens the path without touching a single
+          gate.</li>
+      </ul>
+      <p>
+        Hold violations get the opposite medicine — <em>adding</em> small delay cells to too-fast paths — and
+        that fixing is usually left to the back-end flow, after placement, when the real wire delays are
+        known.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "pipeCut": {
+          "title": "Pipelining a long path: split 3.5 ns of logic into two stages",
+          "ffL": "FF",
+          "ffR": "FF",
+          "ffNew": "new FF",
+          "before": "before: T ≥ 0.9 + 0.8 + 1.1 + 0.7 + 0.15 = 3.65 ns  →  274 MHz",
+          "after": "after: stages 1.85 ns and 1.95 ns  →  T ≥ 1.95 ns  →  513 MHz, latency +1 cycle",
+          "cBudget": "The whole 3.5 ns chain (plus 0.15 ns register overhead) must fit in one cycle: 274 MHz",
+          "cInsert": "Insert a register after the second block: each stage now carries only half the logic",
+          "cResult": "The clock is set by the WORST stage, 1.95 ns — nearly double the frequency, for one cycle of extra latency"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The flagship move, drawn</h2>
+      <p>
+        Here is pipelining as the timing tools see it — a chain of four logic blocks (0.9, 0.8, 1.1 and
+        0.7 ns) between two registers, with 0.15 ns of register overhead
+        (<primer-math>t_{cq} + t_{\text{setup}}</primer-math>) per stage:
+      </p>
+      <primer-geometry scene="pipeCut" caption="Two rows. Top: a register, four logic blocks totalling 3.5 ns, and a register — one 3.65 ns cycle, 274 MHz. Bottom: the same chain with a new register inserted after the second block, making stages of 1.85 ns and 1.95 ns — the clock now only has to cover the worst stage, giving 513 MHz at the cost of one extra cycle of latency."></primer-geometry>
+      <p>
+        Note where the cut went: after the second block, the most <em>balanced</em> split available. Cut after
+        the first block instead and the second stage would carry 2.6 ns — the clock is always set by the
+        <em>worst</em> stage, so an unbalanced cut wastes the register you spent. The little program below
+        tries every cut:
+      </p>
+      <primer-code run>
+        // Pipeline transform: where should the register go in a 4-block chain?
+        const blocks = [0.9, 0.8, 1.1, 0.7];   // ns of logic per block
+        const overhead = 0.15;                 // t_cq + t_setup per stage, ns
+        const sum = (a: number[]) =&gt; a.reduce((s, x) =&gt; s + x, 0);
+        const mhz = (t: number) =&gt; (1000 / t).toFixed(0) + " MHz";
+
+        const tBefore = sum(blocks) + overhead;
+        console.log("unpipelined: T = " + tBefore.toFixed(2) + " ns  ->  " + mhz(tBefore));
+        console.log("");
+
+        for (let cut = 1; cut &lt; blocks.length; cut++) {
+          const s1 = sum(blocks.slice(0, cut)) + overhead;
+          const s2 = sum(blocks.slice(cut)) + overhead;
+          const T = s1 &gt; s2 ? s1 : s2;
+          console.log("cut after block " + cut + ": stages " + s1.toFixed(2) + " / " + s2.toFixed(2) +
+                      " ns  ->  T = " + T.toFixed(2) + " ns  ->  " + mhz(T));
+        }
+        console.log("");
+        console.log("The clock is set by the WORST stage - balance the cut.");
+        console.log("(Retiming is the tool doing exactly this search with your existing registers.)");
+      </primer-code>
+    </primer-card>
+
+    <primer-card>
+      <h2>The closure loop — and its diminishing returns</h2>
+      <p>
+        Closure is iterative: <strong>synthesize → run STA → fix the worst paths → repeat</strong>. The first
+        loop kills the outliers cheaply (a few upsized cells); each following loop digs into a broader, harder
+        layer of paths. Progress follows a wall-of-slack curve: the worst negative slack improves quickly,
+        then crawls, because fixing one path promotes the runner-up to critical — whack-a-mole with
+        thousand-path moles. Experienced teams watch not just WNS (worst negative slack) but <strong>TNS</strong>
+        (total negative slack, the sum over all failing endpoints): WNS tells you how far physics is from the
+        contract, TNS tells you how <em>much</em> of the design is fighting you. When hundreds of endpoints
+        fail by a lot, no cell upsizing will save you — that is the signal to reach for the deeper tools:
+        pipeline, retime, or change the algorithm.
+      </p>
+      <primer-theorem name="Timing closure">
+        <ul>
+          <li><strong>constraints are the contract</strong>: <code>create_clock</code>, input/output delays,
+            false paths (never-functional), multicycle paths (<primer-math>N</primer-math> cycles
+            allowed);</li>
+          <li><strong>fix order</strong>: tool moves (upsizing, buffering, restructuring) → pipeline
+            (throughput kept, latency +1) → retime (slide existing registers, no latency cost) → new
+            algorithm → floorplan hints;</li>
+          <li><strong>the loop</strong>: synthesize → STA → fix worst paths → repeat, with diminishing
+            returns; track WNS <em>and</em> TNS;</li>
+          <li><strong>hold fixing</strong> (inserting delay) is usually left to the back-end, once real wire
+            delays exist.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Why do teams celebrate 'closing timing' like a product launch?">
+      <p>
+        Because it is the moment the design becomes <em>buildable</em>. Before closure, the chip is a wish; a
+        single path 50 ps too slow means the advertised frequency is fiction. And closure is a genuinely
+        global fight: fixing one path can worsen another (that upsized cell just loaded its neighbour's
+        net), so late closure has the character of squeezing a balloon. On large industrial designs the last
+        few hundred picoseconds routinely consume weeks of engineer-and-compute time — farms of machines
+        rerunning synthesis and placement overnight, engineers triaging the morning's WNS like weather
+        forecasters. When the report finally shows no negative slack across all the analysis corners, the
+        design is declared <em>closed</em> — and somebody usually buys cake.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! A false path is an unchecked promise">
+      <p>
+        Declaring a false path does not make the path false — it makes the <em>tool stop checking it</em>.
+        The declaration is a promise, from you, that no real data ever needs to make that trip in one cycle;
+        STA takes your word and deletes the check, and nothing anywhere ever verifies the claim. Declare a
+        <em>real</em> path false and everything downstream looks perfect: synthesis stops optimising it, the
+        reports go green, the chip tapes out — and fails in the field, intermittently, at temperature, in the
+        hands of customers, with no warning and no log entry pointing home. This is why false-path sign-off
+        is a senior-engineer ritual at serious companies: each exception written down, argued for, and
+        reviewed by someone who did not write it. Treat every <code>set_false_path</code> you type as a small
+        signed affidavit.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "closureQuiz@1": {
+          "intro": "Closure loop: synthesize → STA → fix worst paths → repeat. Pipelining splits a path (throughput kept, latency +1); the clock is set by the worst stage. False path = never checked; multicycle = N cycles allowed.",
+          "pipeQ": "A path of {a} ns + {b} ns of logic is split by a pipeline register between the two chunks (ignore register overhead). What is the new minimum clock period, in ns?",
+          "pipeFmaxQ": "A {a} ns and a {b} ns chunk of logic are separated by a new pipeline register (ignore overhead). What is the new maximum frequency, in MHz?",
+          "latencyQ": "You insert {r} pipeline registers into a combinational path. Latency grows by how many cycles?",
+          "wnsQ": "STA reports worst slack of −{w} ps at a clock period of {t} ps. What is the smallest period (in ps) at which this path passes?",
+          "mcpQ": "A multicycle path of {n} is declared on a path at clock period {t} ps. How many ps does the data now have to arrive?",
+          "falseQ": "What does declaring a false path actually do?",
+          "fRight": "Removes the timing check on that path — an unchecked promise from the designer that no real data makes the trip in one cycle",
+          "fWrong1": "Physically deletes the gates on the path",
+          "fWrong2": "Makes the tool verify that the path can never be exercised",
+          "fWrong3": "Slows the path down so it can never win a race",
+          "mcQ": "A multicycle path constraint of N = 2 means…",
+          "mRight": "The data is allowed two full clock periods to cross, because the receiver only samples every second edge",
+          "mWrong1": "The path is checked twice as strictly",
+          "mWrong2": "The clock on that path runs at double frequency",
+          "mWrong3": "The path contains exactly two gates",
+          "retimeQ": "Retiming a design means…",
+          "reRight": "Sliding existing registers through logic to rebalance stage delays — function preserved, no added latency",
+          "reWrong1": "Adding extra registers to increase throughput",
+          "reWrong2": "Changing the clock period in the constraints",
+          "reWrong3": "Re-running STA with different corner conditions",
+          "orderQ": "A path misses timing by a little. What is the sensible first move?",
+          "oRight": "Let the tools try harder: upsize drive strength, buffer, restructure — before any RTL change",
+          "oWrong1": "Immediately rewrite the algorithm",
+          "oWrong2": "Declare the path false so the report is clean",
+          "oWrong3": "Ship it and fix it in software",
+          "deepQ": "STA shows hundreds of endpoints failing by large margins (huge TNS). What does that signal?",
+          "dRight": "Cell-level tweaks won't save it — reach for pipelining, retiming, or a different algorithm",
+          "dWrong1": "The design is nearly closed; one more tool run will fix it",
+          "dWrong2": "The constraints file has a syntax error",
+          "dWrong3": "Hold time is the real problem",
+          "holdWhenQ": "Hold violations are usually fixed…",
+          "hwRight": "In the back-end, by inserting delay cells once real placement and wire delays are known",
+          "hwWrong1": "By slowing the clock in the constraints",
+          "hwWrong2": "During elaboration, before any gates exist",
+          "hwWrong3": "They cannot be fixed once they appear",
+          "pipeCostQ": "What does pipelining a path cost, and what does it keep?",
+          "pcRight": "Costs one extra cycle of latency (and registers); keeps throughput at one result per cycle",
+          "pcWrong1": "Costs throughput; keeps latency unchanged",
+          "pcWrong2": "Costs nothing at all — it is a free transform",
+          "pcWrong3": "Halves both throughput and latency"
+        }
+      }
+    </script>
+
+    <primer-quiz name="closureQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/front-end/static-timing-analysis"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Pipelining a 4-block chain: before (one long cycle) and after (two balanced stages). ──
+  registerGeometryScene(
+    "pipeCut",
+    ({ board, colors, step, sceneStrings }) => {
+      const lab = (x, y, txt, col = colors.ink, size = 12) =>
+        board.create("text", [x, y, txt], {
+          strokeColor: col, fontSize: size, anchorX: "middle", anchorY: "middle", fixed: true, highlight: false,
+        });
+      const box = (x0, y0, x1, y1, txt, col, fillOp = 0.25) => {
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: col, fillOpacity: fillOp, fixed: true, highlight: false,
+          vertices: { visible: false }, borders: { strokeColor: colors.line, strokeWidth: 1.2, highlight: false },
+        });
+        lab((x0 + x1) / 2, (y0 + y1) / 2, txt);
+      };
+      const arrow = (from, to) =>
+        board.create("arrow", [from, to], { strokeColor: colors.line, strokeWidth: 1.5, highlight: false });
+
+      // Row helper: draws FF, logic blocks, FF at height y; insertAfter > 0 adds a register mid-chain.
+      const delays = ["0.9", "0.8", "1.1", "0.7"];
+      const row = (y, insertAfter) => {
+        let x = 0;
+        box(x, y, x + 1.0, y + 1.3, sceneStrings("ffL"), colors.cat[3]);
+        x += 1.0;
+        for (let i = 0; i < 4; i++) {
+          arrow([x, y + 0.65], [x + 0.5, y + 0.65]);
+          x += 0.5;
+          box(x, y, x + 1.9, y + 1.3, delays[i] + " ns", colors.cat[0]);
+          x += 1.9;
+          if (insertAfter === i + 1) {
+            arrow([x, y + 0.65], [x + 0.5, y + 0.65]);
+            x += 0.5;
+            box(x, y, x + 1.0, y + 1.3, sceneStrings("ffNew"), colors.cat[2], 0.45);
+            x += 1.0;
+          }
+        }
+        arrow([x, y + 0.65], [x + 0.5, y + 0.65]);
+        x += 0.5;
+        box(x + 0, y, x + 1.0, y + 1.3, sceneStrings("ffR"), colors.cat[3]);
+      };
+
+      // Base: the unpipelined chain.
+      row(4.6, 0);
+
+      step(sceneStrings("cBudget"), () => {
+        lab(6.1, 6.5, sceneStrings("before"), colors.cat[1], 13);
+      });
+      step(sceneStrings("cInsert"), () => {
+        row(1.2, 2);
+      });
+      step(sceneStrings("cResult"), () => {
+        lab(6.6, 0.4, sceneStrings("after"), colors.cat[2], 13);
+      });
+    },
+    { boundingbox: [-0.6, 7.2, 13.4, -0.4], keepAspect: false, title: () => makeStrings("pipeCut")("title") },
+  );
+
+  registerQuiz("closureQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // New period = worst stage.
+      prompt: (v) => sceneStrings("pipeQ", v),
+      variables: "a=[2:9] b=[2:9]",
+      constraints: "a != b",
+      answer: (v) => Math.max(v.a, v.b),
+    },
+    {
+      // fmax = 1000 / max(a,b), clean divisors.
+      prompt: (v) => sceneStrings("pipeFmaxQ", v),
+      variables: "a=[2,4,5,8] b=[2,4,5,8]",
+      constraints: "a != b",
+      answer: (v) => 1000 / Math.max(v.a, v.b),
+    },
+    {
+      prompt: (v) => sceneStrings("latencyQ", v),
+      variables: "r=[1:4]",
+      answer: "r",
+    },
+    {
+      // Smallest passing period = T + w.
+      prompt: (v) => sceneStrings("wnsQ", v),
+      variables: "t=[800:1200] w=[50:300]",
+      answer: "t + w",
+    },
+    {
+      // Multicycle: n * t.
+      prompt: (v) => sceneStrings("mcpQ", v),
+      variables: "n=[2:4] t=[500:1000]",
+      answer: "n * t",
+    },
+    {
+      prompt: () => sceneStrings("falseQ"),
+      options: [
+        { text: () => sceneStrings("fRight"), correct: true },
+        { text: () => sceneStrings("fWrong1"), correct: false },
+        { text: () => sceneStrings("fWrong2"), correct: false },
+        { text: () => sceneStrings("fWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("mcQ"),
+      options: [
+        { text: () => sceneStrings("mRight"), correct: true },
+        { text: () => sceneStrings("mWrong1"), correct: false },
+        { text: () => sceneStrings("mWrong2"), correct: false },
+        { text: () => sceneStrings("mWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("retimeQ"),
+      options: [
+        { text: () => sceneStrings("reRight"), correct: true },
+        { text: () => sceneStrings("reWrong1"), correct: false },
+        { text: () => sceneStrings("reWrong2"), correct: false },
+        { text: () => sceneStrings("reWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("orderQ"),
+      options: [
+        { text: () => sceneStrings("oRight"), correct: true },
+        { text: () => sceneStrings("oWrong1"), correct: false },
+        { text: () => sceneStrings("oWrong2"), correct: false },
+        { text: () => sceneStrings("oWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("deepQ"),
+      options: [
+        { text: () => sceneStrings("dRight"), correct: true },
+        { text: () => sceneStrings("dWrong1"), correct: false },
+        { text: () => sceneStrings("dWrong2"), correct: false },
+        { text: () => sceneStrings("dWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("holdWhenQ"),
+      options: [
+        { text: () => sceneStrings("hwRight"), correct: true },
+        { text: () => sceneStrings("hwWrong1"), correct: false },
+        { text: () => sceneStrings("hwWrong2"), correct: false },
+        { text: () => sceneStrings("hwWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pipeCostQ"),
+      options: [
+        { text: () => sceneStrings("pcRight"), correct: true },
+        { text: () => sceneStrings("pcWrong1"), correct: false },
+        { text: () => sceneStrings("pcWrong2"), correct: false },
+        { text: () => sceneStrings("pcWrong3"), correct: false },
+      ],
+    },
+  ]);
+</script>

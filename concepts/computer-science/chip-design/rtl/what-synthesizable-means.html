@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>What "Synthesizable" Means</primer-title>
+
+    <primer-card>
+      <p>
+        SystemVerilog has a secret it does not print on the box: it is <strong>two languages wearing one
+        syntax</strong>. One dialect — the <strong>synthesizable subset</strong> — describes hardware that a
+        synthesis tool can turn into gates. The other dialect exists <em>only in simulation</em>: delays,
+        test scaffolding, printing, spawning parallel processes. Both dialects compile; both simulate; only
+        one becomes silicon. Nothing in the language stops you writing a design that simulates like a dream
+        and synthesizes into garbage — or into nothing at all. Knowing exactly where the border runs is what
+        separates people who write RTL from people who write wishes.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The border, on one table</h2>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Construct</th><th>Synthesizable?</th><th>Why</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>assign</code>, <code>always_comb</code></td><td>yes</td><td>gate networks</td></tr>
+            <tr><td><code>always_ff @(posedge clk)</code></td><td>yes</td><td>flip-flops</td></tr>
+            <tr><td><code>if</code>/<code>case</code>, operators, slices</td><td>yes</td><td>muxes and logic</td></tr>
+            <tr><td>module instances, <code>parameter</code>, <code>generate</code></td><td>yes</td><td>structure, frozen at elaboration</td></tr>
+            <tr><td><code>#10</code> delays</td><td>no</td><td>silicon has no delay knob — timing comes from physics</td></tr>
+            <tr><td><code>initial</code> blocks</td><td>no</td><td>"run once at time zero" — that is a testbench's job</td></tr>
+            <tr><td><code>$display</code>, <code>$error</code>, <code>$random</code></td><td>no</td><td>simulator services; there is no console in a chip</td></tr>
+            <tr><td><code>fork…join</code>, <code>wait</code>, file I/O</td><td>no</td><td>simulation processes, not hardware</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The sim-only rows are not defects — they are the <em>verification</em> half of the language, and the
+        next module lives there happily. The sin is not using them; the sin is using them <strong>in the
+        design</strong> and believing the simulation.
+      </p>
+    </primer-card>
+
+    <!-- Two-dialects figure: the language as a map, subset inside. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "dialectMap": {
+          "title": "One syntax, two dialects",
+          "stepAll": "The whole language: everything here compiles and simulates",
+          "stepSubset": "The synthesizable subset: only descriptions inside this line can become gates",
+          "stepHomes": "Your design must live inside the line; your testbenches live outside it — on purpose"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The map</h2>
+      <primer-geometry scene="dialectMap" caption="A large rectangle labelled 'SystemVerilog: simulates'. Inside it, a smaller rounded region labelled 'synthesizable subset: becomes gates' containing assign, always_comb, always_ff, case and generate. Outside the inner region but inside the rectangle sit #delays, initial, $display and fork/join, labelled 'testbench country'."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The classic traps</h2>
+      <p>
+        Four failure modes account for most synthesizability grief. You have met the first already:
+      </p>
+      <p>
+        <strong>1. Inferred latches.</strong> A combinational block that fails to assign an output on some
+        path forces the tool to build memory you never asked for. The cure is mechanical — a default
+        assignment at the top of the block, an <code>else</code> for every trailing <code>if</code>, a
+        <code>default</code> arm in every <code>case</code> — and <code>always_comb</code> warns you when
+        you slip.
+      </p>
+      <p>
+        <strong>2. Simulation/synthesis mismatch.</strong> The simulator and the synthesizer can honestly
+        disagree about what your text means. The classic sources: a legacy <code>always @(a)</code> block
+        that reads <code>b</code> too — the simulator only re-evaluates when <code>a</code> changes (stale
+        <code>b</code>!) while the synthesizer builds gates that respond to both; and zero-delay evaluation
+        order between blocks, which the simulator resolves by <em>picking an order</em> while real gates
+        just settle. Sprinkling <code>#10</code> delays to "fix" a misbehaving design is the anti-pattern of
+        anti-patterns: it changes the simulation and leaves the hardware untouched.
+      </p>
+      <p>
+        <strong>3. X-propagation.</strong> Simulation's four-valued logic (<code>0, 1, x, z</code>) is an
+        honest fiction. Real silicon always holds a definite 0 or 1 — <code>x</code> means <em>the
+        simulator does not know which</em>. The fiction errs in both directions: <strong>x-optimism</strong>
+        (some constructs quietly swallow an <code>x</code> — a <code>case</code> falls to its default, an
+        <code>if (x)</code> takes the else — hiding a real bug the silicon will express), and
+        <strong>x-pessimism</strong> (an <code>x</code> spreads through logic that would in fact produce a
+        definite value: <code>x &amp; 0</code> is really 0). Treat any <code>x</code> reaching real logic as
+        radioactive; find the unreset register it leaked from.
+      </p>
+      <p>
+        <strong>4. Multiple drivers.</strong> Two <code>always</code> blocks assigning one signal is legal-ish
+        text describing two gate outputs soldered to the same wire — in silicon, a fight between a
+        transistor pulling high and one pulling low: a short circuit. One signal, one driving block,
+        always.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>See a mismatch happen</h2>
+      <p>
+        Here is trap 2 in miniature. Two combinational blocks: <code>b = NOT a</code>, and
+        <code>y = a AND b</code>. The hardware answer is eternally <primer-math>y = a \land \lnot a = 0</primer-math>.
+        But a zero-delay simulator that evaluates each block <em>once, in some order</em> after
+        <code>a</code> changes can read a stale <code>b</code>:
+      </p>
+      <primer-code run>
+        // Two "always blocks", as functions writing shared signals.
+        interface Sig { a: number; b: number; y: number }
+        const blockB = (s: Sig) =&gt; { s.b = s.a ^ 1; };   // b = ~a
+        const blockY = (s: Sig) =&gt; { s.y = s.a &amp; s.b; }; // y = a & b  (in hardware: always 0)
+
+        // A naive simulator: after a changes, run each block ONCE in a chosen order.
+        function naiveSim(order: Array&lt;(s: Sig) =&gt; void&gt;): number {
+          const s: Sig = { a: 0, b: 1, y: 0 };   // settled state for a = 0
+          s.a = 1;                               // the input changes...
+          for (const blk of order) blk(s);       // ...one pass, in this order
+          return s.y;
+        }
+
+        console.log("naive sim, order B then Y:", naiveSim([blockB, blockY])); // 0  (fresh b)
+        console.log("naive sim, order Y then B:", naiveSim([blockY, blockB])); // 1  (stale b!)
+
+        // The hardware has no order: it iterates until nothing changes (a fixed point).
+        function settle(): number {
+          const s: Sig = { a: 1, b: 1, y: 0 };
+          for (let pass = 0; pass &lt; 10; pass++) { blockB(s); blockY(s); }
+          return s.y;
+        }
+        console.log("hardware (settled):       ", settle());                  // 0, always
+      </primer-code>
+      <p>
+        Same description, two different simulated answers depending on an ordering the hardware does not
+        have. Real event-driven simulators are far cleverer than this naive one — but the lesson stands:
+        when your design's correctness depends on <em>which block the simulator ran first</em>, you have
+        described a race, not a circuit. (This is precisely why the iron rule from
+        <primer-ref to="computer-science/chip-design/rtl/sequential-logic-and-always-ff">sequential
+        logic</primer-ref> — <code>&lt;=</code> in <code>always_ff</code> — exists: non-blocking assignment
+        removes the ordering from register updates.)
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The lint mindset</h2>
+      <p>
+        You do not police this border alone. A <strong>lint tool</strong> (open-source Verilator's lint
+        mode, or the commercial linters every chip company runs) reads your RTL <em>before simulation</em>
+        and flags the whole rogues' gallery: inferred latches, multiple drivers, width mismatches,
+        incomplete cases, sim-only constructs in design files. Professional flows make lint-clean a
+        precondition for even <em>running</em> a simulation. Treat the linter as your first code reviewer —
+        the one who never gets tired and is never polite.
+      </p>
+      <primer-theorem name="The commandments of synthesizable RTL">
+        <ul>
+          <li>know, for every line, <strong>which dialect</strong> it is in — design inside the subset,
+            testbench outside;</li>
+          <li>every combinational path assigns <strong>every output</strong> — no inferred latches;</li>
+          <li><strong>one signal, one driving block</strong>;</li>
+          <li>no <code>#</code> delays, <code>initial</code> blocks or <code>$</code>-calls in design code;</li>
+          <li><code>&lt;=</code> in <code>always_ff</code>, <code>=</code> in <code>always_comb</code>;
+            never legacy <code>always @</code> with a hand-written sensitivity list;</li>
+          <li>treat <code>x</code> as radioactive — find its source, don't paper over it;</li>
+          <li><strong>lint before you simulate</strong>; simulate before you believe.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Why is there no #delay in silicon?">
+      <p>
+        Because a real gate's delay is not a number you choose — it is physics you <em>suffer</em>: a
+        function of the transistors' size, the wire lengths after placement, the supply voltage, the chip's
+        temperature, and manufacturing luck, varying part to part and hour to hour. That is why the
+        synthesizable world never says "wait 10 nanoseconds"; it says "wait one clock edge", and then a
+        separate discipline (static timing analysis, later in this course) proves that every combinational
+        path settles inside the clock period across all those conditions. The delays in your simulation are
+        cartoons for your convenience. When a design only works with a <code>#10</code> in it, the
+        <code>#10</code> is a confession: somewhere there is an ordering assumption the hardware will not
+        honour, and the fab will collect on it.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'It simulates correctly, therefore it works'">
+      <p>
+        The deadliest sentence in chip design. Simulation checks the description <em>as the simulator
+        interprets it</em> — including every sim-only construct, every x-optimism, every lucky evaluation
+        order. Synthesis then builds <em>a different interpretation</em>: the subset, x-free, orderless.
+        The overlap is large, and the industry's flows exist to make it total — lint, synthesizable-subset
+        discipline, and later formal equivalence checks between RTL and gates. But the burden of proof runs
+        one way: a clean simulation of undisciplined RTL proves <strong>nothing</strong> about the silicon.
+        Chips have shipped with bugs that "could not happen" because they never happened in simulation —
+        an unreset register that woke up differently on the bench than in the fab's silicon, a race between
+        two always blocks that the simulator happened to order kindly. Discipline first; then simulate;
+        then trust — a little.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: classify constructs, latch cases, drivers, x semantics. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "synthQuiz@1": {
+          "intro": "Two dialects, one syntax: the synthesizable subset becomes gates; the rest is testbench country.",
+          "classQ": "Which of these constructs is synthesizable?",
+          "clRight": "always_ff @(posedge clk)",
+          "clDelay": "#10 delays",
+          "clInitial": "initial blocks",
+          "clDisplay": "$display",
+          "class2Q": "Which of these constructs is simulation-only?",
+          "c2Right": "fork…join",
+          "c2Assign": "assign",
+          "c2Comb": "always_comb",
+          "c2Case": "case statements",
+          "homeQ": "Where do initial blocks, #delays and $error legitimately belong?",
+          "homeRight": "In testbenches — the unsynthesized verification half of the language",
+          "homeNever": "Nowhere — they are deprecated in SystemVerilog",
+          "homeDesign": "In design files, to control gate timing",
+          "homeFPGA": "Only in FPGA designs, never ASICs",
+          "latchQ": "An always_comb block cases on a 3-bit selector and assigns the output in {k} of the 8 arms, with no default and no prior assignment. For how many selector values must the output remember its old value?",
+          "latchWhatQ": "What hardware does that incomplete block infer for the uncovered values?",
+          "lwRight": "A latch — storage the designer never asked for, with troublesome timing",
+          "lwZero": "Logic driving the output to 0",
+          "lwNothing": "Nothing — the output is simply disconnected",
+          "lwFF": "An extra flip-flop on the clock",
+          "driversQ": "Signal y is assigned in {n} different always blocks. What does this describe in silicon?",
+          "drRight": "Gate outputs soldered to one wire — a drive fight (short circuit); one signal must have one driving block",
+          "drPriority": "A priority mux choosing among the blocks",
+          "drOr": "The OR of all the assignments",
+          "drFine": "Normal fan-in — it synthesizes cleanly",
+          "xQ": "A signal reads x in simulation. What is true of the real chip at that moment?",
+          "xRight": "It holds a definite 0 or 1 — x means the simulator does not know which",
+          "xAlso": "It also holds x, a third voltage level",
+          "xZero": "It holds 0 — x displays as unknown but behaves as 0",
+          "xFloat": "The wire is physically disconnected",
+          "xOptQ": "An if-condition evaluates to x in simulation and the simulator takes the else branch. Why is this dangerous (x-optimism)?",
+          "xoRight": "The real silicon holds a definite value and may take the other branch — the simulation quietly hides a real bug",
+          "xoSlow": "Taking the else branch makes simulation slower",
+          "xoSynth": "The synthesizer will refuse the if statement",
+          "xoFine": "It is not dangerous — else is always the safe branch",
+          "sensQ": "A legacy block reads always @(a) y = a & b;. Where do simulation and synthesis disagree?",
+          "snRight": "The simulator re-evaluates only when a changes (stale b), while synthesis builds gates responding to both a and b",
+          "snSame": "They agree — the sensitivity list is just documentation",
+          "snErr": "Synthesis rejects any always block reading two signals",
+          "snFast": "Simulation responds to both but the gates only see a",
+          "delayFixQ": "A design misbehaves in simulation, and adding #10 before an assignment 'fixes' it. What has actually happened?",
+          "dfRight": "Only the simulation changed — the hardware has no delay knob, so the underlying ordering bug ships",
+          "dfBoth": "Both simulation and hardware are now correct",
+          "dfSynth": "The synthesizer will insert a matching 10 ns delay element",
+          "dfSlow": "The clock frequency was reduced by 10 ns",
+          "lintQ": "What role does a lint tool play in a professional flow?",
+          "lintRight": "A first, tireless reviewer: it flags latches, multiple drivers, width mismatches and sim-only constructs before simulation even runs",
+          "lintFmt": "It reformats the code to the team style",
+          "lintSpeed": "It makes simulation run faster",
+          "lintOpt": "It optimises the netlist for area",
+          "believeQ": "Why is 'it simulates correctly, therefore it works' the deadliest sentence in chip design?",
+          "bvRight": "Simulation checks the simulator's interpretation — sim-only constructs, x-optimism and lucky orderings included; synthesis builds a different one",
+          "bvSlow": "Because simulation is too slow to be trusted",
+          "bvFPGA": "Because simulators only model FPGAs, not ASICs",
+          "bvFine": "It is not dangerous — a clean simulation is a proof of correctness"
+        }
+      }
+    </script>
+
+    <primer-quiz name="synthQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/rtl/datapath-design-and-parameterization"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The two-dialects map: language rectangle, synthesizable subset inside. ──
+  registerGeometryScene(
+    "dialectMap",
+    ({ board, colors, step, sceneStrings }) => {
+      const ink = colors.ink, wire = colors.line;
+      const subC = colors.cat[0], simC = colors.cat[1];
+      const T = (x, y, txt, color, size = 12, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+      const rect = (x, y, w, h, color, dash = 0) =>
+        board.create("polygon", [[x, y], [x + w, y], [x + w, y - h], [x, y - h]], {
+          borders: { strokeColor: color, strokeWidth: 2, dash, highlight: false },
+          fillOpacity: 0, vertices: { visible: false }, highlight: false,
+        });
+
+      // Step 1: the whole language, with its sim-only citizens.
+      step(sceneStrings("stepAll"), () => {
+        rect(0.3, 6.6, 9.4, 6.0, wire);
+        T(5.0, 6.25, "SystemVerilog — everything here simulates", ink, 13);
+        T(1.1, 5.3, "#10 delays", simC, 12, "left");
+        T(1.1, 4.5, "initial blocks", simC, 12, "left");
+        T(1.1, 3.7, "$display / $error", simC, 12, "left");
+        T(1.1, 2.9, "fork…join, wait", simC, 12, "left");
+        T(1.1, 2.1, "$random, file I/O", simC, 12, "left");
+      });
+
+      // Step 2: the synthesizable subset.
+      step(sceneStrings("stepSubset"), () => {
+        rect(4.4, 5.6, 4.8, 4.2, subC);
+        T(6.8, 5.25, "synthesizable subset", subC, 13);
+        T(6.8, 4.9, "— becomes gates —", subC, 11);
+        T(4.8, 4.3, "assign, always_comb", ink, 12, "left");
+        T(4.8, 3.6, "always_ff @(posedge clk)", ink, 12, "left");
+        T(4.8, 2.9, "if / case, operators", ink, 12, "left");
+        T(4.8, 2.2, "modules, parameter, generate", ink, 12, "left");
+      });
+
+      // Step 3: who lives where.
+      step(sceneStrings("stepHomes"), () => {
+        T(2.3, 1.35, "← testbench country", simC, 12);
+        T(6.8, 1.35, "your design lives here →", subC, 12);
+      });
+    },
+    { boundingbox: [-0.2, 7.1, 10.2, 0.6], title: () => makeStrings("dialectMap")("title") },
+  );
+
+  registerQuiz("synthQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("classQ"),
+      options: [
+        { text: () => sceneStrings("clRight"), correct: true },
+        { text: () => sceneStrings("clDelay"), correct: false },
+        { text: () => sceneStrings("clInitial"), correct: false },
+        { text: () => sceneStrings("clDisplay"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("class2Q"),
+      options: [
+        { text: () => sceneStrings("c2Right"), correct: true },
+        { text: () => sceneStrings("c2Assign"), correct: false },
+        { text: () => sceneStrings("c2Comb"), correct: false },
+        { text: () => sceneStrings("c2Case"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("homeQ"),
+      options: [
+        { text: () => sceneStrings("homeRight"), correct: true },
+        { text: () => sceneStrings("homeNever"), correct: false },
+        { text: () => sceneStrings("homeDesign"), correct: false },
+        { text: () => sceneStrings("homeFPGA"), correct: false },
+      ],
+    },
+    {
+      // 8 − k uncovered selector values.
+      prompt: (v) => sceneStrings("latchQ", v),
+      variables: "k=[1:7]",
+      answer: "8 - k",
+    },
+    {
+      prompt: () => sceneStrings("latchWhatQ"),
+      options: [
+        { text: () => sceneStrings("lwRight"), correct: true },
+        { text: () => sceneStrings("lwZero"), correct: false },
+        { text: () => sceneStrings("lwNothing"), correct: false },
+        { text: () => sceneStrings("lwFF"), correct: false },
+      ],
+    },
+    {
+      prompt: (v) => sceneStrings("driversQ", v),
+      variables: "n=[2:5]",
+      options: [
+        { text: () => sceneStrings("drRight"), correct: true },
+        { text: () => sceneStrings("drPriority"), correct: false },
+        { text: () => sceneStrings("drOr"), correct: false },
+        { text: () => sceneStrings("drFine"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("xQ"),
+      options: [
+        { text: () => sceneStrings("xRight"), correct: true },
+        { text: () => sceneStrings("xAlso"), correct: false },
+        { text: () => sceneStrings("xZero"), correct: false },
+        { text: () => sceneStrings("xFloat"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("xOptQ"),
+      options: [
+        { text: () => sceneStrings("xoRight"), correct: true },
+        { text: () => sceneStrings("xoSlow"), correct: false },
+        { text: () => sceneStrings("xoSynth"), correct: false },
+        { text: () => sceneStrings("xoFine"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sensQ"),
+      options: [
+        { text: () => sceneStrings("snRight"), correct: true },
+        { text: () => sceneStrings("snSame"), correct: false },
+        { text: () => sceneStrings("snErr"), correct: false },
+        { text: () => sceneStrings("snFast"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("delayFixQ"),
+      options: [
+        { text: () => sceneStrings("dfRight"), correct: true },
+        { text: () => sceneStrings("dfBoth"), correct: false },
+        { text: () => sceneStrings("dfSynth"), correct: false },
+        { text: () => sceneStrings("dfSlow"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lintQ"),
+      options: [
+        { text: () => sceneStrings("lintRight"), correct: true },
+        { text: () => sceneStrings("lintFmt"), correct: false },
+        { text: () => sceneStrings("lintSpeed"), correct: false },
+        { text: () => sceneStrings("lintOpt"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("believeQ"),
+      options: [
+        { text: () => sceneStrings("bvRight"), correct: true },
+        { text: () => sceneStrings("bvSlow"), correct: false },
+        { text: () => sceneStrings("bvFPGA"), correct: false },
+        { text: () => sceneStrings("bvFine"), correct: false },
+      ],
+    },
+  ]);
+</script>

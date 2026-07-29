@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Measuring GPU Performance</primer-title>
+
+    <primer-card>
+      <p>
+        The profiler delivers its verdict: your kernel is achieving <strong>4% of the GPU's peak
+        flops</strong>. Four percent! Of the machine you
+        <primer-ref to="computer-science/chip-design/parallelism/the-gpu-software-stack">so
+        carefully launched work onto</primer-ref>! Before you refactor anything, this lesson wants
+        to install one reflex: <em>4% of which roof?</em> A GPU has two ceilings — arithmetic and
+        memory bandwidth — and a kernel can only ever be judged against the one that applies to
+        <em>it</em>. The
+        <primer-ref to="computer-science/computer-architecture/data-parallel/the-roofline-model">roofline
+        model</primer-ref> gave us the theory; today we point it at a real GPU, add the
+        second-most-important number on the chip (<strong>occupancy</strong>), and assemble the
+        short list of measurements that turns "it's slow" into a diagnosis.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The ridge of a modern GPU</h2>
+      <p>
+        Recall the machinery: a kernel's <strong>arithmetic intensity</strong>
+        <primer-math>I</primer-math> is flops performed per byte moved from DRAM, and attainable
+        performance is <primer-math>P = \min(\pi,\; I\beta)</primer-math>. The <strong>ridge
+        point</strong> <primer-math>I^\star = \pi/\beta</primer-math> separates memory-bound from
+        compute-bound. Now put GPU-sized numbers in. A respectable accelerator:
+        <primer-math>\pi = 20</primer-math> Tflop/s, <primer-math>\beta = 1</primer-math> TB/s:
+      </p>
+      <primer-math display>I^\star = \frac{20\,000\ \text{Gflop/s}}{1\,000\ \text{GB/s}} = 20\ \text{flop/byte}.</primer-math>
+      <p>
+        Twenty flops <em>per byte touched</em> just to break even with the ALUs. Now audit some
+        kernels:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Kernel</th><th>Intensity <primer-math>I</primer-math></th><th>Verdict on a ridge-20 machine</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>vector add <primer-math>c_i = a_i + b_i</primer-math></td><td>1 flop / 12 B ≈ <strong>0.08</strong></td><td>memory-bound, 250× below the ridge — roof is 83 Gflop/s, <strong>0.4%</strong> of peak</td></tr>
+            <tr><td>stencils, elementwise ML ops</td><td>0.5 – 2</td><td>memory-bound — this is most real code</td></tr>
+            <tr><td>tiled matrix multiply</td><td>hundreds (grows with tile size)</td><td>compute-bound — the rare kernel that can touch peak flops</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        The uncomfortable truth of GPU performance work is in that middle row: <em>most kernels
+        live far left of the ridge</em>, where the memory roof — not the shiny Tflops number — is
+        the law.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "gpuRoof": {
+          "title": "The roofline, log–log: π = 20 Tflop/s, β = 1 TB/s, ridge at I = 20",
+          "slider": "your kernel: log₁₀ of arithmetic intensity I (−1 ⇒ I = 0.1 flop/byte)",
+          "legMem": "memory roof  P = I·β",
+          "legComp": "compute roof  π = 20 Tflop/s",
+          "legYou": "your kernel's spot on the roof"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Slide along the roof</h2>
+      <p>
+        Practitioners draw the roofline on <strong>log–log axes</strong> so that five orders of
+        magnitude of intensity fit on one chart: the memory roof becomes a 45° line, the compute
+        roof stays flat, and they meet at the ridge. Drag the slider — it is your kernel's
+        intensity — and watch the marker ride up the memory roof, hit the ridge at
+        <primer-math>I = 20</primer-math> (<primer-math>\log_{10} I \approx 1.3</primer-math>),
+        and go no higher. The anchors mark vector add (≈0.08), a stencil (≈3), the ridge, and a
+        well-tiled matmul (≈130):
+      </p>
+      <primer-chart scene="gpuRoof" caption="A log-log roofline chart. The x axis is the base-ten logarithm of arithmetic intensity from 0.01 to 1000 flop per byte; the y axis is the base-ten logarithm of performance in gigaflops per second. A sloped memory-roof line rises at 45 degrees and meets a flat compute-roof line at the ridge point, intensity 20. A marker controlled by the slider slides along whichever roof is lower at the chosen intensity."></primer-chart>
+      <primer-chart-sliders name="gpuRoof"></primer-chart-sliders>
+      <p>
+        Everything left of the ridge can be read as a percentage: at
+        <primer-math>I = 0.08</primer-math> the roof sits a factor of 250 below peak — so
+        <em>full marks</em> for a vector add is 0.4% of peak flops.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Occupancy: are there enough warps to hide the wait?</h2>
+      <p>
+        The roofline says what the hardware <em>could</em> deliver at your intensity; whether you
+        get it depends on keeping the machine busy <em>while memory crawls</em>. A DRAM access
+        costs hundreds of cycles, and the GPU's whole survival strategy is to have other warps
+        ready to issue during the wait. The first-order health metric for that strategy is
+        <strong>occupancy</strong>:
+      </p>
+      <primer-math display>\text{occupancy} \;=\; \frac{\text{resident warps per SM}}{\text{maximum resident warps per SM}}.</primer-math>
+      <p>
+        Why would it ever be below 1? Because residency is rationed by the SM's fixed budgets:
+        the register file and shared memory are carved up among resident blocks. A kernel that
+        uses many registers per thread, or a big slab of shared memory per block, simply
+        <em>fits fewer warps</em>. Worked example: an SM holds at most 64 warps and 65,536
+        registers; a kernel using 40 registers per thread needs
+        <primer-math>40 \times 32 = 1280</primer-math> registers per warp, so at most
+        <primer-math>\lfloor 65536/1280 \rfloor = 51</primer-math> warps fit — rounded down to
+        block granularity, say 48 resident: occupancy <primer-math>48/64 = 75\%</primer-math>.
+        Low occupancy doesn't <em>always</em> hurt — a kernel with lots of independent work per
+        thread can hide latency with fewer warps — but when a memory-bound kernel misses even its
+        memory roof, occupancy is the first gauge to read. The
+        <primer-ref soft to="computer-science/chip-design/gpu-compute/occupancy-and-latency-hiding">gpu-compute
+        module</primer-ref> finishes this story properly.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The measurement kit, and the diagnosis tree</h2>
+      <p>
+        One more distinction: <strong>effective versus peak bandwidth</strong>. Peak is the
+        datasheet; effective is <em>useful</em> bytes your kernel actually moved per second. They
+        diverge when warps touch scattered addresses, dragging whole memory transactions across
+        the bus for a few useful bytes — the coalescing story, previewed here and told in full in
+        <primer-ref soft to="computer-science/chip-design/gpu-compute/memory-coalescing">its own
+        lesson</primer-ref>. With that, the kit is complete. Measure three numbers, then walk the
+        tree:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Measurements say…</th><th>Diagnosis</th><th>Your move</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>achieved bandwidth ≈ peak, flops% low, <primer-math>I &lt; I^\star</primer-math></td><td>memory-bound, <strong>at its roof</strong> — healthy</td><td>raise intensity (tiling, reuse, fusion) or accept victory</td></tr>
+            <tr><td>bandwidth far below peak, still memory-bound</td><td>wasted bytes on the bus</td><td>fix access patterns — coalescing, layout, smaller types</td></tr>
+            <tr><td>occupancy low, both other numbers low</td><td>latency not hidden; the SM idles between dependent ops</td><td>cut registers / shared memory per thread, resize blocks</td></tr>
+            <tr><td>flops ≈ peak</td><td>compute-bound, at the flat roof</td><td>algorithmic change, lower precision, or a bigger GPU</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <primer-theorem name="Measuring GPU performance">
+        <ul>
+          <li><strong>arithmetic intensity</strong> <primer-math>I</primer-math> (flop/byte)
+            decides the applicable roof: <primer-math>P = \min(\pi, I\beta)</primer-math>, ridge
+            at <primer-math>I^\star = \pi/\beta</primer-math>;</li>
+          <li><strong>occupancy</strong> = resident warps ÷ maximum — the latency-hiding budget,
+            capped by per-thread registers and per-block shared memory;</li>
+          <li><strong>effective bandwidth</strong> counts useful bytes; scattered access burns the
+            gap to peak;</li>
+          <li>measure <strong>achieved bandwidth %, achieved flops %, occupancy</strong> — then
+            diagnose against the roof that applies, never against peak flops alone.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>The calculator</h2>
+      <p>
+        The whole methodology fits in a dozen lines. Feed it a machine and a kernel's flops and
+        bytes, and it names the wall and the ceiling:
+      </p>
+      <primer-code run>
+        // Roofline calculator: which wall does each kernel hit, and how fast can it go?
+        const peak = 20000; // Gflop/s  (20 Tflop/s)
+        const bw = 1000;    // GB/s     (1 TB/s)
+        const ridge = peak / bw;
+        console.log(`machine: ${peak} Gflop/s, ${bw} GB/s  -&gt;  ridge = ${ridge} flop/byte\n`);
+
+        const kernels = [
+          { name: "vector add  c=a+b ", flops: 1, bytes: 12 },   // 2 reads + 1 write per flop
+          { name: "7-point stencil   ", flops: 13, bytes: 8 },   // good reuse from shared memory
+          { name: "tiled matmul (128)", flops: 128, bytes: 1 },  // ~tile-width flops per byte
+        ];
+
+        for (const k of kernels) {
+          const I = k.flops / k.bytes;
+          const roof = Math.min(peak, I * bw);
+          const bound = I &lt; ridge ? "MEMORY-bound " : "COMPUTE-bound";
+          const pct = ((roof / peak) * 100).toFixed(1).padStart(5);
+          console.log(`${k.name} I=${I.toFixed(2).padStart(7)}  ${bound} roof=${roof.toFixed(0).padStart(5)} Gflop/s = ${pct}% of peak flops`);
+        }
+
+        const vaddRoof = Math.min(peak, (1 / 12) * bw);
+        console.log(`\nA vector add at ${((vaddRoof / peak) * 100).toFixed(1)}% of peak flops is the hardware`);
+        console.log("working PERFECTLY - that IS the roof at intensity 0.08.");
+      </primer-code>
+      <p>
+        Try your own kernel: count its flops and its DRAM bytes per element, add a line, rerun.
+        Then try doubling <code>bw</code> (a next-generation memory system) — watch every
+        memory-bound roof double while the matmul doesn't budge.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why do the marketing teraflops never, ever show up?">
+      <p>
+        The number on the box assumes every FMA unit on the chip issues a fused multiply-add
+        <em>every cycle</em>, forever — no loads, no stores, no dependencies, no divergence, and a
+        kernel that is 100% multiply-adds (an FMA counts as two flops, which conveniently doubles
+        the figure). Peak is not a promise; it is the product of clock frequency and unit count —
+        a statement about what the ALUs cost, not what your program gets. The roofline is the
+        honest translation layer: it converts the box number into <em>your</em> number by asking
+        the one question marketing never does — how many bytes must move per flop? That is also
+        why vendors increasingly quote peak <em>memory bandwidth</em> in the same breath, and why
+        the ratio of the two numbers (the ridge) tells you more about a GPU's personality than
+        either alone. Two chips with identical Tflops but bandwidths a factor of two apart are, for
+        most real kernels, a factor of two apart.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Flops-utilisation without intensity context is meaningless">
+      <p>
+        A dashboard shows two kernels: kernel A at 61% of peak flops, kernel B at 4%. Which needs
+        the engineer? Possibly A. If B is a memory-bound kernel with
+        <primer-math>I = 0.8</primer-math> on a ridge-20 machine, its roof is
+        <primer-math>0.8/20 = 4\%</primer-math> of peak flops — B is delivering <em>exactly</em>
+        what physics allows: the hardware is working perfectly, and the profiler will confirm it
+        by showing memory bandwidth pinned at ~100%. Meanwhile A, if it is a matmul that
+        <em>should</em> be compute-bound near 90%, is leaving a third of the machine idle —
+        perhaps to poor occupancy or a shared-memory bank conflict. The rule: <strong>a
+        utilisation percentage means nothing until you know which roof applies</strong>. Judge
+        every kernel against <primer-math>\min(\pi, I\beta)</primer-math> at <em>its own</em>
+        intensity — never against bare peak — or you will spend weeks "optimising" kernels that
+        were already touching their ceiling, while the genuinely broken ones sail past code
+        review with a big green number.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "gpuPerfQuiz@1": {
+          "intro": "P = min(π, I·β). Ridge = π/β. Occupancy = resident warps ÷ max. Judge a kernel against ITS roof, not against peak flops.",
+          "ridgeQ": "A GPU peaks at {p} Gflop/s with {b} GB/s of DRAM bandwidth. What is its ridge point, in flop/byte?",
+          "attQ": "Peak {p} Gflop/s, bandwidth {b} GB/s. A kernel has intensity I = {i} flop/byte — well below the ridge. What is its attainable performance in Gflop/s?",
+          "minQ": "Using P = min(π, I·β): π = {p} Gflop/s, β = {b} GB/s, I = {i} flop/byte. Compute P in Gflop/s.",
+          "occQ": "An SM holds {w} resident warps out of a maximum of {m}. What is the occupancy, as a percentage?",
+          "pctQ": "A memory-bound kernel fully uses {b} GB/s at intensity {i} flop/byte on a machine that peaks at {p} Gflop/s. What percentage of peak flops is it delivering?",
+          "fourQ": "A kernel achieves 4% of peak flops — and 96% of peak memory bandwidth. Diagnosis?",
+          "foHealthy": "Healthy: at its intensity the roof IS about 4% of peak flops — it is memory-bound and running at its true ceiling",
+          "foBroken": "Broken: anything under 50% of peak flops needs rework",
+          "foBug": "The profiler is malfunctioning — the two numbers contradict each other",
+          "foDiv": "Warp divergence — always the cause of low flops",
+          "occmQ": "Why is occupancy the first-order health metric of a GPU kernel?",
+          "ocHide": "Enough resident warps are needed to hide memory latency — with too few, the SM sits idle between dependent instructions",
+          "ocHeat": "High occupancy reduces the chip's temperature",
+          "ocMem": "Occupancy is the fraction of DRAM in use",
+          "ocOs": "The driver refuses to launch below 50% occupancy",
+          "capQ": "What typically caps occupancy below 100%?",
+          "caBudget": "Per-thread register use and per-block shared memory — the SM's fixed budgets divide into fewer resident warps",
+          "caClock": "The GPU's clock frequency",
+          "caPcie": "The PCIe link width",
+          "caDriver": "A limit chosen randomly by the JIT compiler",
+          "effQ": "Effective bandwidth is far below peak while the kernel is memory-bound. The usual first suspect?",
+          "efCoal": "Uncoalesced access: warps touch scattered addresses, dragging whole transactions across the bus for a few useful bytes",
+          "efAlu": "The ALUs are too slow to request data",
+          "efJit": "The kernel was not JIT-compiled",
+          "efEcc": "Error correction consumes the bandwidth",
+          "treeQ": "Measured: low achieved-bandwidth %, low flops %, AND low occupancy. What do you investigate FIRST?",
+          "trOcc": "Occupancy — with too few warps resident, neither bandwidth nor flops can be saturated; the other two numbers are symptoms",
+          "trFlops": "The flops number — peak utilisation is always the goal",
+          "trClock": "The GPU's boost clock",
+          "trHost": "The CPU's turbo settings",
+          "vecQ": "Vector add (I ≈ 0.08 flop/byte) runs on a ridge-20 machine. Hand-tuning its arithmetic will…",
+          "veNothing": "achieve nothing measurable — it sits 250× below the ridge; only moving fewer bytes (or accepting the memory roof) can help",
+          "veDouble": "roughly double its performance",
+          "vePeak": "bring it to peak flops",
+          "veOcc": "raise its occupancy"
+        }
+      }
+    </script>
+
+    <primer-quiz name="gpuPerfQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/parallelism/the-gpu-software-stack",
+      "computer-science/computer-architecture/data-parallel/the-roofline-model"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerChartSliders, registerQuiz, makeStrings } from "primer";
+
+  // ── Log–log roofline: π = 20 Tflop/s (log10 ≈ 4.301), β = 1 TB/s (1000 GB/s). ──
+  const gr = makeStrings("gpuRoof");
+  const LOG_PEAK = Math.log10(20000); // ≈ 4.301
+  const LOG_BW = 3;                   // log10(1000 GB/s)
+  const attain = (logI) => Math.min(LOG_PEAK, LOG_BW + logI);
+
+  registerChartSliders("gpuRoof", [
+    {
+      name: "logI",
+      label: () => gr("slider"),
+      min: -2, max: 3, step: 0.1, value: -1.1,
+      anchors: [-1.1, 0.5, 1.3, 2.1],
+    },
+  ]);
+  registerCharts(
+    [{
+      name: "gpuRoof",
+      f: [
+        (x) => LOG_BW + x,                                   // memory roof (45° in log–log)
+        () => LOG_PEAK,                                      // compute roof (flat)
+        (x, s) => attain(s.logI) - 8 * Math.abs(x - s.logI), // marker: a sharp tent touching the roof at logI
+      ],
+      line: (colors, i) =>
+        i === 0
+          ? { strokeColor: colors.cat[0], strokeWidth: 4 }
+          : i === 1
+            ? { strokeColor: colors.cat[1], strokeWidth: 4, dash: 2 }
+            : { strokeColor: colors.cat[2], strokeWidth: 3 },
+      legend: [() => gr("legMem"), () => gr("legComp"), () => gr("legYou")],
+    }],
+    {
+      id: "gpuRoof",
+      title: () => gr("title"),
+      xmin: -2, xmax: 3, xticks: 1,
+      ymin: 0, ymax: 5, yticks: 1,
+      xaxisname: "log₁₀ I (flop/byte)",
+      yaxisname: "log₁₀ P (Gflop/s)",
+    },
+    "gpuRoof",
+  );
+
+  registerQuiz("gpuPerfQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Ridge = peak / bw (all combinations divide cleanly).
+      prompt: (v) => sceneStrings("ridgeQ", v),
+      variables: "p=[10000,20000,40000] b=[500,1000,2000]",
+      answer: "p / b",
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Memory-bound by construction: b*i ≤ 6400 < p always.
+      prompt: (v) => sceneStrings("attQ", v),
+      variables: "p=[10000,20000] b=[200,400,800] i=[2:8]",
+      answer: "b * i",
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Full min(): both branches occur across the draws.
+      prompt: (v) => sceneStrings("minQ", v),
+      variables: "p=[2000,4000] b=[400,800] i=[2,4,8,16]",
+      answer: (v) => Math.min(v.p, v.i * v.b),
+      keyboard: "geometry-lengths",
+    },
+    {
+      // Occupancy % = w*100/m.
+      prompt: (v) => sceneStrings("occQ", v),
+      variables: "w=[8,16,32] m=[32,64]",
+      constraints: "w <= m",
+      answer: "w * 100 / m",
+      keyboard: "geometry-lengths",
+    },
+    {
+      // % of peak flops = b*i*100/p.
+      prompt: (v) => sceneStrings("pctQ", v),
+      variables: "p=[10000,20000] b=[500,1000] i=[1,2,4]",
+      answer: "b * i * 100 / p",
+      keyboard: "geometry-lengths",
+    },
+    {
+      prompt: () => sceneStrings("fourQ"),
+      options: [
+        { text: () => sceneStrings("foHealthy"), correct: true },
+        { text: () => sceneStrings("foBroken"), correct: false },
+        { text: () => sceneStrings("foBug"), correct: false },
+        { text: () => sceneStrings("foDiv"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("occmQ"),
+      options: [
+        { text: () => sceneStrings("ocHide"), correct: true },
+        { text: () => sceneStrings("ocHeat"), correct: false },
+        { text: () => sceneStrings("ocMem"), correct: false },
+        { text: () => sceneStrings("ocOs"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("capQ"),
+      options: [
+        { text: () => sceneStrings("caBudget"), correct: true },
+        { text: () => sceneStrings("caClock"), correct: false },
+        { text: () => sceneStrings("caPcie"), correct: false },
+        { text: () => sceneStrings("caDriver"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("effQ"),
+      options: [
+        { text: () => sceneStrings("efCoal"), correct: true },
+        { text: () => sceneStrings("efAlu"), correct: false },
+        { text: () => sceneStrings("efJit"), correct: false },
+        { text: () => sceneStrings("efEcc"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("treeQ"),
+      options: [
+        { text: () => sceneStrings("trOcc"), correct: true },
+        { text: () => sceneStrings("trFlops"), correct: false },
+        { text: () => sceneStrings("trClock"), correct: false },
+        { text: () => sceneStrings("trHost"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("vecQ"),
+      options: [
+        { text: () => sceneStrings("veNothing"), correct: true },
+        { text: () => sceneStrings("veDouble"), correct: false },
+        { text: () => sceneStrings("vePeak"), correct: false },
+        { text: () => sceneStrings("veOcc"), correct: false },
+      ],
+    },
+  ]);
+</script>

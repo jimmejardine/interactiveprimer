@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>The Texture Unit</primer-title>
+
+    <primer-card>
+      <p>
+        In <primer-ref to="computer-science/computer-graphics/colour-and-texture">colour and
+        texture</primer-ref> you learned what a texture <em>means</em>: an image glued to a surface,
+        sampled at a coordinate <primer-math>(u, v)</primer-math>. In shader code that is one line —
+        <code>texture(sampler, uv)</code> — and it is the most common line in real-time graphics: a modern
+        frame issues <em>billions</em> of samples. So ask the module's standing question: <strong>what
+        silicon answers it?</strong> Not the shader core. The sample is handed to a dedicated
+        <strong>texture unit</strong>, a fixed-function pipeline sitting beside the SMs, and what it does
+        for that one innocent call is a small saga:
+      </p>
+      <ul>
+        <li><strong>Address maths</strong>: turn <primer-math>(u,v) \in [0,1]^2</primer-math> into texel
+          coordinates, applying the wrap mode — repeat (take the fraction), clamp to the edge, or mirror.</li>
+        <li><strong>Level-of-detail</strong>: measure how big a screen pixel is in texels and choose a mip
+          level.</li>
+        <li><strong>Fetch</strong>: read <em>eight</em> texels — a <primer-math>2\times2</primer-math>
+          neighbourhood from each of two mip levels — through its own cache.</li>
+        <li><strong>Filter</strong>: blend them with seven linear interpolations and return one colour.</li>
+      </ul>
+      <p>
+        Done in shader code, that saga is dozens of instructions per sample. Hardwired, it is a pipeline
+        that answers one filtered sample per clock — which is why it has been fixed-function silicon since
+        the very first consumer GPU, and still is.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Choosing the mip: the 2×2 quads pay off</h2>
+      <p>
+        Why mipmapping at all? Picture a textured floor stretching to the horizon. Up close, one screen
+        pixel covers less than one texel — magnification, easy. Far away, one screen pixel covers
+        <em>hundreds</em> of texels; sampling just one of them (whichever lands under the pixel centre)
+        picks an effectively random texel, and as the camera moves the pick changes every frame — the
+        distant floor <strong>shimmers and crawls</strong> with aliasing. The honest fix is to average all
+        the texels under the pixel, but that is hopeless at one sample per clock.
+      </p>
+      <p>
+        The <strong>mipmap chain</strong> is that average, <em>precomputed</em>: level 0 is the full image,
+        level 1 half the size (each texel the average of 4), level 2 a quarter, down to a single texel —
+        all for one-third extra memory. Now "average hundreds of texels" becomes "read the level where one
+        texel ≈ the pixel's footprint". The unit computes the footprint from the screen-space
+        <strong>derivatives</strong> of <primer-math>u</primer-math> and <primer-math>v</primer-math> —
+        and here the rasterizer's <primer-math>2\times2</primer-math> quads pay off: differencing
+        neighbouring quad lanes gives the derivatives almost for free. If the footprint spans
+        <primer-math>f</primer-math> texels, the level is
+      </p>
+      <primer-math display>\lambda = \log_2 f \qquad \text{(footprint 8 texels } \Rightarrow \lambda = 3\text{)}</primer-math>
+      <p>
+        <primer-math>\lambda</primer-math> is rarely a whole number, so <strong>trilinear filtering</strong>
+        samples the two bracketing levels (<primer-math>\lfloor\lambda\rfloor</primer-math> and
+        <primer-math>\lfloor\lambda\rfloor + 1</primer-math>) and blends by the fraction — bilinear twice,
+        plus one more lerp: <primer-math>4 + 4</primer-math> texels, <primer-math>3 + 3 + 1 = 7</primer-math>
+        lerps, every sample.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "texFilter": {
+          "title": "Bilinear, then trilinear",
+          "mip0Lbl": "mip N (finer)",
+          "mip1Lbl": "mip N + 1 (coarser)",
+          "stepSample": "The sample point lands between four texel centres — 0.7 of the way across, 0.4 of the way up",
+          "stepHoriz": "Two horizontal lerps: bottom pair 0.3·10 + 0.7·50 = 38, top pair 0.3·30 + 0.7·90 = 72",
+          "stepVert": "One vertical lerp finishes the bilinear result: 0.6·38 + 0.4·72 = 51.6 (3 lerps, 4 texels)",
+          "stepMip1": "The same point sampled bilinearly in the coarser mip level gives 65 — four more texels, three more lerps",
+          "stepTri": "The seventh lerp blends the two levels by the LOD fraction: 0.65·51.6 + 0.35·65 ≈ 56.3 — one trilinear sample, 8 texels, 7 lerps"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The seven lerps, drawn</h2>
+      <p>
+        Step through one trilinear sample. Texel values are shown at their centres; watch four texels
+        collapse to one bilinear value, twice, and the two levels blend into the answer.
+      </p>
+      <primer-geometry scene="texFilter" caption="Left, a 2 by 2 grid of texels from mip level N with values 10, 50, 30 and 90 at their centres, and a sample point 0.7 of the way across and 0.4 of the way up. Step by step, horizontal interpolations give 38 and 72, a vertical interpolation gives the bilinear result 51.6. Right, a coarser 2 by 2 grid from mip level N plus 1 yields 65 the same way. A final interpolation blends 51.6 and 65 with weights 0.65 and 0.35 into the trilinear result 56.3."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Run the filter yourself</h2>
+      <p>
+        Bilinear filtering on a tiny checkerboard — the four fetches, the four weights, and the mip-level
+        arithmetic, in code you can poke at.
+      </p>
+      <primer-code run>
+        // A 4×4 one-channel texture: a checkerboard of 0s and 255s.
+        const W = 4, H = 4;
+        const texel = (x: number, y: number): number =&gt; {
+          x = Math.min(W - 1, Math.max(0, x));   // clamp addressing at the edges
+          y = Math.min(H - 1, Math.max(0, y));
+          return ((x + y) % 2) * 255;
+        };
+
+        function bilinear(u: number, v: number): number {
+          // Address maths: uv in [0,1] → continuous texel coords (centres at half-integers).
+          const xf = u * W - 0.5, yf = v * H - 0.5;
+          const x0 = Math.floor(xf), y0 = Math.floor(yf);
+          const fx = xf - x0, fy = yf - y0;
+          // The four fetches and their weights.
+          const t00 = texel(x0, y0),     t10 = texel(x0 + 1, y0);
+          const t01 = texel(x0, y0 + 1), t11 = texel(x0 + 1, y0 + 1);
+          const w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy);
+          const w01 = (1 - fx) * fy,       w11 = fx * fy;
+          console.log(`  texels ${t00} ${t10} ${t01} ${t11}  weights ` +
+            [w00, w10, w01, w11].map((w) =&gt; w.toFixed(2)).join(" "));
+          // Three lerps' worth of arithmetic, as a weighted sum.
+          return t00 * w00 + t10 * w10 + t01 * w01 + t11 * w11;
+        }
+
+        for (const [u, v] of [[0.30, 0.30], [0.42, 0.30], [0.50, 0.50]]) {
+          console.log(`sample (${u}, ${v}):`);
+          console.log(`  result ${bilinear(u, v).toFixed(1)}\n`);
+        }
+
+        // LOD selection: footprint of f texels → mip level log2(f).
+        console.log("footprint → mip level (trilinear blends floor and floor+1):");
+        for (const f of [1, 2, 3, 8, 20]) {
+          const lod = Math.max(0, Math.log2(f));
+          console.log(`  ${f} texels → λ = ${lod.toFixed(2)} → levels ` +
+            `${Math.floor(lod)} and ${Math.floor(lod) + 1}, fraction ${(lod - Math.floor(lod)).toFixed(2)}`);
+        }
+      </primer-code>
+      <p>
+        Notice the middle sample: at <primer-math>(0.5, 0.5)</primer-math> all four weights are
+        <primer-math>0.25</primer-math> and the checkerboard averages to exactly
+        <primer-math>127.5</primer-math> — bilinear filtering <em>is</em> a little 4-texel average, slid
+        smoothly around the image.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Anisotropy: when the footprint isn't square</h2>
+      <p>
+        Trilinear assumes a pixel's footprint in texel space is roughly square. Look <em>along</em> a floor
+        at a grazing angle and it isn't — it is a long thin ellipse, perhaps 2 texels wide and 16 long.
+        Trilinear must pick one level for both directions: match the short axis and the long axis aliases;
+        match the long axis and everything blurs (the classic smeared-road look).
+        <strong>Anisotropic filtering</strong> instead takes several trilinear <em>probes</em> spaced along
+        the footprint's major axis — up to 16 of them at "16×" — and averages, sharp in one direction and
+        smooth in the other. The cost is real (each probe is a full 8-texel trilinear sample), which is why
+        it has a quality dial, and why the texture unit's ability to sustain it comes from the next idea.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Feeding the beast: texture caches and Morton order</h2>
+      <p>
+        Eight texels per sample, billions of samples — the arithmetic is the easy half. The hard half is
+        <em>memory</em>. Texture units survive on two locality tricks:
+      </p>
+      <ul>
+        <li><strong>A dedicated texture cache</strong> per unit (backed by the GPU's L2). Neighbouring
+          pixels sample neighbouring texels, and bilinear neighbourhoods overlap heavily — a texel fetched
+          for one pixel is almost always needed again by the next. Small cache, enormous hit rate.</li>
+        <li><strong>Tiled ("Morton-order") storage.</strong> A row-major image is poison for 2-D access: the
+          texel <em>above</em> yours is a whole row away in memory, so a cache line holds a useless 1-D
+          strip. GPUs store textures in small 2-D tiles instead, commonly ordered along a Z-shaped
+          <strong>Morton curve</strong> — so one cache line holds a little <em>square</em> of texels, and a
+          bilinear's <primer-math>2\times2</primer-math> neighbourhood usually lives in one or two lines
+          instead of four.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>Block compression: decompressed inside the unit</h2>
+      <p>
+        The other bandwidth lever is to shrink the texels themselves. GPU formats (<strong>BC</strong> on
+        desktop, <strong>ASTC</strong> on mobile) are <strong>fixed-rate block compressors</strong>: every
+        <primer-math>4\times4</primer-math> texel block compresses to the <em>same</em> number of bytes —
+        BC1 packs a 48-byte RGB block into 8 bytes (6:1), BC7 packs 64 bytes of RGBA into 16 (4:1).
+        Fixed-rate is the whole point: the address of block <primer-math>(i, j)</primer-math> is a single
+        multiply-add, so the unit can fetch <em>just the block it needs</em> and a tiny decoder inside the
+        texture unit unpacks it on the fly. The texture stays compressed in memory <em>and in the cache</em>
+        — every level of the hierarchy carries 4–8× more texels for the same bytes.
+      </p>
+      <p>
+        This is also why you cannot feed the unit a JPEG: JPEG is <em>variable</em>-rate (each block
+        compresses to however many bits it happens to need), so there is no arithmetic that maps texel
+        coordinates to a memory address — you'd have to decode the whole image first, which is exactly the
+        random access a texture sampler cannot live without. Lossy-but-fixed-rate beats
+        better-but-variable-rate, because the consumer is hardware.
+      </p>
+      <primer-theorem name="the texture unit">
+        <ul>
+          <li>one sample = <strong>address maths</strong> (wrap/clamp) + <strong>LOD</strong> from quad
+            derivatives + <strong>8 texel fetches</strong> + <strong>7 lerps</strong> (trilinear), as a
+            fixed-function pipeline;</li>
+          <li><strong>mip levels</strong> are precomputed averages (⅓ extra memory) that replace
+            per-sample averaging; <strong>anisotropic filtering</strong> adds probes along an elongated
+            footprint;</li>
+          <li>bandwidth survives on <strong>texture caches</strong> + <strong>Morton-tiled layout</strong>
+            (2-D locality) and <strong>fixed-rate block compression</strong> (BC/ASTC) decoded inside the
+            unit — random-access-friendly, unlike JPEG;</li>
+          <li>a modern GPU carries <strong>hundreds</strong> of these units, several per SM.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Watch out! Dependent reads put the latency back">
+      <p>
+        A texture unit is a deep pipeline: a sample takes hundreds of cycles to come back, but the SM hides
+        that by keeping many samples in flight and switching warps while they wait — <em>as long as the
+        addresses are known up front</em>. A <strong>dependent texture read</strong> — computing a UV from
+        the <em>result</em> of a previous sample, as in <code>texture(B, texture(A, uv).xy)</code> — breaks
+        that: the second request cannot even be issued until the first returns, so the two latencies
+        <em>add</em> instead of overlapping. One level of indirection is common and survivable (that's how
+        lookup-table effects work); chains of them serialise the very latency all this machinery exists to
+        hide. Keep your UV maths shallow, and let the compiler hoist sample addresses early.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Hundreds of little filter factories">
+      <p>
+        How much of a GPU is texture hardware? Each SM carries its own cluster of texture units (typically
+        four), so a big desktop chip ships <strong>several hundred</strong> of them, together answering on
+        the order of half a <em>trillion</em> filtered samples per second. Historically the ratio ran the
+        other way: the 1996 Voodoo Graphics was essentially a texture unit <em>with a card attached</em> —
+        texturing was the whole product, and shading was an afterthought bolted around it. Thirty years
+        on, the balance of the die has swung to programmable SMs, but the texture unit itself never became
+        software: filtering's arithmetic is settled, its throughput demand is insatiable, and — as
+        the first lesson of this module argued — that combination is exactly what silicon specialisation
+        is for. The one line of shader code you write most often is the one the shader never executes.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "texUnitQuiz@1": {
+          "intro": "One texture sample = address maths + LOD from quad derivatives + 8 texel fetches + 7 lerps, answered by a fixed-function unit with its own cache and in-unit block decompression.",
+          "mipQ": "A pixel's footprint spans {f} texels across. Which mip level does λ = log₂(footprint) select?",
+          "fetchQ": "A shader issues {k} trilinear samples. How many texel fetches does the texture unit perform in total?",
+          "bilinFetchQ": "A shader issues {k} bilinear (single-level) samples. How many texel fetches is that?",
+          "w11Q": "A bilinear sample lands fx = 0.{a} of the way across and fy = 0.{b} of the way up its four texels. What is the weight of the far corner texel (weight = fx · fy)?",
+          "w00Q": "A bilinear sample lands fx = 0.{a} of the way across and fy = 0.{b} of the way up its four texels. What is the weight of the near corner texel (weight = (1−fx) · (1−fy))?",
+          "lerpQ": "One horizontal lerp: texel values {p} and {q}, with fx = 0.{a}. What is (1−fx)·{p} + fx·{q}?",
+          "bcQ": "An uncompressed 4×4 RGBA8 texel block is 64 bytes. A block-compressed format stores it in {b} bytes. What is the compression ratio (uncompressed ÷ compressed)?",
+          "memQ": "A {s} MB uncompressed texture is stored block-compressed at {r}:1. How many MB does it occupy in memory (and in the cache)?",
+          "jpegQ": "Why can't the texture unit sample directly from a JPEG?",
+          "jpegA": "JPEG blocks compress to variable sizes, so no address arithmetic can find the block holding a given texel — random access is impossible without decoding everything",
+          "jpegB": "JPEG images are too large to fit in video memory",
+          "jpegC": "JPEG only stores greyscale data",
+          "jpegD": "JPEG decompression produces colours GPUs cannot display",
+          "mortonQ": "Why are textures stored in Morton-order tiles instead of row-major scanlines?",
+          "mortonA": "So a cache line holds a small 2-D square of texels — matching the 2-D neighbourhoods filtering actually reads — instead of a 1-D strip",
+          "mortonB": "Morton order compresses the texture by reordering bytes",
+          "mortonC": "Row-major images cannot be mipmapped",
+          "mortonD": "It sorts texels from darkest to brightest for faster filtering",
+          "quadQ": "How does the texture unit know which mip level to use?",
+          "quadA": "From the derivatives of u and v, estimated by differencing neighbouring lanes of the rasterizer's 2×2 quads — footprint size → log₂ → level",
+          "quadB": "The artist tags every triangle with a fixed mip level",
+          "quadC": "It always uses level 0 and blurs the result afterwards",
+          "quadD": "It measures how long the previous frame took to render",
+          "shimmerQ": "Without mipmapping, why does a distant textured floor shimmer as the camera moves?",
+          "shimmerA": "Each pixel covers many texels but samples only one — an effectively random pick that changes every frame (undersampling aliasing)",
+          "shimmerB": "The texture cache overflows and returns stale texels",
+          "shimmerC": "Distant triangles are rasterized at a lower clock speed",
+          "shimmerD": "Floating-point UVs lose precision far from the camera",
+          "depQ": "Why is a chain of dependent texture reads (UV computed from a previous sample's result) slow?",
+          "depA": "Each request can only be issued after the previous result returns, so the fetch latencies add up instead of being overlapped and hidden",
+          "depB": "Dependent reads bypass the texture cache entirely",
+          "depC": "The texture unit must decompress the whole texture for each dependent read",
+          "depD": "Dependent reads are performed by the CPU"
+        }
+      }
+    </script>
+
+    <primer-quiz name="texUnitQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/graphics-hardware/early-z-and-the-depth-pipeline",
+      "computer-science/computer-graphics/colour-and-texture"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "texFilter",
+    ({ board, colors, step, sceneStrings }) => {
+      const texC = colors.cat[0], sampC = colors.cat[1], resC = colors.cat[2], ink = colors.ink;
+
+      const square = (cx, cy, h, c) =>
+        board.create("polygon", [[cx - h, cy - h], [cx + h, cy - h], [cx + h, cy + h], [cx - h, cy + h]], {
+          fillColor: c, fillOpacity: 0.12, highlight: false, fixed: true,
+          borders: { strokeColor: c, strokeWidth: 1.6, highlight: false },
+          vertices: { visible: false },
+        });
+      const dotVal = (x, y, val, c) => {
+        board.create("point", [x, y], {
+          size: 2, color: c, fixed: true, highlight: false, name: "", withLabel: false,
+        });
+        board.create("text", [x + 0.14, y + 0.26, val], {
+          anchorX: "left", fontSize: 12, strokeColor: c, cssStyle: "font-weight: bold;", fixed: true, highlight: false,
+        });
+      };
+      const dashSeg = (a, b, c) =>
+        board.create("segment", [a, b], { strokeColor: c, strokeWidth: 1.8, dash: 2, highlight: false, fixed: true });
+
+      // ── Base: mip N — four texels (size 2) with values at their centres. ──
+      const M0 = [[1, 1, "10"], [3, 1, "50"], [1, 3, "30"], [3, 3, "90"]];
+      for (const [x, y] of M0) square(x, y, 1, texC);
+      for (const [x, y, v] of M0) dotVal(x, y, v, ink);
+      board.create("text", [2, 4.7, () => sceneStrings("mip0Lbl")], {
+        anchorX: "middle", fontSize: 13, strokeColor: ink, fixed: true, highlight: false,
+      });
+
+      // The mip-N sample point: fx = 0.7, fy = 0.4 between centres → (2.4, 1.8).
+      const P0 = [2.4, 1.8];
+
+      // Step 1: the sample point and its fractional position.
+      step(sceneStrings("stepSample"), () => {
+        board.create("point", P0, {
+          size: 3, color: sampC, fixed: true, highlight: false, name: "", withLabel: false,
+        });
+        dashSeg([P0[0], 0.55], [P0[0], 1], sampC);
+        board.create("text", [1.65, 0.62, "0.7"], {
+          anchorX: "middle", fontSize: 11, strokeColor: sampC, fixed: true, highlight: false,
+        });
+        board.create("text", [0.35, 1.45, "0.4"], {
+          anchorX: "middle", fontSize: 11, strokeColor: sampC, fixed: true, highlight: false,
+        });
+      });
+
+      // Step 2: two horizontal lerps.
+      step(sceneStrings("stepHoriz"), () => {
+        dashSeg([1, 1], [3, 1], resC);
+        dashSeg([1, 3], [3, 3], resC);
+        dotVal(P0[0], 1, "38", resC);
+        dotVal(P0[0], 3, "72", resC);
+      });
+
+      // Step 3: the vertical lerp → the bilinear result.
+      step(sceneStrings("stepVert"), () => {
+        dashSeg([P0[0], 1], [P0[0], 3], resC);
+        dotVal(P0[0], P0[1], "51.6", resC);
+      });
+
+      // Step 4: mip N + 1 — a coarser 2×2 neighbourhood, bilinear again.
+      const M1 = [[6.75, 1.25, "40"], [8.25, 1.25, "70"], [6.75, 2.75, "50"], [8.25, 2.75, "80"]];
+      const P1 = [7.8, 1.85];
+      step(sceneStrings("stepMip1"), () => {
+        for (const [x, y] of M1) square(x, y, 0.75, texC);
+        for (const [x, y, v] of M1) dotVal(x, y, v, ink);
+        board.create("text", [7.5, 4.7, () => sceneStrings("mip1Lbl")], {
+          anchorX: "middle", fontSize: 13, strokeColor: ink, fixed: true, highlight: false,
+        });
+        board.create("point", P1, {
+          size: 3, color: sampC, fixed: true, highlight: false, name: "", withLabel: false,
+        });
+        dotVal(P1[0], P1[1], "65", resC);
+      });
+
+      // Step 5: the seventh lerp — blend the two levels.
+      step(sceneStrings("stepTri"), () => {
+        board.create("arrow", [[P0[0], 0.4], [4.6, -0.75]], {
+          strokeColor: resC, strokeWidth: 2, lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+        });
+        board.create("arrow", [[P1[0], 0.4], [5.6, -0.75]], {
+          strokeColor: resC, strokeWidth: 2, lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+        });
+        board.create("text", [5.1, -1.05, "0.65·51.6 + 0.35·65 ≈ 56.3"], {
+          anchorX: "middle", fontSize: 13, strokeColor: resC, cssStyle: "font-weight: bold;", fixed: true, highlight: false,
+        });
+      });
+    },
+    { boundingbox: [-0.6, 5.3, 9.8, -1.7], title: () => makeStrings("texFilter")("title") },
+  );
+
+  registerQuiz("texUnitQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("mipQ", v),
+      variables: "f=[2,4,8,16,32,64]",
+      answer: (v) => Math.log2(v.f),
+    },
+    {
+      prompt: (v) => sceneStrings("fetchQ", v),
+      variables: "k=[2:9]",
+      answer: "8*k",
+    },
+    {
+      prompt: (v) => sceneStrings("bilinFetchQ", v),
+      variables: "k=[3:12]",
+      answer: "4*k",
+    },
+    {
+      prompt: (v) => sceneStrings("w11Q", v),
+      variables: "a=[2:8] b=[2:8]",
+      answer: "a*b/100",
+    },
+    {
+      prompt: (v) => sceneStrings("w00Q", v),
+      variables: "a=[2:8] b=[2:8]",
+      answer: "(10-a)*(10-b)/100",
+    },
+    {
+      // q = p + 10·d keeps the lerp result an integer: p + d·a.
+      prompt: (v) => sceneStrings("lerpQ", { ...v, q: v.p + 10 * v.d }),
+      variables: "p=[10,20,30,40] d=[2:6] a=[1:9]",
+      answer: "p+d*a",
+    },
+    {
+      prompt: (v) => sceneStrings("bcQ", v),
+      variables: "b=[8,16]",
+      answer: "64/b",
+    },
+    {
+      prompt: (v) => sceneStrings("memQ", v),
+      variables: "s=[64,128,256,512] r=[4,8]",
+      answer: "s/r",
+    },
+    {
+      prompt: () => sceneStrings("jpegQ"),
+      options: [
+        { text: () => sceneStrings("jpegA"), correct: true },
+        { text: () => sceneStrings("jpegB"), correct: false },
+        { text: () => sceneStrings("jpegC"), correct: false },
+        { text: () => sceneStrings("jpegD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("mortonQ"),
+      options: [
+        { text: () => sceneStrings("mortonA"), correct: true },
+        { text: () => sceneStrings("mortonB"), correct: false },
+        { text: () => sceneStrings("mortonC"), correct: false },
+        { text: () => sceneStrings("mortonD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("quadQ"),
+      options: [
+        { text: () => sceneStrings("quadA"), correct: true },
+        { text: () => sceneStrings("quadB"), correct: false },
+        { text: () => sceneStrings("quadC"), correct: false },
+        { text: () => sceneStrings("quadD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("shimmerQ"),
+      options: [
+        { text: () => sceneStrings("shimmerA"), correct: true },
+        { text: () => sceneStrings("shimmerB"), correct: false },
+        { text: () => sceneStrings("shimmerC"), correct: false },
+        { text: () => sceneStrings("shimmerD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("depQ"),
+      options: [
+        { text: () => sceneStrings("depA"), correct: true },
+        { text: () => sceneStrings("depB"), correct: false },
+        { text: () => sceneStrings("depC"), correct: false },
+        { text: () => sceneStrings("depD"), correct: false },
+      ],
+    },
+  ]);
+</script>

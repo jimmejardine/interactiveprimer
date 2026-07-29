@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Block RAM, DSP Slices and Hard IP</primer-title>
+
+    <primer-card>
+      <p>
+        The <primer-ref to="computer-science/chip-design/fpga/luts-and-the-fpga-fabric">LUT fabric</primer-ref>
+        can be anything — that is its glory and its curse. Try to build a 64-kilobit buffer out of LUTs and
+        you will burn tens of thousands of them on a structure that a memory designer could lay out in a
+        speck of dense SRAM. Try to build one 18×18 multiplier and hundreds of LUTs vanish into partial
+        products, running at half the speed a custom multiplier would manage. Universality has a price, and
+        for the handful of structures <em>every</em> design needs — memories, multipliers, clock circuits —
+        the price is absurd. So FPGA architects made a deal: sprinkle the fabric with small islands of
+        <strong>hardened, fixed-function silicon</strong> for exactly those structures. This lesson is
+        about those islands, and about the quiet art of writing RTL so the tools actually use them.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The islands in the sea</h2>
+      <ul>
+        <li><strong>Block RAM (BRAM).</strong> Columns of dense SRAM blocks — classically
+          <strong>36 kilobits</strong> each — threaded through the fabric. Each block is
+          <strong>dual-ported</strong> (two independent ports can read or write in the same cycle, perfect
+          for a FIFO with a writer on one side and a reader on the other) and reshapeable: one 36 Kb block
+          can present itself as 1K × 36, 2K × 18, 4K × 9, and so on. A big buffer stitches several blocks
+          together.</li>
+        <li><strong>Distributed LUT-RAM.</strong> The other memory option: a LUT's 64-bit table is itself
+          a tiny RAM, and some slices let you write it at runtime. Below roughly a few hundred bits —
+          register files, small FIFOs — LUT-RAM sits right next to the logic that uses it and wastes no
+          36 Kb block; above that, BRAM wins overwhelmingly. Knowing where the crossover lies is part of
+          the craft.</li>
+        <li><strong>DSP slices.</strong> Hardened multiply-accumulate datapaths (the classic is Xilinx's
+          <strong>DSP48</strong>: an 18×18 → 36-bit multiplier feeding a 48-bit accumulator, with optional
+          pre-adder and pipeline registers). One slice does at full clock rate what ~300 LUTs do slowly.
+          A signal-processing or machine-learning design lives and dies by its DSP count.</li>
+        <li><strong>Clock managers (PLLs/MMCMs).</strong> Analogue-flavoured circuits that multiply,
+          divide and phase-align clocks — you cannot synthesise a PLL from LUTs at all.</li>
+        <li><strong>SerDes transceivers.</strong> Serialiser/deserialiser pairs driving multi-gigabit
+          serial links (PCIe, Ethernet, displays). Again physically impossible in fabric: this is
+          high-speed analogue design, hardened at the die edge.</li>
+        <li><strong>Hard processor systems.</strong> The biggest island of all — entire ARM clusters baked
+          in beside the fabric — big enough to get its own lesson
+          <primer-ref forward to="computer-science/chip-design/fpga/softcore-processors-and-fpga-socs">next</primer-ref>.</li>
+      </ul>
+    </primer-card>
+
+    <!-- Figure: a floorplan with hardened columns revealed among the CLB sea. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "fpgaFloorplan": {
+          "title": "A slice of FPGA floorplan: hardened columns in the CLB sea",
+          "labelClb": "CLBs",
+          "labelBram": "BRAM",
+          "labelDsp": "DSP",
+          "labelPll": "PLL",
+          "labelSerdes": "SerDes",
+          "stepBram": "Columns of 36 Kb Block RAMs run through the fabric — dense SRAM where a memory is needed",
+          "stepDsp": "Columns of DSP slices: hardened multiply-accumulate datapaths, one per column stop",
+          "stepHard": "Around the edges: clock managers (PLLs) and multi-gigabit SerDes transceivers — analogue circuits no LUT could imitate"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Where the islands sit</h2>
+      <p>
+        The floorplan makes the deal visible: a vast regular sea of CLBs, interrupted by skinny columns of
+        BRAM and DSP (columns, so the regular routing pattern survives), with the exotic analogue blocks
+        pushed to the edges:
+      </p>
+      <primer-geometry scene="fpgaFloorplan" caption="A stylised FPGA floorplan: a grid of small CLB tiles fills the die. One vertical column of taller Block RAM tiles and one column of DSP-slice tiles interrupt the grid, and along the outside sit a PLL clock-manager block and two SerDes transceiver blocks."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Inference: writing RTL the tools recognise</h2>
+      <p>
+        How do you <em>use</em> a DSP slice or a BRAM? Mostly, you don't ask — you <strong>describe a
+        pattern the synthesis tool recognises</strong>, and it maps your RTL onto the hard block for you.
+        This is called <strong>inference</strong>, and it keeps your RTL portable across vendors. The two
+        patterns that matter most:
+      </p>
+      <primer-code lang="text">
+        // A registered multiply: the tool infers a DSP slice.
+        always_ff @(posedge clk)
+          p &lt;= a * b;              // 18x18-ish operands + a register = DSP48 shape
+
+        // A synchronous-read memory: the tool infers Block RAM.
+        logic [7:0] mem [0:4095];    // 4K x 8 = 32 Kb -&gt; fits one 36 Kb block
+        always_ff @(posedge clk) begin
+          if (we) mem[waddr] &lt;= wdata;
+          rdata &lt;= mem[raddr];     // the READ is clocked: that register is the key
+        end
+      </primer-code>
+      <p>
+        The alternative is <strong>explicit instantiation</strong>: placing the vendor's primitive
+        (<code>DSP48E2</code>, <code>RAMB36E2</code>…) in your netlist by name, port by port. You get exact
+        control and zero portability; teams reserve it for the cases where inference cannot express what
+        the block can do. The professional default is: <em>infer, check the report, instantiate only when
+        forced.</em>
+      </p>
+      <p>
+        "Check the report" is the load-bearing phrase. Every FPGA build prints a <strong>utilization
+        report</strong> — a table of how much of each resource the design consumed:
+      </p>
+      <primer-table>
+        <table>
+          <tr><th>Resource</th><th>Used</th><th>Available</th><th>Util%</th></tr>
+          <tr><td>LUT</td><td>48 213</td><td>274 080</td><td>17.6%</td></tr>
+          <tr><td>FF</td><td>61 402</td><td>548 160</td><td>11.2%</td></tr>
+          <tr><td>BRAM (36 Kb)</td><td>112</td><td>912</td><td>12.3%</td></tr>
+          <tr><td>DSP</td><td>2 496</td><td>2 520</td><td>99.0%</td></tr>
+        </table>
+      </primer-table>
+      <p>
+        Read it like a doctor reads bloodwork. This design is LUT-light but has all-but-exhausted its DSPs
+        — one more multiplier and the tools start building multipliers from LUTs, and speed falls off a
+        cliff. A surprise in the report is also your best bug detector: if you meant to infer one BRAM and
+        the report shows zero BRAMs and five thousand extra LUTs, the tool did not recognise your pattern —
+        which brings us to the classic way that happens (see the Watch out below).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Counting the cost: DSPs versus LUT multipliers</h2>
+      <p>
+        Make the economics concrete. Suppose a matrix-multiply engine needs <primer-math>P</primer-math>
+        parallel multiply-accumulate units, on a mid-range part with 274 000 LUTs and 2 520 DSP slices.
+        Each MAC is either one DSP slice or roughly 300 LUTs:
+      </p>
+      <primer-code run>
+        // One MAC = 1 DSP slice, or ~300 LUTs built from fabric.
+        const LUTS_PER_MAC = 300;
+        const device = { luts: 274000, dsps: 2520 };
+
+        console.log("parallel MACs |  as DSPs (util%)  |  as LUTs (util%)");
+        console.log("--------------+-------------------+------------------");
+        for (let p = 32; p &lt;= 4096; p *= 2) {
+          const dspPct = (100 * p / device.dsps).toFixed(1);
+          const luts = p * LUTS_PER_MAC;
+          const lutPct = (100 * luts / device.luts).toFixed(1);
+          const dspNote = p &gt; device.dsps ? " FULL" : "";
+          const lutNote = luts &gt; device.luts ? " FULL" : "";
+          console.log(
+            `   ${String(p).padStart(6)}     |  ${String(p).padStart(6)} (${dspPct}%)${dspNote}`.padEnd(42) +
+            `|  ${String(luts).padStart(7)} (${lutPct}%)${lutNote}`,
+          );
+        }
+        console.log("\nThe LUT version runs out of chip ~3x earlier - and each");
+        console.log("LUT-built MAC is slower too. Hard blocks are how FPGAs stay usable.");
+      </primer-code>
+      <p>
+        The fabric version hits the wall around 900 MACs while the DSP version sails to 2 520 — and every
+        one of those LUT-built MACs would clock slower besides. Same die, wildly different capability,
+        purely because someone hardened the right islands.
+      </p>
+      <primer-theorem name="Hard blocks and inference">
+        <ul>
+          <li><strong>BRAM</strong>: dual-port ~36 Kb SRAM blocks in columns; use for memories beyond a few
+            hundred bits — below that, <strong>distributed LUT-RAM</strong> wins;</li>
+          <li><strong>DSP slices</strong>: hardened multiply-accumulate (18×18 + 48-bit accumulate); one
+            slice ≈ hundreds of LUTs at higher speed;</li>
+          <li><strong>PLLs, SerDes, hard CPUs</strong>: analogue or hyper-optimised functions the fabric
+            cannot express at all;</li>
+          <li><strong>inference</strong> maps recognised RTL patterns (registered multiply → DSP;
+            synchronous-read array → BRAM) onto hard blocks; instantiation is the explicit fallback;</li>
+          <li>the <strong>utilization report</strong> (LUT/FF/BRAM/DSP %) is where you verify the mapping
+            actually happened.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Why 36 kilobits, of all numbers?">
+      <p>
+        It looks arbitrary until you factor it: <primer-math>36 = 4 \times 9</primer-math>, and
+        <primer-math>9 = 8 + 1</primer-math>. Memory in the computing world loves widths of 8-plus-a-spare:
+        the ninth bit per byte carries a <strong>parity or ECC check bit</strong>, so a 36 Kb block presents
+        clean power-of-two depths at widths of 9, 18 or 36 — that is 4K × 9, 2K × 18, 1K × 36 — with error
+        checking riding along for free. The same 9-flavoured arithmetic shows up in the DSP slice's
+        18×18 multiplier (two 9s) and its 48-bit accumulator, which is no coincidence: the blocks are sized
+        to feed each other. Vendors' marketing sheets quote memory in these units to this day — when a
+        datasheet brags of "4.5 Mb of Block RAM", you are meant to divide by 36 and picture the 128 columns
+        of little SRAM islands.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Asynchronous reads cannot become BRAM">
+      <p>
+        BRAM has a non-negotiable physical property: <strong>its reads are clocked</strong>. Address in at
+        the edge, data out after the edge. So this innocent-looking line —
+        <code>assign rdata = mem[raddr];</code> — an <em>asynchronous</em> read, describes something a
+        36 Kb block physically cannot do. The tool will not error; it will politely build your entire
+        memory out of <strong>LUT-RAM and multiplexers</strong> instead. For a 32 Kb buffer that is
+        thousands of LUTs plus a monstrous read mux: one missing register, and your one-BRAM design becomes
+        a LUT bonfire that fails timing to boot. The fix costs a single line — register the read
+        (<code>rdata &lt;= mem[raddr];</code> inside <code>always_ff</code>) and accept the one-cycle read
+        latency, which is the honest price of dense memory. The habit to build: after any change near a
+        memory, <strong>open the utilization report and confirm the BRAM count is what you expect</strong>.
+        It is the cheapest bug check in FPGA design.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: BRAM accounting, DSP economics, inference patterns, report reading. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "hardIpQuiz@1": {
+          "intro": "Hard blocks are the islands: BRAM for memory, DSP for multiply-accumulate — and RTL patterns decide whether you get them.",
+          "bramCountQ": "A design needs a {n} Kb buffer. BRAM blocks hold 36 Kb each. How many blocks does the memory occupy at minimum?",
+          "lutMacQ": "A multiplier built from fabric costs about {c} LUTs. A design instantiates {m} such fabric multipliers. Roughly how many LUTs do they consume in total?",
+          "utilQ": "The utilization report shows {u} of the device's {t} DSP slices in use. What DSP utilization percentage is that?",
+          "widthQ": "A 36 Kb BRAM is configured 4K deep. How many bits wide is each entry (36 Kb = 36 864 bits, 4K = 4 096 entries)?",
+          "asyncQ": "A memory is read with assign rdata = mem[raddr]; (no clock). What does the synthesis tool do?",
+          "aLutram": "Builds the memory from LUT-RAM and huge multiplexers — BRAM physically cannot do unclocked reads",
+          "aBram": "Maps it to BRAM as usual",
+          "aError": "Stops with a fatal error",
+          "aAsync": "Uses a special asynchronous-read mode of the BRAM",
+          "inferQ": "What does \"inference\" mean in FPGA design?",
+          "iPattern": "Writing RTL patterns the synthesis tool recognises and maps onto hard blocks — no vendor primitives in your source",
+          "iGuess": "The tool guessing your design intent from the module names",
+          "iPrim": "Instantiating vendor primitives by name, port by port",
+          "iAi": "A machine-learning pass that rewrites your RTL",
+          "dspPatQ": "Which RTL pattern infers a DSP slice?",
+          "dPmul": "A multiply whose result is registered in an always_ff block",
+          "dPassign": "Any assign statement containing a plus sign",
+          "dPasync": "An unclocked read of a memory array",
+          "dPcase": "A case statement with more than 16 arms",
+          "bramPatQ": "Which property of a memory description is essential for it to infer Block RAM?",
+          "bPsync": "The read is synchronous — registered by a clock edge",
+          "bPsize": "The memory is smaller than 100 bits",
+          "bPinit": "The memory is initialised to zero",
+          "bPname": "The array is named \"bram\"",
+          "dualQ": "What does \"dual-port\" mean for a Block RAM?",
+          "duTwo": "Two independent ports can access the memory in the same cycle — e.g. one writing while the other reads",
+          "duHalf": "The block can be split into two half-size blocks",
+          "duVolt": "It runs at two different voltages",
+          "duCopy": "It stores two copies of every bit for safety",
+          "crossQ": "A design needs a 64-bit-deep register file (a few hundred bits) and, separately, a 32 Kb sample buffer. What is the sensible mapping?",
+          "crBoth": "Register file in distributed LUT-RAM, sample buffer in BRAM — small memories near the logic, big ones in dense blocks",
+          "crAllB": "Both in BRAM — always use the hard block",
+          "crAllL": "Both in LUT-RAM — it is faster",
+          "crDsp": "Both in DSP slices",
+          "pllQ": "What job do the PLL / clock-manager blocks do?",
+          "plClk": "Multiply, divide and phase-align clocks — an analogue function LUT fabric cannot implement",
+          "plStore": "Store the configuration bitstream",
+          "plMul": "Multiply integers faster than DSP slices",
+          "plIo": "Buffer slow input/output pins",
+          "whyHardQ": "Why do FPGA vendors harden blocks like multipliers at all, when LUTs can implement anything?",
+          "whCost": "Common structures cost enormously more area and speed in universal fabric — hardening them makes real designs fit and run fast",
+          "whEasy": "Hard blocks are easier for the tools to place",
+          "whSell": "It lets vendors sell more device variants",
+          "whTest": "Hard blocks are only for factory self-test",
+          "reportQ": "You meant to infer one BRAM, but the utilization report shows 0 BRAMs and about 5 000 extra LUTs. What most likely happened?",
+          "reAsync": "The memory's read was left unclocked, so the tool built it from LUT-RAM instead of BRAM",
+          "reFine": "Nothing — the tool found a better mapping",
+          "reBig": "The memory was too big for one BRAM",
+          "reDsp": "The BRAM was converted into DSP slices"
+        }
+      }
+    </script>
+
+    <primer-quiz name="hardIpQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/fpga/luts-and-the-fpga-fabric"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Floorplan: CLB grid with hardened BRAM/DSP columns and edge blocks, stepped. ──
+  registerGeometryScene(
+    "fpgaFloorplan",
+    ({ board, colors, step, sceneStrings }) => {
+      const ink = colors.ink, clbC = colors.line, bramC = colors.cat[0], dspC = colors.cat[1], hardC = colors.cat[2];
+      const T = (x, y, txt, color, size = 12, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+      const box = (x, y, w, h, color, width = 2) =>
+        board.create("polygon", [[x, y], [x + w, y], [x + w, y - h], [x, y - h]], {
+          borders: { strokeColor: color, strokeWidth: width, highlight: false },
+          fillOpacity: 0, vertices: { visible: false }, highlight: false,
+        });
+
+      // ── Base: the CLB sea — a grid of small tiles, skipping the hard columns (x = 3, 6). ──
+      for (let gx = 0; gx <= 8; gx++) {
+        if (gx === 3 || gx === 6) continue;
+        for (let gy = 0; gy <= 5; gy++) box(gx - 0.3, gy + 0.3, 0.6, 0.6, clbC, 1);
+      }
+      T(1.5, -0.75, sceneStrings("labelClb"), ink, 12);
+
+      // Step 1: the BRAM column — three tall blocks in column x = 3.
+      step(sceneStrings("stepBram"), () => {
+        for (let j = 0; j < 3; j++) box(2.6, 1.7 + j * 2, 0.8, 1.8, bramC);
+        T(3, -0.75, sceneStrings("labelBram"), bramC, 12);
+      });
+
+      // Step 2: the DSP column — three blocks in column x = 6.
+      step(sceneStrings("stepDsp"), () => {
+        for (let j = 0; j < 3; j++) box(5.6, 1.7 + j * 2, 0.8, 1.8, dspC);
+        T(6, -0.75, sceneStrings("labelDsp"), dspC, 12);
+      });
+
+      // Step 3: the edge blocks — a PLL top-left, SerDes pair on the right edge.
+      step(sceneStrings("stepHard"), () => {
+        box(-0.5, 6.9, 1.6, 0.8, hardC);
+        T(0.3, 6.5, sceneStrings("labelPll"), hardC, 12);
+        box(9.2, 2.1, 0.9, 1.4, hardC);
+        box(9.2, 4.6, 0.9, 1.4, hardC);
+        T(9.65, 5.0, sceneStrings("labelSerdes"), hardC, 11);
+      });
+    },
+    { boundingbox: [-1.4, 7.6, 10.9, -1.5], title: () => makeStrings("fpgaFloorplan")("title") },
+  );
+
+  registerQuiz("hardIpQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // n / 36 blocks (n chosen as clean multiples of 36).
+      prompt: (v) => sceneStrings("bramCountQ", v),
+      variables: "n=[72,144,216,288,360]",
+      answer: "n / 36",
+    },
+    {
+      // m fabric multipliers at c LUTs each.
+      prompt: (v) => sceneStrings("lutMacQ", v),
+      variables: "m=[4:12] c=[200,300,400]",
+      answer: "m * c",
+    },
+    {
+      // Percentage utilization, constrained to divide cleanly.
+      prompt: (v) => sceneStrings("utilQ", v),
+      variables: "u=[10:95] t=[100,200,500]",
+      constraints: "(u * 100) % t == 0",
+      answer: "u * 100 / t",
+    },
+    {
+      // 36864 / 4096 = 9.
+      prompt: () => sceneStrings("widthQ"),
+      answer: 9,
+    },
+    {
+      prompt: () => sceneStrings("asyncQ"),
+      options: [
+        { text: () => sceneStrings("aLutram"), correct: true },
+        { text: () => sceneStrings("aBram"), correct: false },
+        { text: () => sceneStrings("aError"), correct: false },
+        { text: () => sceneStrings("aAsync"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("inferQ"),
+      options: [
+        { text: () => sceneStrings("iPattern"), correct: true },
+        { text: () => sceneStrings("iGuess"), correct: false },
+        { text: () => sceneStrings("iPrim"), correct: false },
+        { text: () => sceneStrings("iAi"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dspPatQ"),
+      options: [
+        { text: () => sceneStrings("dPmul"), correct: true },
+        { text: () => sceneStrings("dPassign"), correct: false },
+        { text: () => sceneStrings("dPasync"), correct: false },
+        { text: () => sceneStrings("dPcase"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bramPatQ"),
+      options: [
+        { text: () => sceneStrings("bPsync"), correct: true },
+        { text: () => sceneStrings("bPsize"), correct: false },
+        { text: () => sceneStrings("bPinit"), correct: false },
+        { text: () => sceneStrings("bPname"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("dualQ"),
+      options: [
+        { text: () => sceneStrings("duTwo"), correct: true },
+        { text: () => sceneStrings("duHalf"), correct: false },
+        { text: () => sceneStrings("duVolt"), correct: false },
+        { text: () => sceneStrings("duCopy"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("crossQ"),
+      options: [
+        { text: () => sceneStrings("crBoth"), correct: true },
+        { text: () => sceneStrings("crAllB"), correct: false },
+        { text: () => sceneStrings("crAllL"), correct: false },
+        { text: () => sceneStrings("crDsp"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pllQ"),
+      options: [
+        { text: () => sceneStrings("plClk"), correct: true },
+        { text: () => sceneStrings("plStore"), correct: false },
+        { text: () => sceneStrings("plMul"), correct: false },
+        { text: () => sceneStrings("plIo"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyHardQ"),
+      options: [
+        { text: () => sceneStrings("whCost"), correct: true },
+        { text: () => sceneStrings("whEasy"), correct: false },
+        { text: () => sceneStrings("whSell"), correct: false },
+        { text: () => sceneStrings("whTest"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("reportQ"),
+      options: [
+        { text: () => sceneStrings("reAsync"), correct: true },
+        { text: () => sceneStrings("reFine"), correct: false },
+        { text: () => sceneStrings("reBig"), correct: false },
+        { text: () => sceneStrings("reDsp"), correct: false },
+      ],
+    },
+  ]);
+</script>

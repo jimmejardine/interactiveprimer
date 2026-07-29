@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>The Scheduler and Dispatcher</primer-title>
+
+    <primer-card>
+      <p>
+        One <primer-ref to="computer-science/chip-design/capstone/a-simt-core-in-rtl">SIMT core</primer-ref>
+        runs one block of four threads. A GPU runs a <em>launch</em>: "here is a kernel, run it as 6
+        blocks of 4" — or six thousand blocks, on hardware the programmer has never seen. The circuit
+        that turns one into the other is the <strong>dispatcher</strong>, and it is almost insultingly
+        small: a counter, a bitmask, and a handshake. Yet this little machine carries the deepest promise
+        in GPU computing — <strong>transparent scalability</strong>. The same kernel binary saturates a
+        chip with two cores or two hundred, because software describes <em>work</em> (blocks) and the
+        dispatcher, at runtime, matches work to whatever hardware exists. Where the
+        <primer-ref to="computer-science/chip-design/gpu-compute/the-warp-scheduler">warp
+        scheduler</primer-ref> juggles warps <em>within</em> a core cycle by cycle, the dispatcher deals
+        blocks <em>between</em> cores — the outer loop of the whole GPU.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The dispatcher's whole job</h2>
+      <p>
+        A launch hands the dispatcher three numbers: the kernel's start address, the total number of
+        blocks, and the block size. From then on it runs a loop you could explain to a shift manager at a
+        delivery depot:
+      </p>
+      <ul>
+        <li>keep a <strong>next-block counter</strong> — the number of the next parcel of work not yet
+          handed out;</li>
+        <li>keep a <strong>free-core bitmask</strong> — one bit per core, busy or free;</li>
+        <li>whenever a core is free and blocks remain: <strong>assign</strong> — latch the block number
+          into the core's <code>%blockIdx</code>, pulse its start signal, mark it busy, bump the
+          counter;</li>
+        <li>whenever a core raises <strong>done</strong> (its block's threads all hit <code>RET</code>):
+          mark it free again and count the finished block;</li>
+        <li>when <em>finished</em> blocks — not merely <em>handed-out</em> blocks — equal the total,
+          raise <strong>kernel-complete</strong>.</li>
+      </ul>
+      <p>That is the scalability contract, and it really is about fifty lines of RTL:</p>
+      <primer-code lang="text">
+        logic [7:0]           next_block, done_blocks;
+        logic [NUM_CORES-1:0] core_busy;                  // the free-core bitmask
+        wire  [NUM_CORES-1:0] free  = ~core_busy;
+        wire  [NUM_CORES-1:0] grant = free &amp; (~free + 1); // lowest free core, one-hot
+
+        always_ff @(posedge clk) begin
+          if (!rst_n) begin
+            next_block &lt;= '0;  done_blocks &lt;= '0;  core_busy &lt;= '0;
+          end else begin
+            for (int i = 0; i &lt; NUM_CORES; i++) begin
+              if (core_done[i]) begin                     // a block finished: recycle the core
+                core_busy[i]   &lt;= 1'b0;
+                done_blocks    &lt;= done_blocks + 1;
+              end
+              if (grant[i] &amp;&amp; next_block &lt; total_blocks) begin
+                core_busy[i]      &lt;= 1'b1;
+                core_block_idx[i] &lt;= next_block;          // %blockIdx LATCHED into the core
+                core_start[i]     &lt;= 1'b1;
+                next_block        &lt;= next_block + 1;
+              end
+            end
+          end
+        end
+
+        assign kernel_done = (done_blocks == total_blocks);
+      </primer-code>
+      <p>
+        The one flourish is the <strong>arbitration</strong> line. <code>free &amp; (~free + 1)</code> is
+        the classic lowest-set-bit trick — <primer-math>x \,\&amp;\, (-x)</primer-math> in two's
+        complement — which isolates the lowest 1 in the mask as a one-hot grant. If cores 1 and 3 are
+        free (<code>free = 1010</code>), the grant is <code>0010</code>: core 1 wins, deterministically,
+        with zero sequential logic. A <em>priority arbiter</em> in one line of arithmetic.
+      </p>
+      <primer-theorem name="The block dispatcher">
+        <ul>
+          <li>a launch = <strong>kernel address + block count + block size</strong>; the dispatcher owns
+            the loop over blocks;</li>
+          <li>state: a <strong>next-block counter</strong>, a <strong>free-core bitmask</strong>, a
+            <strong>done-block counter</strong>;</li>
+          <li>assignment latches <code>%blockIdx</code> into the chosen core <strong>at grant
+            time</strong>;</li>
+          <li>more blocks than cores ⇒ cores are <strong>recycled</strong> — the same silicon runs 6
+            blocks or 6 million;</li>
+          <li><strong>kernel-complete</strong> fires when <em>done</em> = total, not when
+            <em>dispatched</em> = total.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why block-level dispatch works at all</h2>
+      <p>
+        Notice what the dispatcher <em>doesn't</em> have: any channel for core 0 to talk to core 1. It
+        can get away with this because the programming model's blocks are <strong>independent by
+        contract</strong> — a kernel is only well-formed if its blocks can run in any order, on any
+        cores, simultaneously or one after another, without communicating. Our vector-add blocks each own
+        their private slice of the arrays; nothing block 3 does can matter to block 4. That contract is
+        what the dispatcher's dumbness is <em>buying</em>: because it may place blocks anywhere, anytime,
+        the same launch saturates any number of cores — scheduling stays a local, per-core affair, and
+        scaling the GPU means literally pasting in more core columns and widening a bitmask. The
+        programmer promises independence; the hardware pays out scalability. It is the single best trade
+        in parallel computing.
+      </p>
+    </primer-card>
+
+    <!-- Stepped dispatch timeline: 6 blocks onto 2 cores. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "dispatchTimeline": {
+          "title": "Six blocks, two cores: assignment, done, recycle (cycle numbers from the simulation)",
+          "stepAssign": "Launch: the dispatcher deals block 0 to core 0 at cycle 0 and block 1 to core 1 at cycle 1 — one grant per cycle",
+          "stepRecycle": "First recycling: each done signal frees a core, and the next block is latched in on the very same cycle",
+          "stepFinish": "The last pair: block 4 and block 5 finish out of lockstep; kernel-complete fires when done = 6/6, at cycle 239",
+          "core0": "core 0",
+          "core1": "core 1",
+          "blk": "b",
+          "axis": "cycle",
+          "done": "kernel complete"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The timeline, drawn</h2>
+      <p>
+        Here is the exact schedule the simulator below produces — six 78-cycle blocks dealt onto two
+        cores, reading left to right:
+      </p>
+      <primer-geometry scene="dispatchTimeline" caption="A timeline with two rows, one per core, and a cycle axis from 0 to about 240. Core 0 runs blocks 0, 2 and 4 back to back; core 1 runs blocks 1, 3 and 5, each shifted one cycle later. Markers show each assignment and each done signal, with kernel-complete at cycle 239."></primer-geometry>
+      <p>
+        Three blocks per core, zero idle gaps after launch: the moment a core reports done, the
+        dispatcher's grant logic hands it the next block. The one-cycle stagger between the rows — core 1
+        forever finishing one cycle after core 0 — is the fingerprint of "one grant per cycle" from the
+        launch, rippling politely down the whole kernel.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The dispatcher in the simulator</h2>
+      <p>
+        Let's wire it up: two of last lesson's cores (memory still ideal — the realistic memory
+        controller is next lesson's job), one dispatcher, and a 24-element vector add launched as 6
+        blocks of 4. We set <primer-math>a[i] = 10(i{+}1)</primer-math> and
+        <primer-math>b[i] = i{+}1</primer-math>, so a correct run must produce
+        <primer-math>c[i] = 11(i{+}1)</primer-math> — the elevens times table, our self-check:
+      </p>
+      <primer-code run>
+        // ── The dispatcher: 6 blocks of 4 threads, fed to 2 SIMT cores as they free up. ──
+        // Vector add over 24 elements: a@0, b@24, c@48. Ideal memory still (the controller comes next lesson).
+        const PROG = [0x50de, 0x300f, 0x9100, 0x9218, 0x9330, 0x3410, 0x7440, 0x3520, 0x7550, 0x3645, 0x3730, 0x8076, 0xf000];
+        type Fsm = "FETCH" | "DECODE" | "REQUEST" | "WAIT" | "EXECUTE" | "UPDATE" | "IDLE" | "DONE";
+        const STEP: Record&lt;string, Fsm&gt; = {
+          FETCH: "DECODE", DECODE: "REQUEST", REQUEST: "WAIT", WAIT: "EXECUTE", EXECUTE: "UPDATE", UPDATE: "FETCH",
+        };
+
+        interface Lane { regs: number[]; addr: number; data: number }
+        interface Core { st: Fsm; pc: number; ir: number; blockIdx: number; lanes: Lane[] }
+        interface Machine { cores: Core[]; nextBlock: number; doneBlocks: number; mem: number[] }
+
+        const idleCore = (): Core =&gt; ({ st: "IDLE", pc: 0, ir: 0, blockIdx: -1, lanes: [] });
+
+        function startCore(blockIdx: number): Core {                  // %blockIdx LATCHED here, at assignment
+          const lanes: Lane[] = [];
+          for (let t = 0; t &lt; 4; t++) {
+            const regs = new Array(16).fill(0);
+            regs[13] = blockIdx; regs[14] = 4; regs[15] = t;
+            lanes.push({ regs, addr: 0, data: 0 });
+          }
+          return { st: "FETCH", pc: 0, ir: 0, blockIdx, lanes };
+        }
+
+        // One core's combinational step (mem is the machine's shared memory, already cloned).
+        function coreNext(s: Core, mem: number[]): Core {
+          if (s.st === "IDLE" || s.st === "DONE") return s;
+          const n: Core = { ...s, st: STEP[s.st], lanes: s.lanes.map((l) =&gt; ({ ...l, regs: [...l.regs] })) };
+          const w = s.ir, op = w &gt;&gt; 12, rd = (w &gt;&gt; 8) &amp; 15, rs = (w &gt;&gt; 4) &amp; 15, rt = w &amp; 15, imm = w &amp; 255;
+          if (s.st === "FETCH") n.ir = PROG[s.pc];
+          if (s.st === "REQUEST" &amp;&amp; (op === 7 || op === 8)) n.lanes.forEach((l) =&gt; { l.addr = l.regs[rs]; });
+          if (s.st === "WAIT") {
+            if (op === 7) n.lanes.forEach((l) =&gt; { l.data = mem[l.addr]; });
+            if (op === 8) n.lanes.forEach((l) =&gt; { mem[l.addr] = l.regs[rt]; });
+          }
+          if (s.st === "EXECUTE") n.lanes.forEach((l) =&gt; {
+            const a = l.regs[rs], b = l.regs[rt];
+            l.data = op === 3 ? a + b : op === 4 ? a - b : op === 5 ? a * b : op === 6 ? Math.floor(a / b) : op === 9 ? imm : l.data;
+          });
+          if (s.st === "UPDATE") {
+            if ((op &gt;= 3 &amp;&amp; op &lt;= 7) || op === 9) n.lanes.forEach((l) =&gt; { if (rd &lt; 13) l.regs[rd] = l.data; });
+            if (op === 15) n.st = "DONE";                             // RET: raise the done signal
+            n.pc = s.pc + 1;
+          }
+          return n;
+        }
+
+        const NUM_BLOCKS = 6;
+        const log: string[] = [];
+
+        // The whole machine's settle-then-snap: cores step, then the dispatcher reacts.
+        function machineNext(m: Machine, cycle: number): Machine {
+          const mem = [...m.mem];
+          const cores = m.cores.map((c) =&gt; coreNext(c, mem));
+          let nextBlock = m.nextBlock, doneBlocks = m.doneBlocks;
+          // 1) Collect DONE signals: free the core, count the block.
+          m.cores.forEach((c, i) =&gt; {
+            if (c.st === "DONE") {
+              doneBlocks++;
+              cores[i] = idleCore();
+              log.push(`cycle ${String(cycle).padStart(3)}: core ${i} done with block ${c.blockIdx}   (${doneBlocks}/${NUM_BLOCKS} blocks complete)`);
+            }
+          });
+          // 2) Assign at most one block per cycle to the lowest-numbered free core.
+          const free = cores.findIndex((c) =&gt; c.st === "IDLE");
+          if (nextBlock &lt; NUM_BLOCKS &amp;&amp; free &gt;= 0) {
+            cores[free] = startCore(nextBlock);
+            log.push(`cycle ${String(cycle).padStart(3)}: block ${nextBlock} -&gt; core ${free}   (%blockIdx latched = ${nextBlock})`);
+            nextBlock++;
+          }
+          return { cores, nextBlock, doneBlocks, mem };
+        }
+
+        // ── Launch: 24 elements, a[i] = 10·(i+1), b[i] = i+1, so c[i] must be 11·(i+1). ──
+        const mem: number[] = new Array(72).fill(0);
+        for (let i = 0; i &lt; 24; i++) { mem[i] = 10 * (i + 1); mem[24 + i] = i + 1; }
+
+        let m: Machine = { cores: [idleCore(), idleCore()], nextBlock: 0, doneBlocks: 0, mem };
+        let cycle = 0;
+        while (m.doneBlocks &lt; NUM_BLOCKS) { m = machineNext(m, cycle); cycle++; }
+
+        log.forEach((l) =&gt; console.log(l));
+        console.log(`\nkernel complete at cycle ${cycle}`);
+        console.log(`c = [${m.mem.slice(48).join(", ")}]`);
+        const ok = m.mem.slice(48).every((x, i) =&gt; x === 11 * (i + 1));
+        console.log(`all 24 elements correct: ${ok}`);
+      </primer-code>
+      <p>
+        Look at the rhythm of the log: assign, assign, then a long silence while both cores grind, then
+        done/assign pairs at cycles 79–80 and 158–159 as the cores get recycled, and finally the last two
+        done signals at 237 and 238 — <em>out of lockstep</em>, one cycle apart, exactly as the timeline
+        predicted. Nobody synchronised the cores; nobody needed to. Block independence means the
+        dispatcher can treat "core finishes" events whenever they happen to arrive — and the elevens
+        times table comes out perfect anyway. A single core would have needed six rounds of 78 cycles;
+        two cores did it in 239 — and the <em>only</em> thing that changed was the width of a bitmask.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="What does this look like on a real GPU?">
+      <p>
+        NVIDIA calls its dispatcher the <em>GigaThread Engine</em>, and the depot it manages is
+        preposterous: launches of hundreds of thousands of blocks, dealt onto a hundred-plus SMs, with
+        several kernels' launches interleaved at once from independent queues (streams). It also handles
+        what our toy politely ignores: a real block must wait for a core with enough <em>free registers
+        and shared memory</em> to house it — assignment is a bin-packing decision, not just a free bit.
+        But the contract is identical, and so is the payoff. When a kernel written for a bus-powered
+        laptop GPU with 10 SMs lands unmodified on a 132-SM monster and runs thirteen times faster, no
+        recompile, that is not the compiler's doing — it is block-level dispatch quietly matching the
+        same work-list to a wider machine. The dumbest circuit in this course is the one that makes GPUs
+        a stable programming target across a 100× hardware range.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! %blockIdx must be latched, not looked up">
+      <p>
+        A tempting wiring shortcut: skip the per-core <code>%blockIdx</code> register and just wire every
+        core's R13 to the dispatcher's "current block" counter — it holds the right value at assignment
+        time, after all. This is a <strong>race dressed up as a simplification</strong>. The counter is
+        <em>live</em>: one cycle after granting core 0 block 4, the dispatcher grants core 1 block 5 and
+        the counter moves on. Core 0 is still only in FETCH — by the time its lanes read R13 to compute
+        <primer-math>i</primer-math>, they would see 5, or 6, or whatever the counter holds that cycle.
+        The result is silent corruption: threads compute a <em>neighbouring block's</em> indices, some
+        elements get written twice, others never — and the bug shifts with timing, the classic signature
+        of a race. The rule is general and worth engraving: <strong>when a producer's value is consumed
+        later, the consumer must capture its own copy at the handshake</strong>. Assignment is the
+        handshake; the latch in the core is the capture.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: dispatch rounds, residency accounting, arbitration, contract reasoning. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "dispatchQuiz@1": {
+          "intro": "The dispatcher: next-block counter + free-core bitmask + done counter. Assign latches %blockIdx into a free core; kernel-complete when done blocks = total.",
+          "roundsQ": "A launch has {b} blocks and the GPU has {c} cores; every block takes the same time. In how many back-to-back rounds of block execution does the kernel finish?",
+          "timeQ": "Each block takes {T} cycles of core time, and {b} blocks run on {c} cores (ignore the one-cycle dispatch stagger). Roughly how many cycles does the whole kernel take?",
+          "freeQ": "A 4-core GPU has cores {i} and {j} busy and the rest free. Using lowest-free-first arbitration, which core number receives the next block?",
+          "residentQ": "Mid-kernel, the dispatcher's counters read next_block = {n} and done_blocks = {d}. How many blocks are resident in cores right now?",
+          "core0Q": "With 2 cores, lowest-free-first arbitration and equal block times, cores end up alternating blocks. Out of {b} blocks, how many does core 0 run?",
+          "onehotQ": "In the RTL, what does the expression free &amp; (~free + 1) compute?",
+          "onehotA": "A one-hot mask isolating the lowest set bit of free — the lowest-numbered free core, chosen with pure arithmetic",
+          "onehotB": "The number of free cores",
+          "onehotC": "A mask of every busy core",
+          "onehotD": "The highest-numbered free core",
+          "latchQ": "Why must %blockIdx be latched into the core at assignment, rather than the core reading the dispatcher's block counter during execution?",
+          "latchA": "The counter keeps moving as later blocks are dispatched — reading it live is a race that hands threads a neighbouring block's indices",
+          "latchB": "Latching saves power because registers are cheaper than wires",
+          "latchC": "The counter is in a different clock domain, so it cannot be read at all",
+          "latchD": "It makes no difference — both wirings behave identically",
+          "indepQ": "Block-level dispatch needs no communication paths between cores. What property of the programming model makes that possible?",
+          "indepA": "Blocks are independent by contract — a well-formed kernel's blocks may run in any order, on any cores, without talking to each other",
+          "indepB": "All blocks execute exactly the same instructions, so communication would be redundant",
+          "indepC": "The memory system forbids two cores from being active simultaneously",
+          "indepD": "Each core has a private copy of all of data memory",
+          "completeQ": "When must the dispatcher raise kernel-complete?",
+          "completeA": "When the done-block count equals the total — every block has finished, not merely been handed out",
+          "completeB": "When next_block reaches the total — all blocks have been dispatched",
+          "completeC": "As soon as every core has been busy at least once",
+          "completeD": "One cycle after the last assignment",
+          "recycleQ": "A launch has far more blocks than there are cores. What happens?",
+          "recycleA": "Cores are recycled: each done signal frees a core, which is immediately granted the next waiting block — the same silicon serves any block count",
+          "recycleB": "The launch is rejected — block count may not exceed core count",
+          "recycleC": "Extra blocks are silently dropped",
+          "recycleD": "The dispatcher fabricates temporary extra cores",
+          "staggerQ": "In the simulation, core 1 finishes each of its blocks exactly one cycle after core 0 finishes its own. Why?",
+          "staggerA": "The dispatcher grants one block per cycle, so core 1 started one cycle later at launch — and that stagger persists through the whole run",
+          "staggerB": "Core 1 is clocked slightly slower than core 0",
+          "staggerC": "Core 1's blocks contain one extra instruction each",
+          "staggerD": "The done signals share a wire and must take turns",
+          "launchQ": "Which three things does a launch hand the dispatcher?",
+          "launchA": "The kernel's start address, the number of blocks, and the block size",
+          "launchB": "The full list of every thread's register values",
+          "launchC": "The contents of the arrays the kernel will read",
+          "launchD": "A precomputed schedule mapping each block to a specific core"
+        }
+      }
+    </script>
+
+    <primer-quiz name="dispatchQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/capstone/a-simt-core-in-rtl",
+      "computer-science/chip-design/gpu-compute/the-warp-scheduler"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Dispatch timeline: 6 blocks onto 2 cores; x = cycle/20. ──
+  registerGeometryScene(
+    "dispatchTimeline",
+    ({ board, colors, step, sceneStrings }) => {
+      const X = (cyc) => 0.8 + cyc / 20;
+      const ROWY = [3.4, 1.8];                       // core 0 row, core 1 row (bar bottoms)
+      const txt = (x, y, s, color, fs = 11, bold = false) =>
+        board.create("text", [x, y, s], {
+          strokeColor: color, fontSize: fs, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: bold ? "font-weight:600" : "",
+        });
+      const bar = (core, c0, c1, blk) => {
+        const y = ROWY[core];
+        board.create("polygon", [[X(c0), y], [X(c1), y], [X(c1), y + 1], [X(c0), y + 1]], {
+          fillColor: colors.cat[blk % 5], fillOpacity: 0.35, fixed: true, highlight: false,
+          vertices: { visible: false }, borders: { strokeColor: colors.line, highlight: false },
+        });
+        txt(X((c0 + c1) / 2), y + 0.5, sceneStrings("blk") + blk, colors.ink, 11, true);
+      };
+      const tick = (core, cyc, up) => {
+        const y = ROWY[core];
+        board.create("arrow", up ? [[X(cyc), y - 0.7], [X(cyc), y - 0.05]] : [[X(cyc), y + 1.7], [X(cyc), y + 1.05]], {
+          strokeColor: up ? colors.cat[0] : colors.cat[3], strokeWidth: 1.5, highlight: false,
+          lastArrow: { type: 2, size: 4 },
+        });
+      };
+
+      // Base: row labels + cycle axis.
+      txt(0.05, 3.9, sceneStrings("core0"), colors.ink, 11, true);
+      txt(0.05, 2.3, sceneStrings("core1"), colors.ink, 11, true);
+      board.create("segment", [[0.8, 0.7], [X(250), 0.7]], { strokeColor: colors.line, strokeWidth: 1, highlight: false });
+      [0, 79, 158, 239].forEach((c) => {
+        txt(X(c), 0.4, String(c), colors.ink, 9);
+        board.create("segment", [[X(c), 0.62], [X(c), 0.78]], { strokeColor: colors.line, strokeWidth: 1, highlight: false });
+      });
+      txt(X(125), 0.05, sceneStrings("axis"), colors.ink, 10);
+
+      // Step 1: the launch — blocks 0 and 1 assigned at cycles 0 and 1.
+      step(sceneStrings("stepAssign"), () => {
+        bar(0, 1, 79, 0); tick(0, 0, true);
+        bar(1, 2, 80, 1); tick(1, 1, true);
+      });
+
+      // Step 2: first recycling — done at 79/80, blocks 2 and 3 latched the same cycles.
+      step(sceneStrings("stepRecycle"), () => {
+        tick(0, 79, false); tick(1, 80, false);
+        bar(0, 80, 158, 2); bar(1, 81, 159, 3);
+      });
+
+      // Step 3: the final pair and kernel-complete at 239.
+      step(sceneStrings("stepFinish"), () => {
+        tick(0, 158, false); tick(1, 159, false);
+        bar(0, 159, 237, 4); bar(1, 160, 238, 5);
+        board.create("segment", [[X(239), 0.7], [X(239), 4.6]], {
+          strokeColor: colors.cat[3], strokeWidth: 2, dash: 2, highlight: false,
+        });
+        txt(X(239) - 0.05, 4.9, sceneStrings("done"), colors.cat[3], 11, true);
+      });
+    },
+    { boundingbox: [-0.9, 5.4, 14.2, -0.3], keepAspect: false, title: () => makeStrings("dispatchTimeline")("title") },
+  );
+
+  registerQuiz("dispatchQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // ceil(b/c) rounds.
+      prompt: (v) => sceneStrings("roundsQ", v),
+      variables: "b=[5:24] c=[2,4]",
+      answer: (v) => Math.ceil(v.b / v.c),
+    },
+    {
+      // (b/c)·T with b divisible by c.
+      prompt: (v) => sceneStrings("timeQ", v),
+      variables: "T=[60,78,90,120] b=[8,12,16,20] c=[2,4]",
+      answer: "b / c * T",
+    },
+    {
+      // Lowest free core among {0,1,2,3} minus the two busy ones.
+      prompt: (v) => sceneStrings("freeQ", v),
+      variables: "i=[0:2] j=[1:3]",
+      constraints: "i < j",
+      answer: (v) => [0, 1, 2, 3].find((k) => k !== v.i && k !== v.j),
+    },
+    {
+      // Resident blocks = dispatched − done.
+      prompt: (v) => sceneStrings("residentQ", v),
+      variables: "n=[2:8] d=[0:8]",
+      constraints: "n - d <= 2 && n - d >= 1",
+      answer: "n - d",
+    },
+    {
+      // Core 0 runs ceil(b/2) blocks.
+      prompt: (v) => sceneStrings("core0Q", v),
+      variables: "b=[5:12]",
+      answer: (v) => Math.ceil(v.b / 2),
+    },
+    {
+      prompt: () => sceneStrings("onehotQ"),
+      options: [
+        { text: () => sceneStrings("onehotA"), correct: true },
+        { text: () => sceneStrings("onehotB"), correct: false },
+        { text: () => sceneStrings("onehotC"), correct: false },
+        { text: () => sceneStrings("onehotD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("latchQ"),
+      options: [
+        { text: () => sceneStrings("latchA"), correct: true },
+        { text: () => sceneStrings("latchB"), correct: false },
+        { text: () => sceneStrings("latchC"), correct: false },
+        { text: () => sceneStrings("latchD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("indepQ"),
+      options: [
+        { text: () => sceneStrings("indepA"), correct: true },
+        { text: () => sceneStrings("indepB"), correct: false },
+        { text: () => sceneStrings("indepC"), correct: false },
+        { text: () => sceneStrings("indepD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("completeQ"),
+      options: [
+        { text: () => sceneStrings("completeA"), correct: true },
+        { text: () => sceneStrings("completeB"), correct: false },
+        { text: () => sceneStrings("completeC"), correct: false },
+        { text: () => sceneStrings("completeD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("recycleQ"),
+      options: [
+        { text: () => sceneStrings("recycleA"), correct: true },
+        { text: () => sceneStrings("recycleB"), correct: false },
+        { text: () => sceneStrings("recycleC"), correct: false },
+        { text: () => sceneStrings("recycleD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("staggerQ"),
+      options: [
+        { text: () => sceneStrings("staggerA"), correct: true },
+        { text: () => sceneStrings("staggerB"), correct: false },
+        { text: () => sceneStrings("staggerC"), correct: false },
+        { text: () => sceneStrings("staggerD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("launchQ"),
+      options: [
+        { text: () => sceneStrings("launchA"), correct: true },
+        { text: () => sceneStrings("launchB"), correct: false },
+        { text: () => sceneStrings("launchC"), correct: false },
+        { text: () => sceneStrings("launchD"), correct: false },
+      ],
+    },
+  ]);
+</script>

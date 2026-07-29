@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Functional Coverage</primer-title>
+
+    <primer-card>
+      <p>
+        Your regression is green: ten thousand
+        <primer-ref to="computer-science/chip-design/verification/constrained-random-stimulus">constrained-random</primer-ref>
+        tests, zero failures. Time to celebrate? Not yet — a green regression answers "did anything we
+        tried fail?" and stays silent on the question that actually matters: <strong>what did we try?</strong>
+        Ten thousand tests that all happened to be small aligned reads prove nothing about writes, or
+        boundaries, or the read-after-write hazard. <strong>Functional coverage</strong> is the discipline
+        that makes "have we tested it?" a <em>measured quantity</em>: you declare the scenarios that matter,
+        the simulator counts how often each actually occurred, and the holes in the count are your to-do
+        list. It is the difference between "we ran a lot of tests" and "we know what our tests did".
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Covergroups, coverpoints, bins</h2>
+      <p>
+        The declaration mirrors the assertion machinery: you write what matters, the simulator tallies it.
+        A <strong>covergroup</strong> samples signals at an event (usually a clock edge); each
+        <strong>coverpoint</strong> watches one expression; its <strong>bins</strong> partition the values
+        into the cases you care about:
+      </p>
+      <primer-code lang="text">
+        covergroup alu_cov @(posedge clk);
+          cp_op: coverpoint op {
+            bins add          = {OP_ADD};
+            bins sub          = {OP_SUB};
+            bins logic_ops[]  = {OP_AND, OP_OR, OP_XOR};   // one bin each
+            illegal_bins bad  = {4'hF};                    // must NEVER be sampled
+          }
+          cp_a: coverpoint a {
+            bins zero  = {0};
+            bins small = {[1:255]};
+            bins big   = {[256:$]};                        // $: up to the maximum
+          }
+          op_x_a: cross cp_op, cp_a;                       // 5 x 3 = 15 cross bins
+        endgroup
+      </primer-code>
+      <p>
+        Each bin is a little odometer: "how many times did a subtraction happen?", "how many times was an
+        operand zero?". An <code>illegal_bins</code> is a tripwire — sampling it fails the test outright.
+        And the <strong><code>cross</code></strong> is where the real power lives: it counts
+        <em>combinations</em> — did we ever subtract <em>from</em> zero? AND with a big operand? Bugs
+        overwhelmingly hide at the intersections of features ("the FIFO was full <em>while</em> an error
+        arrived <em>during</em> a flush"), which no single coverpoint can see. Crossing an
+        <primer-math>n</primer-math>-bin point with an <primer-math>m</primer-math>-bin point makes
+        <primer-math>n \times m</primer-math> cross bins — the combinatorics that keeps verification teams
+        honest and busy.
+      </p>
+    </primer-card>
+
+    <!-- Coverage curve chart: random vs directed-at-holes. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "covCurve": {
+          "title": "Coverage closure: the saturating grind",
+          "legRandom": "pure random stimulus",
+          "legDirected": "random + tests steered at the holes"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The closure loop</h2>
+      <p>
+        Coverage turns verification into a feedback loop with a name — <strong>coverage closure</strong>:
+        run the regression; read the coverage report; find the <strong>holes</strong> (bins at zero); write
+        or steer tests to hit them (new constraints, new directed tests, new seeds); repeat until every bin
+        is hit or consciously waived. The curve it produces is one of the most recognisable shapes in the
+        industry:
+      </p>
+      <primer-chart scene="covCurve" caption="A chart of functional coverage percentage against number of tests. The pure-random curve rises steeply then flattens near 85 percent, leaving stubborn holes. A second curve, where engineers steer tests at the remaining holes, keeps climbing towards 100 percent."></primer-chart>
+      <p>
+        Random stimulus sprints through the easy scenarios — the first hundred tests buy more coverage than
+        the next ten thousand — then stalls: some bins are simply too improbable to hit by luck (the
+        FIFO-full-during-error cross might need a one-in-a-billion coincidence). Those last bins are hit by
+        <em>aiming</em>: tightening constraints around the hole, or writing an old-fashioned directed test.
+        The plateau is not failure; it is the report telling you where imagination must take over from
+        dice.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Count the bins yourself</h2>
+      <p>
+        A coverage collector is honestly just a map of counters. Watch one discover a hole — and watch the
+        hole persist until the stimulus is steered:
+      </p>
+      <primer-code run>
+        // ── A tiny coverage collector: bins are counters in a Map. ──
+        const ops = ["ADD", "SUB", "AND", "OR"];
+        const sizes = ["zero", "small", "big"];
+
+        function collect(nTests: number, steered: boolean): void {
+          const bins = new Map&lt;string, number&gt;();
+          for (const o of ops) for (const s of sizes) bins.set(`${o} x ${s}`, 0);
+
+          let rng = 12345;
+          const rand = () =&gt; ((rng = (rng * 1103515245 + 12345) &amp; 0x7fffffff) / 0x7fffffff);
+
+          for (let t = 0; t &lt; nTests; t++) {
+            const op = ops[Math.floor(rand() * 4)];
+            // Unsteered stimulus almost never draws a zero operand (1 value in 4096):
+            const zeroP = steered ? 0.2 : 1 / 4096;
+            const r = rand();
+            const size = r &lt; zeroP ? "zero" : r &lt; 0.8 ? "small" : "big";
+            bins.set(`${op} x ${size}`, (bins.get(`${op} x ${size}`) ?? 0) + 1);
+          }
+
+          const hit = [...bins.values()].filter((n) =&gt; n &gt; 0).length;
+          const holes = [...bins.entries()].filter(([, n]) =&gt; n === 0).map(([k]) =&gt; k);
+          const pct = ((100 * hit) / bins.size).toFixed(0);
+          console.log(`${steered ? "steered" : "random "} | ${nTests} tests: ${hit}/${bins.size} cross bins = ${pct}% covered`);
+          if (holes.length) console.log(`          holes: ${holes.join(", ")}`);
+        }
+
+        collect(50, false);     // early random run: easy bins fill fast
+        collect(5000, false);   // 100x more tests... the zero-operand holes REMAIN
+        collect(200, true);     // steer stimulus at the hole: closure with 25x fewer tests
+      </primer-code>
+      <p>
+        Five thousand aimless tests lose to two hundred aimed ones — the closure loop in miniature. The
+        report told us <em>which</em> scenarios were missing; the fix was a constraint making zero operands
+        likely; the holes closed.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Code coverage, functional coverage, and "done"</h2>
+      <p>
+        Tools also report <strong>code coverage</strong> for free: which RTL lines executed, which branches
+        both ways, which signal bits toggled. It is necessary — an unexecuted line is untested by
+        definition — but shallow: code coverage measures <em>the design as written</em>, not <em>the
+        intent</em>. Every line of a FIFO can execute without ever testing "full and empty in the same
+        microsecond" — a scenario, not a line. Functional coverage measures scenarios; code coverage
+        catches the parts of the design your scenario list forgot even to mention. You need both, and
+        neither is sufficient.
+      </p>
+      <p>
+        So when is verification <em>done</em>? Here is the uncomfortable truth this course will repeat at
+        tape-out: <strong>it is never done — it is risk management</strong>. There is no proof at the end
+        of simulation, only evidence: functional coverage closed, code coverage explained, regressions
+        clean across thousands of seeds,
+        <primer-ref to="computer-science/chip-design/verification/assertions-and-sva">assertions</primer-ref>
+        never vacuous, reviews signed. Tape-out is the day the accumulated evidence outweighs the cost of
+        waiting — a judgement call wearing an engineering costume, made honest by the numbers this lesson
+        taught you to collect.
+      </p>
+      <primer-theorem name="Functional coverage">
+        <ul>
+          <li>a <strong>covergroup</strong> samples signals at an event; <strong>coverpoints</strong> watch
+            expressions; <strong>bins</strong> count the cases (values, ranges,
+            <code>illegal_bins</code> tripwires);</li>
+          <li><strong>cross</strong> coverage counts combinations —
+            <primer-math>n \times m</primer-math> bins — because bugs hide at intersections;</li>
+          <li><strong>closure loop</strong>: run → find holes → steer tests at them → repeat;</li>
+          <li><strong>code coverage</strong> (lines/branches/toggles) measures the text; functional
+            coverage measures the <em>scenarios</em> — both needed, neither sufficient;</li>
+          <li>verification is never finished, only <strong>argued to be sufficient</strong>: coverage +
+            clean regressions + review = tape-out confidence.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Coverage-driven verification, the management view">
+      <p>
+        Functional coverage quietly revolutionised how chip projects are <em>run</em>. Before it,
+        verification status was vibes: "we feel good about the cache". After it, a project has a
+        <strong>coverage dashboard</strong> — thousands of bins rolled up into percentages per block,
+        trending week by week — and tape-out reviews walk the numbers: which holes remain, which are waived
+        and why, whose signature is on each waiver. The waiver list is the fascinating part: a hole can be
+        legitimately unhittable ("this error type cannot occur with this bus configuration"), and writing
+        that sentence down forces someone to <em>prove</em> it, which has itself found bugs. The dashboard
+        also produces verification's best-known career wisdom: the engineer who closes the last 2% of
+        coverage learns more about the design than the person who wrote it.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 100% of a wrong model proves nothing">
+      <p>
+        Coverage measures your tests against <strong>your coverage model</strong> — the bins <em>you chose
+        to declare</em>. It cannot see scenarios you never wrote down: forget a coverpoint for
+        back-to-back writes and the report gleams at 100% while that scenario goes untested into silicon;
+        nobody counts a bin that doesn't exist. And coverage says nothing about <em>checking</em>: a bench
+        with a broken scoreboard can hit every bin — every scenario exercised, none of them actually
+        verified — and a green 100% dashboard crowns the whole illusion. Coverage measures the
+        <em>completeness of your test plan's execution</em>, never the <em>correctness of the design</em>.
+        The mature reading of "100% coverage, zero failures" is precisely: "every scenario we thought of
+        was exercised, and our checkers — as good as they are — stayed quiet". Both italicised clauses are
+        load-bearing, and both are exactly where the escaped bugs will have lived.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: bin accounting, cross arithmetic, code-vs-functional, closure. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "covQuiz@1": {
+          "intro": "Bins count scenarios; crosses count combinations; holes are the to-do list.",
+          "pctQ": "A coverpoint has {n} bins and the regression has hit {h} of them. What is its coverage, as a percentage?",
+          "crossQ": "A coverpoint with {n} bins is crossed with one of {m} bins. How many cross bins result?",
+          "cross3Q": "Three coverpoints with {n}, {m} and {p} bins are crossed together. How many cross bins result?",
+          "holesQ": "A covergroup has {n} bins in total and the report shows {h} of them hit. How many holes remain?",
+          "codeQ": "What is the difference between code coverage and functional coverage?",
+          "cdRight": "Code coverage measures which RTL lines/branches/toggles executed; functional coverage measures whether declared SCENARIOS occurred — both needed, neither sufficient",
+          "cdSame": "They are two names for the same measurement",
+          "cdFunc": "Functional coverage is code coverage restricted to always_ff blocks",
+          "cdTool": "Code coverage is measured by synthesis, functional by simulation",
+          "illegalQ": "What happens when a value in an illegal_bins bin is sampled?",
+          "ilRight": "The test fails outright — the bin is a tripwire for values that must never occur",
+          "ilCount": "It is counted toward coverage like any other bin",
+          "ilSkip": "The sample is silently discarded",
+          "ilWaive": "The bin is automatically waived",
+          "loopQ": "Put the coverage-closure loop in order.",
+          "lpRight": "Run the regression → read the report and find holes → steer or write tests at the holes → repeat",
+          "lpWrong1": "Write tests at the holes → find holes → run the regression → stop",
+          "lpWrong2": "Waive all holes → run the regression → declare closure",
+          "lpWrong3": "Read the report → delete unhit bins → rerun to 100%",
+          "whyCrossQ": "Why is cross coverage where the interesting bugs hide?",
+          "wcRight": "Bugs overwhelmingly live at combinations of conditions — full FIFO during an error during a flush — which no single coverpoint can see",
+          "wcMore": "Cross bins are hit more often than ordinary bins",
+          "wcFast": "Crosses make simulation faster",
+          "wcCode": "Crosses measure code coverage more precisely",
+          "plateauQ": "Pure random stimulus makes coverage rise fast, then plateau below 100%. Why the plateau?",
+          "plRight": "The remaining bins are too improbable to hit by luck — they need steered constraints or directed tests aimed at the holes",
+          "plBug": "The plateau means the design has no more bugs",
+          "plSim": "The simulator caps coverage at its licensed maximum",
+          "plSeed": "The seed has been exhausted",
+          "doneQ": "When is verification 'done'?",
+          "doRight": "Never, strictly — it is risk management: closed coverage, clean regressions and review accumulate evidence until tape-out confidence outweighs waiting",
+          "doHundred": "At exactly 100% code coverage",
+          "doGreen": "As soon as one full regression passes",
+          "doTime": "When the schedule says so, regardless of evidence",
+          "modelQ": "A block reports 100% functional coverage with zero failures, yet a bug ships in a scenario nobody tested. How?",
+          "moRight": "The scenario was never declared as a coverpoint — coverage measures your test plan's execution, and a missing bin is an untested scenario nobody counts",
+          "moImp": "Impossible — 100% coverage guarantees correctness",
+          "moTool": "The coverage tool must have miscounted",
+          "moSeed": "The wrong seed was logged",
+          "waiveQ": "What is a coverage waiver?",
+          "waRight": "A signed-off justification that a specific hole is legitimately unhittable — written down and reviewed, which itself sometimes finds bugs",
+          "waAuto": "An automatic exclusion of any bin unhit after one night",
+          "waBug": "A bug report filed against the coverage tool",
+          "waCode": "A switch that converts functional coverage into code coverage"
+        }
+      }
+    </script>
+
+    <primer-quiz name="covQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/verification/constrained-random-stimulus"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerQuiz, makeStrings } from "primer";
+
+  // ── Coverage vs test count: random saturates below 100; steering closes the gap. ──
+  const covStrings = makeStrings("covCurve");
+  registerCharts(
+    [
+      {
+        name: "covCurve",
+        f: [
+          (x) => 85 * (1 - Math.exp(-x / 150)),          // pure random: fast, then a plateau at 85
+          (x) => 100 * (1 - Math.exp(-x / 400)),         // steered at the holes: slower start, closes to 100
+        ],
+        line: (colors, i) => ({ strokeColor: colors.cat[i], strokeWidth: 2.5 }),
+        legend: [() => covStrings("legRandom"), () => covStrings("legDirected")],
+      },
+    ],
+    {
+      title: () => covStrings("title"),
+      xmin: 0, xmax: 2000, ymin: 0, ymax: 105,
+      xticks: 500, yticks: 25,
+      xaxisname: "tests run", yaxisname: "coverage %",
+    },
+  );
+
+  registerQuiz("covQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // 100·h/n, integer because n divides 100.
+      prompt: (v) => sceneStrings("pctQ", v),
+      variables: "n=[4,5,10,20,25] h=[1:25]",
+      constraints: "h <= n",
+      answer: "100 * h / n",
+    },
+    {
+      prompt: (v) => sceneStrings("crossQ", v),
+      variables: "n=[3:8] m=[3:8]",
+      answer: "n * m",
+    },
+    {
+      prompt: (v) => sceneStrings("cross3Q", v),
+      variables: "n=[2:5] m=[2:5] p=[2:5]",
+      answer: "n * m * p",
+    },
+    {
+      prompt: (v) => sceneStrings("holesQ", v),
+      variables: "n=[20:60] h=[5:19]",
+      answer: "n - h",
+    },
+    {
+      prompt: () => sceneStrings("codeQ"),
+      options: [
+        { text: () => sceneStrings("cdRight"), correct: true },
+        { text: () => sceneStrings("cdSame"), correct: false },
+        { text: () => sceneStrings("cdFunc"), correct: false },
+        { text: () => sceneStrings("cdTool"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("illegalQ"),
+      options: [
+        { text: () => sceneStrings("ilRight"), correct: true },
+        { text: () => sceneStrings("ilCount"), correct: false },
+        { text: () => sceneStrings("ilSkip"), correct: false },
+        { text: () => sceneStrings("ilWaive"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("loopQ"),
+      options: [
+        { text: () => sceneStrings("lpRight"), correct: true },
+        { text: () => sceneStrings("lpWrong1"), correct: false },
+        { text: () => sceneStrings("lpWrong2"), correct: false },
+        { text: () => sceneStrings("lpWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyCrossQ"),
+      options: [
+        { text: () => sceneStrings("wcRight"), correct: true },
+        { text: () => sceneStrings("wcMore"), correct: false },
+        { text: () => sceneStrings("wcFast"), correct: false },
+        { text: () => sceneStrings("wcCode"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("plateauQ"),
+      options: [
+        { text: () => sceneStrings("plRight"), correct: true },
+        { text: () => sceneStrings("plBug"), correct: false },
+        { text: () => sceneStrings("plSim"), correct: false },
+        { text: () => sceneStrings("plSeed"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("doneQ"),
+      options: [
+        { text: () => sceneStrings("doRight"), correct: true },
+        { text: () => sceneStrings("doHundred"), correct: false },
+        { text: () => sceneStrings("doGreen"), correct: false },
+        { text: () => sceneStrings("doTime"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("modelQ"),
+      options: [
+        { text: () => sceneStrings("moRight"), correct: true },
+        { text: () => sceneStrings("moImp"), correct: false },
+        { text: () => sceneStrings("moTool"), correct: false },
+        { text: () => sceneStrings("moSeed"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("waiveQ"),
+      options: [
+        { text: () => sceneStrings("waRight"), correct: true },
+        { text: () => sceneStrings("waAuto"), correct: false },
+        { text: () => sceneStrings("waBug"), correct: false },
+        { text: () => sceneStrings("waCode"), correct: false },
+      ],
+    },
+  ]);
+</script>

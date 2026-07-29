@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Testbenches and Simulation</primer-title>
+
+    <primer-card>
+      <p>
+        Here is the industry's uncomfortable arithmetic: on a serious chip project, <strong>more than half
+        of the total engineering effort goes into verification</strong> — often nearer two-thirds. More
+        people, more compute, more calendar time than writing the design itself. The reason is brutal
+        economics: a software bug ships a patch; a silicon bug ships a <em>recall</em>, with mask sets
+        costing millions and respins costing months. So the industry built an entire discipline around one
+        question — <em>how do we know the RTL is right before we pay for it?</em> — and this module is that
+        discipline. It begins with its humblest, most important artifact: the <strong>testbench</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>A module with no pins</h2>
+      <p>
+        A testbench is a SystemVerilog module that <strong>wraps the design under test (DUT)</strong> — it
+        instantiates your design, wiggles its inputs, and watches its outputs. Two things make it unlike any
+        module you wrote in Module&nbsp;1. It has <em>no ports</em>: nothing outside it exists; it is the
+        whole universe as far as the DUT can tell. And it is <strong>never synthesized</strong> — it lives
+        entirely in
+        <primer-ref to="computer-science/chip-design/rtl/what-synthesizable-means">testbench country</primer-ref>,
+        so the sim-only dialect (<code>initial</code>, <code>#</code> delays, <code>$error</code>) is not
+        just allowed but the whole point. Here is a complete self-checking bench for Module&nbsp;1's
+        <code>full_adder</code>:
+      </p>
+      <primer-code lang="text">
+        module full_adder_tb;                  // no ports: the bench is the universe
+          logic a, b, cin, sum, cout;
+
+          // The design under test, wired to the bench's own signals.
+          full_adder dut (.a(a), .b(b), .cin(cin), .sum(sum), .cout(cout));
+
+          initial begin
+            for (int i = 0; i &lt; 8; i++) begin
+              {a, b, cin} = i[2:0];            // drive one input combination
+              #10;                             // let the combinational logic settle
+              if ({cout, sum} !== a + b + cin) // check against a REFERENCE: just add!
+                $error("FAIL: %b+%b+%b gave %b%b", a, b, cin, cout, sum);
+            end
+            $display("all 8 combinations checked");
+            $finish;                           // stop the simulator
+          end
+        endmodule
+      </primer-code>
+      <p>
+        Read the three verbs, because every testbench ever written has exactly these three jobs:
+        <strong>drive</strong> (apply stimulus to the DUT's inputs), <strong>wait</strong> (let virtual time
+        pass so the design reacts), and <strong>check</strong> (compare the DUT's outputs against what they
+        <em>should</em> be). The check compares against <code>a + b + cin</code> — an independent,
+        obviously-correct description of the intent. That little expression is doing enormous work, and it
+        gets a name in a moment.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Clocks, resets and sequential DUTs</h2>
+      <p>
+        A sequential DUT needs a heartbeat, and the bench supplies it with the most famous three lines in
+        verification:
+      </p>
+      <primer-code lang="text">
+        logic clk = 0;
+        initial forever #5 clk = ~clk;     // toggle every 5 time units: period 10
+
+        initial begin
+          rst_n = 0;                        // hold reset...
+          repeat (2) @(posedge clk);        // ...for two clock edges
+          rst_n = 1;                        // release, and the DUT wakes up
+          // drive and check, cycle by cycle, from here on
+        end
+      </primer-code>
+      <p>
+        <code>forever #5 clk = ~clk</code> toggles the clock every 5 time units — a full period of 10, high
+        for 5 and low for 5, forever. The second <code>initial</code> block runs <em>concurrently</em> (the
+        bench may have many, all in parallel — this is the simulation dialect flexing), holding reset across
+        the first two edges so every register wakes into a known state before stimulus begins.
+      </p>
+    </primer-card>
+
+    <!-- Testbench anatomy figure: TB wall, DUT, stimulus, checker — stepped. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "tbAnatomy": {
+          "title": "Anatomy of a self-checking testbench",
+          "stepDut": "The DUT sits inside the bench — the bench is its entire universe",
+          "stepDrive": "Stimulus and clock/reset generators drive the DUT's inputs through virtual time",
+          "stepCheck": "A reference model computes what SHOULD happen; a checker compares, cycle by cycle"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The anatomy, drawn</h2>
+      <primer-geometry scene="tbAnatomy" caption="A large box labelled 'testbench (never synthesized)'. Inside, a central box labelled DUT. On the left, boxes for the stimulus generator and the clock and reset generator, with arrows into the DUT's inputs. On the right, the DUT's outputs flow to a checker box, which also receives expected values from a reference model box fed by the same stimulus."></primer-geometry>
+      <p>
+        The picture to burn in: stimulus flows into <em>two</em> places — the DUT and the <strong>reference
+        model</strong> (also called the <strong>golden model</strong>): a separate, simpler description of
+        intent, like our <code>a + b + cin</code>. The checker's job is a single question asked forever:
+        <em>do they agree?</em> Every disagreement is a bug — in the DUT, or occasionally in the model, and
+        either way you learned something real.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Run a golden-model regression</h2>
+      <p>
+        Here is that architecture as running code: a gate-level DUT (with a planted bug), a golden model, a
+        loop of stimulus, and pass/fail accounting. This shape — <em>drive both, compare, count</em> — is
+        the skeleton of every serious verification environment on Earth:
+      </p>
+      <primer-code run>
+        // ── The DUT: a 4-bit ripple-carry adder built from gate logic... with a bug. ──
+        function dutAdd(a: number, b: number): { sum: number; cout: number } {
+          let sum = 0, carry = 0;
+          for (let i = 0; i &lt; 4; i++) {
+            const ai = (a &gt;&gt; i) &amp; 1, bi = (b &gt;&gt; i) &amp; 1;
+            sum |= (ai ^ bi ^ carry) &lt;&lt; i;
+            carry = (ai &amp; bi) | (bi &amp; carry);   // BUG: forgot the (ai & carry) term!
+          }
+          return { sum, cout: carry };
+        }
+
+        // ── The golden model: the INTENT, stated as simply as possible. ──
+        const golden = (a: number, b: number) =&gt; ({ sum: (a + b) &amp; 15, cout: a + b &gt; 15 ? 1 : 0 });
+
+        // ── The bench: drive both, compare, count. (Seeded so a failure is re-runnable.) ──
+        const seed = 42;
+        let rng = seed;
+        const rand16 = () =&gt; ((rng = (rng * 1103515245 + 12345) &amp; 0x7fffffff) &gt;&gt; 8) % 16;
+
+        let pass = 0, fail = 0;
+        for (let t = 0; t &lt; 100; t++) {
+          const a = rand16(), b = rand16();
+          const d = dutAdd(a, b), g = golden(a, b);
+          if (d.sum === g.sum &amp;&amp; d.cout === g.cout) pass++;
+          else {
+            fail++;
+            if (fail &lt;= 3) console.log(`FAIL: ${a} + ${b} — dut says ${d.cout},${d.sum}; golden says ${g.cout},${g.sum}`);
+          }
+        }
+        console.log(`seed ${seed}: ${pass} passed, ${fail} failed of ${pass + fail}`);
+      </primer-code>
+      <p>
+        The buggy carry term only matters when <code>ai &amp; carry</code> would have fired — some inputs
+        sail through, which is exactly why counting a few passes proves nothing and regressions run
+        <em>many</em> inputs. Note the printed <strong>seed</strong>: rerunning with the same seed replays
+        the identical stimulus, so a failure found at 3 a.m. is reproducible at 9 a.m. — a theme the
+        <primer-ref forward to="computer-science/chip-design/verification/constrained-random-stimulus">random-stimulus
+        lesson</primer-ref> makes central.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Under the hood, and at scale</h2>
+      <p>
+        What is the simulator actually doing? It is an <strong>event-driven</strong> program: it keeps an
+        <strong>event queue</strong> ordered by virtual time, and only ever computes where something
+        <em>changed</em> — a signal toggle schedules evaluations of just the blocks that read it, which may
+        schedule further updates in the same instant (the zero-duration bookkeeping rounds are called
+        <strong>delta cycles</strong>), until the moment quiesces and time jumps to the next event. That is
+        why simulating a billion-gate chip is possible at all: at any instant, almost nothing is changing.
+      </p>
+      <p>
+        And benches are not run once. Teams accumulate them into a <strong>regression suite</strong> —
+        hundreds or thousands of tests rerun automatically on every change to the RTL, exactly like a
+        software CI pipeline but measured in compute-farm-nights. A change that breaks a test three
+        subsystems away is caught before breakfast. The regression suite <em>is</em> the project's memory
+        of every bug ever fixed.
+      </p>
+      <primer-theorem name="Testbenches">
+        <ul>
+          <li>a testbench is an <strong>unsynthesized</strong>, portless module wrapping the
+            <strong>DUT</strong>; it lives in the simulation-only dialect on purpose;</li>
+          <li>its three verbs: <strong>drive</strong> stimulus, <strong>wait</strong> virtual time
+            (<code>#</code>, <code>@(posedge clk)</code>), <strong>check</strong> outputs;</li>
+          <li>checking compares the DUT against a <strong>reference (golden) model</strong> — an
+            independent statement of intent;</li>
+          <li>a bench that does not check itself is not a test; <code>$error</code> on every mismatch;</li>
+          <li>simulators are <strong>event-driven</strong> (event queue + delta cycles); benches accumulate
+            into <strong>regression suites</strong> rerun on every change.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Verification as a career">
+      <p>
+        Here is a fact that surprises every student: at most chip companies, <strong>verification engineers
+        outnumber designers</strong> — sometimes two to one. And it is not the junior job. A great
+        verification engineer is part detective (what input sequence would expose this bug?), part
+        adversary (the designer says it works; assume it doesn't), part software architect (a modern bench
+        is a bigger program than the design it tests). The mindset flip is the fun of it: a designer's good
+        day is "nothing failed"; a verification engineer's good day is "I broke it" — every failure found
+        in simulation is a failure that will never brick a product in the field. The industry's grim
+        koan: <em>if you haven't found a bug this week, your testbench is broken.</em>
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The testbench that checks nothing">
+      <p>
+        The classic beginner bench drives some inputs, dumps waveforms, and prints "test done". The
+        engineer scrolls the waves, they look plausible, ship it. This is not a test — it is a
+        <em>screensaver</em>. Eyeball-checking does not scale past ten cycles, is not repeatable, and
+        silently rots: change the RTL next month and nobody re-stares at the waves. The iron rule:
+        <strong>if it isn't self-checking, it isn't a test.</strong> Every bench must know the correct
+        answer (a golden model, a stored expected trace, an invariant) and must <em>fail loudly</em> —
+        <code>$error</code>, non-zero exit, red in the regression dashboard — when reality disagrees.
+        Waveforms are for <em>debugging</em> a failure after a self-check catches it, never for deciding
+        that things pass. A thousand-test regression of self-checking benches is knowledge; a folder of
+        waveform dumps is décor.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: clock arithmetic, TB roles, golden models, pass accounting. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "tbQuiz@1": {
+          "intro": "Drive, wait, check: an unsynthesized bench wraps the DUT and compares it against a golden model.",
+          "clkQ": "A bench generates its clock with initial forever #{h} clk = ~clk;. What is the clock period, in time units?",
+          "periodsQ": "A clock toggles every {h} time units, and the simulation runs for {t} time units. How many full clock periods is that?",
+          "failQ": "A regression applies {n} random tests to a DUT and the checker reports {f} mismatches. How many tests passed?",
+          "rolesQ": "In a testbench, which is the DUT and which is the bench?",
+          "roRight": "The DUT is the synthesizable design being tested; the bench is the unsynthesized wrapper that drives and checks it",
+          "roSwap": "The DUT drives stimulus and the bench is the design being tested",
+          "roBoth": "Both are synthesized together onto the chip",
+          "roSame": "They are the same module viewed in two tools",
+          "portsQ": "Why does a testbench module have no ports?",
+          "poRight": "Nothing exists outside it — the bench is the DUT's entire universe, so there is nowhere for pins to go",
+          "poSynth": "Ports are not allowed in simulation",
+          "poSpeed": "Removing ports makes simulation faster",
+          "poStyle": "Pure convention — ports would work fine",
+          "goldQ": "What is a golden (reference) model?",
+          "goRight": "An independent, as-simple-as-possible statement of intended behaviour that the DUT's outputs are compared against",
+          "goCopy": "A copy of the DUT's RTL kept in version control",
+          "goSynth": "The synthesized netlist of the DUT",
+          "goWave": "A waveform file from a known-good simulation run",
+          "selfQ": "What makes a testbench self-checking?",
+          "seRight": "It knows the correct answer and fails loudly ($error) on any mismatch — no human waveform-staring required",
+          "seWave": "It automatically dumps waveforms for review",
+          "seRuns": "It runs without any compile errors",
+          "seFast": "It finishes in under a second",
+          "evQ": "How does an event-driven simulator get through a billion-gate design?",
+          "evRight": "It only recomputes where something changed — an event queue schedules just the blocks reading each toggled signal",
+          "evAll": "It evaluates every gate on every time step",
+          "evGPU": "It offloads every gate to a GPU",
+          "evSkip": "It randomly samples a subset of the gates",
+          "deltaQ": "What is a delta cycle?",
+          "deRight": "A zero-duration bookkeeping round within one instant of virtual time, letting cascaded updates settle before time advances",
+          "deTen": "A cycle lasting exactly ten time units",
+          "deClk": "One full period of the generated clock",
+          "deReset": "The cycle in which reset is released",
+          "regQ": "What is a regression suite?",
+          "reRight": "The accumulated set of self-checking tests rerun automatically on every RTL change — the project's memory of every bug fixed",
+          "reOne": "The single most recent test that failed",
+          "reSynth": "A suite of synthesis runs at different clock speeds",
+          "reWave": "An archive of waveform screenshots",
+          "whyQ": "Why does verification consume more than half of a chip project's effort?",
+          "whRight": "A silicon bug means million-dollar masks and months of respin — bugs must be found before tape-out, so proving correctness dwarfs writing the RTL",
+          "whSlow": "Because simulators are slow to install and license",
+          "whEasy": "Because writing RTL is trivial by comparison",
+          "whReg": "Because regulations require a fixed 50% split",
+          "resetQ": "Why does a bench hold reset for the first couple of clock edges before driving stimulus?",
+          "rsRight": "So every register wakes into a known state — otherwise the DUT starts full of x and every check chases ghosts",
+          "rsSpeed": "To let the simulator warm up its caches",
+          "rsClk": "Because the clock cannot start until reset is high",
+          "rsWave": "To make the waveforms easier to read"
+        }
+      }
+    </script>
+
+    <primer-quiz name="tbQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/rtl/what-synthesizable-means"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Testbench anatomy: wall, DUT, drivers, checker + golden model. ──
+  registerGeometryScene(
+    "tbAnatomy",
+    ({ board, colors, step, sceneStrings }) => {
+      const ink = colors.ink, wire = colors.line;
+      const dutC = colors.cat[0], drvC = colors.cat[1], chkC = colors.cat[2], refC = colors.cat[3];
+      const T = (x, y, txt, color, size = 12, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+      const box = (x, y, w, h, label, color) => {
+        board.create("polygon", [[x, y], [x + w, y], [x + w, y - h], [x, y - h]], {
+          borders: { strokeColor: color, strokeWidth: 2, highlight: false },
+          fillOpacity: 0, vertices: { visible: false }, highlight: false,
+        });
+        T(x + w / 2, y - h / 2, label, color, 12);
+      };
+      const arrow = (a, b, color) =>
+        board.create("arrow", [a, b], { strokeColor: color, strokeWidth: 2, highlight: false });
+
+      // Step 1: the bench wall and the DUT inside it.
+      step(sceneStrings("stepDut"), () => {
+        board.create("polygon", [[0.3, 6.7], [11.3, 6.7], [11.3, 0.7], [0.3, 0.7]], {
+          borders: { strokeColor: wire, strokeWidth: 2, dash: 2, highlight: false },
+          fillOpacity: 0, vertices: { visible: false }, highlight: false,
+        });
+        T(5.8, 6.35, "testbench (never synthesized)", ink, 13);
+        box(4.7, 4.9, 2.2, 1.6, "DUT", dutC);
+      });
+
+      // Step 2: stimulus + clock/reset driving the inputs.
+      step(sceneStrings("stepDrive"), () => {
+        box(0.8, 5.5, 2.6, 1.0, "stimulus gen", drvC);
+        box(0.8, 3.9, 2.6, 1.0, "clk / reset gen", drvC);
+        arrow([3.4, 5.0], [4.7, 4.5], drvC);
+        arrow([3.4, 3.4], [4.7, 3.7], drvC);
+      });
+
+      // Step 3: outputs to the checker; reference model in parallel.
+      step(sceneStrings("stepCheck"), () => {
+        box(8.2, 5.7, 2.5, 1.0, "checker", chkC);
+        box(4.7, 2.6, 2.9, 1.0, "reference model", refC);
+        arrow([6.9, 4.3], [8.2, 5.0], dutC);          // DUT outputs → checker
+        T(7.35, 4.95, "actual", ink, 11);
+        arrow([2.1, 4.5], [2.1, 2.1], drvC);          // stimulus also feeds the model
+        board.create("segment", [[2.1, 2.1], [4.7, 2.1]], { strokeColor: drvC, strokeWidth: 2, highlight: false });
+        arrow([7.6, 2.6], [9.4, 4.7], refC);          // model → checker
+        T(8.9, 3.4, "expected", ink, 11);
+        T(9.45, 6.05, "agree?", chkC, 11, "left");
+      });
+    },
+    { boundingbox: [-0.2, 7.2, 11.9, 0.2], title: () => makeStrings("tbAnatomy")("title") },
+  );
+
+  registerQuiz("tbQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Toggle every h → period 2h.
+      prompt: (v) => sceneStrings("clkQ", v),
+      variables: "h=[2:10]",
+      answer: "2 * h",
+    },
+    {
+      // t = 2hk shown in the prompt; k full periods.
+      prompt: (v) => sceneStrings("periodsQ", { ...v, t: 2 * v.h * v.k }),
+      variables: "h=[2:6] k=[3:9]",
+      answer: "k",
+    },
+    {
+      prompt: (v) => sceneStrings("failQ", v),
+      variables: "n=[50:200] f=[1:10]",
+      answer: "n - f",
+    },
+    {
+      prompt: () => sceneStrings("rolesQ"),
+      options: [
+        { text: () => sceneStrings("roRight"), correct: true },
+        { text: () => sceneStrings("roSwap"), correct: false },
+        { text: () => sceneStrings("roBoth"), correct: false },
+        { text: () => sceneStrings("roSame"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("portsQ"),
+      options: [
+        { text: () => sceneStrings("poRight"), correct: true },
+        { text: () => sceneStrings("poSynth"), correct: false },
+        { text: () => sceneStrings("poSpeed"), correct: false },
+        { text: () => sceneStrings("poStyle"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("goldQ"),
+      options: [
+        { text: () => sceneStrings("goRight"), correct: true },
+        { text: () => sceneStrings("goCopy"), correct: false },
+        { text: () => sceneStrings("goSynth"), correct: false },
+        { text: () => sceneStrings("goWave"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("selfQ"),
+      options: [
+        { text: () => sceneStrings("seRight"), correct: true },
+        { text: () => sceneStrings("seWave"), correct: false },
+        { text: () => sceneStrings("seRuns"), correct: false },
+        { text: () => sceneStrings("seFast"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("evQ"),
+      options: [
+        { text: () => sceneStrings("evRight"), correct: true },
+        { text: () => sceneStrings("evAll"), correct: false },
+        { text: () => sceneStrings("evGPU"), correct: false },
+        { text: () => sceneStrings("evSkip"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("deltaQ"),
+      options: [
+        { text: () => sceneStrings("deRight"), correct: true },
+        { text: () => sceneStrings("deTen"), correct: false },
+        { text: () => sceneStrings("deClk"), correct: false },
+        { text: () => sceneStrings("deReset"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("regQ"),
+      options: [
+        { text: () => sceneStrings("reRight"), correct: true },
+        { text: () => sceneStrings("reOne"), correct: false },
+        { text: () => sceneStrings("reSynth"), correct: false },
+        { text: () => sceneStrings("reWave"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("whRight"), correct: true },
+        { text: () => sceneStrings("whSlow"), correct: false },
+        { text: () => sceneStrings("whEasy"), correct: false },
+        { text: () => sceneStrings("whReg"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("resetQ"),
+      options: [
+        { text: () => sceneStrings("rsRight"), correct: true },
+        { text: () => sceneStrings("rsSpeed"), correct: false },
+        { text: () => sceneStrings("rsClk"), correct: false },
+        { text: () => sceneStrings("rsWave"), correct: false },
+      ],
+    },
+  ]);
+</script>

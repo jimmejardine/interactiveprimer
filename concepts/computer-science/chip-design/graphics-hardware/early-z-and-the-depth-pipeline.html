@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Early-Z and the Depth Pipeline</primer-title>
+
+    <primer-card>
+      <p>
+        You met
+        <primer-ref to="applied-mathematics/game-development-math/projection/depth-and-the-z-buffer">the
+        z-buffer</primer-ref> as an algorithm: shade a fragment, compare its depth against the buffer, keep
+        the closer one. Read that sentence again as a hardware engineer and it should horrify you. The
+        expensive step — running the fragment shader, with its texture fetches and lighting maths — happens
+        <em>first</em>, and only <em>then</em> does a cheap compare decide whether the result was wanted at
+        all. In a typical game scene each pixel is covered by several triangles (an <strong>overdraw</strong>
+        of 2–4×), so the naïve order shades two to four fragments per pixel and throws most of them away.
+        The single most profitable optimisation in the whole pixel pipeline follows from one observation:
+      </p>
+      <p>
+        <strong>The cheapest fragment is the one you never shade.</strong> This lesson is about the stack of
+        silicon tricks — early-Z, hierarchical Z, depth compression, fast clears — that exists purely to
+        kill invisible work as early, and as wholesale, as possible.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Early-Z: move the test before the shader</h2>
+      <p>
+        The fix sounds trivial: the
+        <primer-ref to="computer-science/chip-design/graphics-hardware/the-hardware-rasterizer">rasterizer</primer-ref>
+        already interpolates each fragment's depth before any shading happens — so test it <em>then</em>. A
+        small depth unit sits between the rasterizer and the shader pool: it reads the stored depth,
+        compares, and if the incoming fragment loses, the fragment is dropped on the spot. No warp is ever
+        scheduled, no texture is ever fetched. This is <strong>early-Z</strong> (or early depth test), and
+        on modern GPUs it is the default path for essentially every opaque draw.
+      </p>
+      <p>
+        But it is a <em>rearrangement of the spec</em>, not the spec itself — the API still promises that
+        the depth test happens after shading. Early-Z is only legal when the reordering is invisible, which
+        means the shader must not change the two inputs the test depends on:
+      </p>
+      <ul>
+        <li><strong>It must not write its own depth.</strong> If the shader outputs a custom depth value,
+          the rasterizer's interpolated z is not the value the spec says to test — the test <em>must</em>
+          wait until the shader has run.</li>
+        <li><strong>It must not <code>discard</code> fragments.</strong> A discarded fragment must leave the
+          depth buffer untouched; an early test that already wrote its z would corrupt the buffer for
+          everything behind it.</li>
+      </ul>
+      <p>
+        The hardware handles this automatically: when a shader is compiled, the driver inspects it, and any
+        depth write or discard silently routes the whole draw to the <strong>late-Z</strong> path — the
+        original test-after-shading order, performed in the render output units at the end of the pipe. Same
+        image, none of the savings.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Hierarchical Z: reject whole tiles with one compare</h2>
+      <p>
+        Early-Z kills fragments one at a time. Silicon can do better: kill them <em>by the tile</em>. The
+        depth unit maintains a small side buffer — the <strong>hierarchical Z</strong> (Hi-Z) buffer — with
+        one entry per screen tile (say <primer-math>8\times 8</primer-math> pixels) recording the
+        <strong>maximum</strong> (farthest) depth stored anywhere in that tile. Now when the coarse
+        rasterizer hands over a tile of a new triangle, the depth unit computes the triangle's
+        <em>nearest possible</em> depth over that tile — a conservative minimum, straight from the plane
+        equation — and makes one compare:
+      </p>
+      <primer-math display>z_{\min}^{\text{tri}} > z_{\max}^{\text{tile}} \;\Rightarrow\; \text{every fragment in the tile loses — reject all 64 with one compare.}</primer-math>
+      <p>
+        Work the numbers. Three tiles, with an incoming triangle whose nearest depth over each tile is
+        <primer-math>0.55</primer-math> (smaller = closer):
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Tile's stored <primer-math>z_{\max}</primer-math></th><th>Compare</th><th>Verdict</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><primer-math>0.42</primer-math></td><td><primer-math>0.55 > 0.42</primer-math></td><td><strong>Reject the whole tile</strong> — everything already there is closer than the triangle can possibly be</td></tr>
+            <tr><td><primer-math>0.60</primer-math></td><td><primer-math>0.55 < 0.60</primer-math></td><td>Survive — something in the tile is farther; per-pixel early-Z decides</td></tr>
+            <tr><td><primer-math>1.0</primer-math> (cleared)</td><td><primer-math>0.55 < 1.0</primer-math></td><td>Survive — the tile is still background</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        One compare against 64 per-pixel tests: for a heavily occluded triangle, Hi-Z discards almost all
+        of it before the fine rasterizer even stamps out coverage. The Hi-Z buffer is tiny (one value per
+        tile), lives in on-chip storage, and is updated conservatively as real depths are written.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "hiZScene": {
+          "title": "Hierarchical Z: one compare per tile",
+          "stepNear": "A near triangle (z = 0.3) has already been drawn — its fragments wrote the depth buffer",
+          "stepHiz": "The Hi-Z buffer stores each tile's MAXIMUM depth: 0.3 where the triangle covers the whole tile, 1.0 (the cleared background) elsewhere",
+          "stepFar": "A far triangle arrives at z = 0.7 — the coarse rasterizer hands its tiles to the depth unit",
+          "stepVerdict": "One compare per tile: 0.7 > 0.3 rejects the whole tile unseen; against 1.0 the tile survives to the per-pixel test",
+          "rejectLbl": "reject",
+          "testLbl": "test"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The reject, drawn</h2>
+      <p>
+        Step through a toy screen of <primer-math>4\times 3</primer-math> tiles. A near triangle is already
+        in the depth buffer; watch the Hi-Z values it leaves behind, then watch a far triangle's tiles get
+        sentenced one compare at a time.
+      </p>
+      <primer-geometry scene="hiZScene" caption="A grid of 4 by 3 screen tiles. Step by step: a near triangle at depth 0.3 is filled in; each tile is labelled with its hierarchical-Z maximum depth, 0.3 for tiles the triangle fully covers and 1.0 elsewhere; a far triangle at depth 0.7 arrives as an outline; each tile the far triangle touches is stamped reject where the stored maximum is 0.3, or test where the tile still holds background at depth 1.0."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Depth traffic: compression and fast clears</h2>
+      <p>
+        Every surviving fragment reads the depth buffer, and every winner writes it — at 4 bytes per
+        sample, depth is one of the largest bandwidth consumers on the chip. Two tricks tame it, both
+        exploiting the same fact: <strong>within one tile, depth usually comes from one triangle, and a
+        triangle's depth is a plane.</strong>
+      </p>
+      <ul>
+        <li><strong>Plane-equation compression.</strong> If a tile's 64 depths all lie on one plane
+          <primer-math>z = a\,x + b\,y + c</primer-math>, the hardware stores just the three coefficients
+          (plus a tag) instead of 64 raw values — a huge reduction in the bytes actually moved to and from
+          memory. Tiles crossed by several triangles fall back to storing more planes, or raw values; the
+          compression is <em>lossless</em>, and exists purely to cut traffic, not capacity (the worst case
+          must still fit).</li>
+        <li><strong>Fast clears.</strong> "Clear the depth buffer" would naively write every byte of a
+          multi-megabyte buffer, every frame. Instead each tile has a one-bit <em>cleared</em> flag in a
+          tiny on-chip table: clearing the screen sets the flags and writes nothing. A tile's first real
+          read materialises the clear value on the fly. Clearing a 4K depth buffer becomes a few thousand
+          flag writes instead of ~33 MB of memory traffic.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>Order is everything: front-to-back — and the transparency exception</h2>
+      <p>
+        Early-Z only rejects a fragment if something <em>closer</em> is already in the buffer — so the
+        savings depend entirely on draw order. Draw the scene <strong>front-to-back</strong> and the near
+        objects seed the depth buffer first; everything behind them is rejected before shading. Draw it
+        back-to-front and every fragment arrives before its occluder: everything passes the test, everything
+        is shaded, and the near objects simply overwrite the wasted work. Same image, up to
+        <primer-math>N\times</primer-math> the shading cost at overdraw <primer-math>N</primer-math>. This
+        is why engines sort opaque geometry roughly front-to-back (or run a cheap <em>depth pre-pass</em>
+        that lays down z first, so the main pass shades each pixel exactly once).
+      </p>
+      <p>
+        Transparency breaks the party. Alpha-blended geometry must be drawn
+        <strong>back-to-front</strong> for the blending maths to come out right — the exact opposite of the
+        rejection-friendly order — and a transparent fragment can't kill what's behind it anyway (you can
+        see through it, so the thing behind still contributes). Transparent surfaces get no early-Z help at
+        all: every layer is shaded, every time. It is a standing rule of real-time rendering that
+        transparency is expensive, and this is precisely why.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Count the kills yourself</h2>
+      <p>
+        A depth pipeline in miniature: two overlapping quads through a simulated early-Z stage, drawn in
+        both orders. The shader here is just a counter — which is the point: count how many times it runs.
+      </p>
+      <primer-code run>
+        // Two overlapping quads through simulated early-Z (smaller z = closer).
+        const W = 12, H = 8;
+        interface Quad { name: string; x0: number; y0: number; x1: number; y1: number; z: number; }
+        const NEAR: Quad = { name: "NEAR", x0: 1, y0: 1, x1: 8,  y1: 6, z: 0.3 };
+        const FAR:  Quad = { name: "FAR",  x0: 4, y0: 3, x1: 11, y1: 7, z: 0.7 };
+
+        function render(order: Quad[]): { shaded: number; rejected: number } {
+          const depth: number[] = new Array(W * H).fill(1.0);   // fast-cleared to the far plane
+          let shaded = 0, rejected = 0;
+          for (const q of order) {
+            for (let y = q.y0; y &lt; q.y1; y++) {
+              for (let x = q.x0; x &lt; q.x1; x++) {
+                const i = y * W + x;
+                if (q.z &lt; depth[i]) {        // the depth test — BEFORE any shading
+                  depth[i] = q.z;
+                  shaded++;                    // only now would the fragment shader run
+                } else {
+                  rejected++;                  // killed pre-shader: zero shading cost
+                }
+              }
+            }
+          }
+          return { shaded, rejected };
+        }
+
+        const area = (q: Quad) =&gt; (q.x1 - q.x0) * (q.y1 - q.y0);
+        const overlap =
+          Math.max(0, Math.min(NEAR.x1, FAR.x1) - Math.max(NEAR.x0, FAR.x0)) *
+          Math.max(0, Math.min(NEAR.y1, FAR.y1) - Math.max(NEAR.y0, FAR.y0));
+        console.log(`NEAR covers ${area(NEAR)} px, FAR covers ${area(FAR)} px, overlap ${overlap} px\n`);
+
+        const ftb = render([NEAR, FAR]);   // front-to-back: near first
+        const btf = render([FAR, NEAR]);   // back-to-front: far first
+        console.log(`front-to-back: ${ftb.shaded} fragments shaded, ${ftb.rejected} rejected pre-shader`);
+        console.log(`back-to-front: ${btf.shaded} fragments shaded, ${btf.rejected} rejected pre-shader`);
+        console.log(`\nsame image either way — front-to-back shades ${btf.shaded - ftb.shaded} fewer fragments`);
+      </primer-code>
+      <p>
+        Grow the overlap (drag <code>FAR</code>'s rectangle over more of <code>NEAR</code>) and watch the
+        gap widen: the saving is exactly the occluded area, and it costs nothing but drawing in the right
+        order.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Depth precision: the near-plane hog and the reversed-Z one-liner</h2>
+      <p>
+        One last piece of depth-pipeline lore. Perspective projection stores not <primer-math>z</primer-math>
+        but (roughly) <primer-math>1/z</primer-math> — and that curve spends almost all of its output range
+        on points <em>near the camera</em>. With a near plane at 0.1 m and a far plane at 1000 m, about
+        half of the representable depth values describe the first metre of the scene; distant geometry gets
+        squeezed into a sliver of the range, where two different surfaces can round to the same stored value
+        and flicker through each other — <strong>z-fighting</strong>.
+      </p>
+      <p>
+        The modern fix is a famous one-liner: <strong>reversed-Z</strong>. Map the <em>near</em> plane to
+        <primer-math>1.0</primer-math> and the <em>far</em> plane to <primer-math>0.0</primer-math> (and
+        flip the compare to greater-than). A floating-point depth buffer has its representable values packed
+        densely near zero — which is now the <em>far</em> end, exactly where <primer-math>1/z</primer-math>
+        was starving. The two non-linearities roughly cancel, precision becomes nearly uniform across the
+        whole range, and z-fighting on distant geometry all but vanishes. One projection-matrix tweak, one
+        comparison flip; the depth hardware — early-Z, Hi-Z, compression — neither knows nor cares which
+        direction "closer" points.
+      </p>
+      <primer-theorem name="the depth pipeline">
+        <ul>
+          <li><strong>early-Z</strong>: the per-fragment depth test runs <em>before</em> the shader — legal
+            only if the shader neither writes depth nor discards (else the hardware falls back to late-Z in
+            the ROPs);</li>
+          <li><strong>hierarchical Z</strong>: a per-tile <primer-math>z_{\max}</primer-math> buffer rejects
+            an entire tile with one conservative compare;</li>
+          <li><strong>depth compression</strong> stores per-tile plane equations instead of raw samples —
+            lossless, traffic-saving; <strong>fast clears</strong> are per-tile flags, not memory writes;</li>
+          <li>rejection depends on <strong>front-to-back order</strong>; blended transparency must go
+            back-to-front and gets no early-Z help;</li>
+          <li><strong>reversed-Z</strong> (near → 1, far → 0, float buffer) evens out depth precision.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="Watch out! One line of shader can double your shading bill">
+      <p>
+        The early-Z fallback is <em>silent</em>. Write to the fragment depth output — or use
+        <code>discard</code> anywhere in the shader, even down a branch that never executes — and the
+        hardware quietly routes the entire draw to late-Z. Nothing breaks; the image is identical; the
+        profiler just shows your fragment count mysteriously doubled, because every occluded fragment is now
+        shaded before it dies. A classic real-world case: alpha-tested foliage (<code>discard</code> on a
+        leaf texture's transparent texels) turning a forest into a worst-case overdraw bill. Engines fight
+        back by drawing alpha-tested geometry in a separate pass, or laying depth down first in a pre-pass
+        so even late-Z draws shade each visible pixel once. The lesson generalises: <strong>the fast path
+        has entry conditions</strong>, and one innocent-looking shader line can walk you off it.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="How big is the depth-bandwidth bill, really?">
+      <p>
+        Put numbers on why this lesson's plumbing exists. A 4K frame is ~8.3 million pixels; at overdraw 3
+        that is ~25 million depth tests, each a 4-byte read and (for winners) a 4-byte write — roughly
+        150 MB of depth traffic <em>per frame</em>, 9 GB/s at 60 fps, before a single texture or colour
+        byte moves. Now stack the lesson's tricks: Hi-Z answers most occluded tiles from a tiny on-chip
+        buffer (no memory touch at all), plane-equation compression shrinks what does move by several times,
+        and fast clears delete the 33 MB-per-frame clearing cost outright. Together they turn the depth
+        buffer from the biggest consumer of memory bandwidth into a minor one — which is why every GPU
+        vendor, desktop and mobile alike, ships all three. Nobody's marketing ever mentions them: the best
+        silicon is the kind you only notice when it's gone.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "earlyZQuiz@1": {
+          "intro": "Kill invisible work early: test depth before shading (early-Z), reject whole tiles with one compare (Hi-Z), and draw front-to-back so occluders land first.",
+          "hizRejQ": "A tile's Hi-Z entry records maximum depth 0.{m}. An incoming triangle's nearest possible depth over that tile is 0.{n} (smaller = closer). What does the depth unit do?",
+          "hizRejA": "Reject the entire tile with that one compare — nothing in it can pass the per-pixel test",
+          "hizRejB": "Send the tile onward for per-pixel depth tests",
+          "hizRejC": "Shade the tile's fragments and test their depths afterwards",
+          "hizRejD": "Clear the tile's depth values to the far plane",
+          "hizAccQ": "A tile's Hi-Z entry records maximum depth 0.{m}. An incoming triangle's nearest possible depth over that tile is 0.{n} (smaller = closer). What does the depth unit do?",
+          "hizAccA": "The tile survives — something stored may be farther, so per-pixel early-Z tests decide fragment by fragment",
+          "hizAccB": "Reject the entire tile — the compare proves every fragment loses",
+          "hizAccC": "Skip the depth test for this tile entirely and shade everything",
+          "hizAccD": "Write 0.{n} into every pixel of the tile immediately",
+          "ftbQ": "Quad NEAR covers {a} pixels. Quad FAR covers {b} pixels, of which {o} are behind NEAR. With early-Z, drawing front-to-back (NEAR first), how many fragments are shaded in total?",
+          "btfQ": "Quad NEAR covers {a} pixels. Quad FAR covers {b} pixels, of which {o} are behind NEAR. With early-Z, drawing back-to-front (FAR first), how many fragments are shaded in total?",
+          "savedQ": "Quad NEAR covers {a} pixels. Quad FAR covers {b} pixels, of which {o} are behind NEAR. How many fewer fragments does front-to-back shade than back-to-front?",
+          "tileOpsQ": "Tiles are {t}×{t} pixels. A successful Hi-Z rejection replaces how many per-pixel depth tests with a single compare?",
+          "legalQ": "Which fragment shader forces the hardware to fall back from early-Z to late-Z?",
+          "legalA": "One that writes its own depth output or contains a discard statement",
+          "legalB": "One that samples more than four textures",
+          "legalC": "One that runs on more than one SM",
+          "legalD": "Any shader used with alpha blending disabled",
+          "storeQ": "What does the hierarchical-Z buffer store for each screen tile?",
+          "storeA": "The maximum (farthest) depth stored anywhere in the tile — so a farther incoming tile can be rejected wholesale",
+          "storeB": "The average depth of the tile's pixels",
+          "storeC": "The colour of the tile's most recent fragment",
+          "storeD": "A full copy of the tile's 64 depth values",
+          "compQ": "Why can depth buffers be compressed so effectively with per-tile plane equations?",
+          "compA": "Within a tile, depth usually comes from one triangle, and a triangle's depth is a plane — three coefficients replace dozens of raw values",
+          "compB": "Depth values are always integers, which compress better than floats",
+          "compC": "The compression discards distant depths that no one will notice",
+          "compD": "Depth buffers are stored on disk, where compression is mandatory",
+          "clearQ": "How does a fast clear empty a multi-megabyte depth buffer almost instantly?",
+          "clearA": "It sets a one-bit cleared flag per tile in a small on-chip table — no buffer memory is written at all",
+          "clearB": "It writes the buffer using an extra-wide memory bus reserved for clears",
+          "clearC": "It compresses the clear value with the plane-equation encoder",
+          "clearD": "It skips clearing and hopes the whole screen is overdrawn",
+          "transQ": "Why does alpha-blended (transparent) geometry gain almost nothing from early-Z?",
+          "transA": "It must be drawn back-to-front for correct blending, and a see-through fragment cannot occlude what is behind it — so nothing gets rejected",
+          "transB": "Transparent fragments have no depth values",
+          "transC": "The blending unit runs before the rasterizer for transparent draws",
+          "transD": "Early-Z only works on triangles with fewer than three vertices",
+          "revQ": "Why does reversed-Z (near plane → 1.0, far plane → 0.0, floating-point buffer) reduce z-fighting?",
+          "revA": "Float values are densest near zero — now the far end — which cancels the 1/z curve's near-plane bias and spreads precision evenly",
+          "revB": "It doubles the number of bits in the depth buffer",
+          "revC": "It disables the depth test for distant geometry",
+          "revD": "It makes the depth buffer store linear world-space metres"
+        }
+      }
+    </script>
+
+    <primer-quiz name="earlyZQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/graphics-hardware/the-hardware-rasterizer",
+      "applied-mathematics/game-development-math/projection/depth-and-the-z-buffer"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "hiZScene",
+    ({ board, colors, step, sceneStrings }) => {
+      const TILE = 2, NX = 4, NY = 3;                     // 4×3 tiles of 2×2 units
+      const nearC = colors.cat[0], farC = colors.cat[1], rejC = colors.cat[2], ink = colors.ink;
+
+      // The two triangles (near already drawn at z = 0.3; far incoming at z = 0.7).
+      const NEAR = [[-0.3, -0.3], [9.3, -0.3], [-0.3, 6.6]];
+      const FAR = [[2.5, 0.8], [7.5, 1.6], [4.6, 5.4]];
+
+      const cross = (P, Q, x, y) => (x - P[0]) * (Q[1] - P[1]) - (y - P[1]) * (Q[0] - P[0]);
+      const inside = (T, x, y) => {
+        const w0 = cross(T[0], T[1], x, y), w1 = cross(T[1], T[2], x, y), w2 = cross(T[2], T[0], x, y);
+        return (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0);
+      };
+      // Hi-Z value: 0.3 where NEAR fully covers the tile (all four corners inside), else 1.0.
+      const hiz = (tx, ty) => {
+        const x0 = tx * TILE, y0 = ty * TILE, x1 = x0 + TILE, y1 = y0 + TILE;
+        const full = inside(NEAR, x0, y0) && inside(NEAR, x1, y0) && inside(NEAR, x0, y1) && inside(NEAR, x1, y1);
+        return full ? 0.3 : 1.0;
+      };
+      // Does the FAR triangle touch this tile? (dense point sampling is plenty here)
+      const touched = (tx, ty) => {
+        for (let i = 0; i <= 6; i++)
+          for (let j = 0; j <= 6; j++)
+            if (inside(FAR, tx * TILE + (i * TILE) / 6, ty * TILE + (j * TILE) / 6)) return true;
+        return false;
+      };
+
+      const rect = (x0, y0, x1, y1, opts) =>
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          vertices: { visible: false }, highlight: false, fixed: true, ...opts,
+        });
+
+      // ── Base: the tile grid. ──
+      for (let i = 0; i <= NX; i++)
+        board.create("segment", [[i * TILE, 0], [i * TILE, NY * TILE]], {
+          strokeColor: colors.line, strokeWidth: 1.6, strokeOpacity: 0.8, highlight: false, fixed: true,
+        });
+      for (let j = 0; j <= NY; j++)
+        board.create("segment", [[0, j * TILE], [NX * TILE, j * TILE]], {
+          strokeColor: colors.line, strokeWidth: 1.6, strokeOpacity: 0.8, highlight: false, fixed: true,
+        });
+
+      // Step 1: the near triangle, already in the depth buffer.
+      step(sceneStrings("stepNear"), () => {
+        board.create("polygon", [NEAR[0], NEAR[1], NEAR[2]], {
+          fillColor: nearC, fillOpacity: 0.3, highlight: false, fixed: true,
+          borders: { strokeColor: nearC, strokeWidth: 2.5, highlight: false },
+          vertices: { visible: false },
+        });
+        board.create("text", [1.0, 0.75, "z = 0.3"], {
+          anchorX: "left", fontSize: 13, strokeColor: nearC, cssStyle: "font-weight: bold;", fixed: true, highlight: false,
+        });
+      });
+
+      // Step 2: the Hi-Z buffer — one max-depth value per tile.
+      step(sceneStrings("stepHiz"), () => {
+        for (let ty = 0; ty < NY; ty++)
+          for (let tx = 0; tx < NX; tx++)
+            board.create("text", [tx * TILE + 0.15, ty * TILE + TILE - 0.3, hiz(tx, ty).toFixed(1)], {
+              anchorX: "left", fontSize: 12, strokeColor: ink, fixed: true, highlight: false,
+            });
+      });
+
+      // Step 3: the far triangle arrives.
+      step(sceneStrings("stepFar"), () => {
+        board.create("polygon", [FAR[0], FAR[1], FAR[2]], {
+          fillOpacity: 0, highlight: false, fixed: true,
+          borders: { strokeColor: farC, strokeWidth: 3, dash: 2, highlight: false },
+          vertices: { visible: false },
+        });
+        board.create("text", [7.0, 2.5, "z = 0.7"], {
+          anchorX: "left", fontSize: 13, strokeColor: farC, cssStyle: "font-weight: bold;", fixed: true, highlight: false,
+        });
+      });
+
+      // Step 4: the verdicts — reject where 0.7 > tile max, per-pixel test elsewhere.
+      step(sceneStrings("stepVerdict"), () => {
+        for (let ty = 0; ty < NY; ty++)
+          for (let tx = 0; tx < NX; tx++) {
+            if (!touched(tx, ty)) continue;
+            const reject = 0.7 > hiz(tx, ty);
+            if (reject)
+              rect(tx * TILE, ty * TILE, tx * TILE + TILE, ty * TILE + TILE, {
+                fillColor: rejC, fillOpacity: 0.35,
+                borders: { strokeColor: rejC, strokeWidth: 2.5, highlight: false },
+              });
+            board.create(
+              "text",
+              [tx * TILE + TILE / 2, ty * TILE + 0.4, () => sceneStrings(reject ? "rejectLbl" : "testLbl")],
+              {
+                anchorX: "middle", fontSize: 12, strokeColor: reject ? rejC : ink,
+                cssStyle: "font-weight: bold;", fixed: true, highlight: false,
+              },
+            );
+          }
+      });
+    },
+    { boundingbox: [-1.0, 7.4, 10.2, -1.2], title: () => makeStrings("hiZScene")("title") },
+  );
+
+  registerQuiz("earlyZQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Incoming nearest depth 0.n is FARTHER than the tile max 0.m → wholesale reject.
+      prompt: (v) => sceneStrings("hizRejQ", v),
+      variables: "m=[2:5] n=[6:9]",
+      options: [
+        { text: () => sceneStrings("hizRejA"), correct: true },
+        { text: () => sceneStrings("hizRejB"), correct: false },
+        { text: () => sceneStrings("hizRejC"), correct: false },
+        { text: () => sceneStrings("hizRejD"), correct: false },
+      ],
+    },
+    {
+      // Incoming nearest depth 0.n is CLOSER than the tile max 0.m → survive to per-pixel tests.
+      prompt: (v) => sceneStrings("hizAccQ", v),
+      variables: "m=[6:9] n=[2:5]",
+      options: [
+        { text: (v) => sceneStrings("hizAccA", v), correct: true },
+        { text: (v) => sceneStrings("hizAccB", v), correct: false },
+        { text: (v) => sceneStrings("hizAccC", v), correct: false },
+        { text: (v) => sceneStrings("hizAccD", v), correct: false },
+      ],
+    },
+    {
+      prompt: (v) => sceneStrings("ftbQ", v),
+      variables: "a=[20:60] b=[20:60] o=[5:18]",
+      constraints: "o < b && o < a",
+      answer: "a+b-o",
+    },
+    {
+      prompt: (v) => sceneStrings("btfQ", v),
+      variables: "a=[20:60] b=[20:60] o=[5:18]",
+      constraints: "o < b && o < a",
+      answer: "a+b",
+    },
+    {
+      prompt: (v) => sceneStrings("savedQ", v),
+      variables: "a=[20:60] b=[20:60] o=[5:18]",
+      constraints: "o < b && o < a",
+      answer: "o",
+    },
+    {
+      prompt: (v) => sceneStrings("tileOpsQ", v),
+      variables: "t=[4,8,16]",
+      answer: "t^2",
+    },
+    {
+      prompt: () => sceneStrings("legalQ"),
+      options: [
+        { text: () => sceneStrings("legalA"), correct: true },
+        { text: () => sceneStrings("legalB"), correct: false },
+        { text: () => sceneStrings("legalC"), correct: false },
+        { text: () => sceneStrings("legalD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("storeQ"),
+      options: [
+        { text: () => sceneStrings("storeA"), correct: true },
+        { text: () => sceneStrings("storeB"), correct: false },
+        { text: () => sceneStrings("storeC"), correct: false },
+        { text: () => sceneStrings("storeD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("compQ"),
+      options: [
+        { text: () => sceneStrings("compA"), correct: true },
+        { text: () => sceneStrings("compB"), correct: false },
+        { text: () => sceneStrings("compC"), correct: false },
+        { text: () => sceneStrings("compD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("clearQ"),
+      options: [
+        { text: () => sceneStrings("clearA"), correct: true },
+        { text: () => sceneStrings("clearB"), correct: false },
+        { text: () => sceneStrings("clearC"), correct: false },
+        { text: () => sceneStrings("clearD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("transQ"),
+      options: [
+        { text: () => sceneStrings("transA"), correct: true },
+        { text: () => sceneStrings("transB"), correct: false },
+        { text: () => sceneStrings("transC"), correct: false },
+        { text: () => sceneStrings("transD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("revQ"),
+      options: [
+        { text: () => sceneStrings("revA"), correct: true },
+        { text: () => sceneStrings("revB"), correct: false },
+        { text: () => sceneStrings("revC"), correct: false },
+        { text: () => sceneStrings("revD"), correct: false },
+      ],
+    },
+  ]);
+</script>

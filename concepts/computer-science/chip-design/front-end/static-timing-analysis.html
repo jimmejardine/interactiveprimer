@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Static Timing Analysis</primer-title>
+
+    <primer-card>
+      <p>
+        You now have a netlist of real gates, each with a real delay. One question decides whether the chip
+        works: <em>does every signal arrive on time, on every path, every cycle?</em> You already met
+        <primer-ref to="computer-science/computer-architecture/circuits/timing-and-the-critical-path">the
+        critical path</primer-ref> and the budget <primer-math>T_{\text{clk}} \ge t_{cq} + t_{\text{logic}} +
+        t_{\text{setup}}</primer-math>. But a real chip has <em>millions</em> of register-to-register paths.
+        Simulating enough input patterns to exercise the slowest one is hopeless — you would need the one
+        pattern, among billions, that sensitises exactly the worst chain of gates. So the industry does
+        something more radical: it checks timing <strong>without simulating at all</strong>.
+        <strong>Static timing analysis (STA)</strong> treats the netlist as a graph of delays and checks
+        <em>every</em> path by arithmetic. No input vectors, no luck — exhaustive by construction.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Arrival, required, slack</h2>
+      <p>
+        STA runs on three numbers, computed at every point in the circuit:
+      </p>
+      <ul>
+        <li><strong>Arrival time</strong> — when the data actually gets there: the launching flip-flop's
+          clock-to-Q delay, plus every cell and wire delay accumulated along the path. Where paths merge, the
+          <em>latest</em> arrival wins (the data is not ready until the slowest input is).</li>
+        <li><strong>Required time</strong> — when the data <em>must</em> be there: for a setup check at a
+          capturing flip-flop, the next clock edge minus the setup time,
+          <primer-math>t_{\text{req}} = T_{\text{clk}} - t_{\text{setup}}</primer-math>.</li>
+        <li><strong>Slack</strong> — the margin: <primer-math display>\text{slack} \;=\; t_{\text{req}} -
+          t_{\text{arrival}}.</primer-math> Positive slack: fine, with room to spare. Zero: exactly on time.
+          <strong>Negative slack: the chip fails at this clock.</strong> The path with the <em>least</em>
+          slack is the critical path, and the worst negative slack (WNS) is the first number every engineer
+          reads in the morning report.</li>
+      </ul>
+      <p>
+        A worked path, at a 1 ns clock (1 GHz), with a 0.05 ns setup time: the launching flop's clock-to-Q is
+        0.1 ns, the data crosses three gates of 0.2 ns each, then 0.15 ns of wire.
+      </p>
+      <primer-math display>t_{\text{arrival}} = 0.1 + 3(0.2) + 0.15 = 0.85\ \text{ns}, \qquad
+        t_{\text{req}} = 1.0 - 0.05 = 0.95\ \text{ns}, \qquad \text{slack} = +0.10\ \text{ns}.</primer-math>
+      <p>
+        This path passes with 100 ps to spare. Squeeze the clock to 0.9 ns and the slack hits zero — that
+        path alone caps the design at about 1.11 GHz. Slide the delay slider below and watch the crossing
+        point move: the zero-slack clock period <em>is</em> your <primer-math>f_{\max}</primer-math>.
+      </p>
+      <primer-chart scene="slackChart" caption="Slack as a function of clock period: a straight line slack = T − t_path crossing zero at T = t_path. The slider sets the total path delay (clock-to-Q + logic + wire + setup); periods left of the crossing have negative slack and fail."></primer-chart>
+    </primer-card>
+
+    <primer-card>
+      <h2>Setup checks and hold checks: too slow, and too fast</h2>
+      <p>
+        Every path gets <em>two</em> checks, because there are two ways to lose:
+      </p>
+      <ul>
+        <li>The <strong>setup check</strong> asks: is the path <em>too slow</em>? Did the data launched at
+          edge <primer-math>n</primer-math> arrive before edge <primer-math>n+1</primer-math> closes the
+          setup window? Fails are fixed by slowing the clock or shortening the path.</li>
+        <li>The <strong>hold check</strong> asks: is the path <em>too fast</em>? Data launched at edge
+          <primer-math>n</primer-math> must <em>not</em> race through and corrupt what the capturing flop is
+          still latching <em>at that same edge</em>: the new value has to hold off until
+          <primer-math>t_{\text{hold}}</primer-math> after the edge. This is the scarier failure, because
+          <strong>no clock slowdown fixes it</strong> — the race happens at one edge, whatever the period.
+          A chip with a hold violation is dead at every frequency; the only fix is adding delay to the
+          too-short path, in silicon.</li>
+      </ul>
+      <primer-theorem name="The STA checks">
+        <ul>
+          <li><strong>arrival</strong> = clock-to-Q + accumulated cell and wire delays (latest input wins at
+            merges);</li>
+          <li><strong>setup (max) check</strong>: slack <primer-math>= (T_{\text{clk}} - t_{\text{setup}}) -
+            t_{\text{arrival,max}} \ge 0</primer-math> — bounds the longest path, sets
+            <primer-math>f_{\max}</primer-math>;</li>
+          <li><strong>hold (min) check</strong>: <primer-math>t_{\text{arrival,min}} \ge
+            t_{\text{hold}}</primer-math> at the <em>same</em> edge — clock-period independent;</li>
+          <li>the <strong>critical path</strong> is the least-slack path; negative slack anywhere = timing
+            failure.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>STA as a graph algorithm — run it</h2>
+      <p>
+        Under the hood, STA is a longest-path computation on a DAG: process nodes in topological order,
+        propagate <primer-math>t_{\text{arrival}} = \max(\text{inputs}) + \text{delay}</primer-math>, then
+        compare against required times at the endpoints. Millions of paths collapse into one linear-time
+        sweep — that is <em>why</em> STA conquered: a simulator samples paths, STA covers all of them, and it
+        finishes before lunch. Here it is on a five-gate netlist:
+      </p>
+      <primer-code run>
+        // STA in miniature: longest-path arrival times over a netlist DAG (delays in ps).
+        const CLK_TO_Q = 110, T_CLK = 1000, T_SETUP = 60;
+
+        // Edges: [from, to, delay] — cell + wire delay lumped per hop.
+        const edges: [string, string, number][] = [
+          ["FF1/Q", "g1", 180], ["g1", "g2", 220], ["g2", "FF3/D", 90],
+          ["FF2/Q", "g3", 200], ["g3", "g2", 260],
+          ["g1", "g4", 240], ["g4", "FF4/D", 100],
+        ];
+        const sources = ["FF1/Q", "FF2/Q"];
+        const endpoints = ["FF3/D", "FF4/D"];
+
+        // Longest path by relaxation (a topological sweep in disguise), remembering predecessors.
+        const arrival: Record&lt;string, number&gt; = {};
+        const pred: Record&lt;string, string&gt; = {};
+        for (const s of sources) arrival[s] = CLK_TO_Q;
+        for (let pass = 0; pass &lt; 10; pass++)
+          for (const [from, to, d] of edges) {
+            if (arrival[from] === undefined) continue;
+            const t = arrival[from] + d;
+            if (arrival[to] === undefined || t &gt; arrival[to]) { arrival[to] = t; pred[to] = from; }
+          }
+
+        const required = T_CLK - T_SETUP;
+        console.log("required time at every endpoint: " + required + " ps");
+        console.log("");
+        let worst = endpoints[0], worstSlack = Infinity;
+        for (const e of endpoints) {
+          const slack = required - arrival[e];
+          console.log(e + ":  arrival " + arrival[e] + " ps   slack " + (slack &gt;= 0 ? "+" : "") + slack + " ps");
+          if (slack &lt; worstSlack) { worstSlack = slack; worst = e; }
+        }
+
+        // Walk the predecessor chain back from the worst endpoint: the critical path.
+        const path: string[] = [worst];
+        while (pred[path[0]] !== undefined) path.unshift(pred[path[0]]);
+        console.log("");
+        console.log("critical path: " + path.join(" -> "));
+        console.log("f_max for this netlist: " + (1e6 / (arrival[worst] + T_SETUP)).toFixed(0) + " MHz");
+      </primer-code>
+      <p>
+        Try it: shave the <code>g3 → g2</code> hop to 100 ps and the critical path jumps to the
+        <code>g4</code> branch — exactly the whack-a-mole the next lesson (timing closure) is about.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why did STA beat simulation — didn't simulators exist first?">
+      <p>
+        They did, and through the 1980s "timing verification" meant simulating with delays and hoping your
+        vectors hit the worst case. The trouble is combinatorial: a 32-bit adder alone has billions of input
+        transitions, and the slowest path may wake only for one carry pattern in a million. Miss it in
+        simulation and you ship it. STA, championed as designs crossed the hundred-thousand-gate line, flips
+        the burden of proof: assume <em>every</em> path can be exercised, check them all with a linear-time
+        graph sweep, and sign off on arithmetic instead of luck. The trade is deliberate pessimism — STA also
+        checks paths that can never actually happen (a mux that would have to select both inputs at once).
+        Those <strong>false paths</strong> can be declared and excluded — carefully, as the next lesson shows
+        — but the default posture is the safe one. Silicon has no testbench: once the mask set is cut, "we
+        probably covered it" is not a sentence anyone wants to say.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! STA is pessimistic on purpose">
+      <p>
+        Newcomers discover that STA flags a path that <em>cannot occur</em> — logic in a mode the chip never
+        enters, a path between two configurations that are mutually exclusive — and conclude the tool is
+        broken. It is not broken; it is <em>conservative</em>. STA enumerates structural paths, not reachable
+        behaviours, so its worst case is at least as bad as reality — never better. That direction of error
+        is the feature: a pessimistic pass means real silicon passes, while an optimistic tool would sign off
+        chips that fail in the field. When the pessimism genuinely costs you (a false path throttling your
+        clock), the remedy is an explicit, reviewed <em>exception</em> — a promise to the tool that you will
+        meet in the next lesson, along with the ceremony that surrounds it. Deleting the check is easy;
+        being <em>right</em> about it is the hard part.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "staQuiz@1": {
+          "intro": "slack = required − arrival; required = T_clk − t_setup; arrival = clock-to-Q + path delays (latest input wins). Setup = too slow; hold = too fast, and slowing the clock never fixes hold.",
+          "slackQ": "A path's data arrives at {a} ps and is required by {r} ps. What is the slack, in ps?",
+          "negSlackQ": "Data arrives at {a} ps but is required by {r} ps. What is the slack, in ps (mind the sign)?",
+          "arrQ": "A path starts with a clock-to-Q of {q} ps, then crosses {n} gates of {d} ps each. What is the arrival time at the endpoint, in ps?",
+          "reqQ": "The clock period is {t} ps and the capturing flip-flop's setup time is {s} ps. What is the required time for a setup check, in ps?",
+          "fmaxQ": "A design's critical path totals {t} ns including all overheads. What is its maximum clock frequency, in MHz?",
+          "mergeQ": "A gate's two inputs arrive at {a} ps and {b} ps, and the gate itself takes {d} ps. When does its output arrive, in ps?",
+          "workedQ": "Clock {t} ps, setup {s} ps; the path is clock-to-Q {q} ps + logic {g} ps + wire {w} ps. What is the slack, in ps?",
+          "holdQ": "Why is a hold violation scarier than a setup violation?",
+          "hRight": "It happens at a single clock edge regardless of period, so no clock slowdown can fix it — the silicon is broken at every frequency",
+          "hWrong1": "It only appears at high temperature",
+          "hWrong2": "It is scarier in simulation but harmless in silicon",
+          "hWrong3": "It consumes more power",
+          "setupFixQ": "Which failure can be fixed by simply lowering the clock frequency?",
+          "sfSetup": "A setup violation — the longest path gets more time per cycle",
+          "sfHold": "A hold violation — races always respond to a slower clock",
+          "sfBoth": "Both setup and hold violations",
+          "sfNeither": "Neither — clock frequency never affects timing checks",
+          "critQ": "Among all register-to-register paths, the critical path is the one with…",
+          "cLeast": "the least slack — it caps the clock frequency for the whole design",
+          "cMost": "the most slack",
+          "cGates": "the largest number of gates, regardless of their delays",
+          "cWire": "the longest wire, regardless of gate delays",
+          "whyStaQ": "Why did STA displace simulation for timing sign-off?",
+          "wRight": "It checks every path exhaustively with a linear-time graph sweep, while simulation only samples the paths your input vectors happen to exercise",
+          "wWrong1": "It runs on cheaper computers",
+          "wWrong2": "Simulation cannot model gate delays at all",
+          "wWrong3": "STA also verifies logical correctness, so one tool does both jobs",
+          "pessQ": "STA reports a violation on a path that can never occur in real operation. What is the right conclusion?",
+          "pRight": "Expected behaviour: STA checks all structural paths and is pessimistic by design; impossible paths are handled via explicit, reviewed exceptions",
+          "pWrong1": "The tool has a bug and its results should be ignored",
+          "pWrong2": "The netlist must be re-synthesized until the report is empty of such paths",
+          "pWrong3": "Simulation should be used for sign-off instead"
+        }
+      }
+    </script>
+
+    <primer-quiz name="staQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/front-end/logic-synthesis-and-technology-mapping",
+      "computer-science/computer-architecture/circuits/timing-and-the-critical-path"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerQuiz } from "primer";
+
+  // ── Slack vs clock period: slack(T) = T − t_path, zero-crossing at T = t_path. ──
+  registerCharts(
+    [{
+      name: "slackChart",
+      f: [
+        (T, s) => T - s.d,   // slack line
+        () => 0,             // the pass/fail boundary
+      ],
+      line: (colors, i) =>
+        i === 0
+          ? { strokeColor: colors.cat[0], strokeWidth: 2.5 }
+          : { strokeColor: colors.line, strokeOpacity: 0.5, strokeWidth: 1.5, dash: 2 },
+      legend: ["slack(T) = T − t_path", "zero slack (f_max)"],
+    }],
+    { xmin: 0, xmax: 4, ymin: -3, ymax: 3, xaxisname: "T (ns)", yaxisname: "slack (ns)" },
+    [{ name: "d", label: "total path delay t_path (ns)", min: 0.4, max: 3.2, step: 0.1, value: 0.9 }],
+  );
+
+  registerQuiz("staQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Positive slack: required − arrival.
+      prompt: (v) => sceneStrings("slackQ", v),
+      variables: "a=[300:700] r=[720:950]",
+      answer: "r - a",
+    },
+    {
+      // Negative slack.
+      prompt: (v) => sceneStrings("negSlackQ", v),
+      variables: "a=[800:990] r=[600:790]",
+      answer: "r - a",
+    },
+    {
+      // Arrival accumulation.
+      prompt: (v) => sceneStrings("arrQ", v),
+      variables: "q=[80:150] n=[2:5] d=[100:250]",
+      answer: "q + n * d",
+    },
+    {
+      // Required time.
+      prompt: (v) => sceneStrings("reqQ", v),
+      variables: "t=[800:1500] s=[40:90]",
+      answer: "t - s",
+    },
+    {
+      // f_max = 1000 / t_ns MHz, clean divisors.
+      prompt: (v) => sceneStrings("fmaxQ", v),
+      variables: "t=[2,4,5,8,10]",
+      answer: "1000 / t",
+    },
+    {
+      // Latest input wins at a merge.
+      prompt: (v) => sceneStrings("mergeQ", v),
+      variables: "a=[200:500] b=[510:800] d=[50:150]",
+      answer: (v) => Math.max(v.a, v.b) + v.d,
+    },
+    {
+      // Full worked-path slack: (t − s) − (q + g + w).
+      prompt: (v) => sceneStrings("workedQ", v),
+      variables: "t=[900:1300] s=[40:80] q=[90:130] g=[400:800] w=[80:200]",
+      answer: "(t - s) - (q + g + w)",
+    },
+    {
+      prompt: () => sceneStrings("holdQ"),
+      options: [
+        { text: () => sceneStrings("hRight"), correct: true },
+        { text: () => sceneStrings("hWrong1"), correct: false },
+        { text: () => sceneStrings("hWrong2"), correct: false },
+        { text: () => sceneStrings("hWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("setupFixQ"),
+      options: [
+        { text: () => sceneStrings("sfSetup"), correct: true },
+        { text: () => sceneStrings("sfHold"), correct: false },
+        { text: () => sceneStrings("sfBoth"), correct: false },
+        { text: () => sceneStrings("sfNeither"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("critQ"),
+      options: [
+        { text: () => sceneStrings("cLeast"), correct: true },
+        { text: () => sceneStrings("cMost"), correct: false },
+        { text: () => sceneStrings("cGates"), correct: false },
+        { text: () => sceneStrings("cWire"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyStaQ"),
+      options: [
+        { text: () => sceneStrings("wRight"), correct: true },
+        { text: () => sceneStrings("wWrong1"), correct: false },
+        { text: () => sceneStrings("wWrong2"), correct: false },
+        { text: () => sceneStrings("wWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pessQ"),
+      options: [
+        { text: () => sceneStrings("pRight"), correct: true },
+        { text: () => sceneStrings("pWrong1"), correct: false },
+        { text: () => sceneStrings("pWrong2"), correct: false },
+        { text: () => sceneStrings("pWrong3"), correct: false },
+      ],
+    },
+  ]);
+</script>

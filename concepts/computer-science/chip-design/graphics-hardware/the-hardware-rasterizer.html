@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>The Hardware Rasterizer</primer-title>
+
+    <primer-card>
+      <p>
+        You met
+        <primer-ref to="computer-science/computer-graphics/rasterization">rasterization</primer-ref> as an
+        algorithm: evaluate three edge functions at a pixel centre, light the pixel if the signs agree.
+        Now meet it as a <em>circuit</em> — arguably the most elegant fixed-function block on the whole
+        die. The question silicon asks is different from the question software asks. Software asks
+        <em>"is this pixel inside?"</em> Hardware asks <em>"how do I answer that for hundreds of pixels at
+        once, every clock cycle, forever, using almost no energy?"</em> The answer is that the edge
+        function
+      </p>
+      <primer-math display>E(x, y) = a\,x + b\,y + c</primer-math>
+      <p>
+        is not merely correct — it is <strong>hardware gold</strong>, for two properties no other
+        inside-test has.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why edge functions are hardware gold</h2>
+      <ul>
+        <li>
+          <strong>It evaluates anywhere, independently.</strong> <primer-math>E</primer-math> at any point
+          is two multiplies and two adds — no history, no neighbours, no divisions. So the hardware can
+          drop a <em>grid of evaluators</em> onto a block of pixels and test them <strong>all in the same
+          clock cycle</strong>. Parallelism is free because the maths has no dependencies.
+        </li>
+        <li>
+          <strong>It steps incrementally.</strong> Because <primer-math>E</primer-math> is linear,
+          <primer-math display>E(x+1, y) = E(x, y) + a, \qquad E(x, y+1) = E(x, y) + b.</primer-math>
+          Marching one pixel right costs <em>one addition</em>. Marching a whole block over costs one
+          addition per evaluator. The multipliers run once per triangle (in setup, which handed us
+          <primer-math>a, b, c</primer-math> precomputed); from then on the rasterizer is essentially a
+          box of adders — and adders are the cheapest, coolest-running arithmetic silicon there is.
+        </li>
+      </ul>
+      <p>
+        Compare the alternatives: point-in-polygon by angle summation needs trigonometry; ray-crossing
+        needs branches. The edge function needs adders. That is why every GPU rasterizer for thirty years
+        has been built on it.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The hierarchical march: coarse, then fine</h2>
+      <p>
+        Testing every pixel on a 4K screen against every triangle would waste almost all its work — most
+        triangles touch a tiny fraction of the screen. So real rasterizers march <strong>hierarchically</strong>:
+      </p>
+      <ul>
+        <li><strong>Coarse raster:</strong> the screen is carved into tiles (say
+          <primer-math>8\times 8</primer-math> pixels). Because <primer-math>E</primer-math> is linear,
+          testing a tile's <em>corners</em> settles the whole tile: all four corners outside one edge
+          → the tile can't touch the triangle, skip 64 pixels with 4 evaluations. Only tiles the triangle
+          might touch go on.</li>
+        <li><strong>Fine raster:</strong> inside a surviving tile, a bank of parallel evaluators — one
+          per pixel position, fed by those incremental adds — stamps out the exact coverage mask for a
+          block of pixels <em>per clock</em>.</li>
+      </ul>
+      <p>
+        The output is not individual pixels but <strong>quads</strong>: <primer-math>2\times 2</primer-math>
+        blocks of fragments, the pipeline's currency from here on. Why quads? Because a fragment shader
+        needs <em>derivatives</em> — how fast a texture coordinate changes between neighbouring pixels —
+        to choose mipmap levels, and the cheapest derivative estimate is a difference between quad
+        neighbours. The price: a quad with only one covered pixel still runs <strong>all four</strong>
+        fragment invocations; the three uncovered ones are <em>helper lanes</em>, computing only so their
+        neighbour can difference against them.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "hwRaster": {
+          "title": "Coarse tiles, fine pixels, quads",
+          "stepEdges": "Setup hands over three edge equations — the triangle, as three signed half-planes",
+          "stepTiles": "Coarse raster: test tile corners; tiles the triangle cannot touch are skipped wholesale",
+          "stepPixels": "Fine raster: inside surviving tiles, parallel evaluators light every pixel whose CENTRE passes all three sign tests",
+          "stepQuads": "The coverage is emitted as 2×2 quads — partially covered quads still run all four lanes (helpers) so derivatives exist"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The march, drawn</h2>
+      <p>
+        Step through the hierarchy on a toy screen (tiles here are <primer-math>4\times 4</primer-math>
+        pixels so everything fits): edges, then touched tiles, then covered pixels, then the quads that
+        actually ship to the shaders.
+      </p>
+      <primer-geometry scene="hwRaster" caption="A triangle drawn over a 16 by 12 pixel grid divided into 4 by 4 tiles. Step by step: the triangle's three edges appear; the tiles the triangle touches are highlighted; the pixels whose centres pass all three edge tests are filled; and dashed outlines mark the 2 by 2 quads containing covered pixels, including partially covered quads."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>Interpolation — and the divide that ended wobbly textures</h2>
+      <p>
+        The same edge values do double duty: scaled by the triangle's area they are the barycentric
+        weights, and setup's <strong>attribute gradients</strong> let the rasterizer produce every
+        interpolated value (depth, UVs, colour) with the same one-add-per-pixel trick. But there is a
+        famous subtlety: interpolating an attribute <em>linearly in screen space</em> is wrong under
+        perspective — a floor tile's far half covers fewer pixels than its near half, so its texture must
+        compress non-linearly. The fix, hardwired into every modern rasterizer, is
+        <strong>perspective-correct interpolation</strong>: interpolate <primer-math>\tfrac{u}{w}</primer-math>
+        and <primer-math>\tfrac{1}{w}</primer-math> linearly (those <em>are</em> linear in screen space),
+        then recover
+      </p>
+      <primer-math display>u = \frac{u/w}{1/w}</primer-math>
+      <p>
+        with one divide per fragment. The original PlayStation's rasterizer lacked that divide — which is
+        exactly why PS1 textures famously swim and warp as the camera moves. One small divider circuit
+        separates that era from ours.
+      </p>
+      <primer-theorem name="the hardware rasterizer">
+        <ul>
+          <li>inside test: signs of three linear edge functions <primer-math>E = ax + by + c</primer-math>,
+            coefficients precomputed by setup;</li>
+          <li>linearity buys <strong>parallel</strong> evaluation (a grid of evaluators per clock) and
+            <strong>incremental</strong> stepping (one add per pixel step);</li>
+          <li>the march is hierarchical: coarse tiles first, fine pixels within survivors;</li>
+          <li>output is <strong>2×2 quads</strong> (for derivatives), with helper lanes in partially
+            covered quads;</li>
+          <li>attributes interpolate perspective-correctly via <primer-math>u/w</primer-math> and
+            <primer-math>1/w</primer-math>.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Build the rasterizer yourself</h2>
+      <p>
+        Here is the whole fine-raster idea in thirty lines: three edge functions, one pass over a
+        character-cell "screen", and a printed framebuffer. The counters underneath tally what the
+        hierarchy would have saved and what the quads cost.
+      </p>
+      <primer-code run>
+        // A mini hardware rasterizer: 40×20 framebuffer, one triangle.
+        const W = 40, H = 20;
+        const A = [3, 17], B = [36, 12], C = [14, 2];   // screen-space vertices
+
+        // Edge function through P→Q, evaluated at (x, y):  E = a·x + b·y + c
+        function edgeCoeffs(P: number[], Q: number[]): [number, number, number] {
+          const a = Q[1] - P[1];
+          const b = P[0] - Q[0];
+          const c = -(a * P[0] + b * P[1]);
+          return [a, b, c];
+        }
+        const edges = [edgeCoeffs(A, B), edgeCoeffs(B, C), edgeCoeffs(C, A)];
+        const E = (e: number[], x: number, y: number) =&gt; e[0] * x + e[1] * y + e[2];
+
+        // Fine raster: test every pixel CENTRE (x+0.5, y+0.5).
+        const fb: string[][] = [];
+        let covered = 0;
+        for (let y = 0; y &lt; H; y++) {
+          fb.push([]);
+          for (let x = 0; x &lt; W; x++) {
+            const inside = edges.every((e) =&gt; E(e, x + 0.5, y + 0.5) &gt;= 0);
+            fb[y].push(inside ? "█" : "·");
+            if (inside) covered++;
+          }
+        }
+        // Print top row last so y points up, like the maths.
+        for (let y = H - 1; y &gt;= 0; y--) console.log(fb[y].join(""));
+
+        // Coarse raster: which 8×8 tiles hold any covered pixel?
+        let tiles = 0;
+        for (let ty = 0; ty &lt; H; ty += 8)
+          for (let tx = 0; tx &lt; W; tx += 8) {
+            let hit = false;
+            for (let y = ty; y &lt; Math.min(ty + 8, H) &amp;&amp; !hit; y++)
+              for (let x = tx; x &lt; Math.min(tx + 8, W); x++)
+                if (fb[y][x] === "█") { hit = true; break; }
+            if (hit) tiles++;
+          }
+
+        // Quad generation: 2×2 blocks containing at least one covered pixel.
+        let quads = 0;
+        for (let qy = 0; qy &lt; H; qy += 2)
+          for (let qx = 0; qx &lt; W; qx += 2) {
+            const any =
+              fb[qy][qx] === "█" || fb[qy][qx + 1] === "█" ||
+              fb[qy + 1][qx] === "█" || fb[qy + 1][qx + 1] === "█";
+            if (any) quads++;
+          }
+
+        console.log(`\ncovered pixels: ${covered}`);
+        console.log(`8×8 tiles touched: ${tiles} of ${(W / 8) * Math.ceil(H / 8)}`);
+        console.log(`2×2 quads emitted: ${quads} → ${quads * 4} fragment lanes (${quads * 4 - covered} helpers)`);
+      </primer-code>
+      <p>
+        Change the vertices and re-run. Notice the helper count: a long thin triangle wastes far more
+        lanes than a fat one — the quad tax in action, and one reason slivers are expensive.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Fill rate: the rasterizer's speed limit</h2>
+      <p>
+        A rasterizer's throughput is quoted as <strong>fill rate</strong>: pixels stamped per clock,
+        times the clock. A block that emits 16 pixels per clock at 2 GHz supplies
+        <primer-math>32</primer-math> Gpixels/s — and a GPU carries several such blocks. Divide your
+        screen's pixel count into that and you get the hard ceiling on overdraw at 60 fps: fill rate is
+        why "how many times do I touch each pixel?" is a performance question with a silicon answer.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! Coverage is a sample, and edges need a referee">
+      <p>
+        Two classic misreadings of the inside test, both fixed by convention:
+      </p>
+      <ul>
+        <li><strong>A pixel is covered when its CENTRE is inside — not when the triangle overlaps it.</strong>
+          A triangle can overlap half a pixel's area and light nothing (centre outside), or clip a corner
+          of the sample point and claim the whole pixel. Coverage is point sampling, with all the aliasing
+          that implies.</li>
+        <li><strong>Shared edges need a tie-break.</strong> Where two triangles share an edge, a pixel
+          centre exactly on it satisfies <primer-math>E = 0</primer-math> for <em>both</em>. Award it to
+          both and it is shaded twice (visible seams under blending); to neither and a one-pixel
+          <em>crack</em> of background shows through. Every hardware rasterizer implements the
+          <strong>top-left rule</strong>: an <primer-math>E = 0</primer-math> pixel counts as inside only
+          for a triangle whose <em>top</em> or <em>left</em> edge it sits on — so exactly one owner wins,
+          always. It is the rule every rasterizer implements and every beginner's software rasterizer
+          forgets.</li>
+      </ul>
+    </primer-vignette>
+
+    <primer-vignette title="How fast is 'a box of adders', really?">
+      <p>
+        Do the arithmetic for one mid-range GPU: 4 raster engines × 16 pixels per clock × 2.5 GHz is
+        160 <em>billion</em> coverage tests a second — each one three sign checks fed by three adds. At a
+        few femtojoules per add, the entire inside/outside decision machinery for a AAA game frame costs
+        less energy than lighting one LED for the same duration. This is the specialisation argument of
+        this module's first lesson made concrete: the same tests as shader code would burn instruction
+        fetch, scheduling and 32-bit datapaths on what a purpose-built array of narrow adders does almost
+        for free. When an operation is this regular, silicon specialisation is not a 20% win — it is
+        orders of magnitude, and that is why the rasterizer will likely be the last fixed-function block
+        ever to die.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "hwRasterQuiz@1": {
+          "intro": "The rasterizer tests pixel centres with linear edge functions — evaluated in parallel, stepped incrementally, emitted as 2×2 quads.",
+          "evalQ": "An edge function has a = {a}, b = {b}, c = {c}. Evaluate E = a·x + b·y + c at the pixel centre ({x}, {y}).",
+          "incQ": "At some pixel, E = {e}. The edge coefficients are a = {a}, b = {b}. Using the incremental property, what is E one pixel to the RIGHT?",
+          "incKQ": "At some pixel, E = {e}, with a = {a}. Stepping {k} pixels to the right, what does E become?",
+          "incUpQ": "At some pixel, E = {e}, with b = {b}. What is E one pixel UP (y + 1)?",
+          "quadQ": "A triangle's coverage lands in {q} distinct 2×2 quads. How many fragment-shader lanes run (including helpers)?",
+          "helperQ": "A triangle covers {p} pixels spread over {q} quads. How many of the fragment lanes are HELPER lanes (uncovered)?",
+          "tileQ": "Tiles are {t}×{t} pixels. A triangle's bounding box spans {w}×{h} pixels, exactly aligned to the tile grid. At most how many tiles can the coarse raster send onward?",
+          "fillQ": "A raster block stamps {r} pixels per clock at {c} MHz. What is its fill rate in Mpixels/s?",
+          "centreQ": "When is a pixel covered by a triangle?",
+          "centreA": "When its centre (the sample point) is inside — regardless of how much area overlaps",
+          "centreB": "When the triangle overlaps any part of the pixel's square",
+          "centreC": "When the triangle overlaps at least half the pixel's area",
+          "centreD": "When any of the triangle's vertices falls inside the pixel",
+          "tlQ": "What problem does the top-left rule solve?",
+          "tlA": "Pixels exactly on a shared edge get exactly ONE owner — no double-shading, no cracks",
+          "tlB": "It makes the top-left pixel of the screen always render first",
+          "tlC": "It rounds all vertices to the top-left of their pixel",
+          "tlD": "It sorts triangles from top-left to bottom-right",
+          "whyQ": "Why is the linear edge function so well suited to hardware?",
+          "whyA": "It can be evaluated at many points in parallel with no dependencies, and stepped to a neighbouring pixel with a single add",
+          "whyB": "It is the only inside-test that gives the exactly correct answer",
+          "whyC": "Because it requires a fast hardware divider",
+          "whyD": "Because it only works on power-of-two screens",
+          "perspQ": "How does hardware interpolate a texture coordinate u perspective-correctly?",
+          "perspA": "Interpolate u/w and 1/w linearly across the screen, then divide the two per fragment",
+          "perspB": "Interpolate u linearly in screen space — that is already correct",
+          "perspC": "Recompute the vertex shader at every pixel",
+          "perspD": "Store u in the depth buffer and read it back",
+          "quadWhyQ": "Why does the rasterizer emit 2×2 quads instead of single fragments?",
+          "quadWhyA": "Fragment shaders need derivatives (e.g. for mip selection), estimated by differencing neighbouring quad lanes",
+          "quadWhyB": "Because memory buses are 4 bytes wide",
+          "quadWhyC": "To make triangles look smoother at the edges",
+          "quadWhyD": "Because a quad is the smallest triangle"
+        }
+      }
+    </script>
+
+    <primer-quiz name="hwRasterQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/graphics-hardware/the-geometry-front-end",
+      "computer-science/computer-graphics/rasterization"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "hwRaster",
+    ({ board, colors, step, sceneStrings }) => {
+      const NX = 16, NY = 12, TILE = 4;
+      const A = [1.4, 1.6], B = [14.6, 4.4], C = [6.4, 10.6];
+      const triC = colors.cat[1], pixC = colors.cat[0], tileC = colors.cat[2];
+
+      const edge = (P, Q, x, y) => (x - P[0]) * (Q[1] - P[1]) - (y - P[1]) * (Q[0] - P[0]);
+      const inside = (x, y) => {
+        const w0 = edge(A, B, x, y), w1 = edge(B, C, x, y), w2 = edge(C, A, x, y);
+        return (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0);
+      };
+      const covered = (i, j) => inside(i + 0.5, j + 0.5);
+
+      const rect = (x0, y0, x1, y1, opts) =>
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          vertices: { visible: false }, highlight: false, fixed: true, ...opts,
+        });
+
+      // ── Base: the pixel grid, with tile boundaries slightly heavier. ──
+      for (let i = 0; i <= NX; i++)
+        board.create("segment", [[i, 0], [i, NY]], {
+          strokeColor: colors.line, strokeWidth: i % TILE === 0 ? 1.8 : 0.7,
+          strokeOpacity: i % TILE === 0 ? 0.9 : 0.45, highlight: false, fixed: true,
+        });
+      for (let j = 0; j <= NY; j++)
+        board.create("segment", [[0, j], [NX, j]], {
+          strokeColor: colors.line, strokeWidth: j % TILE === 0 ? 1.8 : 0.7,
+          strokeOpacity: j % TILE === 0 ? 0.9 : 0.45, highlight: false, fixed: true,
+        });
+
+      // Step 1: the triangle's edges (setup's three half-planes).
+      step(sceneStrings("stepEdges"), () => {
+        board.create("polygon", [A, B, C], {
+          fillOpacity: 0, highlight: false, fixed: true,
+          borders: { strokeColor: triC, strokeWidth: 2.5, highlight: false },
+          vertices: { visible: false },
+        });
+      });
+
+      // Step 2: coarse raster — highlight tiles containing any covered pixel centre.
+      step(sceneStrings("stepTiles"), () => {
+        for (let ty = 0; ty < NY; ty += TILE)
+          for (let tx = 0; tx < NX; tx += TILE) {
+            let hit = false;
+            for (let j = ty; j < ty + TILE && !hit; j++)
+              for (let i = tx; i < tx + TILE; i++)
+                if (covered(i, j)) { hit = true; break; }
+            if (hit)
+              rect(tx, ty, tx + TILE, ty + TILE, {
+                fillColor: tileC, fillOpacity: 0.18, borders: { strokeColor: tileC, strokeWidth: 2, highlight: false },
+              });
+          }
+      });
+
+      // Step 3: fine raster — fill covered pixels.
+      step(sceneStrings("stepPixels"), () => {
+        for (let i = 0; i < NX; i++)
+          for (let j = 0; j < NY; j++)
+            if (covered(i, j))
+              rect(i, j, i + 1, j + 1, {
+                fillColor: pixC, fillOpacity: 0.55, borders: { visible: false },
+              });
+      });
+
+      // Step 4: quads — dashed outlines around 2×2 blocks with any coverage.
+      step(sceneStrings("stepQuads"), () => {
+        for (let qy = 0; qy < NY; qy += 2)
+          for (let qx = 0; qx < NX; qx += 2) {
+            const any = covered(qx, qy) || covered(qx + 1, qy) || covered(qx, qy + 1) || covered(qx + 1, qy + 1);
+            if (any)
+              rect(qx, qy, qx + 2, qy + 2, {
+                fillOpacity: 0, borders: { strokeColor: colors.ink, strokeWidth: 1.6, dash: 2, highlight: false },
+              });
+          }
+      });
+    },
+    { boundingbox: [-0.8, 12.8, 16.8, -0.8], title: () => makeStrings("hwRaster")("title") },
+  );
+
+  registerQuiz("hwRasterQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("evalQ", v),
+      variables: "a=[-4:4] b=[-4:4] c=[-9:9] x=[0:6] y=[0:6]",
+      constraints: "a != 0 && b != 0",
+      answer: "a*x+b*y+c",
+    },
+    {
+      prompt: (v) => sceneStrings("incQ", v),
+      variables: "e=[-20:20] a=[-6:6] b=[-6:6]",
+      constraints: "a != 0",
+      answer: "e+a",
+    },
+    {
+      prompt: (v) => sceneStrings("incKQ", v),
+      variables: "e=[-15:15] a=[-5:5] k=[2:6]",
+      constraints: "a != 0",
+      answer: "e+k*a",
+    },
+    {
+      prompt: (v) => sceneStrings("incUpQ", v),
+      variables: "e=[-20:20] b=[-6:6]",
+      constraints: "b != 0",
+      answer: "e+b",
+    },
+    {
+      prompt: (v) => sceneStrings("quadQ", v),
+      variables: "q=[3:12]",
+      answer: "4*q",
+    },
+    {
+      // Helper lanes = total lanes − covered pixels; constraints keep it consistent
+      // (each quad holds 1–4 covered pixels).
+      prompt: (v) => sceneStrings("helperQ", v),
+      variables: "p=[6:30] q=[3:10]",
+      constraints: "4*q >= p && p >= q",
+      answer: "4*q-p",
+    },
+    {
+      // Bounding box exactly w×h = (m·t)×(n·t) pixels → m·n tiles.
+      prompt: (v) => sceneStrings("tileQ", { ...v, w: v.m * v.t, h: v.n * v.t }),
+      variables: "t=[8,16] m=[2:5] n=[2:4]",
+      answer: "m*n",
+    },
+    {
+      prompt: (v) => sceneStrings("fillQ", v),
+      variables: "r=[8,16,32] c=[500,1000,1500,2000]",
+      answer: "r*c",
+    },
+    {
+      prompt: () => sceneStrings("centreQ"),
+      options: [
+        { text: () => sceneStrings("centreA"), correct: true },
+        { text: () => sceneStrings("centreB"), correct: false },
+        { text: () => sceneStrings("centreC"), correct: false },
+        { text: () => sceneStrings("centreD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("tlQ"),
+      options: [
+        { text: () => sceneStrings("tlA"), correct: true },
+        { text: () => sceneStrings("tlB"), correct: false },
+        { text: () => sceneStrings("tlC"), correct: false },
+        { text: () => sceneStrings("tlD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("whyA"), correct: true },
+        { text: () => sceneStrings("whyB"), correct: false },
+        { text: () => sceneStrings("whyC"), correct: false },
+        { text: () => sceneStrings("whyD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("perspQ"),
+      options: [
+        { text: () => sceneStrings("perspA"), correct: true },
+        { text: () => sceneStrings("perspB"), correct: false },
+        { text: () => sceneStrings("perspC"), correct: false },
+        { text: () => sceneStrings("perspD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("quadWhyQ"),
+      options: [
+        { text: () => sceneStrings("quadWhyA"), correct: true },
+        { text: () => sceneStrings("quadWhyB"), correct: false },
+        { text: () => sceneStrings("quadWhyC"), correct: false },
+        { text: () => sceneStrings("quadWhyD"), correct: false },
+      ],
+    },
+  ]);
+</script>

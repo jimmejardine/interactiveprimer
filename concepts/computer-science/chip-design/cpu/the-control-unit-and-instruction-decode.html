@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>The Control Unit and Instruction Decode</primer-title>
+
+    <primer-card>
+      <p>
+        Last lesson's
+        <primer-ref to="computer-science/chip-design/cpu/a-single-cycle-cpu-in-rtl">single-cycle CPU</primer-ref>
+        had a confession buried in it: a magic <code>decoder</code> box that "just knows" which mux
+        selects what. Time to open the box. The datapath is the machine's muscles — adders, muxes,
+        memories, all willing but entirely undirected. The <strong>control unit</strong> is its nervous
+        system: a fistful of one-bit (and two-bit) signals that tell every mux which input to pass and
+        every write port whether tonight is the night. The wonderful surprise of this lesson is how small
+        it is: for our ten instructions, the entire "brain" is one combinational <code>case</code>
+        statement — a lookup from opcode to a bundle of bits.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The signal bundle</h2>
+      <p>
+        First, meet the signals. Each one answers exactly one question that some mux or write-enable in the
+        datapath is asking:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Signal</th><th>The question it answers</th><th>Who listens</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>RegWrite</code></td><td>Does rd get written this cycle?</td><td>Register-file write port</td></tr>
+            <tr><td><code>ALUSrc</code></td><td>Is the ALU's B input rs2, or the immediate?</td><td>ALU-B mux</td></tr>
+            <tr><td><code>ALUOp</code></td><td>Add, subtract, AND, OR — or pass B through?</td><td>The ALU</td></tr>
+            <tr><td><code>MemRead</code></td><td>Should data memory perform a read?</td><td>Data memory</td></tr>
+            <tr><td><code>MemWrite</code></td><td>Should data memory store rs2?</td><td>Data-memory write port</td></tr>
+            <tr><td><code>MemToReg</code></td><td>Does rd receive memory data, or the ALU result?</td><td>Write-back mux</td></tr>
+            <tr><td><code>Branch</code></td><td>May a zero ALU result redirect the pc?</td><td>Next-PC logic</td></tr>
+            <tr><td><code>Jump</code></td><td>Redirect the pc unconditionally (and link pc+4)?</td><td>Next-PC logic, WB mux</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        And here is the whole brain, laid flat — every instruction's settings for every signal. This table
+        <em>is</em> the control unit; the RTL below and the code at the bottom are just two ways of writing
+        it down:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Instr</th><th>RegWrite</th><th>ALUSrc</th><th>ALUOp</th><th>MemRead</th><th>MemWrite</th><th>MemToReg</th><th>Branch</th><th>Jump</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>ADD</code></td><td>1</td><td>0</td><td>ADD</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+            <tr><td><code>SUB</code></td><td>1</td><td>0</td><td>SUB</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+            <tr><td><code>ADDI</code></td><td>1</td><td>1</td><td>ADD</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+            <tr><td><code>AND</code></td><td>1</td><td>0</td><td>AND</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+            <tr><td><code>OR</code></td><td>1</td><td>0</td><td>OR</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+            <tr><td><code>LW</code></td><td>1</td><td>1</td><td>ADD</td><td>1</td><td>0</td><td>1</td><td>0</td><td>0</td></tr>
+            <tr><td><code>SW</code></td><td><strong>0</strong></td><td>1</td><td>ADD</td><td>0</td><td>1</td><td>0</td><td>0</td><td>0</td></tr>
+            <tr><td><code>BEQ</code></td><td><strong>0</strong></td><td>0</td><td>SUB</td><td>0</td><td>0</td><td>0</td><td>1</td><td>0</td></tr>
+            <tr><td><code>JAL</code></td><td>1</td><td>0</td><td>ADD</td><td>0</td><td>0</td><td>0</td><td>0</td><td>1</td></tr>
+            <tr><td><code>LUI</code></td><td>1</td><td>1</td><td>PASSB</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Little elegances hide in the rows. <code>BEQ</code> has no subtract-and-compare hardware of its
+        own: its <code>ALUOp</code> is <code>SUB</code>, and the next-PC logic just watches the ALU's
+        <em>zero</em> flag — equality testing by subtraction. <code>LW</code> and <code>SW</code> both set
+        <code>ALUSrc</code> because the ALU is moonlighting as their address adder. And <code>LUI</code>
+        asks the ALU to do nothing at all — <code>PASSB</code> waves the shifted immediate straight
+        through to write-back.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The RTL: one always_comb, safe defaults first</h2>
+      <primer-code lang="text">
+always_comb begin
+  // Safe defaults FIRST: nothing writes, nothing branches. Every case
+  // below only switches ON what its instruction actually needs.
+  ctl = '{reg_write: 0, alu_src: 0, alu_op: ALU_ADD, mem_read: 0,
+          mem_write: 0, mem_to_reg: 0, branch: 0, jump: 0};
+  unique case (opcode)
+    7'b0110011: begin ctl.reg_write = 1;                          // ADD SUB AND OR
+                      ctl.alu_op = alu_from_funct(funct3, funct7); end
+    7'b0010011: begin ctl.reg_write = 1; ctl.alu_src = 1; end     // ADDI
+    7'b0000011: begin ctl.reg_write = 1; ctl.alu_src = 1;         // LW
+                      ctl.mem_read = 1; ctl.mem_to_reg = 1; end
+    7'b0100011: begin ctl.alu_src = 1; ctl.mem_write = 1; end     // SW
+    7'b1100011: begin ctl.branch = 1; ctl.alu_op = ALU_SUB; end   // BEQ
+    7'b1101111: begin ctl.reg_write = 1; ctl.jump = 1; end        // JAL
+    7'b0110111: begin ctl.reg_write = 1; ctl.alu_src = 1;         // LUI
+                      ctl.alu_op = ALU_PASSB; end
+    default: ;   // unknown opcode: the safe defaults hold, and nothing happens
+  endcase
+end
+      </primer-code>
+      <p>
+        The style here is load-bearing, not cosmetic. Every signal gets a <strong>safe default</strong>
+        before the <code>case</code> — the "nothing happens" bundle — and each arm switches on
+        <em>only</em> what its instruction needs. This has two payoffs: no arm can forget a signal (the
+        default already set it), and an undecodable opcode falls through to a guaranteed-harmless NOP
+        rather than to whatever bits the synthesizer felt like. Recall from
+        <primer-ref soft to="computer-science/chip-design/rtl/combinational-logic-in-systemverilog">combinational
+        RTL</primer-ref> that an incomplete <code>always_comb</code> infers a latch; here an incomplete
+        <em>case arm</em> would infer something worse — wrong behaviour that only shows on the instruction
+        you forgot.
+      </p>
+      <primer-vignette title="Watch out! The don't-care that corrupts a register">
+        <p>
+          The classic control-unit disaster is a "don't-care" that wasn't. Suppose you reason: "SW writes
+          no register, so <code>RegWrite</code> during SW is a don't-care — I'll leave whatever the
+          optimizer likes." If it settles to 1, then every <code>sw x5, 12(x2)</code> also writes a
+          register — which one? Whatever bits 11:7 happen to hold, and for S-format those bits are
+          <em>immediate bits</em>. So <code>sw x5, 12(x2)</code> quietly clobbers <code>x12</code>.
+          The store itself works perfectly; some unrelated register dies; the program fails minutes later
+          in code nowhere near the bug. <strong>Every cell of the control table is load-bearing.</strong>
+          When a signal seems not to matter, set it to the safe value (writes and redirects OFF) — never
+          leave it to chance.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>Worked example: LW's row, wire by wire</h2>
+      <p>
+        Take <code>lw x5, 8(x2)</code> and follow its control row through the datapath, mux by mux:
+      </p>
+      <ul>
+        <li><code>ALUSrc = 1</code>: the ALU-B mux picks the immediate, so the ALU computes
+          <code>x2 + 8</code> — the address.</li>
+        <li><code>MemRead = 1</code>: data memory reads at <code>alu_out</code> and produces
+          <code>mem_rdata</code>.</li>
+        <li><code>MemToReg = 1</code>: the write-back mux passes the <em>memory</em> data, not the ALU's
+          address.</li>
+        <li><code>RegWrite = 1</code>: the register file commits <code>mem_rdata</code> into
+          <code>x5</code> at the edge.</li>
+        <li><code>MemWrite = Branch = Jump = 0</code>: nothing stores, nothing redirects; the pc takes its
+          quiet <code>pc + 4</code>.</li>
+      </ul>
+      <p>
+        Do this walk yourself for <code>BEQ</code> (whose result is <em>thrown away</em> — only the zero
+        flag matters) and for <code>JAL</code> (whose write-back value ignores the ALU entirely). If you
+        can narrate a row, you understand the machine.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Hardwired — and the road not taken</h2>
+      <p>
+        What we just built is <strong>hardwired control</strong>: pure combinational logic from
+        <code>opcode</code>/<code>funct3</code>/<code>funct7</code> to the signal bundle, settling in a
+        fraction of a nanosecond. The historical alternative you met in
+        <primer-ref to="computer-science/computer-architecture/datapath/hardwired-vs-microprogrammed-control">hardwired
+        vs microprogrammed control</primer-ref> stores the bundles as <em>microcode words in a little
+        ROM</em> and steps through them — flexible, patchable, and the right call in the 1970s when
+        instructions were baroque and gates were precious. RISC-V's regularity is precisely what makes the
+        hardwired choice so cheap here: a handful of opcodes, fields that never move, and the whole
+        decision fits in a page of gates. The ISA and the control style were designed for each other.
+      </p>
+      <primer-vignette title="Is microcode dead, then?">
+        <p>
+          Not remotely — you almost certainly ran microcode today. x86 processors still translate their
+          crustiest instructions into internal micro-op sequences from an on-chip ROM, and
+          <em>patchable</em> microcode is how vendors ship fixes for hardware bugs — the Spectre and
+          Meltdown mitigations of 2018 arrived partly as microcode updates, decades after microcode was
+          declared obsolete. The modern arrangement is a hybrid: the common fast path is hardwired (RISC
+          won that argument), with a microcoded trapdoor for the rare, the complex, and the regrettable.
+          Our little CPU takes the pure hardwired road because its ISA — like all of RISC-V — was shaped so
+          it could.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>The decoder as a pure function</h2>
+      <p>
+        In the running TypeScript model, the control unit is exactly what the RTL is: a pure function from
+        instruction to signal bundle. Here it is, printing the control table straight from the code — and
+        then steering the same sum-to-15 program as last lesson, with every mux decision now made by the
+        bundle instead of a hand-written <code>switch</code>:
+      </p>
+      <primer-code run>
+// ── Assembler + decoder (lesson 34 recap, compact). ──
+function R(f7: number, f3: number, rd: number, rs1: number, rs2: number): number {
+  return ((f7 &lt;&lt; 25) | (rs2 &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | (rd &lt;&lt; 7) | 0x33) | 0;
+}
+function I(op: number, f3: number, rd: number, rs1: number, imm: number): number {
+  return (((imm &amp; 0xfff) &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | (rd &lt;&lt; 7) | op) | 0;
+}
+function B(f3: number, rs1: number, rs2: number, imm: number): number {
+  return ((((imm &gt;&gt; 12) &amp; 1) &lt;&lt; 31) | (((imm &gt;&gt; 5) &amp; 0x3f) &lt;&lt; 25) | (rs2 &lt;&lt; 20) | (rs1 &lt;&lt; 15) |
+          (f3 &lt;&lt; 12) | (((imm &gt;&gt; 1) &amp; 0xf) &lt;&lt; 8) | (((imm &gt;&gt; 11) &amp; 1) &lt;&lt; 7) | 0x63) | 0;
+}
+function J(rd: number, imm: number): number {
+  return ((((imm &gt;&gt; 20) &amp; 1) &lt;&lt; 31) | (((imm &gt;&gt; 1) &amp; 0x3ff) &lt;&lt; 21) | (((imm &gt;&gt; 11) &amp; 1) &lt;&lt; 20) |
+          (((imm &gt;&gt; 12) &amp; 0xff) &lt;&lt; 12) | (rd &lt;&lt; 7) | 0x6f) | 0;
+}
+const asm = {
+  ADD:  (rd: number, rs1: number, rs2: number) =&gt; R(0x00, 0, rd, rs1, rs2),
+  ADDI: (rd: number, rs1: number, imm: number) =&gt; I(0x13, 0, rd, rs1, imm),
+  BEQ:  (rs1: number, rs2: number, imm: number) =&gt; B(0, rs1, rs2, imm),
+  JAL:  (rd: number, imm: number) =&gt; J(rd, imm),
+};
+interface Decoded { name: string; rd: number; rs1: number; rs2: number; imm: number }
+function decode(w: number): Decoded {
+  const opcode = w &amp; 0x7f, rd = (w &gt;&gt; 7) &amp; 0x1f, f3 = (w &gt;&gt; 12) &amp; 7;
+  const rs1 = (w &gt;&gt; 15) &amp; 0x1f, rs2 = (w &gt;&gt; 20) &amp; 0x1f, f7 = (w &gt;&gt;&gt; 25) &amp; 0x7f;
+  const immI = w &gt;&gt; 20;
+  const immS = ((w &gt;&gt; 25) &lt;&lt; 5) | ((w &gt;&gt; 7) &amp; 0x1f);
+  const immB = ((w &gt;&gt; 31) &lt;&lt; 12) | (((w &gt;&gt; 7) &amp; 1) &lt;&lt; 11) | (((w &gt;&gt; 25) &amp; 0x3f) &lt;&lt; 5) | (((w &gt;&gt; 8) &amp; 0xf) &lt;&lt; 1);
+  const immJ = ((w &gt;&gt; 31) &lt;&lt; 20) | (((w &gt;&gt; 12) &amp; 0xff) &lt;&lt; 12) | (((w &gt;&gt; 20) &amp; 1) &lt;&lt; 11) | (((w &gt;&gt; 21) &amp; 0x3ff) &lt;&lt; 1);
+  if (opcode === 0x33) return { name: f3 === 0 ? (f7 === 0x20 ? "SUB" : "ADD") : f3 === 7 ? "AND" : "OR", rd, rs1, rs2, imm: 0 };
+  if (opcode === 0x13) return { name: "ADDI", rd, rs1, rs2, imm: immI };
+  if (opcode === 0x03) return { name: "LW",   rd, rs1, rs2, imm: immI };
+  if (opcode === 0x23) return { name: "SW",   rd, rs1, rs2, imm: immS };
+  if (opcode === 0x63) return { name: "BEQ",  rd, rs1, rs2, imm: immB };
+  if (opcode === 0x6f) return { name: "JAL",  rd, rs1, rs2, imm: immJ };
+  return { name: "LUI", rd, rs1, rs2, imm: (w &gt;&gt; 12) &lt;&lt; 12 };
+}
+
+// ── The control unit: one pure function, instruction name → signal bundle. ──
+interface Ctl {
+  RegWrite: number; ALUSrc: number; ALUOp: string;
+  MemRead: number; MemWrite: number; MemToReg: number; Branch: number; Jump: number;
+}
+function control(name: string): Ctl {
+  // Start from the SAFE default: nothing writes, nothing branches.
+  const c: Ctl = { RegWrite: 0, ALUSrc: 0, ALUOp: "ADD", MemRead: 0, MemWrite: 0, MemToReg: 0, Branch: 0, Jump: 0 };
+  switch (name) {
+    case "ADD": case "AND": case "OR":
+                 c.RegWrite = 1; c.ALUOp = name; break;
+    case "SUB":  c.RegWrite = 1; c.ALUOp = "SUB"; break;
+    case "ADDI": c.RegWrite = 1; c.ALUSrc = 1; break;
+    case "LW":   c.RegWrite = 1; c.ALUSrc = 1; c.MemRead = 1; c.MemToReg = 1; break;
+    case "SW":   c.ALUSrc = 1; c.MemWrite = 1; break;
+    case "BEQ":  c.ALUOp = "SUB"; c.Branch = 1; break;
+    case "JAL":  c.RegWrite = 1; c.Jump = 1; break;
+    case "LUI":  c.RegWrite = 1; c.ALUSrc = 1; c.ALUOp = "PASSB"; break;
+  }
+  return c;
+}
+
+// ── Print the control table. ──
+const names = ["ADD", "SUB", "ADDI", "AND", "OR", "LW", "SW", "BEQ", "JAL", "LUI"];
+console.log("instr | RegWrite ALUSrc ALUOp  MemRead MemWrite MemToReg Branch Jump");
+console.log("------+---------------------------------------------------------------");
+for (const n of names) {
+  const c = control(n);
+  console.log(
+    `${n.padEnd(5)} |    ${c.RegWrite}       ${c.ALUSrc}    ${c.ALUOp.padEnd(6)}   ${c.MemRead}       ${c.MemWrite}        ${c.MemToReg}       ${c.Branch}     ${c.Jump}`,
+  );
+}
+
+// ── The same CPU as last lesson — but now the CONTROLS steer everything. ──
+interface State { pc: number; regs: number[]; mem: number[] }
+const imem = [
+  asm.ADDI(1, 0, 0), asm.ADDI(2, 0, 1), asm.ADDI(3, 0, 6),
+  asm.BEQ(2, 3, 16), asm.ADD(1, 1, 2), asm.ADDI(2, 2, 1), asm.JAL(0, -12),
+];
+function next(s: State): State {
+  const d = decode(imem[s.pc &gt;&gt; 2]);
+  const c = control(d.name);                              // ← the new star of the show
+  const regs = s.regs.slice(), mem = s.mem.slice();
+  const a = s.regs[d.rs1];
+  const b = c.ALUSrc ? d.imm : s.regs[d.rs2];             // ALUSrc steers the B mux
+  const alu_out = c.ALUOp === "SUB" ? (a - b) | 0 : c.ALUOp === "AND" ? a &amp; b
+    : c.ALUOp === "OR" ? a | b : c.ALUOp === "PASSB" ? b : (a + b) | 0;
+  const zero = alu_out === 0;
+  if (c.MemWrite) mem[alu_out &gt;&gt; 2] = s.regs[d.rs2];      // MemWrite gates the store
+  const loaded = c.MemRead ? mem[alu_out &gt;&gt; 2] | 0 : 0;   // MemRead gates the load
+  const wb = c.MemToReg ? loaded : c.Jump ? s.pc + 4 : alu_out;  // MemToReg/Jump steer write-back
+  if (c.RegWrite &amp;&amp; d.rd !== 0) regs[d.rd] = wb;          // RegWrite gates the RF port
+  const pc = c.Jump || (c.Branch &amp;&amp; zero) ? s.pc + d.imm : s.pc + 4;  // the PC-source mux
+  return { pc, regs, mem };
+}
+let state: State = { pc: 0, regs: new Array(32).fill(0), mem: new Array(16).fill(0) };
+let cycles = 0;
+while (state.pc &gt;&gt; 2 &lt; imem.length) { state = next(state); cycles++; }
+console.log(`\nsum-to-5 program, control-driven: x1 = ${state.regs[1]} after ${cycles} cycles (15 in 24?)`);
+      </primer-code>
+      <p>
+        Compare <code>next()</code> with last lesson's: the arithmetic is unchanged, but every decision
+        point now reads a control bit — <code>c.ALUSrc</code> steers the B mux, <code>c.RegWrite</code>
+        gates the write, <code>c.Branch &amp;&amp; zero</code> arbitrates the pc. The <code>switch</code>
+        on instruction names is gone from the datapath and lives only inside <code>control()</code> —
+        exactly the separation the hardware has. Same answer, 15 in 24 cycles; better anatomy.
+      </p>
+    </primer-card>
+
+    <!-- Quiz. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "ctlQuiz@1": {
+          "intro": "From opcode to a bundle of bits: every mux obeys, and every cell of the table is load-bearing.",
+          "bitsQ": "A control bundle carries {n} one-bit signals plus a {b}-bit ALUOp field. How many control bits ride to the datapath per instruction?",
+          "tableQ": "A control table covers {n} instructions with {s} control bits each. How many bits does the whole table define?",
+          "swRwQ": "In SW's control row, what is the value of RegWrite?",
+          "jalRwQ": "In JAL's control row, what is the value of RegWrite? (Think about the return address.)",
+          "mtrQ": "Which is the ONLY instruction in our subset with MemToReg = 1?",
+          "mtrA": "LW — only a load writes memory data into a register",
+          "mtrB": "SW — it is the other memory instruction",
+          "mtrC": "ADD — results must reach the register file",
+          "mtrD": "JAL — it writes pc + 4",
+          "beqQ": "Why is BEQ's ALUOp set to SUB?",
+          "beqA": "Equality is tested by subtracting: the next-PC logic just watches the ALU's zero flag",
+          "beqB": "Branches must decrement the loop counter",
+          "beqC": "SUB is the fastest ALU operation",
+          "beqD": "It is an arbitrary don't-care",
+          "alusrcQ": "The ALUSrc signal selects between which two values?",
+          "alusrcA": "The rs2 register value and the decoded immediate — the ALU's B input",
+          "alusrcB": "The rs1 and rs2 register values",
+          "alusrcC": "The ALU result and the memory data",
+          "alusrcD": "pc + 4 and the branch target",
+          "defQ": "Before the case statement, every signal is set to a default. What makes a default 'safe'?",
+          "defA": "All writes and pc-redirects OFF — an unknown opcode then executes as a harmless NOP",
+          "defB": "All signals set to 1, so nothing is forgotten",
+          "defC": "Copying the previous instruction's bundle",
+          "defD": "Letting the synthesizer choose the cheapest values",
+          "lwQ": "During LW, the loaded value's path to the register file runs through…",
+          "lwA": "data memory, then the write-back mux (MemToReg=1), then the RF write port (RegWrite=1)",
+          "lwB": "the ALU, which adds it to the immediate first",
+          "lwC": "the instruction memory's second port",
+          "lwD": "the branch adder",
+          "swBugQ": "A lazy decoder leaves RegWrite=1 during SW. What actually goes wrong?",
+          "swBugA": "The store works, but a register named by immediate bits (11:7) is silently corrupted — failure appears far from the bug",
+          "swBugB": "The store is dropped and memory is never written",
+          "swBugC": "The CPU halts immediately with an error",
+          "swBugD": "Nothing — SW has no rd, so the write has nowhere to go",
+          "hwQ": "What distinguishes hardwired control from microprogrammed control?",
+          "hwA": "Hardwired: combinational gates map opcode to signals directly. Microprogrammed: control words are fetched from an on-chip ROM, one micro-step at a time",
+          "hwB": "Hardwired control cannot implement branches",
+          "hwC": "Microprogrammed control has no control signals",
+          "hwD": "They differ only in the programming language used",
+          "pcQ": "In the next-PC logic, which combination redirects the pc for BEQ?",
+          "pcA": "Branch = 1 AND the ALU's zero flag set — both, ANDed",
+          "pcB": "Branch = 1 alone; the ALU is not consulted",
+          "pcC": "The zero flag alone, on every instruction",
+          "pcD": "RegWrite = 1 with MemToReg = 1"
+        }
+      }
+    </script>
+
+    <primer-quiz name="ctlQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/cpu/a-single-cycle-cpu-in-rtl",
+      "computer-science/computer-architecture/datapath/hardwired-vs-microprogrammed-control"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("ctlQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("bitsQ", v),
+      variables: "n=[6:9] b=[2:4]",
+      answer: "n + b",
+    },
+    {
+      prompt: (v) => sceneStrings("tableQ", v),
+      variables: "n=[8:12] s=[8:11]",
+      answer: "n * s",
+    },
+    { prompt: () => sceneStrings("swRwQ"), answer: 0 },
+    { prompt: () => sceneStrings("jalRwQ"), answer: 1 },
+    {
+      prompt: () => sceneStrings("mtrQ"),
+      options: [
+        { text: () => sceneStrings("mtrA"), correct: true },
+        { text: () => sceneStrings("mtrB"), correct: false },
+        { text: () => sceneStrings("mtrC"), correct: false },
+        { text: () => sceneStrings("mtrD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("beqQ"),
+      options: [
+        { text: () => sceneStrings("beqA"), correct: true },
+        { text: () => sceneStrings("beqB"), correct: false },
+        { text: () => sceneStrings("beqC"), correct: false },
+        { text: () => sceneStrings("beqD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("alusrcQ"),
+      options: [
+        { text: () => sceneStrings("alusrcA"), correct: true },
+        { text: () => sceneStrings("alusrcB"), correct: false },
+        { text: () => sceneStrings("alusrcC"), correct: false },
+        { text: () => sceneStrings("alusrcD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("defQ"),
+      options: [
+        { text: () => sceneStrings("defA"), correct: true },
+        { text: () => sceneStrings("defB"), correct: false },
+        { text: () => sceneStrings("defC"), correct: false },
+        { text: () => sceneStrings("defD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lwQ"),
+      options: [
+        { text: () => sceneStrings("lwA"), correct: true },
+        { text: () => sceneStrings("lwB"), correct: false },
+        { text: () => sceneStrings("lwC"), correct: false },
+        { text: () => sceneStrings("lwD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("swBugQ"),
+      options: [
+        { text: () => sceneStrings("swBugA"), correct: true },
+        { text: () => sceneStrings("swBugB"), correct: false },
+        { text: () => sceneStrings("swBugC"), correct: false },
+        { text: () => sceneStrings("swBugD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hwQ"),
+      options: [
+        { text: () => sceneStrings("hwA"), correct: true },
+        { text: () => sceneStrings("hwB"), correct: false },
+        { text: () => sceneStrings("hwC"), correct: false },
+        { text: () => sceneStrings("hwD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("pcQ"),
+      options: [
+        { text: () => sceneStrings("pcA"), correct: true },
+        { text: () => sceneStrings("pcB"), correct: false },
+        { text: () => sceneStrings("pcC"), correct: false },
+        { text: () => sceneStrings("pcD"), correct: false },
+      ],
+    },
+  ]);
+</script>

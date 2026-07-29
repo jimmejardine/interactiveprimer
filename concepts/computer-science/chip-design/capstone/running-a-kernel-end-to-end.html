@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Running a Kernel End to End</primer-title>
+
+    <primer-card>
+      <p>
+        Four lessons of parts; now the machine. This is the payoff lesson — the one where an ISA on
+        paper, a lockstep core, a dealing dispatcher and a bottlenecked
+        <primer-ref to="computer-science/chip-design/capstone/the-memory-subsystem">memory
+        controller</primer-ref> click together and PrimerGPU <em>breathes</em>: a kernel goes in one end
+        and eight correct sums come out the other, with every one of the 93 cycles in between accounted
+        for. We will watch the whole life of a launch — dispatch, lockstep fetch, per-lane index math,
+        coalesced loads queueing, the honest stalls, stores, <code>RET</code>, done, kernel-complete —
+        then interrogate the run like engineers: <em>where did the cycles go?</em> and <em>what happens
+        if we take pieces away?</em> Three configurations, one truth about GPUs, and a self-check in the
+        proper <primer-ref to="computer-science/chip-design/verification/testbenches-and-simulation">testbench
+        tradition</primer-ref> to prove none of it is wishful thinking.
+      </p>
+    </primer-card>
+
+    <!-- Stepped full-machine block diagram. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "fullMachine": {
+          "title": "The whole PrimerGPU: dispatcher, two SIMT cores, memory controller",
+          "stepDispatch": "On top: the dispatcher — block counter, free-core bitmask, done collection",
+          "stepCores": "The middle: two SIMT cores, each one PC + decoder driving four lanes in lockstep",
+          "stepMemory": "Below: the controller — arbitration, two 4-cycle channels, the coalescer — and flat memory",
+          "stepFlow": "The life of a launch flows top to bottom and back: blocks down, done signals up, data both ways",
+          "disp": "DISPATCHER",
+          "core": "SIMT core",
+          "lanes": "4 lanes",
+          "ctrl": "memory controller + coalescer",
+          "chan": "ch",
+          "mem": "data memory",
+          "blocks": "blocks",
+          "done": "done",
+          "reqs": "requests",
+          "resps": "responses"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The complete machine</h2>
+      <primer-geometry scene="fullMachine" caption="Full block diagram of PrimerGPU. At the top, the dispatcher. Below it, two SIMT cores, each with a shared front end and four lanes. At the bottom, the memory controller with its coalescer and two 4-cycle channels in front of the flat data memory. Arrows show blocks flowing down from the dispatcher, done signals returning up, and memory requests and responses flowing between cores and controller."></primer-geometry>
+      <p>
+        Every box on this diagram is something you built: the
+        <primer-ref to="computer-science/chip-design/capstone/designing-a-tiny-gpu-isa">contract</primer-ref>
+        it all serves, the cores from lesson two, the dispatcher from lesson three, the memory system
+        from lesson four. The simulator below contains all of it in about 150 lines — dispatcher, both
+        cores, queues, arbitration, coalescer — still the same two-phase
+        <em>settle-then-snap</em> loop we started with back in the RTL module, just with a grander
+        <code>State</code>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>THE run</h2>
+      <p>
+        The launch: vector add over 8 elements as 2 blocks of 4 threads, on 2 cores with the coalescer
+        on. One line per cycle — each core's FSM state, each channel's countdown, and annotations when
+        something happens. Then the accounting, and then the same kernel with pieces removed:
+      </p>
+      <primer-code run>
+        // ── The whole PrimerGPU: dispatcher + 2 SIMT cores + memory controller + coalescer. ──
+        // Kernel: vector add, 8 elements as 2 blocks of 4 threads. a@0, b@8, c@16.
+        const PROG = [0x50de, 0x300f, 0x9100, 0x9208, 0x9310, 0x3410, 0x7440, 0x3520, 0x7550, 0x3645, 0x3730, 0x8076, 0xf000];
+        const NUM_BLOCKS = 2, LATENCY = 4;
+        const chanOf = (a: number) =&gt; Math.floor(a / 4) % 2;
+
+        type Fsm = "FETCH" | "DECODE" | "REQUEST" | "WAIT" | "EXECUTE" | "UPDATE" | "IDLE" | "DONE";
+        const STEP: Record&lt;string, Fsm&gt; = {
+          FETCH: "DECODE", DECODE: "REQUEST", REQUEST: "WAIT", WAIT: "EXECUTE", EXECUTE: "UPDATE", UPDATE: "FETCH",
+        };
+        interface Lane { regs: number[]; data: number }
+        interface Core { st: Fsm; pc: number; ir: number; pending: number; blockIdx: number; lanes: Lane[] }
+        interface Req { kind: "load" | "store"; addr: number; core: number; lane: number; data: number[] }
+        interface Chan { queue: Req[]; cur: Req | null; left: number }
+        interface M { cores: Core[]; chans: Chan[]; mem: number[]; nextBlock: number; doneBlocks: number; txns: number }
+
+        const idle = (): Core =&gt; ({ st: "IDLE", pc: 0, ir: 0, pending: 0, blockIdx: -1, lanes: [] });
+        const start = (b: number): Core =&gt; ({
+          st: "FETCH", pc: 0, ir: 0, pending: 0, blockIdx: b,
+          lanes: [0, 1, 2, 3].map((t) =&gt; {
+            const regs = new Array(16).fill(0);
+            regs[13] = b; regs[14] = 4; regs[15] = t;
+            return { regs, data: 0 };
+          }),
+        });
+
+        function coreNext(s: Core, ci: number, out: Req[], coalesce: boolean): Core {
+          if (s.st === "IDLE" || s.st === "DONE") return s;
+          const n: Core = { ...s, st: STEP[s.st], lanes: s.lanes.map((l) =&gt; ({ ...l, regs: [...l.regs] })) };
+          const w = s.ir, op = w &gt;&gt; 12, rd = (w &gt;&gt; 8) &amp; 15, rs = (w &gt;&gt; 4) &amp; 15, rt = w &amp; 15, imm = w &amp; 255;
+          if (s.st === "FETCH") n.ir = PROG[s.pc];
+          if (s.st === "REQUEST" &amp;&amp; (op === 7 || op === 8)) {
+            const kind = op === 7 ? "load" as const : "store" as const;
+            const addrs = s.lanes.map((l) =&gt; l.regs[rs]);
+            if (coalesce &amp;&amp; addrs.every((a, t) =&gt; a === addrs[0] + t)) {
+              out.push({ kind, addr: addrs[0], core: ci, lane: -1, data: s.lanes.map((l) =&gt; l.regs[rt]) });
+              n.pending = 1;
+            } else {
+              s.lanes.forEach((l, t) =&gt; out.push({ kind, addr: addrs[t], core: ci, lane: t, data: [l.regs[rt]] }));
+              n.pending = 4;
+            }
+          }
+          if (s.st === "WAIT" &amp;&amp; s.pending &gt; 0) n.st = "WAIT";
+          if (s.st === "EXECUTE") n.lanes.forEach((l) =&gt; {
+            const a = l.regs[rs], b = l.regs[rt];
+            l.data = op === 3 ? a + b : op === 4 ? a - b : op === 5 ? a * b : op === 6 ? Math.floor(a / b) : op === 9 ? imm : l.data;
+          });
+          if (s.st === "UPDATE") {
+            if ((op &gt;= 3 &amp;&amp; op &lt;= 7) || op === 9) n.lanes.forEach((l) =&gt; { if (rd &lt; 13) l.regs[rd] = l.data; });
+            if (op === 15) n.st = "DONE";
+            n.pc = s.pc + 1;
+          }
+          return n;
+        }
+
+        function machineNext(m: M, rr: number, coalesce: boolean, note: (s: string) =&gt; void): M {
+          const mem = [...m.mem];
+          const out: Req[] = [];
+          const cores = m.cores.map((c, i) =&gt; coreNext(c, i, out, coalesce));
+          const chans = m.chans.map((ch) =&gt; ({ ...ch, queue: [...ch.queue] }));
+          let { nextBlock, doneBlocks, txns } = m;
+          // memory channels: grind, deliver by requestor ID
+          chans.forEach((ch, k) =&gt; {
+            if (ch.cur) {
+              ch.left--;
+              if (ch.left === 0) {
+                const r = ch.cur, c = cores[r.core];
+                if (r.kind === "load") {
+                  if (r.lane &lt; 0) c.lanes.forEach((l, t) =&gt; { l.data = mem[r.addr + t]; });
+                  else c.lanes[r.lane].data = mem[r.addr];
+                } else if (r.lane &lt; 0) r.data.forEach((d, t) =&gt; { mem[r.addr + t] = d; });
+                else mem[r.addr] = r.data[0];
+                c.pending--;
+                note(`ch${k} answers core ${r.core}${r.lane &lt; 0 ? " (all 4 lanes)" : " lane " + r.lane}`);
+                ch.cur = null;
+              }
+            }
+          });
+          // arbitration: rotating requestor priority into the channel queues
+          const rid = (r: Req) =&gt; r.core * 4 + Math.max(r.lane, 0);
+          out.sort((x, y) =&gt; ((rid(x) - rr + 8) % 8) - ((rid(y) - rr + 8) % 8));
+          out.forEach((r) =&gt; { chans[chanOf(r.addr)].queue.push(r); txns++; });
+          chans.forEach((ch) =&gt; { if (!ch.cur &amp;&amp; ch.queue.length &gt; 0) { ch.cur = ch.queue.shift()!; ch.left = LATENCY; } });
+          // dispatcher: collect done, grant one block per cycle to the lowest free core
+          m.cores.forEach((c, i) =&gt; {
+            if (c.st === "DONE") { doneBlocks++; cores[i] = idle(); note(`core ${i} done (block ${c.blockIdx}) — ${doneBlocks}/${NUM_BLOCKS}`); }
+          });
+          const free = cores.findIndex((c) =&gt; c.st === "IDLE");
+          if (nextBlock &lt; NUM_BLOCKS &amp;&amp; free &gt;= 0) {
+            cores[free] = start(nextBlock);
+            note(`dispatch block ${nextBlock} -&gt; core ${free}`);
+            nextBlock++;
+          }
+          return { cores, chans, mem, nextBlock, doneBlocks, txns };
+        }
+
+        function run(numCores: number, coalesce: boolean, verbose: boolean) {
+          const mem = new Array(24).fill(0);
+          for (let i = 0; i &lt; 8; i++) { mem[i] = 10 * (i + 1); mem[8 + i] = i + 1; }
+          let m: M = {
+            cores: Array.from({ length: numCores }, idle),
+            chans: [{ queue: [], cur: null, left: 0 }, { queue: [], cur: null, left: 0 }],
+            mem, nextBlock: 0, doneBlocks: 0, txns: 0,
+          };
+          const budget: Record&lt;string, number&gt; = {};
+          let cycle = 0, waitCycles = 0;
+          while (m.doneBlocks &lt; NUM_BLOCKS) {
+            const notes: string[] = [];
+            const snap = m;
+            m = machineNext(m, cycle % 8, coalesce, (s) =&gt; notes.push(s));
+            snap.cores.forEach((c) =&gt; {
+              budget[c.st] = (budget[c.st] ?? 0) + 1;
+              if (c.st === "WAIT") waitCycles++;
+            });
+            if (verbose) {
+              const cs = snap.cores.map((c, i) =&gt; `core${i} ${(c.st === "FETCH" ? "FETCH p" + c.pc : c.st).padEnd(8)}`).join(" ");
+              const ch = snap.chans.map((c, k) =&gt; `ch${k} ${c.cur ? "busy" + c.left : "-  "}${c.queue.length &gt; 0 ? "+q" + c.queue.length : "   "}`).join(" ");
+              console.log(`c${String(cycle).padStart(2, "0")}  ${cs}  ${ch}  ${notes.join("; ")}`);
+            }
+            cycle++;
+          }
+          // self-check: the RTL's memory must equal a plain software reference (the testbench discipline)
+          const ref = new Array(24).fill(0);
+          for (let i = 0; i &lt; 8; i++) { ref[i] = 10 * (i + 1); ref[8 + i] = i + 1; ref[16 + i] = ref[i] + ref[8 + i]; }
+          const pass = m.mem.every((x, i) =&gt; x === ref[i]);
+          return { cycle, txns: m.txns, budget, waitCycles, pass, c: m.mem.slice(16) };
+        }
+
+        // ── THE run: the full machine, watched cycle by cycle. ──
+        console.log("PrimerGPU end to end: 2 cores, coalescer ON, 2 blocks of 4 threads");
+        const A = run(2, true, true);
+        console.log(`\nkernel complete at cycle ${A.cycle};  c = [${A.c.join(", ")}];  self-check ${A.pass ? "PASS" : "FAIL"}`);
+
+        console.log("\nwhere the core-cycles went (both cores, config A):");
+        const total = Object.values(A.budget).reduce((a, b) =&gt; a + b, 0);
+        (["FETCH", "DECODE", "REQUEST", "WAIT", "EXECUTE", "UPDATE", "IDLE"] as const).forEach((st) =&gt; {
+          const n = A.budget[st] ?? 0;
+          console.log(`  ${st.padEnd(7)} ${String(n).padStart(4)} cycles  ${String(Math.round((100 * n) / total)).padStart(3)}%  ${"#".repeat(Math.round(n / 4))}`);
+        });
+
+        console.log("\nthree configurations, same kernel, same data:");
+        const B = run(1, true, false);
+        const C = run(2, false, false);
+        console.log(`  A: 2 cores, coalescer ON :  ${A.cycle} cycles, ${A.txns} transactions  (self-check ${A.pass ? "PASS" : "FAIL"})`);
+        console.log(`  B: 1 core,  coalescer ON :  ${B.cycle} cycles, ${B.txns} transactions  (self-check ${B.pass ? "PASS" : "FAIL"})`);
+        console.log(`  C: 2 cores, coalescer OFF:  ${C.cycle} cycles, ${C.txns} transactions  (self-check ${C.pass ? "PASS" : "FAIL"})`);
+        console.log(`  parallelism (B/A):  ${(B.cycle / A.cycle).toFixed(2)}x    coalescing (C/A): ${(C.cycle / A.cycle).toFixed(2)}x`);
+      </primer-code>
+      <p>Now walk the trace like a guided tour — every phase of a kernel's life is in there:</p>
+      <ul>
+        <li><strong>c00–c01, the launch</strong>: the dispatcher grants block 0 to core 0, then block 1
+          to core 1 — one grant per cycle, <code>%blockIdx</code> latched at each;</li>
+        <li><strong>c02–c39, the lockstep march</strong>: both cores tick FETCH→…→UPDATE through the
+          index math and the base constants, core 1 forever one beat behind. At c07's UPDATE, eight
+          threads across two cores have each computed a different <primer-math>i</primer-math>;</li>
+        <li><strong>c40–c44, memory gets real</strong>: both cores' first coalesced loads hit the
+          channels — block 0's line lands on ch0, block 1's on ch1, served <em>in parallel</em> — while
+          both cores sit visibly in WAIT;</li>
+        <li><strong>c56–c60 and c78–c82</strong>: the second load and the store replay the pattern —
+          three memory instructions, three stalls, exactly as the
+          <primer-ref soft to="computer-science/chip-design/capstone/the-memory-subsystem">memory
+          lesson</primer-ref> measured;</li>
+        <li><strong>c91–c93, the curtain</strong>: each core's <code>RET</code> raises done, the
+          dispatcher counts 1/2 then 2/2, and kernel-complete fires at cycle 93 with
+          <primer-math>c = [11, 22, \dots, 88]</primer-math>.</li>
+      </ul>
+    </primer-card>
+
+    <primer-card>
+      <h2>Where the cycles went</h2>
+      <p>The budget table is the honest heart of this lesson:</p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>State</th><th>Core-cycles</th><th>Share</th><th>What it is</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>FETCH</td><td>26</td><td>14%</td><td>reading instruction words</td></tr>
+            <tr><td>DECODE</td><td>26</td><td>14%</td><td>unpacking fields</td></tr>
+            <tr><td>REQUEST</td><td>26</td><td>14%</td><td>computing addresses, issuing requests</td></tr>
+            <tr><td><strong>WAIT</strong></td><td><strong>50</strong></td><td><strong>27%</strong></td><td><strong>stalled on the memory system</strong></td></tr>
+            <tr><td>EXECUTE</td><td>26</td><td>14%</td><td>the ALUs actually computing</td></tr>
+            <tr><td>UPDATE</td><td>26</td><td>14%</td><td>committing registers and the PC</td></tr>
+            <tr><td>IDLE</td><td>4</td><td>2%</td><td>launch and drain ramps</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        WAIT is the largest line — <strong>nearly double any other state</strong> — and that is
+        <em>with</em> the coalescer doing its best; switch it off (config C) and waiting swells to
+        roughly half of all core time. Meanwhile EXECUTE, the only state where mathematics actually
+        happens, gets one cycle in seven. Our toy, built honestly, has independently discovered the
+        central truth of GPU design: <strong>a GPU is a machine for surviving memory latency</strong>,
+        and everything real GPUs add — warps in flight, caches, deeper coalescing, occupancy machinery —
+        is aimed squarely at that 27%.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Three machines, one kernel</h2>
+      <p>
+        The comparison table quantifies the two big architectural ideas <em>on our own machine</em>,
+        not by appeal to authority:
+      </p>
+      <primer-table>
+        <table>
+          <thead>
+            <tr><th>Config</th><th>Cores</th><th>Coalescer</th><th>Cycles</th><th>Transactions</th><th>vs. A</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>A</strong></td><td>2</td><td>on</td><td>93</td><td>6</td><td>—</td></tr>
+            <tr><td><strong>B</strong></td><td>1</td><td>on</td><td>183</td><td>6</td><td>1.97× slower</td></tr>
+            <tr><td><strong>C</strong></td><td>2</td><td>off</td><td>129</td><td>24</td><td>1.39× slower</td></tr>
+          </tbody>
+        </table>
+      </primer-table>
+      <p>
+        Halve the cores and the kernel takes 1.97× longer — block-level dispatch converting hardware
+        directly into speed, the scalability contract paying out at
+        <primer-math>N{=}2</primer-math>. Keep both cores but scatter the memory traffic into per-lane
+        transactions and you lose 1.39× while moving <em>the same 24 words</em>. And in every
+        configuration, the <strong>self-check passes</strong>: the final data memory is compared,
+        word for word, against a reference computed by a plain software loop — the testbench discipline
+        from the verification module, in miniature. A trace that looks right is an anecdote; a
+        machine-checked equality against an independent model is evidence. The crown jewel is not that
+        the trace is pretty — it is that line: <code>self-check PASS</code>.
+      </p>
+      <primer-theorem name="What the end-to-end run shows">
+        <ul>
+          <li>the full pipeline works: launch → dispatch → lockstep execution → coalesced memory
+            traffic → stores → done → kernel-complete, in 93 cycles;</li>
+          <li><strong>WAIT dominates</strong> the cycle budget (27% coalesced, ~half uncoalesced) —
+            memory latency is the design problem;</li>
+          <li>parallelism measured: 2 cores ⇒ <strong>1.97×</strong>; coalescing measured:
+            <strong>1.39×</strong> on this kernel;</li>
+          <li>correctness is established by <strong>asserting final memory equals an independent
+            software reference</strong>, never by eyeballing.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="You have now built a computer, twice">
+      <p>
+        Pause on what just happened, because it is the whole course in one breath. You wrote text —
+        thirteen assembly lines. A program you wrote (the assembler) turned it into sixteen-bit words. A
+        machine you specified at the register-transfer level — FSMs, latches, arbitration, all things
+        that synthesize to gates — executed those words, and a testbench you understand proved the
+        answer right. That is the same loop a thousand-engineer GPU team runs, and the same loop this
+        course's earlier capstone ran for a CPU; the difference is only scale and the number of zeros on
+        the budget. There is a marvellous circularity available here too: our simulator ran on <em>your</em>
+        computer's processor — silicon that began life as somebody's RTL, simulated on some earlier
+        processor, all the way back down a chain of machines building machines that bottoms out in the
+        hand-drawn masks of the 1970s. You are now, in a small but genuine way, part of that chain.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The idleness is the exhibit, not the flaw">
+      <p>
+        It would be easy to read the budget table as an indictment — our cores twiddle in WAIT over a
+        quarter of the time; surely a better design would fix that? Look closer: the fix is not cleverer
+        circuits, it is <strong>more threads</strong>. Our machine runs 8 threads, so when both blocks
+        stall on loads there is <em>nothing else to switch to</em> — the WAIT shows up as naked idle
+        time. A real SM keeps dozens of warps resident precisely so that another warp's arithmetic can
+        fill every one of those cycles: same latency, hidden behind other work. Real GPUs run
+        <em>hundreds of thousands</em> of threads not because the workload demands that many answers at
+        once, but because that is how many are needed to bury the memory stalls our toy displays
+        nakedly. In other words: PrimerGPU's inefficiency is the most honest thing about it — it
+        exhibits the disease (latency) with the medicine (massive multithreading) removed, which is
+        exactly why the medicine exists. The next lesson makes that upgrade path precise.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: trace reading, budget accounting, config comparison, self-check reasoning. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "endToEndQuiz@1": {
+          "intro": "The full PrimerGPU run: 93 cycles, WAIT the biggest budget line (27%), 2 cores ⇒ 1.97× vs 1 core, coalescing ⇒ 1.39×, and correctness by asserting memory against a software reference.",
+          "blockCycQ": "On PrimerGPU, a non-memory instruction takes 6 cycles and a (coalesced) memory instruction takes 10. How many cycles does one block need for a kernel of {n} non-memory and {k} memory instructions?",
+          "budgetQ": "A run used {T} core-cycles in total, and WAIT accounted for {w}% of them. How many core-cycles were spent in WAIT?",
+          "speedQ": "The 1-core run took {B} cycles and the {c}-core run took {a} cycles. What is the speedup factor?",
+          "txQ": "A kernel launch runs {blk} blocks, each executing {mi} memory instructions. With the coalescer OFF (4 transactions per memory instruction), how many transactions hit the channels in total?",
+          "txOnQ": "Same launch — {blk} blocks, {mi} memory instructions each — with the coalescer ON (every access a perfect adjacent run). Total transactions?",
+          "whereQ": "Which FSM state consumed the most core-cycles in the end-to-end run — even with the coalescer on?",
+          "whereA": "WAIT — stalled on the memory system, nearly double any other state",
+          "whereB": "EXECUTE — arithmetic is the bulk of any compute kernel",
+          "whereC": "FETCH — instruction supply is the classic bottleneck",
+          "whereD": "UPDATE — register writes are the slowest operation",
+          "selfQ": "What exactly does the run's self-check do?",
+          "selfA": "Compares the machine's final data memory, word for word, against a reference computed by an ordinary software loop — and fails loudly on any mismatch",
+          "selfB": "Prints the output array so the reader can eyeball whether it looks right",
+          "selfC": "Runs the kernel twice and checks the two runs agree with each other",
+          "selfD": "Checks that the cycle count matches a hard-coded expected number",
+          "parQ": "Why did doubling the cores speed this kernel up by almost exactly 2×?",
+          "parA": "The blocks are independent and the memory channels were far from saturated, so two cores really did work in parallel with almost no interference",
+          "parB": "Two cores double the clock frequency",
+          "parC": "The second core has faster ALUs",
+          "parD": "It is a coincidence of this particular data",
+          "cfgQ": "Config C (coalescer off) was 1.39× slower AND issued 24 transactions instead of 6 — while moving the same 24 words. What is the right conclusion?",
+          "cfgA": "The memory system's cost is per transaction, so packing four words per transaction saves both queueing time and channel work",
+          "cfgB": "The coalescer compresses the data so fewer words need to move",
+          "cfgC": "Transactions are free; the slowdown came from the coalescer's check being skipped",
+          "cfgD": "Config C must have computed a different, larger result",
+          "stallQ": "At cycles 41–44 of the trace, both cores sit in WAIT while ch0 and ch1 both count down. What is happening?",
+          "stallA": "Each core's coalesced load is being served — block 0's line on channel 0 and block 1's on channel 1, in parallel — while the cores stall for the data",
+          "stallB": "The dispatcher has paused the cores to assign new blocks",
+          "stallC": "A deadlock that the simulator later recovers from",
+          "stallD": "The cores are executing their arithmetic in the channels",
+          "lastQ": "The final RET's UPDATE has executed. What must still happen before the launch is over?",
+          "lastA": "The dispatcher must collect that core's done signal and see its done-block count reach the total — only then does kernel-complete fire",
+          "lastB": "Nothing — RET and kernel-complete are the same event",
+          "lastC": "The memory must be erased for the next kernel",
+          "lastD": "The other core must also execute one final RET on its behalf",
+          "buryQ": "Our cores were idle in WAIT about a quarter of the time. How do real GPUs make the same latency disappear?",
+          "buryA": "They keep many more threads resident, so the scheduler can issue other warps' work during every stall — the latency is hidden, not removed",
+          "buryB": "They use memory with essentially zero latency",
+          "buryC": "They slow the cores down until memory keeps up",
+          "buryD": "They let the compiler delete most load instructions"
+        }
+      }
+    </script>
+
+    <primer-quiz name="endToEndQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/capstone/the-memory-subsystem",
+      "computer-science/chip-design/verification/testbenches-and-simulation"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The whole machine: dispatcher / cores / memory controller, stepped top to bottom. ──
+  registerGeometryScene(
+    "fullMachine",
+    ({ board, colors, step, sceneStrings }) => {
+      const txt = (x, y, s, color, fs = 10, bold = false) =>
+        board.create("text", [x, y, s], {
+          strokeColor: color, fontSize: fs, anchorX: "middle", anchorY: "middle",
+          fixed: true, highlight: false, cssStyle: bold ? "font-weight:600" : "",
+        });
+      const box = (x0, y0, x1, y1, stroke, opacity) =>
+        board.create("polygon", [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], {
+          fillColor: stroke, fillOpacity: opacity, fixed: true, highlight: false,
+          vertices: { visible: false }, borders: { strokeColor: stroke, strokeWidth: 1.5, highlight: false },
+        });
+      const arrow = (x0, y0, x1, y1, color, dash = 0) =>
+        board.create("arrow", [[x0, y0], [x1, y1]], {
+          strokeColor: color, strokeWidth: 1.5, dash, highlight: false, lastArrow: { type: 2, size: 4 },
+        });
+
+      // Step 1: the dispatcher on top.
+      step(sceneStrings("stepDispatch"), () => {
+        box(3.5, 8.3, 10.5, 9.4, colors.cat[0], 0.18);
+        txt(7, 8.85, sceneStrings("disp"), colors.cat[0], 12, true);
+      });
+
+      // Step 2: two SIMT cores.
+      step(sceneStrings("stepCores"), () => {
+        for (let c = 0; c < 2; c++) {
+          const x = 1.2 + c * 6.6;
+          box(x, 5.0, x + 5.0, 7.3, colors.cat[1], 0.12);
+          txt(x + 2.5, 6.9, sceneStrings("core") + " " + c, colors.cat[1], 11, true);
+          for (let l = 0; l < 4; l++) box(x + 0.35 + l * 1.15, 5.3, x + 1.25 + l * 1.15, 6.3, colors.cat[1], 0.3);
+          txt(x + 2.5, 5.75, sceneStrings("lanes"), colors.ink, 9, true);
+        }
+      });
+
+      // Step 3: the memory controller, channels and memory.
+      step(sceneStrings("stepMemory"), () => {
+        box(1.8, 2.6, 12.2, 3.7, colors.cat[2], 0.15);
+        txt(7, 3.15, sceneStrings("ctrl"), colors.cat[2], 11, true);
+        for (let k = 0; k < 2; k++) {
+          box(4.4 + k * 3.4, 1.4, 6.2 + k * 3.4, 2.2, colors.cat[3], 0.25);
+          txt(5.3 + k * 3.4, 1.8, sceneStrings("chan") + k, colors.cat[3], 10, true);
+        }
+        box(3.4, 0.1, 10.6, 0.9, colors.line, 0.12);
+        txt(7, 0.5, sceneStrings("mem"), colors.ink, 11, true);
+        arrow(5.3, 1.4, 5.9, 0.9, colors.line); arrow(8.7, 1.4, 8.1, 0.9, colors.line);
+        arrow(5.3, 2.6, 5.3, 2.2, colors.line); arrow(8.7, 2.6, 8.7, 2.2, colors.line);
+      });
+
+      // Step 4: the flows — blocks down, done up, requests/responses both ways.
+      step(sceneStrings("stepFlow"), () => {
+        arrow(5.0, 8.3, 3.7, 7.3, colors.cat[0]);
+        arrow(9.0, 8.3, 10.3, 7.3, colors.cat[0]);
+        txt(2.9, 7.9, sceneStrings("blocks"), colors.cat[0], 9, true);
+        arrow(4.6, 7.3, 5.9, 8.3, colors.cat[4], 2);
+        arrow(11.2, 7.3, 9.9, 8.3, colors.cat[4], 2);
+        txt(11.6, 7.95, sceneStrings("done"), colors.cat[4], 9, true);
+        arrow(3.7, 5.0, 3.7, 3.7, colors.cat[2]);
+        arrow(10.3, 5.0, 10.3, 3.7, colors.cat[2]);
+        txt(2.7, 4.35, sceneStrings("reqs"), colors.cat[2], 9, true);
+        arrow(4.6, 3.7, 4.6, 5.0, colors.cat[3], 2);
+        arrow(11.2, 3.7, 11.2, 5.0, colors.cat[3], 2);
+        txt(12.4, 4.35, sceneStrings("resps"), colors.cat[3], 9, true);
+      });
+    },
+    { boundingbox: [-0.3, 9.9, 13.9, -0.4], keepAspect: false, title: () => makeStrings("fullMachine")("title") },
+  );
+
+  registerQuiz("endToEndQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // 6n + 10k.
+      prompt: (v) => sceneStrings("blockCycQ", v),
+      variables: "n=[8:12] k=[2:4]",
+      answer: "6 * n + 10 * k",
+    },
+    {
+      // T·w/100 with clean numbers.
+      prompt: (v) => sceneStrings("budgetQ", v),
+      variables: "T=[100,200,300] w=[10,20,25,30,50]",
+      answer: "T * w / 100",
+    },
+    {
+      // Speedup s, with B = a·s precomputed for the prompt.
+      prompt: (v) => sceneStrings("speedQ", { ...v, B: v.a * v.s }),
+      variables: "a=[60,80,90,100] s=[2,3,4] c=[2,4]",
+      constraints: "s <= c",
+      answer: "s",
+    },
+    {
+      // OFF: 4·blk·mi transactions.
+      prompt: (v) => sceneStrings("txQ", v),
+      variables: "blk=[2:6] mi=[3:5]",
+      answer: "4 * blk * mi",
+    },
+    {
+      // ON: blk·mi transactions.
+      prompt: (v) => sceneStrings("txOnQ", v),
+      variables: "blk=[2:6] mi=[3:5]",
+      answer: "blk * mi",
+    },
+    {
+      prompt: () => sceneStrings("whereQ"),
+      options: [
+        { text: () => sceneStrings("whereA"), correct: true },
+        { text: () => sceneStrings("whereB"), correct: false },
+        { text: () => sceneStrings("whereC"), correct: false },
+        { text: () => sceneStrings("whereD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("selfQ"),
+      options: [
+        { text: () => sceneStrings("selfA"), correct: true },
+        { text: () => sceneStrings("selfB"), correct: false },
+        { text: () => sceneStrings("selfC"), correct: false },
+        { text: () => sceneStrings("selfD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("parQ"),
+      options: [
+        { text: () => sceneStrings("parA"), correct: true },
+        { text: () => sceneStrings("parB"), correct: false },
+        { text: () => sceneStrings("parC"), correct: false },
+        { text: () => sceneStrings("parD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cfgQ"),
+      options: [
+        { text: () => sceneStrings("cfgA"), correct: true },
+        { text: () => sceneStrings("cfgB"), correct: false },
+        { text: () => sceneStrings("cfgC"), correct: false },
+        { text: () => sceneStrings("cfgD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("stallQ"),
+      options: [
+        { text: () => sceneStrings("stallA"), correct: true },
+        { text: () => sceneStrings("stallB"), correct: false },
+        { text: () => sceneStrings("stallC"), correct: false },
+        { text: () => sceneStrings("stallD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lastQ"),
+      options: [
+        { text: () => sceneStrings("lastA"), correct: true },
+        { text: () => sceneStrings("lastB"), correct: false },
+        { text: () => sceneStrings("lastC"), correct: false },
+        { text: () => sceneStrings("lastD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("buryQ"),
+      options: [
+        { text: () => sceneStrings("buryA"), correct: true },
+        { text: () => sceneStrings("buryB"), correct: false },
+        { text: () => sceneStrings("buryC"), correct: false },
+        { text: () => sceneStrings("buryD"), correct: false },
+      ],
+    },
+  ]);
+</script>

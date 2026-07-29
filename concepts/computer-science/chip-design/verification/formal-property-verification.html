@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Formal Property Verification</primer-title>
+
+    <primer-card>
+      <p>
+        Everything in this module so far —
+        <primer-ref to="computer-science/chip-design/verification/the-uvm-testbench">the mightiest UVM bench</primer-ref>,
+        a million seeds, closed coverage — shares one quiet limitation: simulation <strong>samples</strong>.
+        Each test walks <em>one</em> path through the design's possible behaviours; a green regression says
+        "no failure on the paths we happened to walk". <strong>Formal property verification</strong> makes a
+        different kind of statement entirely: a tool explores <em>every reachable state</em> of the design
+        and returns a mathematical verdict — the property <strong>holds in all of them</strong>, or here is
+        an input sequence that breaks it. Not "we didn't find a bug"; <em>"there is no bug of this kind to
+        find"</em>. This lesson is about what that promise really means, where it is achievable, and where
+        it quietly runs out.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Model checking: the state space as a map</h2>
+      <p>
+        The design is a state machine: its flip-flops define a state, and each clock edge moves it to a
+        successor state that depends on the inputs. A <strong>model checker</strong> treats this as a graph
+        problem. Start at the reset state; follow every possible input, to every successor, and theirs, and
+        theirs — until no new state appears. That fixed set is the <strong>reachable states</strong>, and
+        the property (the very same SVA you wrote in the
+        <primer-ref soft to="computer-science/chip-design/verification/assertions-and-sva">assertions lesson</primer-ref> —
+        formal reuses them verbatim) must hold at every one of them:
+      </p>
+      <primer-code lang="text">
+        property no_double_grant;               // same language, new verdict
+          @(posedge clk) disable iff (!rst_n) !(g0 &amp;&amp; g1);
+        endproperty
+        assert property (no_double_grant);
+
+        //  simulation:  "held in every cycle we happened to run"
+        //  formal:      "PROVEN — holds in every reachable state"
+        //           or  "cex at depth 2: r0=1, r1=1, …"  (a concrete failing trace)
+      </primer-code>
+      <p>
+        Note the word <em>reachable</em>. A design with <primer-math>n</primer-math> flip-flops has
+        <primer-math>2^n</primer-math> possible states, but reset and the update logic may make most of
+        them impossible to ever enter — and the checker rightly ignores those, or it would report failures
+        no real silicon could exhibit.
+      </p>
+    </primer-card>
+
+    <!-- Chart: exponential state growth vs what a year of simulation can even touch. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "explosion": {
+          "title": "State-space explosion (note the log scale)",
+          "legStates": "states of n flip-flops: log₁₀(2ⁿ)",
+          "legSim": "every state a YEAR of simulation at 10⁹ states/s can visit"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The explosion, and where formal shines</h2>
+      <p>
+        The catch has a name: <strong>state-space explosion</strong>. Every extra flip-flop
+        <em>doubles</em> the state space — <primer-math>n</primer-math> flops make
+        <primer-math>2^n</primer-math> states — and exponentials do not negotiate:
+      </p>
+      <primer-chart scene="explosion" caption="A chart plotting the base-10 logarithm of the number of states against the number of flip-flops. The state count is a straight rising line on the log scale, doubling with every flip-flop. A horizontal line marks the roughly 10 to the 16.5 states that a full year of simulation at a billion states per second could visit; the state count crosses it at only about 55 flip-flops."></primer-chart>
+      <p>
+        Around 55 flip-flops, the states outnumber what a <em>year</em> of brute-force simulation could
+        even touch — and a single 64-bit datapath register blows past that on its own. This is why formal
+        tools do not enumerate states one by one (they reason about huge sets of states
+        <em>symbolically</em>), and it is why formal has a home turf: <strong>control logic</strong>.
+        Arbiters, FIFO pointers, handshake protocols, state machines — tens of flip-flops of dense,
+        corner-case-riddled logic where bugs love to hide and the reachable space is small enough to
+        conquer. A 64-bit multiplier's datapath, by contrast, is simulation's job (or specialised
+        equivalence tricks). The craft of formal is carving out the control kernel and proving it
+        watertight.
+      </p>
+      <p>
+        When a full proof is out of reach, tools fall back to <strong>bounded model checking</strong>
+        (BMC): prove the property holds for every input sequence of length up to <primer-math>k</primer-math>
+        — "no violation within 20 cycles of reset". That is not a proof for cycle 21; it is a
+        depth-<primer-math>k</primer-math> guarantee, and in practice a superb bug-finder, because most
+        control bugs have short minimal traces. Reports read "proven" (unbounded, done) or "no cex to
+        depth <primer-math>k</primer-math>" (keep the asterisk).
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Be the model checker</h2>
+      <p>
+        For a small design you can do exhaustive reachability by hand — breadth-first search over states,
+        trying every input at every step. Here is a two-requester round-robin arbiter (3 flops: two grants
+        plus a fairness bit) and the property <em>no two grants ever simultaneous</em> — first a correct
+        design, then one whose arbitration was "simplified" away:
+      </p>
+      <primer-code run>
+        // ── Exhaustive BFS over the reachable states = a tiny model checker. ──
+        type S = { g0: number; g1: number; last: number };
+        const key = (s: S) =&gt; `${s.g0}${s.g1}${s.last}`;
+
+        function check(name: string, next: (s: S, r0: number, r1: number) =&gt; S): void {
+          const reset: S = { g0: 0, g1: 0, last: 0 };
+          const seen = new Map&lt;string, { prev: string | null; via: string }&gt;();
+          seen.set(key(reset), { prev: null, via: "reset" });
+          const frontier: S[] = [reset];
+          let bad: string | null = null;
+          while (frontier.length &amp;&amp; !bad) {
+            const s = frontier.shift()!;
+            for (const r0 of [0, 1]) for (const r1 of [0, 1]) {   // EVERY input, not a sample
+              const n = next(s, r0, r1);
+              if (seen.has(key(n))) continue;
+              seen.set(key(n), { prev: key(s), via: `r0=${r0} r1=${r1}` });
+              if (n.g0 &amp;&amp; n.g1) { bad = key(n); break; }        // property violated!
+              frontier.push(n);
+            }
+          }
+          console.log(`${name}: ${seen.size} reachable states (of 8 possible)`);
+          if (!bad) { console.log("  PROVEN: g0 and g1 never high together, in ANY reachable state"); return; }
+          const trace: string[] = [];                             // walk predecessors back to reset
+          for (let k: string | null = bad; k; k = seen.get(k)!.prev)
+            trace.unshift(`${seen.get(k)!.via}  -&gt;  g0=${k[0]} g1=${k[1]} last=${k[2]}`);
+          console.log("  COUNTEREXAMPLE (shortest failing trace):");
+          for (const line of trace) console.log("    " + line);
+        }
+
+        // Round-robin: on contention, grant whoever did NOT go last.
+        const arbiter = (s: S, r0: number, r1: number): S =&gt; {
+          if (r0 &amp;&amp; r1) return s.last === 0 ? { g0: 0, g1: 1, last: 1 } : { g0: 1, g1: 0, last: 0 };
+          return { g0: r0, g1: r1, last: r1 ? 1 : r0 ? 0 : s.last };
+        };
+        // "Simplified" version: each grant just follows its request. What could go wrong?
+        const buggy = (s: S, r0: number, r1: number): S =&gt; ({ g0: r0, g1: r1, last: s.last });
+
+        check("round-robin arbiter", arbiter);
+        check("buggy arbiter      ", buggy);
+      </primer-code>
+      <p>
+        Two things to savour. The proof covered only <em>4</em> reachable states, not all 8 — reachability
+        did real work. And the failure comes back not as a percentage or a red bar but as a
+        <strong>counterexample</strong>: the exact, minimal input sequence — reset, then both request —
+        driving the design into the bad state. Real formal tools hand you this as a waveform; debugging a
+        formal counterexample is often <em>easier</em> than debugging a random-simulation failure, because
+        the tool has already minimised the story for you. The counterexample is the payoff.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Two more places formal earns its keep</h2>
+      <p>
+        <strong>Equivalence checking.</strong> After synthesis turns your RTL into a gate-level netlist,
+        how does anyone know the tool preserved the design's meaning? Not by re-running the regression on
+        gates (weeks of runtime) — by <em>formally proving</em> that RTL and netlist compute identical
+        next-state and output functions, register by register. Every tape-out on Earth rests on this proof;
+        it is why the industry gets to trust synthesis and never simulate the netlist exhaustively.
+      </p>
+      <p>
+        <strong>Assume–guarantee at interfaces.</strong> A block in isolation sees inputs its real
+        neighbours could never send, so naive formal drowns in false alarms. The fix: <em>assume</em>
+        properties about the inputs (legal protocol only), and prove your properties under those
+        assumptions. The elegant part — when the neighbouring block is verified, your assumptions become
+        <em>its</em> proof obligations (its guarantees), and the proofs compose across the interface like
+        a contract with matching signatures. Divide, constrain, and conquer.
+      </p>
+      <primer-theorem name="Formal property verification">
+        <ul>
+          <li>simulation <strong>samples</strong> behaviours; model checking explores <strong>all reachable
+            states</strong> and returns <em>proven</em> or a <strong>counterexample</strong> — the exact
+            minimal failing trace;</li>
+          <li><primer-math>n</primer-math> flip-flops → <primer-math>2^n</primer-math> possible states:
+            the <strong>state-space explosion</strong> confines full proofs to <strong>control
+            logic</strong> (arbiters, FIFOs, handshakes), not wide datapaths;</li>
+          <li><strong>bounded model checking</strong> proves "no violation within <primer-math>k</primer-math>
+            cycles of reset" — a depth-limited guarantee and a superb bug-finder;</li>
+          <li><strong>equivalence checking</strong> proves RTL ≡ synthesized netlist — the reason the
+            industry trusts synthesis;</li>
+          <li><strong>assume–guarantee</strong>: constrain inputs to legal behaviour; your assumptions
+            become the neighbour's proof obligations, so proofs compose at interfaces.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="How can any tool handle 2¹⁰⁰ states?">
+      <p>
+        It cannot — one at a time. The 1980s breakthrough (Clarke, Emerson and Sifakis, later the 2007
+        Turing Award) was <em>symbolic</em> model checking: represent an astronomically large <em>set</em>
+        of states as a compact formula — first as binary decision diagrams, later as SAT problems — and
+        step whole sets through the design's logic at once. "All states where the FIFO is empty and no
+        grant is high" might be a trillion states and a twelve-node data structure. The state count stops
+        mattering; the <em>structure</em> of the logic is what the tool pays for. That is also the honest
+        reading of formal's limits: on tangly control logic the formulas stay small and proofs fly; on
+        multipliers they balloon, which is why your formal testplan says "arbiter: prove" and "datapath:
+        simulate" — and why the modern SAT-solver renaissance keeps moving that boundary outward.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! 'Formally verified' means the properties YOU WROTE hold">
+      <p>
+        Formal's guarantee is airtight about exactly one thing: <em>the listed properties hold in every
+        reachable state</em>. Weak properties, weak guarantee: prove three easy assertions about a cache
+        controller and the marketing sentence "formally verified" is true while the eviction logic ships
+        broken. Worse is the <strong>vacuous</strong> proof: <code>req |-&gt; ##2 grant</code> is
+        triumphantly "proven" on a design where an over-tight input assumption means <code>req</code> can
+        never rise — the implication held because it was never tested. (An assumption contradiction can
+        even prove <em>false</em>.) Good tools report vacuity and covered preconditions; good engineers
+        read those reports, and ask the same question this module keeps asking of coverage and
+        scoreboards alike: <em>not "did the check pass?" but "could this check have failed?"</em> Formal
+        moves the risk from "did we try the scenario?" to "did we state the requirement?" — the burden of
+        imagination never goes away, it just changes address.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: 2^n arithmetic, sim-vs-formal, BMC depth, counterexamples, equivalence. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "formalQuiz@1": {
+          "intro": "Simulation samples; formal proves — over every reachable state, or hands you the failing trace.",
+          "stateQ": "A block's control logic contains {n} flip-flops. At most how many distinct states could it have?",
+          "factorQ": "Adding {k} more flip-flops to a design multiplies the size of its possible state space by what factor?",
+          "bmcTrQ": "A bounded model check runs clean to depth {k} cycles. A bug's shortest failing trace is {j} cycles long. Does this run find it?",
+          "btNo": "No — the run only examined behaviour within {k} cycles of reset, and this bug needs {j}",
+          "btYes": "Yes — bounded model checking is exhaustive at every depth",
+          "btMaybe": "Only if the simulator's random seed also hits it",
+          "btVac": "Yes, but it is reported as vacuous",
+          "svfQ": "What is the essential difference between simulation and formal property checking?",
+          "svRight": "Simulation samples individual behaviours; formal explores ALL reachable states, so a pass is a proof and a fail is a concrete counterexample",
+          "svSpeed": "Formal is simply a faster simulator",
+          "svCov": "Formal measures coverage while simulation measures correctness",
+          "svGate": "Simulation works on RTL, formal only on gate-level netlists",
+          "ctrlQ": "Why does formal verification shine on arbiters, FIFO controls and handshakes, but not on a 64-bit multiplier's datapath?",
+          "ctRight": "Control logic packs its corner cases into a few dozen flip-flops — a conquerable state space — while a wide datapath's state space explodes beyond any full proof",
+          "ctSva": "SVA cannot describe arithmetic",
+          "ctClk": "Datapaths have no clock, so there are no states to explore",
+          "ctBor": "Control logic is where simulation cannot reach at all",
+          "cexQ": "What does a formal tool return when a property FAILS?",
+          "cxRight": "A counterexample — an exact, minimal input sequence from reset into the violating state, ready to debug as a waveform",
+          "cxPct": "A percentage estimate of how likely the failure is",
+          "cxBin": "A coverage hole naming the missing bin",
+          "cxList": "The list of all states that were not explored",
+          "bmcQ": "A bounded model check completes to depth 20 with no violation. What exactly has been established?",
+          "bmRight": "No input sequence of up to 20 cycles from reset can violate the property — cycle 21 and beyond remain unproven",
+          "bmFull": "The property holds forever — bounded and unbounded proofs are equivalent",
+          "bmBug": "The design contains no bugs of any kind",
+          "bmVac": "The property is vacuous",
+          "eqQ": "What role does equivalence checking play in the chip-design flow?",
+          "eqRight": "It formally proves the synthesized gate-level netlist implements the same logic as the RTL — which is why nobody must re-verify the netlist by simulation",
+          "eqSim": "It checks that two simulators produce the same waveforms",
+          "eqCov": "It compares the coverage of two regressions",
+          "eqTim": "It verifies that the clock frequency target is met",
+          "agQ": "In assume–guarantee reasoning at a block interface, what happens to the assumptions you made about your inputs?",
+          "agRight": "They become proof obligations — guarantees — for the neighbouring block that drives those inputs, so the proofs compose across the interface",
+          "agFree": "Nothing; assumptions are free and never checked",
+          "agSim": "They are converted into random-stimulus constraints and simulated",
+          "agDrop": "They are discarded once the proof completes",
+          "meanQ": "A press release says a block is 'formally verified'. What has actually been shown?",
+          "meRight": "That the specific properties someone wrote hold over all reachable states — behaviour no property mentions is exactly as unverified as before",
+          "meAll": "That the block is correct in every possible respect",
+          "meSil": "That silicon of the block has been tested exhaustively",
+          "meSyn": "That the block synthesizes without warnings",
+          "vacQ": "A formal tool proves req |-> ##2 grant, but an input assumption makes req impossible to assert. What is this situation called, and what is the proof worth?",
+          "vaRight": "A vacuous proof — the implication never fired, so it establishes nothing about grant; vacuity reports exist to catch exactly this",
+          "vaStr": "A strong proof — impossibility of req makes the property doubly safe",
+          "vaCex": "A counterexample",
+          "vaBmc": "A bounded proof, valid to depth 2",
+          "reachQ": "Why do model checkers restrict attention to REACHABLE states rather than all 2^n states?",
+          "rcRight": "States that reset and the update logic can never enter cannot occur in real operation — flagging violations there would be false alarms (and proofs get smaller)",
+          "rcFast": "Unreachable states take longer to represent in memory",
+          "rcSim": "Only reachable states can be simulated afterwards",
+          "rcLaw": "The SystemVerilog standard forbids exploring them"
+        }
+      }
+    </script>
+
+    <primer-quiz name="formalQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/verification/the-uvm-testbench"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerQuiz, makeStrings } from "primer";
+
+  // ── log10(states) vs flip-flop count, against a year of brute-force simulation. ──
+  const expStrings = makeStrings("explosion");
+  registerCharts(
+    [
+      {
+        name: "explosion",
+        f: [
+          (x) => x * Math.log10(2),        // log10(2^n): the explosion, straightened by the log scale
+          () => 16.5,                      // log10(states in a year at 1e9 states/s) ≈ 16.5
+        ],
+        line: (colors, i) => ({ strokeColor: colors.cat[i], strokeWidth: 2.5, dash: i === 1 ? 2 : 0 }),
+        legend: [() => expStrings("legStates"), () => expStrings("legSim")],
+      },
+    ],
+    {
+      title: () => expStrings("title"),
+      xmin: 0, xmax: 100, ymin: 0, ymax: 32,
+      xticks: 20, yticks: 8,
+      xaxisname: "flip-flops n", yaxisname: "log₁₀(states)",
+    },
+  );
+
+  registerQuiz("formalQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("stateQ", v),
+      variables: "n=[3:10]",
+      answer: "2 ^ n",
+    },
+    {
+      prompt: (v) => sceneStrings("factorQ", v),
+      variables: "k=[2:6]",
+      answer: "2 ^ k",
+    },
+    {
+      // j is always beyond the bound k, so the answer is a firm "no".
+      prompt: (v) => sceneStrings("bmcTrQ", v),
+      variables: "k=[10:30] j=[35:60]",
+      options: [
+        { text: (v) => sceneStrings("btNo", v), correct: true },
+        { text: () => sceneStrings("btYes"), correct: false },
+        { text: () => sceneStrings("btMaybe"), correct: false },
+        { text: () => sceneStrings("btVac"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("svfQ"),
+      options: [
+        { text: () => sceneStrings("svRight"), correct: true },
+        { text: () => sceneStrings("svSpeed"), correct: false },
+        { text: () => sceneStrings("svCov"), correct: false },
+        { text: () => sceneStrings("svGate"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ctrlQ"),
+      options: [
+        { text: () => sceneStrings("ctRight"), correct: true },
+        { text: () => sceneStrings("ctSva"), correct: false },
+        { text: () => sceneStrings("ctClk"), correct: false },
+        { text: () => sceneStrings("ctBor"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cexQ"),
+      options: [
+        { text: () => sceneStrings("cxRight"), correct: true },
+        { text: () => sceneStrings("cxPct"), correct: false },
+        { text: () => sceneStrings("cxBin"), correct: false },
+        { text: () => sceneStrings("cxList"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bmcQ"),
+      options: [
+        { text: () => sceneStrings("bmRight"), correct: true },
+        { text: () => sceneStrings("bmFull"), correct: false },
+        { text: () => sceneStrings("bmBug"), correct: false },
+        { text: () => sceneStrings("bmVac"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("eqQ"),
+      options: [
+        { text: () => sceneStrings("eqRight"), correct: true },
+        { text: () => sceneStrings("eqSim"), correct: false },
+        { text: () => sceneStrings("eqCov"), correct: false },
+        { text: () => sceneStrings("eqTim"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("agQ"),
+      options: [
+        { text: () => sceneStrings("agRight"), correct: true },
+        { text: () => sceneStrings("agFree"), correct: false },
+        { text: () => sceneStrings("agSim"), correct: false },
+        { text: () => sceneStrings("agDrop"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("meanQ"),
+      options: [
+        { text: () => sceneStrings("meRight"), correct: true },
+        { text: () => sceneStrings("meAll"), correct: false },
+        { text: () => sceneStrings("meSil"), correct: false },
+        { text: () => sceneStrings("meSyn"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("vacQ"),
+      options: [
+        { text: () => sceneStrings("vaRight"), correct: true },
+        { text: () => sceneStrings("vaStr"), correct: false },
+        { text: () => sceneStrings("vaCex"), correct: false },
+        { text: () => sceneStrings("vaBmc"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("reachQ"),
+      options: [
+        { text: () => sceneStrings("rcRight"), correct: true },
+        { text: () => sceneStrings("rcFast"), correct: false },
+        { text: () => sceneStrings("rcSim"), correct: false },
+        { text: () => sceneStrings("rcLaw"), correct: false },
+      ],
+    },
+  ]);
+</script>

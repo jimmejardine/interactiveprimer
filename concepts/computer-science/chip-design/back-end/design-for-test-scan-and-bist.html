@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Design for Test: Scan and BIST</primer-title>
+
+    <primer-card>
+      <p>
+        The wafers are back from the fab. On each one sit hundreds of copies of your chip — and, thanks to
+        the defects we will meet in <primer-ref forward
+        to="computer-science/chip-design/back-end/silicon-manufacturing-and-yield">the next lesson</primer-ref>,
+        a good fraction of them are broken: a speck of dust shorted two wires here, a void opened a
+        connection there. Which ones? You cannot ship them all and let customers find out. And here is the
+        bind: a die has millions of internal wires and you can physically touch only its few hundred pads.
+        <strong>You cannot probe internal nodes.</strong> The answer is one of the great pragmatic ideas of
+        the industry — <strong>design for test (DFT)</strong>: build the chip, from the start, so that it can
+        be <em>interrogated</em> through the pins it has.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The stuck-at fault model</h2>
+      <p>
+        First, tame the question. "Is anything wrong anywhere?" is untestable; DFT replaces it with a
+        concrete checklist: the <strong>stuck-at fault model</strong>. Assume any single internal node might
+        be permanently <strong>stuck at 0</strong> or <strong>stuck at 1</strong> (as if shorted to ground or
+        supply) — one entry per node per polarity. It is a deliberate simplification (real defects include
+        bridges, opens, and slow transistors — richer models exist for those), but it is <em>enumerable</em>:
+        a tool can list every fault, and for each one ask two things:
+      </p>
+      <ul>
+        <li><strong>Controllability</strong> — can I drive the circuit into a state where this node
+          <em>should</em> carry the opposite value?</li>
+        <li><strong>Observability</strong> — would the fault's wrong value change something I can see at an
+          output?</li>
+      </ul>
+      <p>
+        For deeply buried logic, both are hopeless through the functional pins alone. Which brings us to the
+        trick.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "scanChain": {
+          "title": "Scan: every flop joins one giant shift register",
+          "stepFunc": "Functional mode: the flops feed the combinational logic clouds and capture their results — normal operation",
+          "stepMux": "DFT inserts a small test mux in front of every flop's data input: functional data on one leg, a scan input on the other",
+          "stepChain": "Test mode: the muxes select the scan legs, chaining every flop head-to-tail into one shift register from the SI pin to the SO pin"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Scan: the chip becomes its own probe</h2>
+      <p>
+        The <strong>scan</strong> idea: give every flip-flop a tiny multiplexer on its data input. One leg
+        carries the normal functional data; the other leg connects to <em>the previous flop's output</em>. A
+        single test-enable signal flips every mux at once:
+      </p>
+      <primer-geometry scene="scanChain" caption="Four flip-flops with combinational logic clouds between them. In functional mode each flop captures its logic's output. DFT adds a test mux before each flop; in test mode the muxes chain all four flops into a single shift register running from the scan-in pin SI to the scan-out pin SO."></primer-geometry>
+      <p>
+        In test mode the chip's million flops become <strong>one giant shift register</strong> threading the
+        whole die. Now every test runs the same three-beat rhythm:
+      </p>
+      <ul>
+        <li><strong>Shift in</strong> — clock the chain <primer-math>n</primer-math> times to load any state
+          pattern you like into all <primer-math>n</primer-math> flops: total controllability;</li>
+        <li><strong>Capture</strong> — flip to functional mode for <em>one clock</em>: the combinational
+          logic computes from your planted state, and the flops capture the results;</li>
+        <li><strong>Shift out</strong> — back to test mode, clock <primer-math>n</primer-math> times and read
+          the captured snapshot at the scan-out pin (while shifting the <em>next</em> pattern in behind it):
+          total observability.</li>
+      </ul>
+      <p>
+        Every internal node is now two shift operations away from your tester. <strong>ATPG</strong>
+        (automatic test pattern generation) exploits this: for each stuck-at fault it computes a pattern that
+        excites the fault and steers its effect into some flop, then greedily merges patterns until a few
+        thousand of them cover 99%+ of all faults — the quoted <strong>fault coverage</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Run a scan test</h2>
+      <primer-code run>
+        // A 4-flop circuit: next state = simple logic of current state.
+        //   n0 = q1 AND q2,  n1 = q0 OR q3,  n2 = NOT q3,  n3 = q0 XOR q1
+        // Fault to hunt: the wire from q1 into the AND gate, stuck at 0.
+        type Bits = number[];
+        const step = (q: Bits, q1Stuck0: boolean): Bits => {
+          const q1 = q1Stuck0 ? 0 : q[1];             // the injected defect
+          return [q1 &amp; q[2], q[0] | q[3], 1 - q[3], q[0] ^ q[1]];
+        };
+
+        // Scan test: shift a pattern in, capture once, shift the response out.
+        const scanTest = (pattern: Bits, faulty: boolean): Bits => {
+          let q: Bits = [0, 0, 0, 0];
+          for (const bit of pattern) q = [bit, q[0], q[1], q[2]]; // shift in (4 clocks)
+          q = step(q, faulty);                                    // capture (1 functional clock)
+          return q;                                               // (shifted out, 4 clocks)
+        };
+
+        // ATPG's chosen pattern: q1=1, q2=1 excites the fault (AND should see 1,1).
+        const pattern: Bits = [0, 1, 1, 0]; // → q = [q0,q1,q2,q3] = [0,1,1,0] after shifting
+
+        const good = scanTest(pattern, false);
+        const bad = scanTest(pattern, true);
+        console.log("pattern shifted in : " + pattern.join(""));
+        console.log("good die shifts out: " + good.join(""));
+        console.log("this die shifts out: " + bad.join(""));
+
+        const diff = good.map((b, i) => (b !== bad[i] ? "^" : " ")).join("");
+        console.log("                     " + diff + "  ← the tell-tale diff");
+        console.log(bad.join("") === good.join("")
+          ? "Responses match: die passes this pattern."
+          : "Mismatch: q0 captured 0 where a good die captures 1 — stuck-at-0 caught. Reject the die.");
+      </primer-code>
+      <p>
+        Notice how surgical it is: the pattern was <em>designed</em> so that a healthy AND gate outputs 1 and
+        a stuck-at-0 outputs 0, and that difference lands in a flop we can read. Multiply by a few thousand
+        patterns and every enumerable fault gets its moment in the spotlight.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Test time is money, memories test themselves, boards get scanned too</h2>
+      <p>
+        A tester (a multi-million-dollar machine) charges by the second, and a naive scan regime is slow:
+        each pattern costs roughly a full chain-length of shifting. With <primer-math>p</primer-math>
+        patterns, chain length <primer-math>n</primer-math>, and shift clock <primer-math>f</primer-math>,
+        test time is about <primer-math>p \cdot n / f</primer-math>. The levers follow directly:
+      </p>
+      <ul>
+        <li><strong>parallel chains</strong> — split one million-flop chain into hundreds of shorter chains
+          shifted simultaneously through spare pins;</li>
+        <li><strong>test compression</strong> — on-chip decompressors expand compact tester patterns into
+          full chain contents, and compactors squeeze the responses back down: 100× fewer tester bits;</li>
+        <li><strong>memory BIST</strong> — RAMs, with their regular structure and custom bit-cells, get
+          <strong>built-in self-test</strong>: a small on-chip engine marches classic patterns
+          (checkerboards, march algorithms) through every address at full speed and reports pass/fail —
+          the tester just says "go";</li>
+        <li><strong>boundary scan (JTAG)</strong> — the same shift-register idea wrapped around the chip's
+          <em>pins</em>, standardised (IEEE 1149.1) so that assembled <em>boards</em> can be tested for
+          soldering faults through a five-wire port.</li>
+      </ul>
+      <primer-theorem name="Design for test">
+        <ul>
+          <li>the <strong>stuck-at model</strong> turns "is it broken?" into an enumerable checklist of
+            per-node stuck-at-0/1 faults;</li>
+          <li><strong>scan</strong> adds a test mux to every flop; in test mode all flops form one shift
+            register — shift in, capture one functional clock, shift out — giving controllability and
+            observability of every node;</li>
+          <li><strong>ATPG</strong> generates the patterns and reports <strong>fault coverage</strong>;</li>
+          <li>test time ≈ patterns × chain length ÷ shift clock — attacked with parallel chains and
+            <strong>test compression</strong>;</li>
+          <li><strong>memory BIST</strong> tests RAMs from inside; <strong>JTAG boundary scan</strong>
+            extends the idea to board-level;</li>
+          <li>scan costs ~5–10% area — and every team pays it, because an untestable chip is unsellable.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="How do you test the very first chip, before any of this?">
+      <p>
+        A chicken-and-egg puzzle: scan finds manufacturing defects by comparing a die's responses against
+        the <em>correct</em> ones — but correct according to what? The answer is that ATPG simulates the
+        golden netlist to predict every expected response; the tester is really comparing silicon against
+        simulation. That works beautifully for fabrication defects, but notice what it can never catch: a
+        <em>design</em> bug, faithfully manufactured, passes every scan pattern with flying colours — the
+        silicon matches the netlist, bug included. That is why manufacturing test and functional
+        verification are entirely separate disciplines: verification asks "did we design the right
+        machine?"; test asks "did the fab build the machine we designed?". Mixing up the two questions has
+        embarrassed more than one project review.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! DFT is not optional politeness">
+      <p>
+        To a designer squeezing timing, the scan mux on every single flop looks like pure vandalism: extra
+        delay on every data path, ~5–10% extra area, whole routing tracks spent threading chains. The
+        temptation to "skip DFT just for this block" is real — and giving in to it is how you end up with a
+        warehouse of chips you <strong>cannot sell</strong>. Without scan there is no way to tell good dice
+        from bad ones at the tester; without that, you either ship defects to customers or discard entire
+        wafers on suspicion. An untestable chip is unsellable <em>regardless of how correct the design
+        is</em>. Every serious team pays the scan tax gladly, plans it from day one, and treats "scan
+        coverage 99%+" as a tape-out gate as hard as timing closure itself.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "dftQuiz@1": {
+          "intro": "Scan: shift in, capture, shift out. Coverage, chains and BIST — the arithmetic of asking silicon if it works.",
+          "shiftQ": "A single scan chain holds {n} flops. For one pattern — full shift in, one capture clock, full shift out (not overlapped) — how many clock cycles are needed?",
+          "chainsQ": "A design's {n} flops are split into {k} equal parallel scan chains. How many shift cycles does it take to load one full pattern?",
+          "coverQ": "ATPG detects {f} of the design's 1000 enumerated stuck-at faults. What is the fault coverage as a percentage?",
+          "timeQ": "A test set has {p} patterns and the (single) scan chain is {n} flops long. Ignoring capture cycles, roughly how many shift cycles does the whole test take (patterns × chain length, with shift-out overlapped into the next shift-in)?",
+          "stuckQ": "What does the stuck-at fault model assume?",
+          "sGood": "Any single node may behave as if permanently tied to 0 or to 1 — giving an enumerable list of faults to target",
+          "sBad1": "Transistors gradually slow down as they age",
+          "sBad2": "Whole flip-flops vanish from the netlist",
+          "sBad3": "The clock sticks at a fixed frequency",
+          "muxQ": "What does DFT add to every flip-flop to make scan possible?",
+          "mGood": "A small mux on its data input: functional data on one leg, the previous flop's output on the other",
+          "mBad1": "A second, redundant flop that votes on the result",
+          "mBad2": "A dedicated output pad wired to the tester",
+          "mBad3": "A fuse that disconnects it after test",
+          "coQ": "In one sentence, what does scan buy?",
+          "cGood": "Controllability and observability of every internal node: any state can be planted, and any captured state can be read out",
+          "cBad1": "Faster functional operation in the field",
+          "cBad2": "Lower power during normal operation",
+          "cBad3": "Immunity to manufacturing defects",
+          "captureQ": "During one scan pattern, how many functional-mode clock pulses occur, and why?",
+          "capGood": "One — the planted state propagates through the combinational logic exactly once and the flops capture the result",
+          "capBad1": "One per flop in the chain",
+          "capBad2": "None — scan never leaves test mode",
+          "capBad3": "As many as the tester has time for",
+          "bistQ": "Why do on-chip RAMs get memory BIST instead of scan?",
+          "bGood": "A small on-chip engine can march classic patterns through the regular array at full speed and just report pass/fail — far cheaper than scanning a memory",
+          "bBad1": "RAMs cannot contain any faults",
+          "bBad2": "Scan muxes do not fit inside SRAM bit-cells, so memories are simply left untested",
+          "bBad3": "BIST is required by law for memories",
+          "jtagQ": "What is boundary scan (JTAG) for?",
+          "jGood": "A standardised scan ring around the chip's pins, so assembled boards can be tested for connection faults through a few wires",
+          "jBad1": "Scanning the chip's internal flops faster than normal scan",
+          "jBad2": "Debugging software running on the CPU",
+          "jBad3": "Programming the chip's power-on voltage",
+          "designBugQ": "A chip contains a genuine RTL design bug, manufactured faithfully. What does scan test report?",
+          "dbGood": "Pass — silicon matches the (buggy) netlist; catching design bugs is verification's job, not manufacturing test's",
+          "dbBad1": "Fail — any bug shows up as a stuck-at fault",
+          "dbBad2": "Pass or fail at random",
+          "dbBad3": "The tester refuses to run on buggy designs",
+          "priceQ": "What does scan cost, and how do teams regard the price?",
+          "pGood": "Roughly 5–10% area plus a mux delay on every flop — paid gladly, because without it good dice cannot be told from bad",
+          "pBad1": "No cost at all — scan reuses existing wires",
+          "pBad2": "About half the die area, so only large companies can afford it",
+          "pBad3": "Only tester time, with no silicon cost"
+        }
+      }
+    </script>
+
+    <primer-quiz name="dftQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": ["computer-science/chip-design/back-end/power-delivery-and-ir-drop"],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The scan chain: functional wiring, then test muxes, then the threaded chain. ──
+  registerGeometryScene(
+    "scanChain",
+    ({ board, colors, step, sceneStrings }) => {
+      const ink = colors.ink;
+      const T = (x, y, txt, color, size = 12, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+      const rect = (x1, y1, x2, y2, color, fill) =>
+        board.create("polygon", [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], {
+          borders: { strokeColor: color, strokeWidth: 2, highlight: false },
+          fillColor: color, fillOpacity: fill, vertices: { visible: false }, highlight: false,
+        });
+      const seg = (a, b, color, w = 2, dash = 0) =>
+        board.create("segment", [a, b], { strokeColor: color, strokeWidth: w, dash, highlight: false });
+
+      const ffC = colors.cat[0], logicC = colors.cat[1], muxC = colors.cat[2], chainC = colors.cat[3];
+
+      // Base: four flops and three logic clouds between them.
+      const ffX = [1.5, 6.0, 10.5, 15.0];
+      for (let i = 0; i < 4; i++) {
+        rect(ffX[i], 2.0, ffX[i] + 1.6, 4.0, ffC, 0.25);
+        T(ffX[i] + 0.8, 3.0, "FF" + i, ffC, 13);
+      }
+      for (let i = 0; i < 3; i++) {
+        const cx = ffX[i] + 3.05;
+        board.create("circle", [[cx, 3.0], 0.95], {
+          strokeColor: logicC, strokeWidth: 2, fillColor: logicC, fillOpacity: 0.12, highlight: false,
+        });
+        T(cx, 3.0, "logic", logicC, 11);
+      }
+
+      // Step 1: functional wiring FF → logic → next FF.
+      step(sceneStrings("stepFunc"), () => {
+        for (let i = 0; i < 3; i++) {
+          seg([ffX[i] + 1.6, 3.0], [ffX[i] + 2.1, 3.0], ink);
+          seg([ffX[i] + 4.0, 3.0], [ffX[i + 1], 3.0], ink);
+        }
+        T(9.0, 0.9, "functional mode: state → logic → next state", ink, 12);
+      });
+
+      // Step 2: a test mux appears in front of every flop.
+      step(sceneStrings("stepMux"), () => {
+        for (let i = 0; i < 4; i++) {
+          const mx = ffX[i] - 0.9;
+          board.create("polygon", [[mx, 2.4], [mx, 3.6], [mx + 0.6, 3.3], [mx + 0.6, 2.7]], {
+            borders: { strokeColor: muxC, strokeWidth: 2, highlight: false },
+            fillColor: muxC, fillOpacity: 0.3, vertices: { visible: false }, highlight: false,
+          });
+          seg([mx + 0.6, 3.0], [ffX[i], 3.0], muxC);
+        }
+        T(9.0, 5.9, "a test mux before every flop: functional data, or the scan leg", muxC, 12);
+      });
+
+      // Step 3: test mode — the chain threads SI → FF0 → FF1 → FF2 → FF3 → SO.
+      step(sceneStrings("stepChain"), () => {
+        T(-0.9, 4.9, "SI", chainC, 14);
+        seg([-0.6, 4.9], [0.6, 4.9], chainC, 3);
+        seg([0.6, 4.9], [0.6, 3.3], chainC, 3);
+        seg([0.6, 3.3], [ffX[0] - 0.9, 3.3], chainC, 3);
+        for (let i = 0; i < 3; i++) {
+          // FF output up and over to the next mux's scan leg
+          seg([ffX[i] + 1.6, 3.4], [ffX[i] + 1.9, 3.4], chainC, 3);
+          seg([ffX[i] + 1.9, 3.4], [ffX[i] + 1.9, 4.9], chainC, 3);
+          seg([ffX[i] + 1.9, 4.9], [ffX[i + 1] - 1.2, 4.9], chainC, 3);
+          seg([ffX[i + 1] - 1.2, 4.9], [ffX[i + 1] - 1.2, 3.3], chainC, 3);
+          seg([ffX[i + 1] - 1.2, 3.3], [ffX[i + 1] - 0.9, 3.3], chainC, 3);
+        }
+        seg([ffX[3] + 1.6, 3.0], [17.6, 3.0], chainC, 3);
+        T(18.0, 3.0, "SO", chainC, 14);
+        T(9.0, 6.9, "test mode: one shift register through every flop on the die", chainC, 12);
+      });
+    },
+    { boundingbox: [-2.2, 7.7, 19.2, 0.2], title: () => makeStrings("scanChain")("title") },
+  );
+
+  registerQuiz("dftQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("shiftQ", v),
+      variables: "n=[20:100]",
+      answer: "2 * n + 1",
+    },
+    {
+      prompt: (v) => sceneStrings("chainsQ", v),
+      variables: "n=[100,200,400] k=[2,4,10]",
+      answer: "n / k",
+    },
+    {
+      prompt: (v) => sceneStrings("coverQ", v),
+      variables: "f=[900,950,980,990]",
+      answer: "f / 10",
+    },
+    {
+      prompt: (v) => sceneStrings("timeQ", v),
+      variables: "p=[10:50] n=[100,200]",
+      answer: "p * n",
+    },
+    {
+      prompt: () => sceneStrings("stuckQ"),
+      options: [
+        { text: () => sceneStrings("sGood"), correct: true },
+        { text: () => sceneStrings("sBad1"), correct: false },
+        { text: () => sceneStrings("sBad2"), correct: false },
+        { text: () => sceneStrings("sBad3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("muxQ"),
+      options: [
+        { text: () => sceneStrings("mGood"), correct: true },
+        { text: () => sceneStrings("mBad1"), correct: false },
+        { text: () => sceneStrings("mBad2"), correct: false },
+        { text: () => sceneStrings("mBad3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("coQ"),
+      options: [
+        { text: () => sceneStrings("cGood"), correct: true },
+        { text: () => sceneStrings("cBad1"), correct: false },
+        { text: () => sceneStrings("cBad2"), correct: false },
+        { text: () => sceneStrings("cBad3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("captureQ"),
+      options: [
+        { text: () => sceneStrings("capGood"), correct: true },
+        { text: () => sceneStrings("capBad1"), correct: false },
+        { text: () => sceneStrings("capBad2"), correct: false },
+        { text: () => sceneStrings("capBad3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bistQ"),
+      options: [
+        { text: () => sceneStrings("bGood"), correct: true },
+        { text: () => sceneStrings("bBad1"), correct: false },
+        { text: () => sceneStrings("bBad2"), correct: false },
+        { text: () => sceneStrings("bBad3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("jtagQ"),
+      options: [
+        { text: () => sceneStrings("jGood"), correct: true },
+        { text: () => sceneStrings("jBad1"), correct: false },
+        { text: () => sceneStrings("jBad2"), correct: false },
+        { text: () => sceneStrings("jBad3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("designBugQ"),
+      options: [
+        { text: () => sceneStrings("dbGood"), correct: true },
+        { text: () => sceneStrings("dbBad1"), correct: false },
+        { text: () => sceneStrings("dbBad2"), correct: false },
+        { text: () => sceneStrings("dbBad3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("priceQ"),
+      options: [
+        { text: () => sceneStrings("pGood"), correct: true },
+        { text: () => sceneStrings("pBad1"), correct: false },
+        { text: () => sceneStrings("pBad2"), correct: false },
+        { text: () => sceneStrings("pBad3"), correct: false },
+      ],
+    },
+  ]);
+</script>

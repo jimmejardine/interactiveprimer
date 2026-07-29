@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Verifying the CPU</primer-title>
+
+    <primer-card>
+      <p>
+        The pipeline works. It
+        <primer-ref to="computer-science/chip-design/cpu/hazards-and-forwarding-in-rtl">forwards, stalls
+        and flushes</primer-ref>, and it ran our test program perfectly. So: ship it? Not even close.
+        "It ran my program" is to verification what "it compiled" is to software — a pulse, not a diagnosis.
+        A CPU's state space is astronomical, its nastiest bugs live in the <em>interactions</em> (a
+        forwarding path times a stall times an <code>x0</code> corner), and a wrong CPU doesn't crash — it
+        computes confidently incorrect numbers. This final lesson brings the whole verification arsenal —
+        <primer-ref to="computer-science/chip-design/verification/the-uvm-testbench">testbench
+        discipline</primer-ref>, constrained randomness, coverage, assertions — home to the machine we
+        just built. CPUs, it turns out, have a superpower here: <strong>a CPU can run programs, so a CPU
+        can test itself</strong>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Self-checking programs</h2>
+      <p>
+        The cheapest tester is the device under test. Write a program that computes something, compares
+        against the known answer <em>using the CPU's own branch instruction</em>, and steers to a
+        <code>pass</code> or <code>fail</code> address. This is exactly how the official
+        <code>riscv-tests</code> suite works — hundreds of tiny assembly programs, one per instruction
+        behaviour, each ending in a self-grade:
+      </p>
+      <primer-code lang="text">
+# A self-checking test, riscv-tests style: the CPU grades its own homework.
+  addi x1, x0, 5
+  addi x2, x0, 7
+  add  x3, x1, x2        # the behaviour under test
+  addi x4, x0, 12        # the EXPECTED answer, precomputed by the test author
+  beq  x3, x4, pass      # the CPU itself compares
+fail:
+  jal  x0, fail          # infinite loop: pc pinned at 'fail' = red flag
+pass:
+  ...                    # next test case, or the magic 'all tests passed' store
+      </primer-code>
+      <p>
+        The testbench only watches the <code>pc</code>: parked at <code>fail</code> means a bug; reaching
+        the final store means all cases passed. Elegant — and subtly circular. The test <em>uses</em>
+        <code>ADDI</code>, <code>BEQ</code> and <code>JAL</code> to grade <code>ADD</code>; if the graders
+        themselves are broken, a test can "pass" for the wrong reason (a broken-everything CPU that never
+        branches to <code>fail</code> looks suspiciously green). Self-checking programs are a superb smoke
+        test and a lousy foundation — we need a referee standing <em>outside</em> the machine.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The golden model: co-simulation in lockstep</h2>
+      <p>
+        Here is the move that anchors real CPU verification — and the payoff of this module's oldest
+        investment. Back in lesson 36 we wrote a single-cycle functional model: <code>{pc, regs, mem}</code>
+        and a <code>next()</code>. That model <em>is</em> an <strong>instruction-set simulator</strong>
+        (ISS) — an executable copy of the contract, so simple it is obviously right. Now run it in
+        <strong>lockstep</strong> with the pipelined RTL: every time the pipeline <em>retires</em> an
+        instruction from WB, let the ISS execute one instruction too, and compare architectural state —
+        <code>pc</code> retired, every register. The instant they disagree you have not just "a bug
+        somewhere" but <strong>the exact pc, register and cycle of first divergence</strong>. The complex
+        machine is graded, retirement by retirement, by the simple one — which is why the single-cycle CPU
+        was never a throwaway: slow-but-obvious is precisely what a referee should be.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Random programs, measured coverage</h2>
+      <p>
+        Lockstep comparison answers "is this run correct?" — but who supplies the runs? Hand-written tests
+        exercise the hazards you already understand; the bug is, by definition, in one you don't. So
+        generate programs <em>randomly under constraints</em> (the
+        <primer-ref soft to="computer-science/chip-design/verification/constrained-random-stimulus">constrained-random</primer-ref>
+        idea, industrialised for CPUs by tools like <code>riscv-dv</code>): initialise every register
+        first, keep load/store addresses in the legal range, then spray instructions with random
+        destinations and sources. Dependent pairs, load-use chains, <code>x0</code> destinations, the same
+        register produced twice in a row — corner cases fall out of the generator at a rate no human
+        matches. Random stimulus is only half the contract, though; the other half is
+        <primer-ref soft to="computer-science/chip-design/verification/functional-coverage">measuring
+        what you actually hit</primer-ref>: bins for every instruction, every hazard distance
+        (producer–consumer gap of 1, 2, 3), every forwarding path taken, every stall and flush — and the
+        <em>crosses</em> that matter, like "load-use stall whose consumer also needs an EX/MEM forward on
+        its other operand". Empty bin, missing test — regardless of how many millions of instructions
+        happened to retire green.
+      </p>
+      <p>
+        The last layer sits <em>inside</em> the design:
+        <primer-ref soft to="computer-science/chip-design/verification/assertions-and-sva">assertions</primer-ref>
+        that watch invariants on every cycle of every run, hand-written or random:
+      </p>
+      <primer-code lang="text">
+// Assertions live INSIDE the pipeline, watching every cycle of every test.
+// x0 is never architecturally written:
+assert property (@(posedge clk) disable iff (!rst_n)
+  !(rf_we &amp;&amp; rf_rd == 5'd0));
+
+// A bubble carries no side effects: if the control bundle is NOP, nothing writes.
+assert property (@(posedge clk) disable iff (!rst_n)
+  (id_ex.ctl == '0) |-&gt; !id_ex_writes_anything);
+
+// Exactly one instruction can retire per cycle -- WB is a single port:
+assert property (@(posedge clk) disable iff (!rst_n)
+  $onehot0({mem_wb_valid_alu, mem_wb_valid_load}));
+      </primer-code>
+      <p>
+        That first assertion is our old friend from the register-file lesson — the <code>x0</code>
+        invariant, now standing guard permanently. When a random program trips it, the failure fires
+        <em>at the violating cycle</em>, not thousands of instructions later when the corruption surfaces.
+      </p>
+      <primer-vignette title="Watch out! You can only hand-test the bugs you already understand">
+        <p>
+          The seductive plan — "I'll write a test for forwarding, a test for stalls, a test for
+          branches" — has a blind spot the size of the design: your tests are drawn from the same mental
+          model that produced the RTL, so <em>a misunderstanding creates the bug and excuses the test in
+          the same stroke</em>. If you believed load-use detection needn't check <code>rs2</code>, you
+          wrote neither the logic nor the test for it. Random generation is the antidote precisely because
+          it doesn't share your model — it will cheerfully emit the dependent-store-after-load-into-
+          <code>x0</code> sequence you never imagined. The industry's standard: directed tests to bring a
+          block up, then <strong>constrained-random + coverage + assertions</strong> to grind it clean,
+          with coverage — not optimism — deciding when to stop.
+        </p>
+      </primer-vignette>
+    </primer-card>
+
+    <primer-card>
+      <h2>The whole rig, running — and catching a planted bug</h2>
+      <p>
+        Everything above, in one executable: the lesson-36 model as ISS, the lesson-39 pipeline as the
+        design under test, a constrained-random program generator, and a lockstep comparator. Then the
+        experiment that makes it real: we <em>inject</em> the classic forwarding bug — dropping the
+        <code>rd != x0</code> qualification — and let the co-sim hunt it down:
+      </p>
+      <primer-code run>
+// -- Shared machinery: assembler + decoder (the module's toolkit, compact). --
+function R(f7: number, f3: number, rd: number, rs1: number, rs2: number): number {
+  return ((f7 &lt;&lt; 25) | (rs2 &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | (rd &lt;&lt; 7) | 0x33) | 0;
+}
+function I(op: number, f3: number, rd: number, rs1: number, imm: number): number {
+  return (((imm &amp; 0xfff) &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | (rd &lt;&lt; 7) | op) | 0;
+}
+function S(f3: number, rs2: number, rs1: number, imm: number): number {
+  return ((((imm &gt;&gt; 5) &amp; 0x7f) &lt;&lt; 25) | (rs2 &lt;&lt; 20) | (rs1 &lt;&lt; 15) | (f3 &lt;&lt; 12) | ((imm &amp; 0x1f) &lt;&lt; 7) | 0x23) | 0;
+}
+const asm = {
+  ADD:  (rd: number, rs1: number, rs2: number) =&gt; R(0x00, 0, rd, rs1, rs2),
+  SUB:  (rd: number, rs1: number, rs2: number) =&gt; R(0x20, 0, rd, rs1, rs2),
+  AND:  (rd: number, rs1: number, rs2: number) =&gt; R(0x00, 7, rd, rs1, rs2),
+  OR:   (rd: number, rs1: number, rs2: number) =&gt; R(0x00, 6, rd, rs1, rs2),
+  ADDI: (rd: number, rs1: number, imm: number) =&gt; I(0x13, 0, rd, rs1, imm),
+  LW:   (rd: number, rs1: number, imm: number) =&gt; I(0x03, 2, rd, rs1, imm),
+  SW:   (rs2: number, rs1: number, imm: number) =&gt; S(2, rs2, rs1, imm),
+};
+interface Decoded { name: string; rd: number; rs1: number; rs2: number; imm: number; useRs1: boolean; useRs2: boolean }
+function decode(w: number): Decoded {
+  const opcode = w &amp; 0x7f, rd = (w &gt;&gt; 7) &amp; 0x1f, f3 = (w &gt;&gt; 12) &amp; 7;
+  const rs1 = (w &gt;&gt; 15) &amp; 0x1f, rs2 = (w &gt;&gt; 20) &amp; 0x1f, f7 = (w &gt;&gt;&gt; 25) &amp; 0x7f;
+  if (opcode === 0x33)
+    return { name: f3 === 0 ? (f7 === 0x20 ? "SUB" : "ADD") : f3 === 7 ? "AND" : "OR", rd, rs1, rs2, imm: 0, useRs1: true, useRs2: true };
+  if (opcode === 0x13) return { name: "ADDI", rd, rs1, rs2, imm: w &gt;&gt; 20, useRs1: true, useRs2: false };
+  if (opcode === 0x03) return { name: "LW",   rd, rs1, rs2, imm: w &gt;&gt; 20, useRs1: true, useRs2: false };
+  return { name: "SW", rd: 0, rs1, rs2, imm: ((w &gt;&gt; 25) &lt;&lt; 5) | ((w &gt;&gt; 7) &amp; 0x1f), useRs1: true, useRs2: true };
+}
+function alu(op: string, a: number, b: number): number {
+  return op === "SUB" ? (a - b) | 0 : op === "AND" ? a &amp; b : op === "OR" ? a | b : (a + b) | 0;
+}
+
+// -- The golden model: lesson 36's single-cycle CPU IS an instruction-set simulator. --
+interface ArchState { pc: number; regs: number[]; mem: number[] }
+function issStep(s: ArchState, imem: number[]): ArchState {
+  const d = decode(imem[s.pc &gt;&gt; 2]);
+  const regs = s.regs.slice(), mem = s.mem.slice();
+  const a = s.regs[d.rs1], b = s.regs[d.rs2];
+  if (d.name === "SW") mem[(a + d.imm) &gt;&gt; 2] = b;
+  else if (d.rd !== 0) regs[d.rd] = d.name === "LW" ? mem[(a + d.imm) &gt;&gt; 2] | 0
+    : d.name === "ADDI" ? (a + d.imm) | 0 : alu(d.name, a, b);
+  return { pc: s.pc + 4, regs, mem };
+}
+
+// -- The design under test: lesson 39's pipelined CPU, with an optional injected bug. --
+interface IDEX  { pc: number; name: string; rd: number; rs1: number; rs2: number; useRs1: boolean; useRs2: boolean; a: number; b: number; imm: number }
+interface EXMEM { pc: number; name: string; rd: number; alu: number; storeVal: number }
+interface MEMWB { pc: number; name: string; rd: number; val: number; regWrite: number }
+interface PState {
+  pc: number; regs: number[]; mem: number[];
+  if_id: { pc: number; word: number } | null; id_ex: IDEX | null; ex_mem: EXMEM | null; mem_wb: MEMWB | null;
+}
+function rtlStep(s: PState, imem: number[], buggy: boolean): PState {
+  const regs = s.regs.slice(), mem = s.mem.slice();
+  if (s.mem_wb &amp;&amp; s.mem_wb.regWrite &amp;&amp; s.mem_wb.rd !== 0) regs[s.mem_wb.rd] = s.mem_wb.val;
+  let mem_wb: MEMWB | null = null;
+  if (s.ex_mem) {
+    const m = s.ex_mem;
+    let val = m.alu;
+    if (m.name === "SW") mem[m.alu &gt;&gt; 2] = m.storeVal;
+    if (m.name === "LW") val = mem[m.alu &gt;&gt; 2] | 0;
+    mem_wb = { pc: m.pc, name: m.name, rd: m.rd, val, regWrite: m.name === "SW" ? 0 : 1 };
+  }
+  let ex_mem: EXMEM | null = null;
+  if (s.id_ex) {
+    const e = s.id_ex;
+    // The forwarding unit. "buggy" drops the rd != x0 qualification: spot the difference.
+    const fwd = (rs: number, used: boolean): number | null =&gt; {
+      if (!used) return null;
+      if (s.ex_mem &amp;&amp; s.ex_mem.name !== "SW" &amp;&amp; (buggy || s.ex_mem.rd !== 0) &amp;&amp; s.ex_mem.rd === rs) return s.ex_mem.alu;
+      if (s.mem_wb &amp;&amp; s.mem_wb.regWrite &amp;&amp; (buggy || s.mem_wb.rd !== 0) &amp;&amp; s.mem_wb.rd === rs) return s.mem_wb.val;
+      return null;
+    };
+    const fa = fwd(e.rs1, e.useRs1), fb = fwd(e.rs2, e.useRs2);
+    const a = fa === null ? e.a : fa;
+    const bReg = fb === null ? e.b : fb;
+    const useImm = e.name === "ADDI" || e.name === "LW" || e.name === "SW";
+    ex_mem = { pc: e.pc, name: e.name, rd: e.rd, alu: alu(useImm ? "ADD" : e.name, a, useImm ? e.imm : bReg), storeVal: bReg };
+  }
+  const d = s.if_id ? decode(s.if_id.word) : null;
+  const loadUse = !!(d &amp;&amp; s.id_ex &amp;&amp; s.id_ex.name === "LW" &amp;&amp; s.id_ex.rd !== 0 &amp;&amp;
+    ((d.useRs1 &amp;&amp; d.rs1 === s.id_ex.rd) || (d.useRs2 &amp;&amp; d.rs2 === s.id_ex.rd)));
+  if (loadUse) return { pc: s.pc, regs, mem, if_id: s.if_id, id_ex: null, ex_mem, mem_wb };
+  let id_ex: IDEX | null = null;
+  if (d &amp;&amp; s.if_id)
+    id_ex = { pc: s.if_id.pc, name: d.name, rd: d.rd, rs1: d.rs1, rs2: d.rs2, useRs1: d.useRs1, useRs2: d.useRs2,
+              a: regs[d.rs1], b: regs[d.rs2], imm: d.imm };
+  const word = imem[s.pc &gt;&gt; 2];
+  return { pc: s.pc + 4, regs, mem, if_id: word === undefined ? null : { pc: s.pc, word }, id_ex, ex_mem, mem_wb };
+}
+
+// -- Constrained-random instruction generation (riscv-dv in miniature). --
+let seed = 1;
+const rnd = (n: number) =&gt; {
+  seed = (Math.imul(seed, 1664525) + 1013904223) | 0;   // a 32-bit LCG
+  return (seed &gt;&gt;&gt; 17) % n;
+};
+function randomProgram(len: number): number[] {
+  const prog: number[] = [];
+  for (let r = 1; r &lt;= 7; r++) prog.push(asm.ADDI(r, 0, rnd(100)));  // constraint: init registers first
+  for (let i = 0; i &lt; len; i++) {
+    const k = rnd(7), rd = rnd(8), rs1 = rnd(8), rs2 = rnd(8);       // constraint: only x0..x7
+    if (k === 0) prog.push(asm.ADD(rd, rs1, rs2));
+    else if (k === 1) prog.push(asm.SUB(rd, rs1, rs2));
+    else if (k === 2) prog.push(asm.AND(rd, rs1, rs2));
+    else if (k === 3) prog.push(asm.OR(rd, rs1, rs2));
+    else if (k === 4) prog.push(asm.ADDI(rd, rs1, rnd(32)));
+    else if (k === 5) prog.push(asm.LW(rd, 0, 4 * rnd(8)));          // constraint: legal addresses
+    else prog.push(asm.SW(rs2, 0, 4 * rnd(8)));
+  }
+  return prog;
+}
+
+// -- Lockstep co-simulation: every RTL retirement must match one ISS step. --
+function cosim(imem: number[], buggy: boolean): string {
+  let iss: ArchState = { pc: 0, regs: new Array(32).fill(0), mem: new Array(8).fill(0) };
+  let rtl: PState = { pc: 0, regs: new Array(32).fill(0), mem: new Array(8).fill(0), if_id: null, id_ex: null, ex_mem: null, mem_wb: null };
+  let retired = 0;
+  for (let cycle = 0; cycle &lt; 200; cycle++) {
+    if (imem[rtl.pc &gt;&gt; 2] === undefined &amp;&amp; !rtl.if_id &amp;&amp; !rtl.id_ex &amp;&amp; !rtl.ex_mem &amp;&amp; !rtl.mem_wb) break;
+    const wasInWb = rtl.mem_wb;                    // this instruction retires during this cycle
+    rtl = rtlStep(rtl, imem, buggy);
+    if (wasInWb) {
+      iss = issStep(iss, imem);                    // the golden model executes the same instruction
+      retired++;
+      if (iss.pc - 4 !== wasInWb.pc)
+        return `DIVERGE at retirement ${retired}: RTL retired pc=${wasInWb.pc}, ISS executed pc=${iss.pc - 4}`;
+      for (let r = 0; r &lt; 32; r++)
+        if (iss.regs[r] !== rtl.regs[r])
+          return `DIVERGE at pc=${wasInWb.pc} (${wasInWb.name}): x${r} -- ISS says ${iss.regs[r]}, RTL says ${rtl.regs[r]}`;
+    }
+  }
+  return `PASS -- ${retired} instructions retired, architectural state matched at every one`;
+}
+
+const prog = randomProgram(14);
+console.log("random program:", prog.length, "instructions");
+prog.forEach((w, i) =&gt; {
+  const d = decode(w);
+  console.log(`  ${String(i * 4).padStart(2)}: ${d.name.toLowerCase().padEnd(4)} rd=x${d.rd} rs1=x${d.rs1} rs2=x${d.rs2} imm=${d.imm}`);
+});
+console.log("\ncorrect RTL vs ISS :", cosim(prog, false));
+console.log("buggy   RTL vs ISS :", cosim(prog, true));
+      </primer-code>
+      <p>
+        Read the verdicts. The correct pipeline: 21 retirements, state matched at every one. The buggy
+        pipeline runs the <em>same</em> program and diverges at <code>pc = 68</code> — an
+        <code>addi x7, x0, 27</code> that should produce 27 produced 43, because the <code>lw x0</code>
+        one slot earlier (a load that <em>discards</em> its result into <code>x0</code>) was wrongly
+        forwarded into the <code>x0</code> read. Notice how much the report hands you: the pc, the
+        register, both values — and the culprit sitting one instruction upstream. That is what
+        "divergence = bug + exact location" means in practice. Try it yourself: change the seed, lengthen
+        the program, or invent your own bug (break the EX/MEM priority, or forward from stores) and watch
+        the referee catch it.
+      </p>
+      <primer-vignette title="How do real CPU teams do this at scale?">
+        <p>
+          Take our little rig and multiply by a million. Commercial CPU projects run
+          <em>billions</em> of constrained-random instructions nightly across server farms and hardware
+          emulators, every one checked in lockstep against a golden ISS (for RISC-V, typically Spike);
+          formal tools <em>prove</em> properties of the decoder and forwarding logic outright; and
+          verification engineers outnumber designers two-to-one or more. The stakes were made vivid in
+          1994 when the Pentium's FDIV unit shipped with five missing entries in a divider lookup table —
+          a bug pattern random testing plus coverage would have cornered — costing Intel a $475M recall.
+          Modern flows exist so that class of escape dies in simulation. When a fresh RISC-V core "boots
+          Linux first try" on silicon, that is not luck; it is this lesson's loop — generate, co-simulate,
+          cover, assert — run relentlessly for months. Verification is not the tax on design; it is most
+          of the engineering.
+        </p>
+      </primer-vignette>
+      <p>
+        And with that, the project arc closes: a contract (lesson 34), a register file, a single-cycle
+        machine that became our referee, a control unit, a pipeline, its hazards healed — and a
+        verification rig that lets you change any of it and <em>know</em>, within seconds, whether the
+        machine still honours the contract. That loop — edit, run, referee — is chip design in miniature.
+      </p>
+    </primer-card>
+
+    <!-- Quiz. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "verifQuiz@1": {
+          "intro": "Self-checking programs, a golden-model referee, random stimulus, coverage and assertions — the arsenal, aimed at our own CPU.",
+          "divQ": "A lockstep co-sim compares after every retirement and first diverges at retirement {k}. How many retirements are known to have matched exactly?",
+          "covQ": "A coverage model crosses {i} instructions × {h} producer–consumer hazard distances × {f} forwarding paths. How many cross bins is that?",
+          "cosimQ": "In lockstep co-simulation, what exactly is compared, and when?",
+          "cosimA": "Architectural state (retired pc, registers) between RTL and the ISS, once per retired instruction",
+          "cosimB": "Every internal pipeline-register bit, every cycle",
+          "cosimC": "Total run time of the two simulations",
+          "cosimD": "The two models' source code, line by line",
+          "whyIssQ": "Why is the slow single-cycle model from lesson 36 the ideal golden reference for the fast pipeline?",
+          "whyIssA": "It is simple enough to be obviously correct, and implements the same ISA contract — perfect referee material",
+          "whyIssB": "It runs faster than the pipelined model",
+          "whyIssC": "It shares the forwarding logic, so bugs cancel out",
+          "whyIssD": "It is written in a different programming language",
+          "selfQ": "What is the defining trick of a riscv-tests-style self-checking program?",
+          "selfA": "The program computes, compares against a precomputed answer with its own BEQ, and branches to a pass or fail address the testbench watches",
+          "selfB": "The program prints its results for a human to inspect",
+          "selfC": "The testbench decodes every instruction a second time",
+          "selfD": "The program runs twice and compares its own halves",
+          "selfLimQ": "What is the blind spot of relying on self-checking programs alone?",
+          "selfLimA": "They grade the CPU using the CPU — if the comparing/branching instructions are broken too, a test can pass for the wrong reason",
+          "selfLimB": "They cannot test arithmetic instructions",
+          "selfLimC": "They only run in simulation, never on silicon",
+          "selfLimD": "They require an operating system",
+          "randQ": "Why does constrained-RANDOM instruction generation find bugs that hand-written tests miss?",
+          "randA": "It does not share the designer's mental model, so it emits interaction corners (hazard × stall × x0) the designer never imagined testing",
+          "randB": "Random programs are longer than directed ones",
+          "randC": "It runs at a higher clock frequency",
+          "randD": "It skips instructions that are known to work",
+          "consQ": "Our generator initialises all registers first and keeps load/store addresses in a small legal range. Why constrain randomness at all?",
+          "consA": "Unconstrained programs are mostly meaningless or illegal — constraints keep every program valid while leaving the interesting choices random",
+          "consB": "To make the programs shorter",
+          "consC": "Because true randomness is impossible in software",
+          "consD": "To guarantee every program passes",
+          "covHoleQ": "A million random instructions retire with zero mismatches, but the 'load-use stall whose consumer also forwards from EX/MEM' bin is empty. What can you conclude?",
+          "covHoleA": "Nothing about that corner — it was never exercised; an empty bin means a missing test, however green the run",
+          "covHoleB": "That corner is proven correct by the passing run",
+          "covHoleC": "The bin must be impossible to hit",
+          "covHoleD": "The RTL should be re-synthesized",
+          "assertQ": "Which assertion would have caught lesson 35's register-file-stores-to-x0 bug at the violating cycle?",
+          "assertA": "assert property (!(rf_we && rf_rd == 5'd0)) — x0 is never architecturally written",
+          "assertB": "assert property (pc % 4 == 0) — the pc stays aligned",
+          "assertC": "assert property (clk || !clk) — the clock toggles",
+          "assertD": "assert property (mem_read != mem_write) — memory ports differ",
+          "bugQ": "With the rd != x0 qualification dropped, which sequence exposes the forwarding bug?",
+          "bugA": "An instruction with rd = x0 (like lw x0 or jal x0) followed closely by an instruction that READS x0 — it receives the discarded value instead of 0",
+          "bugB": "Two independent ADDs on different registers",
+          "bugC": "A store followed three slots later by a load",
+          "bugD": "Any taken branch",
+          "stopQ": "In the industry-standard flow, what decides when verification is 'done'?",
+          "stopA": "Coverage closure — every planned bin and cross hit, with all assertions clean — not the absence of recent failures",
+          "stopB": "A fixed number of simulation hours",
+          "stopC": "The designer's confidence after a demo",
+          "stopD": "The first successful boot of a real program"
+        }
+      }
+    </script>
+
+    <primer-quiz name="verifQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/cpu/hazards-and-forwarding-in-rtl",
+      "computer-science/chip-design/verification/the-uvm-testbench"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("verifQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("divQ", v),
+      variables: "k=[5:40]",
+      answer: "k - 1",
+    },
+    {
+      prompt: (v) => sceneStrings("covQ", v),
+      variables: "i=[8:10] h=[3:4] f=[2:3]",
+      answer: "i * h * f",
+    },
+    {
+      prompt: () => sceneStrings("cosimQ"),
+      options: [
+        { text: () => sceneStrings("cosimA"), correct: true },
+        { text: () => sceneStrings("cosimB"), correct: false },
+        { text: () => sceneStrings("cosimC"), correct: false },
+        { text: () => sceneStrings("cosimD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyIssQ"),
+      options: [
+        { text: () => sceneStrings("whyIssA"), correct: true },
+        { text: () => sceneStrings("whyIssB"), correct: false },
+        { text: () => sceneStrings("whyIssC"), correct: false },
+        { text: () => sceneStrings("whyIssD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("selfQ"),
+      options: [
+        { text: () => sceneStrings("selfA"), correct: true },
+        { text: () => sceneStrings("selfB"), correct: false },
+        { text: () => sceneStrings("selfC"), correct: false },
+        { text: () => sceneStrings("selfD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("selfLimQ"),
+      options: [
+        { text: () => sceneStrings("selfLimA"), correct: true },
+        { text: () => sceneStrings("selfLimB"), correct: false },
+        { text: () => sceneStrings("selfLimC"), correct: false },
+        { text: () => sceneStrings("selfLimD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("randQ"),
+      options: [
+        { text: () => sceneStrings("randA"), correct: true },
+        { text: () => sceneStrings("randB"), correct: false },
+        { text: () => sceneStrings("randC"), correct: false },
+        { text: () => sceneStrings("randD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("consQ"),
+      options: [
+        { text: () => sceneStrings("consA"), correct: true },
+        { text: () => sceneStrings("consB"), correct: false },
+        { text: () => sceneStrings("consC"), correct: false },
+        { text: () => sceneStrings("consD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("covHoleQ"),
+      options: [
+        { text: () => sceneStrings("covHoleA"), correct: true },
+        { text: () => sceneStrings("covHoleB"), correct: false },
+        { text: () => sceneStrings("covHoleC"), correct: false },
+        { text: () => sceneStrings("covHoleD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("assertQ"),
+      options: [
+        { text: () => sceneStrings("assertA"), correct: true },
+        { text: () => sceneStrings("assertB"), correct: false },
+        { text: () => sceneStrings("assertC"), correct: false },
+        { text: () => sceneStrings("assertD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("bugQ"),
+      options: [
+        { text: () => sceneStrings("bugA"), correct: true },
+        { text: () => sceneStrings("bugB"), correct: false },
+        { text: () => sceneStrings("bugC"), correct: false },
+        { text: () => sceneStrings("bugD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("stopQ"),
+      options: [
+        { text: () => sceneStrings("stopA"), correct: true },
+        { text: () => sceneStrings("stopB"), correct: false },
+        { text: () => sceneStrings("stopC"), correct: false },
+        { text: () => sceneStrings("stopD"), correct: false },
+      ],
+    },
+  ]);
+</script>

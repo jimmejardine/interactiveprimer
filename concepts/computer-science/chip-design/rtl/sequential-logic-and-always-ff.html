@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Sequential Logic and always_ff</primer-title>
+
+    <primer-card>
+      <p>
+        Combinational logic has a superpower and a matching disability: it answers instantly, and it
+        remembers nothing. It cannot count to three, because counting means remembering where you got to.
+        Every interesting machine — a processor, a traffic light, your GPU-to-be — needs <strong>state</strong>,
+        and in synchronous digital design all state lives in one kind of place: the
+        <primer-ref to="computer-science/computer-architecture/circuits/sequential-elements-and-clocking">flip-flop</primer-ref>,
+        marching to the beat of a <strong>clock</strong>. This lesson gives hardware its heartbeat — and
+        introduces a little simulator we will keep using for the rest of the course, all the way up to a
+        working CPU and GPU.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The flip-flop and the clock</h2>
+      <p>
+        A <strong>D flip-flop</strong> is a 1-bit camera: at the instant its clock ticks from 0 to 1 (the
+        <strong>rising edge</strong>), it photographs its input <code>D</code> and holds that photo on its
+        output <code>Q</code> until the next tick — ignoring everything <code>D</code> does in between. A
+        <strong>register</strong> is a row of flip-flops sharing one clock. In SystemVerilog, clocked state
+        has its own block:
+      </p>
+      <primer-code lang="text">
+        always_ff @(posedge clk) begin
+          count &lt;= count + 1;        // a counter: at each tick, capture current count + 1
+        end
+      </primer-code>
+      <p>
+        Read <code>@(posedge clk)</code> as "at every rising clock edge". Between edges, <em>nothing in this
+        block happens</em>: the combinational cloud computing <code>count + 1</code> settles at its leisure,
+        and only the edge commits the result into the register. That rhythm — <strong>settle, then
+        snap</strong> — is the entire discipline of synchronous design. It is why a chip with a billion
+        gates can be reasoned about at all: time is chopped into cycles, and each cycle asks one tractable
+        question, "what are the register values at the next edge, given the values at this one?"
+      </p>
+    </primer-card>
+
+    <!-- Timing-diagram figure: clock, D and Q waveforms, stepped. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "ffTiming": {
+          "title": "The flip-flop samples D only at rising clock edges",
+          "stepClock": "The clock: a relentless square wave — rising edges are the only moments that matter",
+          "stepD": "The input D wanders freely between edges — mid-cycle wiggles are invisible to the register",
+          "stepQ": "Q updates only at each rising edge, capturing whatever D held at that instant"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>Reading the waveform</h2>
+      <p>
+        Designers live in diagrams like this one — time flowing right, one row per signal:
+      </p>
+      <primer-geometry scene="ffTiming" caption="A timing diagram with three rows. Top: the clock, a square wave with rising edges marked. Middle: the input D, changing at arbitrary times. Bottom: the output Q, which changes only at rising clock edges, taking whatever value D had at that moment."></primer-geometry>
+      <p>
+        Notice what the bottom row does <em>not</em> do: <code>Q</code> never reacts to <code>D</code>'s
+        mid-cycle changes. The flip-flop turns messy, continuously-varying signals into a clean sequence of
+        per-cycle values — analogue chaos in, clockwork out.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Non-blocking assignment: everyone snaps together</h2>
+      <p>
+        The arrow <code>&lt;=</code> is the <strong>non-blocking assignment</strong>, and it encodes the
+        deepest fact about registers: at a clock edge, <em>every register in the chip samples its input
+        simultaneously, using the old values of everything else</em>. The classic proof is the swap:
+      </p>
+      <primer-code lang="text">
+        always_ff @(posedge clk) begin
+          a &lt;= b;      // both right-hand sides read the OLD values…
+          b &lt;= a;      // …then both registers update together: a genuine swap!
+        end
+      </primer-code>
+      <p>
+        In software those two lines destroy <code>a</code>. In hardware they exchange two registers,
+        because <code>&lt;=</code> means "sample now, commit at the edge": both right-hand sides are read
+        from the pre-edge world, and both photos develop at once. Two flip-flops with crossed wires — of
+        course they swap. The statement order is irrelevant, just as it was for <code>assign</code>.
+      </p>
+      <p>
+        Registers also need a way to start from a known value — a <strong>reset</strong>:
+      </p>
+      <primer-code lang="text">
+        always_ff @(posedge clk) begin
+          if (!rst_n) count &lt;= '0;        // synchronous reset, checked at the edge
+          else        count &lt;= count + 1;
+        end
+      </primer-code>
+      <p>
+        This is a <em>synchronous</em> reset (obeyed at a clock edge); the alternative, an asynchronous
+        reset (<code>@(posedge clk or negedge rst_n)</code>), yanks the register to zero the moment reset
+        asserts, clock or no clock. Chips use both; what matters now is that every register gets <em>some</em>
+        reset story, or it wakes up holding <code>x</code> — the unknown.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The two-phase simulator</h2>
+      <p>
+        "Settle, then snap" is not just a slogan — it is an algorithm, and it is how we will simulate every
+        design in this course. Represent the registers as a state object; write one function computing what
+        the combinational logic feeds each register's input; stepping the clock means calling it and
+        committing the result <em>all at once</em>. Here it is, running a 3-bit counter and a 4-bit shift
+        register side by side:
+      </p>
+      <primer-code run>
+        // ── The reusable pattern: state + next(state) = the combinational logic. ──
+        interface State { count: number; shift: number[]; a: number; b: number }
+
+        function next(s: State, serialIn: number): State {
+          return {
+            count: (s.count + 1) % 8,                  // count <= count + 1  (3 bits wrap)
+            shift: [serialIn, ...s.shift.slice(0, 3)], // shift <= {serialIn, shift[3:1]}
+            a: s.b,                                    // a <= b   } the swap,
+            b: s.a,                                    // b <= a   } non-blocking style
+          };
+        }
+
+        // ── The clock: settle (compute next) then snap (replace state atomically). ──
+        let state: State = { count: 0, shift: [0, 0, 0, 0], a: 1, b: 0 };
+        const serial = [1, 0, 1, 1, 0, 0, 1, 0];       // bits arriving one per cycle
+
+        console.log("cycle | count | shift   | a b");
+        console.log("------+-------+---------+----");
+        for (let cycle = 0; cycle &lt; 8; cycle++) {
+          console.log(`  ${cycle}   |   ${state.count}   | ${state.shift.join(" ")} | ${state.a} ${state.b}`);
+          state = next(state, serial[cycle]);          // one rising edge
+        }
+      </primer-code>
+      <p>
+        Three behaviours, one mechanism. The counter climbs and wraps at 8; the shift register slides each
+        arriving bit along one place per tick; and <code>a</code>/<code>b</code> swap forever — the
+        non-blocking semantics falls out for free, because <code>next</code> reads only the old state and
+        the whole new state replaces it in one go. Keep this pattern in mind: the CPU in Module 6 and the
+        GPU capstone are this exact loop with a richer <code>State</code>.
+      </p>
+      <primer-theorem name="Sequential logic in SystemVerilog">
+        <ul>
+          <li>a D flip-flop samples its input only at the <strong>rising clock edge</strong> and holds it
+            until the next; a register is a row of them;</li>
+          <li><code>always_ff @(posedge clk)</code> describes clocked state; the cycle rhythm is
+            <strong>settle (combinational), then snap (edge)</strong>;</li>
+          <li>non-blocking <code>&lt;=</code> means all registers read old values and update
+            <strong>together</strong> — so <code>a &lt;= b; b &lt;= a;</code> swaps;</li>
+          <li>every register needs a <strong>reset</strong> (synchronous or asynchronous) to a known
+            value;</li>
+          <li>rule of style: <code>&lt;=</code> in <code>always_ff</code>, <code>=</code> in
+            <code>always_comb</code> — never mix.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-vignette title="What is the clock, physically?">
+      <p>
+        Somewhere on every board sits a sliver of quartz, ringing like a microscopic tuning fork a few
+        million times a second; on-chip circuits multiply that ring up to gigahertz. That one signal then
+        fans out to <em>every register on the die</em> — hundreds of millions of flip-flops — through a
+        distribution network so demanding it gets an entire lesson later in this course. A 3 GHz clock gives
+        each cycle just 333 picoseconds; in that time light itself travels about ten centimetres, roughly
+        the width of the laptop the chip sits in. Every combinational cloud on the chip must settle within
+        that sliver of time, every cycle, billions of times a second, for years — which is why the question
+        "how fast can the clock go?" (the critical path) governs so much of chip design.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! Blocking assignment in a clocked block">
+      <p>
+        Write the swap with ordinary <code>=</code> (the <strong>blocking</strong> assignment) and it breaks
+        exactly the way software does: <code>a = b; b = a;</code> executes in order during the edge, so both
+        end up holding <code>b</code>'s value — and worse, the behaviour now <em>depends on statement
+        order</em>, which is poison in a language describing simultaneous hardware. The
+        community's iron rule: <strong>non-blocking <code>&lt;=</code> in <code>always_ff</code>, blocking
+        <code>=</code> in <code>always_comb</code>, and never mix them in one block.</strong> Follow it
+        blindly now; you will meet the rare principled exceptions (and the simulation race conditions that
+        punish violators) in the verification module.
+      </p>
+    </primer-vignette>
+
+    <!-- Quiz: counters mod 2^w, swap semantics, shift registers, edges and resets. -->
+    <script type="application/json" class="scene-strings">
+      {
+        "seqQuiz@1": {
+          "intro": "Settle, then snap: registers sample old values at the rising edge and update together.",
+          "countQ": "A {w}-bit counter starts at 0 and increments every cycle, wrapping when it overflows. What does it hold after {n} cycles?",
+          "swapQ": "At a clock edge, a holds {p} and b holds {q}, and the block runs a <= b; b <= a;. Immediately after the edge, what does a hold?",
+          "swapBQ": "Same edge, same starting values (a = {p}, b = {q}): what does b hold after the edge?",
+          "edgeQ": "When does a register described by always_ff @(posedge clk) change its output?",
+          "eEdge": "Only at rising clock edges — input changes between edges are ignored",
+          "eAny": "Whenever its input changes",
+          "eLevel": "Whenever the clock is high",
+          "eFall": "At falling clock edges",
+          "nbQ": "Why does a <= b; b <= a; swap the two registers instead of losing a?",
+          "nbOld": "Non-blocking assignments read the old values first, then all registers commit together at the edge",
+          "nbLuck": "The simulator happens to run the lines in a lucky order",
+          "nbTwo": "The block runs twice per edge, once for each line",
+          "nbTemp": "The synthesizer silently inserts a temporary variable",
+          "shiftQ": "A 4-bit shift register holds 0 0 0 0 and shifts in the bits 1, then 1, then 0 (newest on the left). What does it hold after those three cycles?",
+          "shAns": "0 1 1 0",
+          "shWrong1": "1 1 0 0",
+          "shWrong2": "0 0 1 1",
+          "shWrong3": "1 0 1 0",
+          "betweenQ": "Between two clock edges, what is the combinational logic feeding a register's input doing?",
+          "bSettle": "Settling — computing the next value at its own pace; only the edge commits the result",
+          "bNothing": "Nothing — combinational logic is disabled between edges",
+          "bCommit": "Committing new values continuously into the register",
+          "bReset": "Being reset",
+          "resetQ": "What is the difference between a synchronous and an asynchronous reset?",
+          "rSync": "Synchronous reset takes effect at a clock edge; asynchronous reset forces the register immediately, clock or no clock",
+          "rSpeed": "Synchronous resets are faster",
+          "rNone": "There is no difference in behaviour, only in syntax",
+          "rAsync": "Asynchronous resets only work in simulation",
+          "ruleQ": "The community's iron rule for assignments is…",
+          "ruRight": "<= in always_ff, = in always_comb, never mixed in one block",
+          "ruWrong1": "= everywhere; <= is legacy syntax",
+          "ruWrong2": "<= everywhere, including always_comb",
+          "ruWrong3": "Whichever you prefer — they are interchangeable",
+          "unresetQ": "A register with no reset wakes up in simulation holding…",
+          "uX": "x, the unknown value — honestly reflecting that real silicon powers up in an arbitrary state",
+          "uZero": "0, like any variable",
+          "uOne": "1, by convention",
+          "uLast": "Whatever it held when the simulator last ran",
+          "photoQ": "A flip-flop's input D changes three times in the middle of a cycle, then settles before the next rising edge. How many of those changes does Q show?",
+          "phNone": "None — Q only shows the value D held at the edge itself",
+          "phAll": "All three, slightly delayed",
+          "phFirst": "Only the first",
+          "phLast2": "The last two"
+        }
+      }
+    </script>
+
+    <primer-quiz name="seqQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/rtl/combinational-logic-in-systemverilog",
+      "computer-science/computer-architecture/circuits/sequential-elements-and-clocking"
+    ],
+    "completedDate": "2026-07-28"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Timing diagram: clock / D / Q rows, revealed one signal at a time. ──
+  registerGeometryScene(
+    "ffTiming",
+    ({ board, colors, step, sceneStrings }) => {
+      const ink = colors.ink, clkC = colors.cat[0], dC = colors.cat[1], qC = colors.cat[2], guide = colors.line;
+      const T = (x, y, txt, color, size = 13, ax = "middle") =>
+        board.create("text", [x, y, txt], {
+          strokeColor: color, fontSize: size, anchorX: ax, anchorY: "middle", fixed: true, highlight: false,
+        });
+      // Draw a waveform from a list of [time, level] change-points on a row baseline.
+      const wave = (pts, base, amp, color) => {
+        for (let i = 0; i < pts.length - 1; i++) {
+          const [t0, v0] = pts[i], [t1, v1] = pts[i + 1];
+          board.create("segment", [[t0, base + v0 * amp], [t1, base + v0 * amp]], {
+            strokeColor: color, strokeWidth: 2.5, highlight: false,
+          });
+          if (v1 !== v0)
+            board.create("segment", [[t1, base + v0 * amp], [t1, base + v1 * amp]], {
+              strokeColor: color, strokeWidth: 2.5, highlight: false,
+            });
+        }
+      };
+
+      // ── Base: row labels and the four rising-edge guide lines. ──
+      T(0.35, 5.0, "clk", clkC, 14, "right");
+      T(0.35, 3.4, "D", dC, 14, "right");
+      T(0.35, 1.8, "Q", qC, 14, "right");
+      // Rising edges at t = 1, 3, 5, 7 (clock: low from even, high from odd).
+      [1, 3, 5, 7].forEach((t) => {
+        board.create("segment", [[t, 0.9], [t, 5.9]], {
+          strokeColor: guide, strokeWidth: 1, dash: 2, strokeOpacity: 0.5, highlight: false,
+        });
+      });
+
+      // Step 1: the clock — square wave, rising at odd times.
+      step(sceneStrings("stepClock"), () => {
+        wave([[0.5, 0], [1, 1], [2, 0], [3, 1], [4, 0], [5, 1], [6, 0], [7, 1], [8, 0], [8.6, 0]], 4.6, 0.8, clkC);
+      });
+
+      // Step 2: D — wanders, including mid-cycle wiggles.
+      // Values at edges t=1,3,5,7: 1, 1, 0, 1.
+      step(sceneStrings("stepD"), () => {
+        wave([[0.5, 0], [0.8, 1], [2.4, 0], [2.7, 1], [4.2, 0], [6.3, 1], [7.6, 0], [8.6, 0]], 3.0, 0.8, dC);
+      });
+
+      // Step 3: Q — changes only at edges, sampling D's edge values (starts 0; 1,1,0,1).
+      step(sceneStrings("stepQ"), () => {
+        wave([[0.5, 0], [1, 1], [5, 0], [7, 1], [8.6, 1]], 1.4, 0.8, qC);
+      });
+    },
+    { boundingbox: [-0.7, 6.3, 9.3, 0.6], title: () => makeStrings("ffTiming")("title") },
+  );
+
+  registerQuiz("seqQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // n mod 2^w.
+      prompt: (v) => sceneStrings("countQ", v),
+      variables: "w=[2:4] n=[9:40]",
+      answer: "n % (2 ^ w)",
+    },
+    {
+      // After the swap, a holds old b.
+      prompt: (v) => sceneStrings("swapQ", v),
+      variables: "p=[0:9] q=[10:19]",
+      answer: "q",
+    },
+    {
+      prompt: (v) => sceneStrings("swapBQ", v),
+      variables: "p=[0:9] q=[10:19]",
+      answer: "p",
+    },
+    {
+      prompt: () => sceneStrings("edgeQ"),
+      options: [
+        { text: () => sceneStrings("eEdge"), correct: true },
+        { text: () => sceneStrings("eAny"), correct: false },
+        { text: () => sceneStrings("eLevel"), correct: false },
+        { text: () => sceneStrings("eFall"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("nbQ"),
+      options: [
+        { text: () => sceneStrings("nbOld"), correct: true },
+        { text: () => sceneStrings("nbLuck"), correct: false },
+        { text: () => sceneStrings("nbTwo"), correct: false },
+        { text: () => sceneStrings("nbTemp"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("shiftQ"),
+      options: [
+        { text: () => sceneStrings("shAns"), correct: true },
+        { text: () => sceneStrings("shWrong1"), correct: false },
+        { text: () => sceneStrings("shWrong2"), correct: false },
+        { text: () => sceneStrings("shWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("betweenQ"),
+      options: [
+        { text: () => sceneStrings("bSettle"), correct: true },
+        { text: () => sceneStrings("bNothing"), correct: false },
+        { text: () => sceneStrings("bCommit"), correct: false },
+        { text: () => sceneStrings("bReset"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("resetQ"),
+      options: [
+        { text: () => sceneStrings("rSync"), correct: true },
+        { text: () => sceneStrings("rSpeed"), correct: false },
+        { text: () => sceneStrings("rNone"), correct: false },
+        { text: () => sceneStrings("rAsync"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("ruleQ"),
+      options: [
+        { text: () => sceneStrings("ruRight"), correct: true },
+        { text: () => sceneStrings("ruWrong1"), correct: false },
+        { text: () => sceneStrings("ruWrong2"), correct: false },
+        { text: () => sceneStrings("ruWrong3"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("unresetQ"),
+      options: [
+        { text: () => sceneStrings("uX"), correct: true },
+        { text: () => sceneStrings("uZero"), correct: false },
+        { text: () => sceneStrings("uOne"), correct: false },
+        { text: () => sceneStrings("uLast"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("photoQ"),
+      options: [
+        { text: () => sceneStrings("phNone"), correct: true },
+        { text: () => sceneStrings("phAll"), correct: false },
+        { text: () => sceneStrings("phFirst"), correct: false },
+        { text: () => sceneStrings("phLast2"), correct: false },
+      ],
+    },
+  ]);
+</script>

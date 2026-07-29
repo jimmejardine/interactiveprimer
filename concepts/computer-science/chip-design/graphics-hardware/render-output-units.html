@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Render Output Units</primer-title>
+
+    <primer-card>
+      <p>
+        A fragment has run the gauntlet: rasterized, early-Z tested, shaded, textured. It is now a colour
+        with an address. One question remains — <em>who actually writes it into the framebuffer?</em> Not
+        the shader. On every GPU, the last mile belongs to a ring of fixed-function blocks called
+        <strong>render output units</strong> (ROPs — historically "raster operations"). They are the only
+        hardware allowed to touch the framebuffer, and everything about them follows from one
+        uncomfortable fact: the final write is not a write at all. With
+        <primer-ref to="computer-science/computer-graphics/shading-and-lighting">blending</primer-ref>,
+        depth and stencil in play, it is a <strong>read–modify–write</strong> — and thousands of fragments
+        are trying to do it to the same buffer, concurrently, in a machine built to be massively parallel.
+        The ROPs are where that chaos is forced back into order.
+      </p>
+      <p>
+        Their job list: the <strong>final depth/stencil test</strong> (the authoritative late-Z, for draws
+        that early-Z had to skip), <strong>alpha blending</strong>, <strong>MSAA resolve</strong>, and
+        <strong>framebuffer compression</strong> — each a read–modify–write specialist.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Blending: a read–modify–write with a referee</h2>
+      <p>
+        The standard "over" blend for a translucent fragment with opacity <primer-math>\alpha</primer-math>
+        is
+      </p>
+      <primer-math display>\text{out} = \text{src} \cdot \alpha + \text{dst} \cdot (1 - \alpha)</primer-math>
+      <p>
+        — where <primer-math>\text{dst}</primer-math> is <em>whatever the framebuffer currently holds</em>.
+        Work one: a red-ish fragment <primer-math>\text{src} = 0.8</primer-math> at
+        <primer-math>\alpha = 0.25</primer-math> over a background
+        <primer-math>\text{dst} = 0.2</primer-math> gives
+        <primer-math>0.8 \cdot 0.25 + 0.2 \cdot 0.75 = 0.35</primer-math>. Trivial arithmetic — but note
+        what it requires: read the old pixel, blend, write the new one back, <em>atomically</em>. If two
+        fragments hit the same pixel and their read–modify–writes interleave, one update is simply lost.
+      </p>
+      <p>
+        And it is worse than atomicity: the maths is <strong>order-dependent</strong>. Blending A then B
+        does not equal B then A — and the API makes a hard promise: <em>pixels are updated in the order you
+        submitted the primitives</em>, no matter how the hardware parallelised everything in between. That
+        promise is why blending is fixed-function. Shader cores could do the multiply-adds easily; what
+        they cannot cheaply do is referee thousands of concurrent RMWs into per-pixel submission order.
+        The ROPs do it structurally: each ROP <em>owns</em> a fixed slice of the screen, so every fragment
+        for a given pixel funnels through the same unit, and that unit's queues keep primitive order. The
+        arithmetic is the cheap part; <strong>the ordering guarantee is the product</strong>.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "ropScene": {
+          "title": "One blended pixel, then MSAA",
+          "fragLbl": "fragment: src 0.80, α 0.25",
+          "fbLbl": "framebuffer pixel",
+          "ropLbl": "ROP (blend unit)",
+          "readLbl": "1. read dst",
+          "writeLbl": "3. write back",
+          "resolveLbl": "resolve = average of the 4 samples",
+          "stepFrag": "A shaded, translucent fragment arrives at the ROP that owns its pixel",
+          "stepRead": "The ROP reads the pixel's current colour from the framebuffer: dst = 0.20",
+          "stepMath": "The blend: out = 0.80·0.25 + 0.20·0.75 = 0.35 — a read–modify–write, in primitive order",
+          "stepWrite": "The result is written back; the framebuffer pixel now holds 0.35",
+          "stepMsaa": "MSAA: the pixel keeps 4 depth-tested samples; the edge covers 2 of them, the shader ran ONCE, and the resolve averages all 4"
+        }
+      }
+    </script>
+
+    <primer-card>
+      <h2>The last mile, drawn</h2>
+      <p>
+        Step through one fragment's read–modify–write, then see what the pixel looks like when MSAA gives
+        it four samples.
+      </p>
+      <primer-geometry scene="ropScene" caption="Left, a fragment box holding source colour 0.80 with alpha 0.25 feeds a ROP blend unit; an arrow reads the destination value 0.20 from a framebuffer pixel on the right, the blend equation computes 0.35, and a write-back arrow stores it. Below, a magnified pixel square contains four sample points; a triangle edge crosses it covering two samples, and a label notes the resolve averages all four samples while the shader ran once."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>MSAA: test per sample, shade per fragment, resolve at the end</h2>
+      <p>
+        Multisample anti-aliasing is a ROP specialty because it is a <em>storage</em> trick, not a shading
+        trick. With <primer-math>4\times</primer-math> MSAA each pixel keeps <strong>four</strong> colour +
+        depth samples at slightly different positions. At a triangle's edge, the rasterizer tests coverage
+        and the ROP tests depth <em>per sample</em> — but the fragment shader still runs <strong>once per
+        fragment</strong>, and its one colour is stored into whichever samples the triangle covers. At the
+        end of the frame the <strong>resolve</strong> pass averages each pixel's samples: a pixel whose
+        four samples hold <primer-math>0.8, 0.8, 0.2, 0.2</primer-math> resolves to
+        <primer-math>0.5</primer-math> — a smooth edge, for one shading's worth of work and four samples'
+        worth of bookkeeping. That bookkeeping (per-sample depth tests, per-sample writes, the resolve
+        averaging) is all ROP arithmetic, which is why "MSAA cost" is largely a ROP-and-bandwidth story,
+        not a shader story.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Bandwidth, again: framebuffer compression and where ROPs live</h2>
+      <p>
+        Every blend reads and writes the framebuffer; MSAA multiplies the samples. The same medicine you
+        saw for depth applies to colour: <strong>lossless per-tile compression</strong>. Neighbouring
+        pixels are usually similar, so the hardware stores a tile as one base colour plus small
+        <em>deltas</em> (and an MSAA tile whose samples all agree — every interior pixel — collapses to a
+        single value). Like depth compression it saves <em>traffic, not capacity</em>: the worst case must
+        still fit, but the common case moves a fraction of the bytes.
+      </p>
+      <p>
+        Geography follows function: on the die, the ROPs sit <strong>next to the L2 cache slices and
+        memory controllers</strong> — not next to the shaders. A ROP's life is memory traffic; wiring it
+        into the memory crossbar keeps its read–modify–writes local. And counting them gives the classic
+        ceiling: <strong>ROP count × pixels-per-clock × clock = fill rate</strong>, the hard limit on how
+        fast the GPU can write pixels no matter how simple the shading. A GPU with 96 ROPs at 2 GHz tops
+        out at 192 Gpixels/s — full-screen passes, UI layers and particle storms all queue at that gate.
+      </p>
+      <primer-theorem name="render output units">
+        <ul>
+          <li>ROPs <strong>own the framebuffer</strong>: final depth/stencil (late-Z), blending, MSAA
+            resolve, framebuffer compression — all read–modify–write operations;</li>
+          <li>blending is fixed-function because the API guarantees <strong>per-pixel primitive
+            order</strong> — hardware queues referee concurrent RMWs, which shader code cannot do
+            cheaply;</li>
+          <li><strong>MSAA</strong>: coverage and depth per <em>sample</em>, shading per <em>fragment</em>,
+            average at <em>resolve</em>;</li>
+          <li>per-tile <strong>delta compression</strong> cuts colour traffic (lossless; traffic, not
+            capacity);</li>
+          <li>ROPs sit <strong>beside L2/memory controllers</strong>; ROP count × clock sets the
+            <strong>fill-rate ceiling</strong>.</li>
+        </ul>
+      </primer-theorem>
+    </primer-card>
+
+    <primer-card>
+      <h2>Order matters — prove it in ten lines</h2>
+      <p>
+        The compositor below stacks translucent layers over a background in submission order, then in
+        shuffled order. Same layers, same arithmetic, different picture. Then an MSAA resolve on a tiny
+        edge shows the four-samples-one-shade trick.
+      </p>
+      <primer-code run>
+        // "Over" blending: out = src·α + dst·(1−α), single channel for clarity.
+        interface Layer { name: string; src: number; a: number; }
+        const layers: Layer[] = [
+          { name: "haze",  src: 0.9, a: 0.5 },
+          { name: "glass", src: 0.1, a: 0.5 },
+          { name: "smoke", src: 0.6, a: 0.5 },
+        ];
+
+        function composite(order: Layer[], bg: number): number {
+          let dst = bg;
+          for (const L of order) dst = L.src * L.a + dst * (1 - L.a);   // read–modify–write
+          return dst;
+        }
+
+        const bg = 0.2;
+        const submitted = composite(layers, bg);
+        const shuffled = composite([layers[2], layers[0], layers[1]], bg);
+        console.log(`submission order : ${submitted.toFixed(4)}`);
+        console.log(`shuffled order   : ${shuffled.toFixed(4)}`);
+        console.log(`same layers, different pixel — blending is order-dependent!\n`);
+
+        // MSAA 4×: per-sample coverage against an edge at x = 2.4, one shade per fragment.
+        // Rotated-grid sample offsets inside each pixel:
+        const offsets = [[0.375, 0.125], [0.875, 0.375], [0.125, 0.625], [0.625, 0.875]];
+        const edgeX = 2.4, triColour = 1.0, bgColour = 0.0;
+        let shades = 0;
+        const row: string[] = [];
+        for (let px = 0; px &lt; 5; px++) {
+          const covered = offsets.filter(([ox]) =&gt; px + ox &lt; edgeX).length;
+          if (covered &gt; 0) shades++;                       // the shader runs ONCE per covered fragment
+          const resolved = (covered * triColour + (4 - covered) * bgColour) / 4;
+          row.push(resolved.toFixed(2));
+        }
+        console.log(`edge at x = ${edgeX}, resolved pixel row: ${row.join("  ")}`);
+        console.log(`fragment shader ran ${shades} times for ${5 * 4} depth-tested samples`);
+      </primer-code>
+      <p>
+        Swap the shuffled order around: <em>every</em> permutation gives a different colour. Whatever
+        parallel adventure the fragments had upstream, the ROP must land them in the order you drew them.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! The hardware keeps order — YOU must supply it">
+      <p>
+        The ROP's ordering guarantee is narrower than it sounds. It promises that fragments blend in
+        <strong>submission order</strong> — the order your draw calls and triangles were issued. It does
+        <em>not</em> know which order is visually correct. Translucent geometry must be blended
+        <strong>back-to-front</strong> (the "over" operator assumes the far thing is already in the
+        buffer), so if your engine submits transparent objects unsorted, the ROP will faithfully,
+        deterministically blend them in the <em>wrong</em> order — glass behind smoke drawn as if in
+        front, every frame, no error raised. This is why engines sort transparent objects by depth every
+        frame, and why unsortable cases (intersecting or self-overlapping transparency) push people to
+        order-independent techniques that restore commutativity by changing the maths (additive blending,
+        weighted OIT). The referee enforces the order you gave it — garbage order in, deterministic
+        garbage out.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Why not just use atomics in the shader?">
+      <p>
+        GPU compute has atomic memory operations — so couldn't blending be a shader loop with atomics?
+        Arithmetically yes; practically it would fall off a cliff. An atomic RMW to memory costs tens of
+        cycles and serialises <em>at the memory</em>, exactly where contention is worst (every fragment of
+        an overlapping particle system hits the same pixels). And atomics give you atomicity but
+        <em>not order</em> — submission order would need a whole software ticketing scheme on top. The
+        ROP solves both structurally: screen-slice ownership means no two units ever race on a pixel, and
+        in-order queues make primitive order a property of the plumbing rather than a synchronisation
+        protocol. It is this module's recurring lesson in its purest form: the win of fixed-function
+        hardware is not doing <em>arithmetic</em> faster — it is making an expensive <em>guarantee</em>
+        (per-pixel atomic, ordered RMW at billions per second) fall out of physical structure for free.
+      </p>
+    </primer-vignette>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "ropQuiz@1": {
+          "intro": "ROPs own the framebuffer: ordered read–modify–write blending, per-sample MSAA with per-fragment shading, tile compression — parked beside the memory controllers.",
+          "blendQ": "Blend a fragment src = 0.{s} at α = 0.{a} over dst = 0.{d}: out = src·α + dst·(1−α). What is out?",
+          "blendOpaqueQ": "A fragment with src = 0.{s} arrives with α = 1.0 over dst = 0.{d}. What does out = src·α + dst·(1−α) equal?",
+          "resolveQ": "A 4× MSAA pixel's samples hold {a}, {b}, {c} and {d}. What value does the resolve write?",
+          "covQ": "At a triangle edge, {k} of a pixel's 4 samples are covered by a triangle of colour {s}; the other samples hold 0. What does the pixel resolve to?",
+          "testsQ": "A frame is {p} Mpixels with {n}× MSAA. How many million per-sample depth tests does one full-screen opaque layer trigger in the ROPs?",
+          "fillQ": "A GPU has {r} ROPs, each finishing 1 pixel per clock, at {c} MHz. What is its fill-rate ceiling in Mpixels/s?",
+          "shadeQ": "With 4× MSAA, a fragment fully covers a pixel. How many times does the fragment shader run, and how many samples get depth-tested?",
+          "shadeA": "The shader runs once; all 4 samples are depth-tested and written",
+          "shadeB": "The shader runs 4 times, once per sample",
+          "shadeC": "The shader runs once and only 1 sample is tested",
+          "shadeD": "The shader runs 4 times but only 1 sample is stored",
+          "whyFixQ": "Why is blending fixed-function hardware rather than shader code?",
+          "whyFixA": "It is a read–modify–write racing across thousands of concurrent fragments, and the API demands per-pixel primitive order — a guarantee ROP ownership and queues provide structurally",
+          "whyFixB": "Shader cores cannot perform multiply-add arithmetic",
+          "whyFixC": "Blending needs double-precision floats, which SMs lack",
+          "whyFixD": "Blending was forgotten when shaders became programmable",
+          "orderQ": "Two translucent fragments land on the same pixel in one frame. Which order does the hardware blend them in?",
+          "orderA": "The order their primitives were submitted in — the API guarantees it, however parallel the pipeline was in between",
+          "orderB": "Whichever fragment finished shading first",
+          "orderC": "Random order — blending is commutative so it doesn't matter",
+          "orderD": "Nearest first, using the depth buffer to sort",
+          "sortQ": "The ROP blends in submission order. Why must YOUR engine still sort transparent objects back-to-front?",
+          "sortA": "The 'over' blend is only visually correct far-to-near; the ROP faithfully applies whatever order you submit — including a wrong one",
+          "sortB": "Unsorted objects overflow the ROP's queues",
+          "sortC": "Sorting lets the ROP skip the read half of the read–modify–write",
+          "sortD": "Front-to-back sorting is required, to help early-Z reject blended fragments",
+          "whereQ": "Where do ROPs sit on the die, and why?",
+          "whereA": "Beside the L2 slices and memory controllers — their whole job is framebuffer read–modify–write traffic, so they live in the memory system",
+          "whereB": "Inside each SM, one ROP per warp scheduler",
+          "whereC": "On a separate chip next to the display connector",
+          "whereD": "Between the vertex fetch engine and the rasterizer",
+          "fbcQ": "How does framebuffer compression cut colour bandwidth?",
+          "fbcA": "Tiles are stored as a base colour plus small per-pixel deltas (lossless) — neighbouring pixels are usually similar, so the common case moves far fewer bytes",
+          "fbcB": "It stores the framebuffer as a JPEG each frame",
+          "fbcC": "It halves the screen resolution and upscales at scan-out",
+          "fbcD": "It discards every second frame's writes"
+        }
+      }
+    </script>
+
+    <primer-quiz name="ropQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/chip-design/graphics-hardware/the-texture-unit",
+      "computer-science/computer-graphics/shading-and-lighting"
+    ],
+    "completedDate": "2026-07-29"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  registerGeometryScene(
+    "ropScene",
+    ({ board, colors, step, sceneStrings }) => {
+      const fragC = colors.cat[0], ropC = colors.cat[1], fbC = colors.cat[2], edgeC = colors.cat[3], ink = colors.ink;
+
+      const box = (cx, cy, hw, hh, key, c) => {
+        board.create("polygon", [[cx - hw, cy - hh], [cx + hw, cy - hh], [cx + hw, cy + hh], [cx - hw, cy + hh]], {
+          fillColor: colors.bg, fillOpacity: 0.9, highlight: false, fixed: true,
+          borders: { strokeColor: c, strokeWidth: 2.5, highlight: false },
+          vertices: { visible: false },
+        });
+        board.create("text", [cx, cy, () => sceneStrings(key)], {
+          anchorX: "middle", anchorY: "middle", fontSize: 12, strokeColor: ink, fixed: true, highlight: false,
+        });
+      };
+      const arrow = (a, b, c) => board.create("arrow", [a, b], {
+        strokeColor: c, strokeWidth: 2.5, lastArrow: { type: 2, size: 6 }, highlight: false, fixed: true,
+      });
+      const txt = (x, y, key, c, size) =>
+        board.create("text", [x, y, () => sceneStrings(key)], {
+          anchorX: "middle", fontSize: size || 11, strokeColor: c, fixed: true, highlight: false,
+        });
+
+      // ── Base: the ROP and the framebuffer pixel it owns. ──
+      box(6.0, 4.6, 1.7, 0.6, "ropLbl", ropC);
+      box(10.7, 4.6, 1.5, 0.6, "fbLbl", fbC);
+      const dstVal = board.create("text", [10.7, 3.75, "dst = 0.20"], {
+        anchorX: "middle", fontSize: 12, strokeColor: fbC, cssStyle: "font-weight: bold;", fixed: true, highlight: false,
+      });
+
+      // Step 1: the fragment arrives.
+      step(sceneStrings("stepFrag"), () => {
+        box(1.6, 4.6, 1.6, 0.6, "fragLbl", fragC);
+        arrow([3.2, 4.6], [4.3, 4.6], fragC);
+      });
+
+      // Step 2: read dst.
+      step(sceneStrings("stepRead"), () => {
+        arrow([9.2, 4.85], [7.7, 4.85], fbC);
+        txt(8.45, 5.3, "readLbl", fbC);
+      });
+
+      // Step 3: the blend maths.
+      step(sceneStrings("stepMath"), () => {
+        board.create("text", [6.0, 3.5, "2.  0.80·0.25 + 0.20·0.75 = 0.35"], {
+          anchorX: "middle", fontSize: 13, strokeColor: ropC, cssStyle: "font-weight: bold;", fixed: true, highlight: false,
+        });
+      });
+
+      // Step 4: write back — the pixel's value changes.
+      step(sceneStrings("stepWrite"), () => {
+        arrow([7.7, 4.35], [9.2, 4.35], ropC);
+        txt(8.45, 3.95, "writeLbl", ropC);
+        board.create("text", [10.7, 3.2, "dst = 0.35"], {
+          anchorX: "middle", fontSize: 12, strokeColor: ropC, cssStyle: "font-weight: bold;", fixed: true, highlight: false,
+        });
+      });
+
+      // Step 5: MSAA — a magnified pixel with 4 rotated-grid samples, an edge covering 2.
+      step(sceneStrings("stepMsaa"), () => {
+        const x0 = 3.4, y0 = 0.0, s = 2.2;   // the magnified pixel square
+        board.create("polygon", [[x0, y0], [x0 + s, y0], [x0 + s, y0 + s], [x0, y0 + s]], {
+          fillOpacity: 0, highlight: false, fixed: true,
+          borders: { strokeColor: colors.line, strokeWidth: 2, highlight: false },
+          vertices: { visible: false },
+        });
+        // The triangle edge crossing the pixel (covers the left side).
+        board.create("segment", [[x0 + 1.5, y0 - 0.25], [x0 + 0.9, y0 + s + 0.25]], {
+          strokeColor: edgeC, strokeWidth: 3, highlight: false, fixed: true,
+        });
+        // Rotated-grid sample points: two covered (left of the edge), two not.
+        const samples = [[0.35, 0.3, true], [1.7, 0.55, false], [0.5, 1.45, true], [1.85, 1.8, false]];
+        for (const [dx, dy, cov] of samples)
+          board.create("point", [x0 + dx, y0 + dy], {
+            size: 3, color: cov ? edgeC : ink, fixed: true, highlight: false, name: "", withLabel: false,
+          });
+        txt(x0 + 1.1, y0 - 0.6, "resolveLbl", ink, 12);
+      });
+    },
+    { boundingbox: [-0.4, 6.0, 12.8, -1.3], title: () => makeStrings("ropScene")("title") },
+  );
+
+  registerQuiz("ropQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: (v) => sceneStrings("blendQ", v),
+      variables: "s=[2:9] d=[1:8] a=[2:8]",
+      constraints: "s != d",
+      answer: "(s*a+d*(10-a))/100",
+    },
+    {
+      // α = 1 → the source replaces the destination outright.
+      prompt: (v) => sceneStrings("blendOpaqueQ", v),
+      variables: "s=[2:9] d=[1:8]",
+      constraints: "s != d",
+      answer: "s/10",
+    },
+    {
+      // Sample values are multiples of 4, so the average is an integer.
+      prompt: (v) => sceneStrings("resolveQ", v),
+      variables: "a=[0,4,8,12] b=[16,20,24] c=[28,32,36] d=[40,44,48]",
+      answer: "(a+b+c+d)/4",
+    },
+    {
+      prompt: (v) => sceneStrings("covQ", v),
+      variables: "k=[1:3] s=[40,80,120,200]",
+      answer: "k*s/4",
+    },
+    {
+      prompt: (v) => sceneStrings("testsQ", v),
+      variables: "p=[1,2,4,8] n=[2,4,8]",
+      answer: "p*n",
+    },
+    {
+      prompt: (v) => sceneStrings("fillQ", v),
+      variables: "r=[16,32,64,96] c=[1000,1500,2000]",
+      answer: "r*c",
+    },
+    {
+      prompt: () => sceneStrings("shadeQ"),
+      options: [
+        { text: () => sceneStrings("shadeA"), correct: true },
+        { text: () => sceneStrings("shadeB"), correct: false },
+        { text: () => sceneStrings("shadeC"), correct: false },
+        { text: () => sceneStrings("shadeD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whyFixQ"),
+      options: [
+        { text: () => sceneStrings("whyFixA"), correct: true },
+        { text: () => sceneStrings("whyFixB"), correct: false },
+        { text: () => sceneStrings("whyFixC"), correct: false },
+        { text: () => sceneStrings("whyFixD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("orderQ"),
+      options: [
+        { text: () => sceneStrings("orderA"), correct: true },
+        { text: () => sceneStrings("orderB"), correct: false },
+        { text: () => sceneStrings("orderC"), correct: false },
+        { text: () => sceneStrings("orderD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("sortQ"),
+      options: [
+        { text: () => sceneStrings("sortA"), correct: true },
+        { text: () => sceneStrings("sortB"), correct: false },
+        { text: () => sceneStrings("sortC"), correct: false },
+        { text: () => sceneStrings("sortD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("whereQ"),
+      options: [
+        { text: () => sceneStrings("whereA"), correct: true },
+        { text: () => sceneStrings("whereB"), correct: false },
+        { text: () => sceneStrings("whereC"), correct: false },
+        { text: () => sceneStrings("whereD"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fbcQ"),
+      options: [
+        { text: () => sceneStrings("fbcA"), correct: true },
+        { text: () => sceneStrings("fbcB"), correct: false },
+        { text: () => sceneStrings("fbcC"), correct: false },
+        { text: () => sceneStrings("fbcD"), correct: false },
+      ],
+    },
+  ]);
+</script>
