@@ -32,6 +32,7 @@ import { initLocale, getLocale, DEFAULT_LOCALE, t, type LocaleId } from "./i18n.
 import { loadGraph } from "./graph-data.ts";
 import { mountConceptSearch as mountConceptSearchBox, SEARCH_BOX_CSS } from "./concept-search-box.ts";
 import { runProgressMigration } from "./progress-migration.ts";
+import { initWikiLookup } from "./wiki-selection.ts";
 
 /** Build the page shell once the DOM is ready. */
 async function render(): Promise<void> {
@@ -52,6 +53,9 @@ async function render(): Promise<void> {
   if (!body.querySelector("primer-menu")) {
     body.appendChild(document.createElement("primer-menu"));
   }
+
+  // Selecting a short phrase in the prose pops a Wikipedia-summary card (mounted once).
+  initWikiLookup();
 
   const meta = safeMeta();
   const id = conceptIdFromPath();

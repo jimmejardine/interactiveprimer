@@ -168,6 +168,9 @@ const en: Record<string, string> = {
   "menu.restore": "Restore progress",
   "card.readAloud": "Read aloud",
   "card.stopReading": "Stop reading",
+  "wiki.label": "Wikipedia summary",
+  "wiki.readMore": "Read on Wikipedia",
+  "wiki.close": "Close",
   "progress.restoreTitle": "Restore progress",
   "progress.restorePrompt":
     "You already have saved scores. Merge the file (keeping the most recent score per concept), or overwrite everything with the file?",
