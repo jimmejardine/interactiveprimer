@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Diffractive Networks and Metasurfaces</primer-title>
+
+    <primer-card>
+      <p>
+        In 2018 a group at UCLA (Aydogan Ozcan's lab) published a neural network you could knock off a
+        table. Five plastic layers, 3-D printed with carefully bumpy surfaces, stacked a few centimetres
+        apart. Shine a terahertz image of a handwritten digit through the stack and the transmitted light
+        converges onto one of ten detector spots — the network's answer, correct about 90% of the time on
+        MNIST. No processor, no memory, no power supply, no clock. The multiplications happen <em>while
+        the light travels</em>, in the physics of
+        <primer-ref to="physics/waves/diffraction">diffraction</primer-ref> itself; the trained weights are
+        literally the thickness profile of the plastic. They called it a <strong>diffractive deep neural
+        network</strong> — D²NN — and it is the purest expression of an idea this course has circled since
+        the 4f correlator: <em>propagation is computation</em>. Inference at the speed of light, for the
+        energy cost of the illumination. The catch is equally pure, and this lesson takes both halves
+        seriously.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>How a sheet of plastic multiplies</h2>
+      <p>
+        Unroll what happens between two layers. By Huygens' principle, every point of a wavefront acts as
+        a secondary source radiating onward — so every pixel of layer <primer-math>\ell</primer-math>
+        illuminates <em>every</em> pixel of layer <primer-math>\ell+1</primer-math>. That is a dense,
+        all-to-all linear map, applied by geometry at no cost: for layers of
+        <primer-math>N</primer-math> pixels, free space implements the full
+        <primer-math>N \times N</primer-math> complex matrix of Fresnel propagation kernels. The layer
+        itself adds the trainable part: each pixel's printed thickness <primer-math>t</primer-math> delays
+        the wave by a phase
+        <primer-math>\varphi = 2\pi (n - 1)\, t / \lambda</primer-math>, so the field leaving pixel
+        <primer-math>k</primer-math> is multiplied by <primer-math>e^{i\varphi_k}</primer-math>. One layer
+        of a D²NN is therefore
+      </p>
+      <primer-math display>u_{\ell+1}(x) \;=\; \sum_{x'} \underbrace{w(x, x')}_{\text{diffraction}}\;
+        \underbrace{e^{\,i\varphi(x')}}_{\text{printed phase}}\; u_{\ell}(x'),</primer-math>
+      <p>
+        a fixed fully-connected matrix sandwiched with trainable phases — a neural network layer written
+        in optics. Training happens entirely in simulation: model the stack in software, backpropagate
+        through the (perfectly differentiable) diffraction equations to choose every pixel's phase, then
+        <em>print the result</em>. A worked number for scale: layers of
+        <primer-math>200 \times 200</primer-math> pixels have
+        <primer-math>N = 4\times10^{4}</primer-math> neurons each, so a single inter-layer hop applies
+        <primer-math>N^2 = 1.6\times10^{9}</primer-math> complex connection weights — and a wavefront
+        crosses a five-layer, 15 cm stack in half a nanosecond. No electronic layer of any kind touches
+        those 8 billion multiplies.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Build one: a 1-D diffractive classifier</h2>
+      <p>
+        The program below is a complete diffractive network small enough to read: sixteen pixels per
+        layer, two trainable phase masks, Fresnel propagation between them. It must distinguish two input
+        beams that have <em>identical intensity everywhere</em> — pattern A has all pixels in phase, B
+        alternates phase pixel to pixel — so no single detector could ever tell them apart; only
+        diffraction, which converts phase structure into position, can. "Training" is a few hundred rounds
+        of hill-climbing on the mask phases (the print-shop version of what UCLA did with backprop),
+        rewarding masks that steer A's energy onto a left-hand detector zone and B's onto a right-hand
+        one:
+      </p>
+      <primer-code run>
+        // A 1-D diffractive network: two trainable phase masks + Fresnel diffraction.
+        // Pattern A: all pixels in phase.  Pattern B: alternating phase.
+        // Their intensities are IDENTICAL — only diffraction can tell them apart.
+        const N = 16;
+        type C = { re: number; im: number };
+        const c = (re: number, im = 0): C => ({ re, im });
+        const mul = (a: C, b: C): C => c(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re);
+        const cis = (p: number): C => c(Math.cos(p), Math.sin(p));
+
+        let seed = 42;                                   // deterministic "randomness"
+        const rand = (): number => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+
+        // Fresnel kernel: every pixel of one layer talks to EVERY pixel of the next.
+        const kernel: C[][] = [];
+        for (let j = 0; j &lt; N; j++) {
+          kernel.push([]);
+          for (let i = 0; i &lt; N; i++) {
+            const d = (j - i) * 0.5;
+            kernel[j].push(cis(0.35 * d * d));           // quadratic (Fresnel) phase
+          }
+        }
+
+        function propagate(u: C[], mask: number[]): C[] {
+          const out: C[] = [];
+          for (let j = 0; j &lt; N; j++) {
+            let acc = c(0);
+            for (let i = 0; i &lt; N; i++) {
+              const w = mul(u[i], cis(mask[i]));         // printed phase, then diffraction
+              const k = kernel[j][i];
+              acc = c(acc.re + w.re * k.re - w.im * k.im, acc.im + w.re * k.im + w.im * k.re);
+            }
+            out.push(c(acc.re / N, acc.im / N));
+          }
+          return out;
+        }
+
+        const A: C[] = [], B: C[] = [];
+        for (let i = 0; i &lt; N; i++) { A.push(c(1)); B.push(c(i % 2 === 0 ? 1 : -1)); }
+
+        const zoneEnergy = (u: C[], lo: number, hi: number): number => {
+          let e = 0;
+          for (let i = lo; i &lt; hi; i++) e += u[i].re * u[i].re + u[i].im * u[i].im;
+          return e;
+        };
+
+        function forward(u: C[], m1: number[], m2: number[]): [number, number] {
+          const out = propagate(propagate(u, m1), m2);
+          return [zoneEnergy(out, 1, 7), zoneEnergy(out, 9, 15)];   // left, right detectors
+        }
+
+        function score(m1: number[], m2: number[]): number {        // worst-case margin:
+          const [aL, aR] = forward(A, m1, m2);                      // A must win LEFT and
+          const [bL, bR] = forward(B, m1, m2);                      // B must win RIGHT
+          return Math.min(aL - aR, bR - bL);
+        }
+
+        const m1: number[] = new Array(N).fill(0);
+        const m2: number[] = new Array(N).fill(0);
+        console.log("untrained margin: " + score(m1, m2).toFixed(3));
+
+        let best = score(m1, m2);
+        for (let it = 0; it &lt; 600; it++) {             // "training" = sculpting the masks
+          const m = rand() &lt; 0.5 ? m1 : m2;
+          const i = Math.floor(rand() * N);
+          const old = m[i];
+          m[i] += (rand() - 0.5) * 2;
+          const s = score(m1, m2);
+          if (s > best) best = s; else m[i] = old;
+        }
+        console.log("trained margin:   " + best.toFixed(3));
+
+        const [aL, aR] = forward(A, m1, m2);
+        console.log("A → left " + aL.toFixed(3) + ", right " + aR.toFixed(3) +
+          (aL > aR ? "   classified A ✓" : "   WRONG"));
+        const [bL, bR] = forward(B, m1, m2);
+        console.log("B → left " + bL.toFixed(3) + ", right " + bR.toFixed(3) +
+          (bR > bL ? "   classified B ✓" : "   WRONG"));
+      </primer-code>
+      <p>
+        Run it: the untrained masks can't separate the patterns at all (margin ≈ 0), and after training
+        each pattern lands decisively on its own detector. Once the loop finishes, the two
+        <code>m1</code>/<code>m2</code> arrays <em>are</em> the network — in the physical version you
+        would print them as thickness profiles, and the classification would thereafter cost nothing,
+        forever.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Metasurfaces: calculus in a coat of paint</h2>
+      <p>
+        The printed layers above are wavelength-thick bumps; <strong>metasurfaces</strong> shrink the idea
+        to a single layer of sub-wavelength pillars, each pillar a tiny antenna whose geometry sets the
+        local phase — an arbitrary phase profile in a film thinner than the wavelength. Beyond replacing
+        bulk lenses, metasurfaces can be designed as <em>mathematical operators</em>. Recall from Fourier
+        optics that differentiation is a multiplication in the frequency domain:
+        <primer-math>\partial u/\partial x \;\leftrightarrow\; i k_x\, \tilde u(k_x)</primer-math>. A
+        surface engineered so its transmission grows linearly with the angle (i.e. spatial frequency) of
+        the incoming plane-wave component implements exactly that multiplication — it hands you the
+        spatial derivative of the incident image, optically. The showcase application is
+        <strong>edge detection</strong>: derivatives are large exactly at intensity boundaries, so a
+        camera looking through such a "differentiator glass" records an outline image directly — the first
+        layer of a convolutional network, executed by a passive coating before any photon reaches the
+        sensor. Laplacian (<primer-math>k^2</primer-math>) surfaces and even meta-structures that solve
+        small integral equations in the steady state of their internal reflections have been demonstrated
+        at proof-of-concept scale.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! It is almost all linear — and it is frozen">
+      <p>
+        Two sober truths keep D²NN claims honest. <strong>First, the linearity trap.</strong> Diffraction
+        is linear, and a phase mask is linear in the field — so a cascade of any number of layers
+        collapses, mathematically, to a <em>single</em> complex matrix. In field-space, a "deep"
+        diffractive network is a one-layer linear network; calling it deep does not grant it the
+        expressive power of nonlinear depth. Where does its (real) classification ability come from? The
+        weights are complex and physically constrained (multiple masks parameterise matrices a single mask
+        cannot reach), and the detector at the end measures <primer-math>|u|^2</primer-math> — one
+        quadratic nonlinearity at the output. That is enough for useful vision tasks, and fundamentally
+        less than a nonlinear deep network — there is no optical ReLU between the plastic sheets, for
+        exactly the reasons the
+        <primer-ref soft to="computer-science/photonic-computing/photonic-ai/the-nonlinearity-problem">nonlinearity
+        problem</primer-ref> lesson made painful. <strong>Second, the rigidity trap.</strong> Passive
+        zero-energy inference is bought by baking the weights into matter: retraining means reprinting,
+        there is no fine-tuning a lump of plastic, and micron-scale layer misalignment degrades the
+        computation. Demonstrated: printed THz digit classifiers, metasurface edge detectors, single-shot
+        optical logic demos. Speculative: reconfigurable, visible-light, camera-integrated diffractive
+        processors competing with silicon on real workloads.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="The zero-energy inference budget">
+      <p>
+        How seriously should you take "computes for free"? Thermodynamically, quite seriously: a passive
+        stack adds <em>no</em> energy of its own — the only energy in the system is the illumination, and
+        if the scene is already lit (sunlight, a headlamp, a THz source you needed anyway), the marginal
+        cost of the computation truly is zero joules per inference, with latency set by light crossing
+        centimetres: sub-nanosecond. The fair accounting charges the <em>boundaries</em>: the source, and
+        the camera or detector array that reads the answer — the same electronic-photonic frontier this
+        course keeps meeting. That is why the natural home for diffractive optics is not "replace the
+        GPU" but <em>preprocessing where light already exists</em>: an edge-detecting or
+        feature-extracting front end fused onto a sensor, compressing the scene optically so the
+        electronics behind it can be smaller, slower and cooler. A lens has always been a free Fourier
+        transform bolted to every camera; diffractive networks generalise that dividend — compute smuggled
+        into the optics you were going to build anyway.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Where this goes next — and where the module lands</h2>
+      <p>
+        This closes the emerging-photonics tour: spiking lasers computing in time, phase-change cells
+        remembering in matter, meshes reprogrammed in software, combs multiplying channels in frequency,
+        and finally networks printed into space itself. Five different answers to "what else can light
+        do?", every one of them ultimately bounded by the same choke point: getting signals into the
+        optical domain and answers back out of it. That frontier — the
+        <primer-ref soft to="computer-science/photonic-computing/systems/the-electronic-photonic-interface">electronic–photonic
+        interface</primer-ref> — is where the systems module begins, and where every architecture in this
+        course will be made to pay its honest, end-to-end bill.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "d2nnQuiz@1": {
+          "intro": "A D²NN: printed phase layers + free-space diffraction between them. Each pixel's thickness sets a phase e^{iφ}; Huygens propagation connects every pixel to every pixel of the next layer; detection at the end measures |u|².",
+          "neuronsQ": "A diffractive layer is a square array of {n} × {n} phase pixels. How many 'neurons' does the layer contain?",
+          "connQ": "By Huygens' principle, a single pixel of one diffractive layer is connected to how many pixels of the next layer?",
+          "connRight": "All of them — every point radiates secondary wavelets that reach the entire next layer, a dense all-to-all linear map applied by free space",
+          "connFour": "Its four nearest neighbours, like a convolution",
+          "connOne": "Exactly one — the pixel directly in line with it",
+          "connZone": "Only pixels within one wavelength of it",
+          "phaseQ": "A layer is printed in material of refractive index 1.5. What pixel thickness gives a π phase shift at λ = {lam} nm? (Δφ = 2π(n−1)t/λ, in nm)",
+          "energyQ": "What is the marginal energy cost per inference of a passive printed D²NN, once the scene is illuminated?",
+          "energyRight": "Essentially zero — the stack adds no energy; only the illumination source and the detector at the boundaries consume power",
+          "energyMac": "One femtojoule per multiply–accumulate",
+          "energyGpu": "Comparable to a GPU, since the same math is done",
+          "energyHeat": "It grows with the number of layers, which each dissipate heat",
+          "linQ": "Mathematically, what does a cascade of phase masks and diffraction (with no nonlinear material) collapse to?",
+          "linRight": "A single complex linear operator on the field — the 'depth' adds physical parameterisation and constraints, not nonlinear expressive power; the only nonlinearity is the |u|² detection at the end",
+          "linDeep": "A genuinely nonlinear deep network, one activation per layer",
+          "linConv": "A single convolution with a 3×3 kernel",
+          "linNothing": "The identity — diffraction undoes the masks",
+          "derivQ": "A metasurface performs optical spatial differentiation. Which Fourier-domain operation is it implementing?",
+          "derivRight": "Multiplying each plane-wave component by ik_x — the Fourier derivative theorem — so transmission grows with spatial frequency and edges come out bright",
+          "derivShift": "Shifting the spectrum by a constant offset",
+          "derivAbs": "Taking the absolute value of the spectrum",
+          "derivDc": "Blocking all high spatial frequencies",
+          "rigidQ": "After deployment, the task changes and the D²NN must be retrained. What does that require?",
+          "rigidRight": "Re-optimising the phases in simulation and physically reprinting the layers — the weights are baked into the material and cannot be updated in place",
+          "rigidFlash": "Flashing new weights over a configuration port",
+          "rigidLight": "Briefly illuminating it with a stronger training beam",
+          "rigidAuto": "Nothing; diffractive networks adapt on their own",
+          "huygensQ": "What physical principle 'wires up' the layers of a diffractive network?",
+          "huygensRight": "Huygens' principle — every point of the wavefront radiates secondary wavelets onward, so propagation itself applies a fully-connected complex matrix",
+          "huygensSnell": "Snell's law of refraction at each interface",
+          "huygensDoppler": "The Doppler effect between moving layers",
+          "huygensPe": "The photoelectric effect in the plastic",
+          "latQ": "Light traverses a diffractive stack with a total optical path of {d} cm. What is the inference latency, in ps?",
+          "statusQ": "Which diffractive-optics claim is DEMONSTRATED rather than speculative?",
+          "statusRight": "Printed terahertz diffractive classifiers reaching ~90% on MNIST digits, and metasurface edge-detection imaging",
+          "statusGpu": "Diffractive processors outperforming GPUs on large language models",
+          "statusVis": "Fully reconfigurable visible-light diffractive networks in consumer cameras",
+          "statusNl": "Printed layers providing a strong optical ReLU between stages",
+          "nlQ": "Why is there no activation function between the layers of a printed diffractive network?",
+          "nlRight": "The layers are passive linear phase elements — at ordinary light levels no material provides a useful nonlinearity, the same nonlinearity problem that haunts all photonic neural hardware",
+          "nlChoice": "Designers omit it because it would slow the light down",
+          "nlHidden": "There is one; the plastic's absorption acts as a ReLU",
+          "nlDigital": "Activations are computed digitally between layers",
+          "appQ": "What is the most natural near-term role for diffractive and metasurface computing?",
+          "appRight": "Passive optical preprocessing fused onto sensors — edge detection and feature extraction where light already exists, shrinking the electronics behind the camera",
+          "appGpu": "Drop-in replacement for datacenter GPUs",
+          "appMem": "High-density long-term data storage",
+          "appClock": "Distributing clock signals across chips"
+        }
+      }
+    </script>
+
+    <primer-quiz name="d2nnQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/photonic-computing/emerging/frequency-combs-for-computing",
+      "physics/waves/diffraction"
+    ],
+    "completedDate": "2026-07-30"
+  }
+</script>
+
+<script type="module">
+  import { registerQuiz } from "primer";
+
+  registerQuiz("d2nnQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // n×n pixels → n² neurons.
+      prompt: (v) => sceneStrings("neuronsQ", v),
+      variables: "n=[15:40]",
+      answer: "n ^ 2",
+    },
+    {
+      prompt: () => sceneStrings("connQ"),
+      options: [
+        { text: () => sceneStrings("connRight"), correct: true },
+        { text: () => sceneStrings("connFour"), correct: false },
+        { text: () => sceneStrings("connOne"), correct: false },
+        { text: () => sceneStrings("connZone"), correct: false },
+      ],
+    },
+    {
+      // π shift with n = 1.5: (n−1)t = λ/2 → t = λ.
+      prompt: (v) => sceneStrings("phaseQ", v),
+      variables: "lam=[600,750,900]",
+      answer: "lam",
+    },
+    {
+      prompt: () => sceneStrings("energyQ"),
+      options: [
+        { text: () => sceneStrings("energyRight"), correct: true },
+        { text: () => sceneStrings("energyMac"), correct: false },
+        { text: () => sceneStrings("energyGpu"), correct: false },
+        { text: () => sceneStrings("energyHeat"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("linQ"),
+      options: [
+        { text: () => sceneStrings("linRight"), correct: true },
+        { text: () => sceneStrings("linDeep"), correct: false },
+        { text: () => sceneStrings("linConv"), correct: false },
+        { text: () => sceneStrings("linNothing"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("derivQ"),
+      options: [
+        { text: () => sceneStrings("derivRight"), correct: true },
+        { text: () => sceneStrings("derivShift"), correct: false },
+        { text: () => sceneStrings("derivAbs"), correct: false },
+        { text: () => sceneStrings("derivDc"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("rigidQ"),
+      options: [
+        { text: () => sceneStrings("rigidRight"), correct: true },
+        { text: () => sceneStrings("rigidFlash"), correct: false },
+        { text: () => sceneStrings("rigidLight"), correct: false },
+        { text: () => sceneStrings("rigidAuto"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("huygensQ"),
+      options: [
+        { text: () => sceneStrings("huygensRight"), correct: true },
+        { text: () => sceneStrings("huygensSnell"), correct: false },
+        { text: () => sceneStrings("huygensDoppler"), correct: false },
+        { text: () => sceneStrings("huygensPe"), correct: false },
+      ],
+    },
+    {
+      // t = d/c: d cm → (d/3)·100 ps.
+      prompt: (v) => sceneStrings("latQ", v),
+      variables: "d=[3,6,9,12]",
+      answer: "d * 100 / 3",
+    },
+    {
+      prompt: () => sceneStrings("statusQ"),
+      options: [
+        { text: () => sceneStrings("statusRight"), correct: true },
+        { text: () => sceneStrings("statusGpu"), correct: false },
+        { text: () => sceneStrings("statusVis"), correct: false },
+        { text: () => sceneStrings("statusNl"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("nlQ"),
+      options: [
+        { text: () => sceneStrings("nlRight"), correct: true },
+        { text: () => sceneStrings("nlChoice"), correct: false },
+        { text: () => sceneStrings("nlHidden"), correct: false },
+        { text: () => sceneStrings("nlDigital"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("appQ"),
+      options: [
+        { text: () => sceneStrings("appRight"), correct: true },
+        { text: () => sceneStrings("appGpu"), correct: false },
+        { text: () => sceneStrings("appMem"), correct: false },
+        { text: () => sceneStrings("appClock"), correct: false },
+      ],
+    },
+  ]);
+</script>

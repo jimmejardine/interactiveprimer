@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>The Photonic Design Flow</primer-title>
+
+    <primer-card>
+      <p>
+        The parts bin is full: MZIs, phase shifters, rings, modulators, detectors, lasers. How does anyone
+        turn a folder of ideas into a diced, packaged, working photonic chip? The answer is a design flow
+        transplanted, organ by organ, from electronics — the same foundry model, the same GDSII masks, the
+        same shuttle runs that the
+        <primer-ref to="computer-science/chip-design/back-end/packaging-and-chiplets">chip-design
+        world</primer-ref> perfected — but with several organs conspicuously missing. Electronic design rides
+        on a tower of abstraction: RTL is <primer-ref to="computer-science/chip-design/front-end/logic-synthesis-and-technology-mapping">synthesised</primer-ref>
+        into gates, gates into standard cells, cells placed and routed by algorithms, billions of devices
+        that a human never looks at individually. Photonics has the <em>bottom</em> of that tower — foundries,
+        PDKs, mask tooling — and almost none of the top: no HDL, no synthesis, no standard cell. A photonic
+        chip has tens to thousands of components, every one placed by a person or a script that a person
+        wrote, every geometric micron of it meaningful. This closing lesson walks the flow end to end and
+        marks, honestly, where the pavement stops.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "designFlow": {
+          "title": "The photonic design flow",
+          "design": "Design: schematic capture from the PDK's component library, plus circuit-level simulation",
+          "layout": "Layout: components become curved geometry in a GDSII file; DRC checks bend radii and spacings",
+          "fab": "Fabrication: the design shares an MPW shuttle wafer with dozens of other projects — months per iteration",
+          "test": "Test and packaging: wafer-level optical probing through grating couplers, then dicing, fibre attach, wire bond"
+        }
+      }
+    </script>
+    <primer-card>
+      <h2>The flow at a glance</h2>
+      <primer-geometry scene="designFlow" caption="The photonic design flow as a pipeline: design (PDK components and circuit simulation) feeds layout (GDSII geometry and design-rule checking), which is fabricated on a shared MPW shuttle run, and finally tested at wafer level and packaged with attached fibres."></primer-geometry>
+      <p>
+        Four stations, one loop: when the tested chip disagrees with the simulation — and on a first spin it
+        will, somewhere — the loop closes back to design, and the months start again. Everything in this
+        lesson is about making each pass count.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>PDKs and component libraries</h2>
+      <p>
+        As in electronics, you do not design <em>for a process in general</em> — you design for one foundry's
+        <strong>process design kit</strong>. A photonic PDK contains the layer stack (silicon thickness, etch
+        depths, doping implants, the Ge and heater modules), the design rules, and — its crown jewels — a
+        <strong>component library</strong>: parameterised, silicon-validated building blocks. The foundry has
+        fabricated and measured its grating couplers, splitters, phase shifters, ring filters and detectors
+        across process corners, and publishes each as a black box with a layout cell and a measured
+        <strong>S-parameter model</strong> (ports in, ports out, wavelength-dependent complex amplitudes —
+        the same formalism as microwave engineering). The professional habit this teaches is humility: your
+        design's novelty budget is finite, so spend it on the one custom device your idea actually needs and
+        take everything else, gratefully, from the library. A circuit made of validated parts fails only in
+        its new part — a circuit made of home-rolled couplers fails everywhere at once.
+      </p>
+      <p>
+        Simulation splits into two regimes that must not be confused. <strong>FDTD</strong>
+        (finite-difference time-domain) solves Maxwell's equations on a grid through one component — exact,
+        and exactly unaffordable at chip scale, since memory and time grow with volume over
+        <primer-math>\Delta x^3</primer-math>: halving the grid step costs 8× the memory, and a whole chip
+        at nanometre resolution would need more RAM than exists. So the flow uses FDTD once per novel
+        component to <em>extract</em> its S-matrix, then simulates the full chip at <strong>circuit
+        level</strong>: multiply and cascade the S-matrices, sweep wavelength, done in seconds. It is the
+        photonic incarnation of "characterise the cell once, then compose" — with the phasor and matrix
+        arithmetic of this module doing the composing.
+      </p>
+      <primer-code run>
+        // Circuit-level thinking in one page: cascade a link's components at 1550 nm.
+        // Each part contributes loss (dB); the laser sets the input power (dBm).
+        type Part = { name: string; lossDb: number };
+        const link: Part[] = [
+          { name: "laser -> coupler",   lossDb: 1.5 },
+          { name: "modulator (IL)",     lossDb: 3.0 },
+          { name: "waveguide, 2 cm",    lossDb: 2 * 1.5 },   // 1.5 dB/cm
+          { name: "ring filter",        lossDb: 0.5 },
+          { name: "chip -> fibre",      lossDb: 1.5 },
+        ];
+
+        let p = 10;                                          // 10 dBm from the laser
+        console.log("launch: " + p.toFixed(1) + " dBm");
+        for (const part of link) {
+          p -= part.lossDb;
+          console.log("after " + part.name + ": " + p.toFixed(1) + " dBm");
+        }
+
+        const sensitivity = -18;                             // receiver needs -18 dBm
+        console.log("margin over receiver: " + (p - sensitivity).toFixed(1) + " dB");
+      </primer-code>
+      <p>
+        That ten-line "simulation" — losses add in dB, margin is what's left — is genuinely how first-pass
+        link budgets are done, and running out of margin on paper is a great deal cheaper than running out
+        on silicon.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Layout, DRC, and the shuttle to the fab</h2>
+      <p>
+        Layout produces the same artifact electronics ships: a <strong>GDSII</strong> file, polygons on
+        numbered layers, one per mask step. But photonic geometry is a different dialect. Electronic layout
+        is Manhattan — rectangles on a grid; photonic layout is <em>curves</em> — spirals, adiabatic tapers,
+        S-bends, ring gaps — drawn as many-sided polygons on a nanometre grid, usually generated by Python
+        frameworks rather than drawn by hand. Design-rule checking changes dialect too: alongside min-width
+        and min-space, photonic DRC polices <strong>bend radii</strong> (too tight radiates light into the
+        substrate), coupler gaps, and grid-snapping artifacts on curves. What it cannot police is function:
+        photonics has only a weak analogue of electronics' LVS-and-extraction safety net, so "DRC clean"
+        means <em>manufacturable</em>, not <em>working</em>.
+      </p>
+      <p>
+        Then the design goes to the fab — almost never alone. A full mask set costs from hundreds of
+        thousands of dollars upward, so prototypes ride <strong>multi-project-wafer (MPW) shuttles</strong>:
+        the foundry tiles dozens of customers' designs onto one reticle, everyone pays for their few square
+        millimetres, and the shuttle departs on a published schedule a few times a year. A seat costs
+        thousands rather than millions; the price is <em>cadence</em> — miss the tape-in date or botch the
+        design, and the next boat is months away. Design reviews before a shuttle deadline have the
+        atmosphere of a launch window.
+      </p>
+      <p>
+        Months later the wafers return, and the flow's most photonic-specific stage begins:
+        <strong>test and packaging</strong>. Wafer-level testing works by pointing fibre probes at grating
+        couplers — the one coupler type that fires vertically, so chips can be measured <em>before
+        dicing</em>, thousands of structures overnight on an automated prober. Packaging is where photonics
+        still hurts: a fibre must be glued to the chip edge holding sub-micron alignment through decades of
+        thermal cycling, lasers must be attached or bonded, the electronics wire-bonded alongside — and this
+        assembly, not the silicon, commonly dominates unit cost. Electronics solved its packaging with
+        solder-ball self-alignment decades ago; photonics is still buying its way out one fibre at a time.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="What does a seat on a shuttle actually cost?">
+      <p>
+        Rough current numbers, for calibration: a passive-silicon MPW seat of ~25&nbsp;mm² runs on the order
+        of €10–20k through brokers like Europractice or CMP on foundry platforms such as imec, AMF, AIM
+        Photonics or GlobalFoundries; add active layers (junctions, Ge detectors, heaters) and the seat
+        multiplies; a dedicated full-mask run starts in the high hundreds of thousands. The shuttle model is
+        the same social technology that MOSIS pioneered for student CMOS chips in the 1980s — amortise the
+        mask set across everyone on board — and it is quietly the reason university groups can afford to tape
+        out photonic processors at all. The strategic consequence of "a few boats per year" is a design
+        culture electronics has largely forgotten: you cannot iterate your way out of carelessness, so
+        photonic groups over-instrument every tape-out — de-embedding structures, test rings, parameter
+        sweeps of every gap and width — packing the margins of their seat with the experiments that will
+        make the <em>next</em> seat's design right first time.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! In photonics, the layout is the device">
+      <p>
+        An electronics habit that must be surrendered at the border: treating layout as mere implementation
+        of a schematic that carries the real meaning. In a photonic chip the geometry <em>is</em> the
+        physics. A waveguide's width sets its effective index directly — a 1&nbsp;nm width error shifts
+        <primer-math>n_{\text{eff}}</primer-math> enough to move a ring resonance by a full linewidth
+        (~100&nbsp;pm), which is why no two nominally identical rings on one chip resonate at the same
+        wavelength, and why every ring in Module 5's weight banks carries a trimming heater. A coupler gap
+        drawn 10&nbsp;nm wide changes its splitting ratio; a bend drawn slightly tight radiates a fraction
+        of a dB that a schematic will never show. There is no synthesis tool re-deriving your geometry from
+        intent, and only weak extraction checking that geometry against intent afterwards. The mitigations
+        are cultural as much as technical: take library cells wherever possible, simulate <em>with</em> the
+        PDK's measured corner data, design for post-fab trimming, and treat every hand-drawn nanometre as a
+        design decision — because the fab will faithfully manufacture your mistakes at nanometre precision.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Module complete — where this goes next</h2>
+      <p>
+        This module built the parts and, now, the pipeline that turns parts into chips. Notice what the flow
+        lacks by electronics' standards — synthesis, abstraction layers, mature packaging, self-correcting
+        toolchains — because the shortfall is not a footnote: it is a standing tax on every photonic system
+        in the rest of this course, paid in tape-out months and calibration heaters. From here the course
+        stops building components and starts <em>computing</em> with them: Module 4 begins with the
+        <primer-ref soft to="computer-science/photonic-computing/meshes/the-beamsplitter-as-a-matrix">beamsplitter
+        read as a matrix</primer-ref>, and the MZIs of this module — laid out, fabricated, packaged and
+        locked by exactly the flow you now know — become the tiles of programmable linear algebra.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "flowQuiz@1": {
+          "intro": "The photonic flow: PDK component libraries + circuit-level S-matrix simulation → GDSII layout + DRC → MPW shuttle fabrication → wafer test via grating couplers → packaging. Losses in dB add along a link.",
+          "budgetQ": "A laser launches {p} dBm. The modulator's insertion loss is {a} dB and all other on-chip losses total {b} dB. The power reaching the output fibre, in dBm, is…",
+          "fdtdQ": "An FDTD simulation's grid step Δx is made {f}× finer in all three dimensions. Its memory requirement grows by a factor of…",
+          "mpwQ": "A mask-and-fab run costs {c} k$ and an MPW shuttle splits it across {n} equal seats. Each seat costs how many k$?",
+          "pdkQ": "The crown jewels of a photonic PDK are…",
+          "pdkRight": "A library of silicon-validated, parameterised components — each a layout cell plus a measured S-parameter model — alongside the layer stack and design rules",
+          "pdkHdl": "An HDL compiler that synthesises photonic circuits from code",
+          "pdkLaser": "A license to the foundry's laser patents",
+          "pdkMask": "The finished masks of previous customers",
+          "gdsQ": "The GDSII file handed to the mask shop contains…",
+          "gdsRight": "Pure geometry: polygons on numbered layers, one set per mask step — in photonics, curved shapes discretised onto a nanometre grid",
+          "gdsNetlist": "The circuit netlist and its S-parameter models",
+          "gdsCode": "The Python source that generated the design",
+          "gdsTest": "The wafer-test measurement plan",
+          "synthQ": "Why is there no logic-synthesis step in the photonic flow?",
+          "synRight": "There's no gate-level abstraction to synthesise into: a photonic circuit is tens to thousands of physical components whose continuous geometry is the design, not billions of identical switching cells",
+          "synSoon": "There is one — photonic HDL compilers are standard",
+          "synSecret": "Synthesis exists but foundries keep it proprietary",
+          "synSlow": "Synthesis would work but runs too slowly on curves",
+          "simSplitQ": "The standard division of simulation labour in photonics is…",
+          "ssRight": "FDTD solves Maxwell's equations once per novel component to extract its S-matrix; the full chip is then simulated by cascading S-matrices at circuit level",
+          "ssAll": "FDTD simulates the entire chip at nanometre resolution",
+          "ssNone": "Circuit simulators solve Maxwell's equations directly",
+          "ssSpice": "Photonic chips are simulated in SPICE as RC networks",
+          "gratingQ": "Why are grating couplers the key to wafer-scale photonic testing?",
+          "grRight": "They couple light vertically, so fibre probes can measure circuits anywhere on an undiced wafer — no polished chip edge needed",
+          "grLoss": "They are the lowest-loss coupler available",
+          "grBand": "They work across the widest wavelength range",
+          "grCheap": "They require no lithography to fabricate",
+          "packQ": "The stage that commonly dominates the unit cost of a photonic product is…",
+          "pkRight": "Packaging — attaching fibres with sub-micron alignment that must survive thermal cycling, plus laser attach and electrical assembly",
+          "pkMask": "The GDSII license fee",
+          "pkSim": "FDTD compute time",
+          "pkDice": "Dicing the wafer into chips",
+          "drcQ": "Photonic DRC differs from electronic DRC by additionally policing things like…",
+          "drcRight": "Bend radii and coupler gaps — geometry that would radiate or mis-couple light — while still failing to guarantee the circuit actually works",
+          "drcTiming": "Setup and hold timing margins",
+          "drcPower": "IR drop on the power grid",
+          "drcLogic": "Boolean equivalence with the RTL",
+          "widthQ": "A ring resonator's waveguide is fabricated 1 nm wider than drawn. The realistic consequence is…",
+          "wdRight": "Its n_eff shifts enough to move the resonance by roughly a linewidth — which is why nominally identical rings never match and each carries a trimming heater",
+          "wdNone": "Nothing — 1 nm is far below any meaningful tolerance",
+          "wdDead": "The ring stops guiding light entirely",
+          "wdFaster": "The ring becomes measurably faster",
+          "matureQ": "Relative to electronic design, the photonic flow is LEAST mature in…",
+          "mtRight": "The top of the stack: no synthesis or abstraction layers, weak extraction/verification, and packaging that hasn't been standardised — the fabs and mask tooling underneath are borrowed and solid",
+          "mtMask": "Mask-making, which photonics must reinvent",
+          "mtLitho": "Lithography, which cannot print curves",
+          "mtNothing": "Nothing — the flows are equally mature end to end"
+        }
+      }
+    </script>
+
+    <primer-quiz name="flowQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/photonic-computing/building-blocks/lasers-on-chip",
+      "computer-science/chip-design/back-end/packaging-and-chiplets"
+    ],
+    "completedDate": "2026-07-30"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── The design-flow pipeline: four stations and a feedback loop. ──
+  registerGeometryScene("designFlow", ({ board, colors, step, sceneStrings, label }) => {
+    const boxStyle = (fill) => ({
+      borders: { strokeColor: colors.line, strokeWidth: 1.5 },
+      fillColor: fill, fillOpacity: 0.25, vertices: { visible: false },
+    });
+    const arr = { strokeColor: colors.line, strokeWidth: 2.5, lastArrow: { type: 2, size: 6 } };
+    const box = (x, fill) =>
+      board.create("polygon", [[x, -0.8], [x + 2.6, -0.8], [x + 2.6, 0.8], [x, 0.8]], boxStyle(fill));
+
+    step(sceneStrings("design"), () => {
+      box(-6.6, colors.cat[0]);
+      label([-5.3, 0.25], "design");
+      label([-5.3, -0.35], "PDK + sim");
+    });
+    step(sceneStrings("layout"), () => {
+      board.create("arrow", [[-4.0, 0], [-3.4, 0]], arr);
+      box(-3.4, colors.cat[1]);
+      label([-2.1, 0.25], "layout");
+      label([-2.1, -0.35], "GDSII + DRC");
+    });
+    step(sceneStrings("fab"), () => {
+      board.create("arrow", [[-0.8, 0], [-0.2, 0]], arr);
+      box(-0.2, colors.cat[2]);
+      label([1.1, 0.25], "MPW fab");
+      label([1.1, -0.35], "months");
+    });
+    step(sceneStrings("test"), () => {
+      board.create("arrow", [[2.4, 0], [3.0, 0]], arr);
+      box(3.0, colors.cat[3]);
+      label([4.3, 0.25], "test +");
+      label([4.3, -0.35], "package");
+      // Feedback loop back to design.
+      board.create("segment", [[4.3, -0.8], [4.3, -2.0]], { strokeColor: colors.line, strokeWidth: 1.5, dash: 2 });
+      board.create("segment", [[4.3, -2.0], [-5.3, -2.0]], { strokeColor: colors.line, strokeWidth: 1.5, dash: 2 });
+      board.create("arrow", [[-5.3, -2.0], [-5.3, -0.9]], { strokeColor: colors.line, strokeWidth: 1.5, dash: 2, lastArrow: { type: 2, size: 5 } });
+      label([-0.5, -2.5], "respin: back to design");
+    });
+  }, {
+    boundingbox: [-7.4, 2.2, 6.4, -3.3],
+    keepAspect: false,
+    title: () => makeStrings("designFlow")("title"),
+  });
+
+  registerQuiz("flowQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // dB losses subtract from dBm.
+      prompt: (v) => sceneStrings("budgetQ", v),
+      variables: "p=[6,8,10,13] a=[1:4] b=[2:6]",
+      answer: "p-a-b",
+    },
+    {
+      // Memory ∝ 1/Δx³.
+      prompt: (v) => sceneStrings("fdtdQ", v),
+      variables: "f=[2,3,4]",
+      answer: "f^3",
+    },
+    {
+      // Seat = c/n (all combinations divide evenly).
+      prompt: (v) => sceneStrings("mpwQ", v),
+      variables: "c=[120,240,360,480] n=[12,24,40]",
+      answer: "c/n",
+    },
+    {
+      prompt: () => sceneStrings("pdkQ"),
+      options: [
+        { text: () => sceneStrings("pdkRight"), correct: true },
+        { text: () => sceneStrings("pdkHdl"), correct: false },
+        { text: () => sceneStrings("pdkLaser"), correct: false },
+        { text: () => sceneStrings("pdkMask"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gdsQ"),
+      options: [
+        { text: () => sceneStrings("gdsRight"), correct: true },
+        { text: () => sceneStrings("gdsNetlist"), correct: false },
+        { text: () => sceneStrings("gdsCode"), correct: false },
+        { text: () => sceneStrings("gdsTest"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("synthQ"),
+      options: [
+        { text: () => sceneStrings("synRight"), correct: true },
+        { text: () => sceneStrings("synSoon"), correct: false },
+        { text: () => sceneStrings("synSecret"), correct: false },
+        { text: () => sceneStrings("synSlow"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("simSplitQ"),
+      options: [
+        { text: () => sceneStrings("ssRight"), correct: true },
+        { text: () => sceneStrings("ssAll"), correct: false },
+        { text: () => sceneStrings("ssNone"), correct: false },
+        { text: () => sceneStrings("ssSpice"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("gratingQ"),
+      options: [
+        { text: () => sceneStrings("grRight"), correct: true },
+        { text: () => sceneStrings("grLoss"), correct: false },
+        { text: () => sceneStrings("grBand"), correct: false },
+        { text: () => sceneStrings("grCheap"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("packQ"),
+      options: [
+        { text: () => sceneStrings("pkRight"), correct: true },
+        { text: () => sceneStrings("pkMask"), correct: false },
+        { text: () => sceneStrings("pkSim"), correct: false },
+        { text: () => sceneStrings("pkDice"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("drcQ"),
+      options: [
+        { text: () => sceneStrings("drcRight"), correct: true },
+        { text: () => sceneStrings("drcTiming"), correct: false },
+        { text: () => sceneStrings("drcPower"), correct: false },
+        { text: () => sceneStrings("drcLogic"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("widthQ"),
+      options: [
+        { text: () => sceneStrings("wdRight"), correct: true },
+        { text: () => sceneStrings("wdNone"), correct: false },
+        { text: () => sceneStrings("wdDead"), correct: false },
+        { text: () => sceneStrings("wdFaster"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("matureQ"),
+      options: [
+        { text: () => sceneStrings("mtRight"), correct: true },
+        { text: () => sceneStrings("mtMask"), correct: false },
+        { text: () => sceneStrings("mtLitho"), correct: false },
+        { text: () => sceneStrings("mtNothing"), correct: false },
+      ],
+    },
+  ]);
+</script>

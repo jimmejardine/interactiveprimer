@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Photonic Reservoir Computing</primer-title>
+
+    <primer-card>
+      <p>
+        Module 5 left a bruise that never quite healed: photonic neural networks are glorious at
+        <em>inference</em> and miserable at <em>training</em>. Every weight lives in a physical component
+        that drifts, every gradient must be estimated through hardware imperfections, and
+        <primer-ref soft to="computer-science/photonic-computing/photonic-ai/training-photonic-neural-networks">training
+        the mesh</primer-ref> ends up fighting the very physics that made inference cheap.
+        <strong>Reservoir computing</strong> is the judo response: <em>stop training the network</em>.
+        Take any fixed, random, nonlinear dynamical system — the "reservoir" — drive it with your input
+        stream, and let it do whatever it naturally does. Its internal state becomes a rich, churning,
+        nonlinear echo of the input's recent history. Then train exactly one thing: a <strong>linear
+        readout</strong> that maps the observed state to the desired output. All the hard, physical,
+        drift-prone machinery is untouched and untrained; the entire learning problem collapses to linear
+        regression — one matrix solve, no gradients, no backpropagation through glass.
+      </p>
+      <p>
+        For photonics this is close to a perfect fit. The
+        <primer-ref to="computer-science/photonic-computing/analog/holography-and-optical-memory">previous
+        lesson</primer-ref> stored static patterns in a medium; here the "memory" is dynamic — light
+        circulating in a loop — and the machine computes <em>with its own transient dynamics</em>. What
+        optics lacks (precise programmability) the recipe never asks for; what optics has in
+        embarrassing surplus (fast, cheap, high-dimensional nonlinear dynamics) is exactly the
+        ingredient.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "delayLoop": {
+          "title": "A delay-loop reservoir: one nonlinear node and a length of fibre",
+          "input": "The input stream u(t), multiplied by a fixed random mask, drives a single nonlinear node (e.g. a modulator biased on the curve of its sin² response)",
+          "loop": "The node's output circulates through a delay line of round-trip time τ and feeds back — the system's state is the whole pattern of light in the loop",
+          "virtual": "Sampling the loop every θ seconds defines N = τ/θ virtual nodes: time-multiplexed neurons sharing one physical device",
+          "readout": "A linear readout — the only trained part — combines the virtual-node states into the output ŷ(t)"
+        }
+      }
+    </script>
+    <primer-card>
+      <h2>The recipe, and the hardware trick that made it photonic</h2>
+      <p>
+        A classical (electronic) reservoir is a sparse random recurrent network with a few hundred nodes.
+        Building hundreds of coupled optical neurons sounds expensive — so the photonic community found a
+        beautiful shortcut: <strong>one</strong> nonlinear node plus a <strong>delay line</strong>. Feed
+        the node's output into a kilometre of fibre (round-trip time <primer-math>\tau</primer-math>) and
+        back into its input. Now sample the circulating signal every <primer-math>\theta</primer-math>
+        seconds: each of the <primer-math>N = \tau/\theta</primer-math> time slots behaves as a distinct
+        <em>virtual node</em>, coupled to its neighbours by the node's finite response time. One modulator
+        and a spool of fibre impersonate an <primer-math>N</primer-math>-neuron recurrent network,
+        time-multiplexed at gigahertz rates. To make the virtual nodes respond <em>differently</em> from
+        one another, the input is first multiplied by a fixed, random, fast-repeating
+        <strong>mask</strong> — without it, every slot would see the same drive and the network would
+        collapse to one effective neuron.
+      </p>
+      <primer-geometry scene="delayLoop" caption="Schematic of a delay-loop photonic reservoir. An input stream passes through a fixed random mask and drives a single nonlinear node; the node's output circulates through a fibre delay loop of round-trip time τ and feeds back. Samples spaced θ apart along the loop act as N = τ/θ virtual nodes, and a trained linear readout combines their states into the output."></primer-geometry>
+    </primer-card>
+
+    <primer-card>
+      <h2>The readout: ridge regression or bust</h2>
+      <p>
+        Collect the reservoir's state vector <primer-math>\mathbf{x}(t)</primer-math> (the
+        <primer-math>N</primer-math> virtual-node values) at each time step into a matrix
+        <primer-math>X</primer-math>, and the training targets into <primer-math>Y</primer-math>. The
+        readout weights solve a linear least-squares problem — but never solve it naively. Reservoir
+        states are strongly correlated (neighbouring virtual nodes echo one another), so
+        <primer-math>XX^{\mathsf T}</primer-math> is ill-conditioned, and unregularised least squares
+        manufactures huge, delicately cancelling weights that amplify every microvolt of detector noise.
+        The standard cure is exactly the
+        <primer-ref to="applied-mathematics/inverse-problems/tikhonov-regularization">Tikhonov
+        regularization</primer-ref> you have already studied, here under its statistics alias
+        <em>ridge regression</em>:
+      </p>
+      <primer-math display>W \;=\; Y X^{\mathsf T}\,\big(X X^{\mathsf T} + \lambda I\big)^{-1}.</primer-math>
+      <p>
+        The penalty <primer-math>\lambda</primer-math> trades training error against weight magnitude —
+        and small weights are not merely a statistical nicety here but a <em>physical robustness</em>
+        guarantee: the readout must keep working tomorrow, when the reservoir has drifted a little. In
+        practice <primer-math>\lambda</primer-math> is chosen by validation, and it is the single most
+        important hyperparameter the experimenter controls.
+      </p>
+      <p>
+        Watch the whole pipeline run. The program below builds a 24-virtual-node delay-loop reservoir with
+        an MZI-flavoured <primer-math>\sin^2</primer-math> nonlinearity, and trains a ridge readout on a
+        task chosen to need <em>both</em> memory and nonlinearity — predicting
+        <primer-math>y(t) = u(t\!-\!1)\cdot u(t\!-\!2)</primer-math> from the stream
+        <primer-math>u(t)</primer-math>. A linear readout of the raw input alone cannot do this at all;
+        the fixed random reservoir makes it a linear problem:
+      </p>
+      <primer-code run>
+        // A delay-loop reservoir + ridge readout, end to end.
+        const N = 24, T = 300, WASH = 5, SPLIT = 220;
+
+        let seed = 42;                                    // deterministic pseudo-randomness
+        const rand = (): number => {
+          seed = (seed * 1664525 + 1013904223) % 4294967296;
+          return seed / 4294967296 - 0.5;
+        };
+
+        const mask: number[] = [];                        // the fixed random input mask
+        for (let i = 0; i &lt; N; i++) mask.push(rand() &gt; 0 ? 1 : -1);
+        const u: number[] = [];                           // the input stream
+        for (let t = 0; t &lt; T; t++) u.push(rand());
+
+        // Reservoir dynamics: each virtual node is a sin² nonlinearity driven by the masked
+        // input plus the echo of its neighbour one loop ago. NOTHING here is ever trained.
+        const X: number[][] = [];
+        let prevRow: number[] = new Array(N).fill(0);
+        for (let t = 0; t &lt; T; t++) {
+          const row: number[] = [];
+          for (let i = 0; i &lt; N; i++) {
+            const drive = 2.2 * mask[i] * u[t] + 0.9 * prevRow[(i + N - 1) % N] + 0.25;
+            row.push(Math.sin(drive) ** 2);
+          }
+          X.push(row);
+          prevRow = row;
+        }
+
+        // Target needs memory AND nonlinearity: y(t) = u(t-1)·u(t-2).
+        const y: number[] = [];
+        for (let t = 0; t &lt; T; t++) y.push(t &lt; 2 ? 0 : u[t - 1] * u[t - 2]);
+
+        // Ridge regression on [states, bias]: solve (A + λI) w = b by Gaussian elimination.
+        function ridge(rows: number[][], target: number[], lambda: number): number[] {
+          const d = rows[0].length;
+          const A: number[][] = [];
+          const b: number[] = new Array(d).fill(0);
+          for (let i = 0; i &lt; d; i++) A.push(new Array(d).fill(0));
+          for (let t = 0; t &lt; rows.length; t++) {
+            for (let i = 0; i &lt; d; i++) {
+              b[i] += rows[t][i] * target[t];
+              for (let j = 0; j &lt; d; j++) A[i][j] += rows[t][i] * rows[t][j];
+            }
+          }
+          for (let i = 0; i &lt; d; i++) A[i][i] += lambda;
+          for (let col = 0; col &lt; d; col++) {              // elimination
+            let piv = col;
+            for (let r = col + 1; r &lt; d; r++) if (Math.abs(A[r][col]) &gt; Math.abs(A[piv][col])) piv = r;
+            [A[col], A[piv]] = [A[piv], A[col]];
+            [b[col], b[piv]] = [b[piv], b[col]];
+            for (let r = col + 1; r &lt; d; r++) {
+              const fac = A[r][col] / A[col][col];
+              for (let j = col; j &lt; d; j++) A[r][j] -= fac * A[col][j];
+              b[r] -= fac * b[col];
+            }
+          }
+          const w = new Array(d).fill(0);
+          for (let i = d - 1; i &gt;= 0; i--) {
+            let s = b[i];
+            for (let j = i + 1; j &lt; d; j++) s -= A[i][j] * w[j];
+            w[i] = s / A[i][i];
+          }
+          return w;
+        }
+
+        const feats = (t: number): number[] => [...X[t], 1];         // states + bias
+        const trainRows: number[][] = [], trainY: number[] = [];
+        for (let t = WASH; t &lt; SPLIT; t++) { trainRows.push(feats(t)); trainY.push(y[t]); }
+        const w = ridge(trainRows, trainY, 1e-4);
+
+        function nmse(from: number, to: number, model: (t: number) => number): number {
+          let err = 0, varY = 0, mean = 0, n = to - from;
+          for (let t = from; t &lt; to; t++) mean += y[t] / n;
+          for (let t = from; t &lt; to; t++) {
+            err += (model(t) - y[t]) ** 2;
+            varY += (y[t] - mean) ** 2;
+          }
+          return err / varY;
+        }
+
+        const reservoirOut = (t: number): number =>
+          feats(t).reduce((acc, xi, i) => acc + xi * w[i], 0);
+        console.log("reservoir readout, test NMSE: " + nmse(SPLIT, T, reservoirOut).toFixed(3));
+
+        // Baseline: the best LINEAR readout of the raw input u(t) alone (no reservoir).
+        const base = ridge(
+          u.slice(WASH, SPLIT).map((v) => [v, 1]),
+          y.slice(WASH, SPLIT), 1e-4);
+        console.log("linear-on-input baseline NMSE: " +
+          nmse(SPLIT, T, (t) => base[0] * u[t] + base[1]).toFixed(3));
+      </primer-code>
+      <p>
+        The baseline scores an NMSE near 1 — no better than guessing the mean — while the reservoir
+        readout tracks the target well, despite <em>none</em> of its dynamics being designed for the
+        task. The fixed random system projected the input's history into a high-dimensional nonlinear
+        feature space where a hyperplane suffices; the only "learning" was finding the hyperplane.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>What it's actually good at</h2>
+      <p>
+        Reservoirs are not general-purpose learners — they are <em>temporal feature machines</em>, and
+        their sweet spot is streaming signals that need modest precision at ferocious speed. The
+        headline photonic demonstrations are telling: <strong>channel equalization</strong> — undoing
+        the nonlinear distortion a fibre link inflicts on a signal — done optically at gigabaud rates on
+        the raw waveform; <strong>spoken-digit and header recognition</strong> at millions of words per
+        second; <strong>chaotic time-series prediction</strong>, the field's favourite benchmark since
+        the delay dynamics of the reservoir naturally match the delay structure of chaotic systems. The
+        common shape: the input is already a fast analog waveform (so no I/O conversion is needed on the
+        way in), the required output is low-dimensional (so the readout is cheap), and the value lies in
+        latency — the reservoir answers while a digital DSP would still be filling its input buffer.
+        Conversely, tasks needing long memory, exact symbolic manipulation, or high-precision arithmetic
+        are structurally wrong for it — the reservoir's fading memory and analog noise floor set hard
+        limits no readout can undo.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Why does a bucket of random dynamics compute anything?">
+      <p>
+        The idea seems too lazy to work — surely the network's weights must be <em>about</em> the task?
+        The resolution is one of the prettiest ideas in machine learning. A readout that is linear in the
+        state can represent any function that is linear in the <em>features</em> the state happens to
+        compute — so the reservoir's only job is to compute, incidentally, an enormous spray of diverse
+        nonlinear functions of the input's recent history. Random systems are astonishingly good at this:
+        what a designed system computes deliberately, a random high-dimensional system computes by
+        accident, many times over. This is the same mathematics as kernel methods and random-feature
+        regression — Cover's theorem guarantees that nonlinearly projecting data into enough dimensions
+        makes linearly-inseparable problems separable with high probability. Two properties, not design,
+        are required: <strong>separation</strong> (different input histories drive the state to different
+        places) and <strong>fading memory</strong> (the state forgets initial conditions, so it depends
+        on the recent input, not on how the machine was switched on — the "echo state property").
+        Almost any sufficiently rich dynamical system pitched between order and chaos qualifies — fibre
+        loops, silicon-photonic meshes, semiconductor lasers with feedback, and, in one famous 2003
+        experiment by Fernando and Sojakka, a literal bucket of water computing XOR with ripples.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! The readout learns; nothing else may">
+      <p>
+        Two classic ways to fool yourself with a reservoir. First: the moment you catch yourself tuning
+        the reservoir <em>to the task</em> — adjusting feedback strength, bias point or mask against the
+        test error, task by task — you have quietly started training a recurrent network by expensive
+        black-box search and forfeited the whole bargain; global hyperparameters are set once, by
+        validation, and then the reservoir is frozen. Second, subtler: with hundreds of virtual nodes the
+        linear readout has hundreds of free parameters, and unregularised least squares will happily
+        memorise your training set and its noise — reservoir papers live and die by the honesty of their
+        train/validation/test splits and their <primer-math>\lambda</primer-math> sweeps. The physical
+        version of the same sin: a readout trained at 9 a.m. slowly decays as temperature drifts the
+        reservoir away from the state distribution it was fit to. The saving grace is that retraining
+        costs one linear solve on fresh data — seconds, not GPU-days — which is precisely why the
+        architecture tolerates hardware that would be hopeless for a conventionally trained photonic
+        network.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Where this goes next</h2>
+      <p>
+        Reservoir computing uses analog optical dynamics as a <em>feature map</em> and lets electronics
+        draw the conclusions. The next lesson pushes the same philosophy to its extreme: build an optical
+        dynamical system whose <em>equilibrium itself</em> is the answer — a network of coupled
+        parametric oscillators that relaxes toward the ground state of a combinatorial optimization
+        problem. That machine is the
+        <primer-ref soft to="computer-science/photonic-computing/analog/coherent-ising-machines">coherent
+        Ising machine</primer-ref>.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "reservoirQuiz@1": {
+          "intro": "Reservoir computing: a fixed random nonlinear dynamical system is driven by the input; only a linear readout of its state is trained (by ridge regression).",
+          "trainQ": "In a reservoir computer, which part is trained?",
+          "trReadout": "Only the linear readout from the reservoir state to the output — the reservoir's own dynamics stay fixed and random",
+          "trAll": "All internal weights, by backpropagation through time",
+          "trRes": "Only the reservoir's internal weights; the readout is fixed",
+          "trNone": "Nothing — the system works untrained end to end",
+          "fitQ": "Why is reservoir computing such a natural fit for photonic hardware?",
+          "ftFit": "It demands exactly what optics offers — fast, high-dimensional, fixed nonlinear dynamics — and never requires the precise programmability and in-hardware training that optics finds hard",
+          "ftCheap": "Optical components are cheaper than electronic ones",
+          "ftDigital": "Light is naturally digital, matching the readout",
+          "ftMemory": "Optical systems never drift, so training sticks forever",
+          "virtQ": "A delay-loop reservoir has round-trip time τ = {t} ns and virtual-node spacing θ = {s} ns. How many virtual nodes does it implement?",
+          "ridgeQ": "Why is the readout trained with ridge regression rather than plain least squares?",
+          "rgIll": "Reservoir states are strongly correlated, so XXᵀ is ill-conditioned; the λI term (Tikhonov regularization) prevents huge noise-amplifying weights and keeps the readout robust to drift",
+          "rgFast": "Ridge regression is the only method fast enough",
+          "rgNonlin": "Plain least squares cannot fit nonlinear reservoirs at all",
+          "rgExact": "Ridge regression gives exactly zero training error",
+          "fadeQ": "The 'fading memory' (echo state) property requires that the reservoir…",
+          "fmForget": "Forgets its initial conditions, so its state depends on the recent input history rather than on how it was started",
+          "fmRemember": "Remembers every input since power-on indefinitely",
+          "fmLinear": "Responds perfectly linearly to its input",
+          "fmPeriodic": "Oscillates with a fixed period",
+          "lamQ": "The regularization strength λ is turned up far too high. The readout…",
+          "lgUnder": "Underfits — the weights are squeezed toward zero and the output flattens toward a constant, missing structure it could have captured",
+          "lgOver": "Overfits the training noise more strongly",
+          "lgExplode": "Develops exploding weights",
+          "lgSame": "Is unaffected — λ only changes training speed",
+          "nonlinQ": "The readout is purely linear, yet the machine computes nonlinear functions of the input. Where does the nonlinearity come from?",
+          "nlRes": "From the fixed reservoir dynamics — the node's nonlinear response turns the state into a spray of nonlinear features of the input's history, on which a linear map suffices",
+          "nlReadout": "From the readout — linear maps become nonlinear when regularized",
+          "nlNoise": "From detector noise",
+          "nlNone": "It can't — reservoir computers are limited to linear functions",
+          "taskQ": "Which task profile suits a photonic reservoir computer best?",
+          "tkStream": "A fast streaming signal needing modest precision and low latency — channel equalization, waveform classification, short-horizon time-series prediction",
+          "tkPrecise": "64-bit-exact arithmetic on stored data",
+          "tkStatic": "Static image classification at leisurely rates and maximum accuracy",
+          "tkSymbolic": "Long-chain symbolic algebra",
+          "costQ": "Compared with backpropagation-in-hardware for an equivalent photonic network, training a reservoir's readout costs…",
+          "csSolve": "One regularized linear solve on recorded states — no gradients through the physics at all",
+          "csSame": "About the same — gradients must still traverse the optics",
+          "csMore": "More — linear solves are costlier than backpropagation",
+          "csZero": "Nothing — reservoirs require no training data",
+          "weightQ": "A delay-loop reservoir exposes N = {n} virtual nodes, plus one bias term. A readout producing a single scalar output has how many trainable weights?",
+          "driftQ": "Overnight, temperature drift shifts the reservoir's operating point. The standard remedy is to…",
+          "dfRetrain": "Retrain the readout on fresh data — one cheap linear solve — since the fixed reservoir never had to be accurate, only repeatable over the short term",
+          "dfRebuild": "Replace the fibre loop with a longer one",
+          "dfBackprop": "Backpropagate through the hardware to correct the internal weights",
+          "dfNothing": "Do nothing — reservoirs are immune to drift",
+          "maskQ": "What goes wrong if the fixed random input mask is removed (all virtual nodes driven identically)?",
+          "mkCollapse": "The virtual nodes all compute the same value, collapsing the reservoir's dimensionality to one effective neuron — the mask is what gives the nodes diverse responses",
+          "mkNoise": "The reservoir becomes too noisy to read",
+          "mkUnstable": "The loop necessarily becomes chaotic",
+          "mkNothing": "Nothing — the mask is only a calibration aid"
+        }
+      }
+    </script>
+
+    <primer-quiz name="reservoirQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/photonic-computing/analog/holography-and-optical-memory",
+      "applied-mathematics/inverse-problems/tikhonov-regularization"
+    ],
+    "completedDate": "2026-07-30"
+  }
+</script>
+
+<script type="module">
+  import { registerGeometryScene, registerQuiz, makeStrings } from "primer";
+
+  // ── Delay-loop reservoir: mask → nonlinear node → fibre loop → linear readout. ──
+  registerGeometryScene("delayLoop", ({ board, colors, step, sceneStrings, label }) => {
+    const wire = { strokeColor: colors.line, strokeWidth: 2 };
+
+    step(sceneStrings("input"), () => {
+      board.create("arrow", [[-6.2, 0], [-4.9, 0]], { ...wire, lastArrow: { type: 2, size: 5 } });
+      label([-5.7, 0.5], "u(t)");
+      board.create("polygon", [[-4.9, -0.5], [-3.9, -0.5], [-3.9, 0.5], [-4.9, 0.5]], {
+        borders: { strokeColor: colors.cat[2], strokeWidth: 1.5 },
+        fillColor: colors.cat[2], fillOpacity: 0.25, vertices: { visible: false },
+      });
+      label([-4.4, 1.0], "mask");
+      board.create("arrow", [[-3.9, 0], [-2.75, 0]], { ...wire, lastArrow: { type: 2, size: 5 } });
+      board.create("circle", [[-2.2, 0], 0.55], {
+        strokeColor: colors.cat[0], strokeWidth: 2, fillColor: colors.cat[0], fillOpacity: 0.25,
+      });
+      label([-2.2, -1.05], "nonlinear node");
+    });
+
+    step(sceneStrings("loop"), () => {
+      board.create("circle", [[0.05, 0], 1.7], { strokeColor: colors.line, strokeWidth: 2, dash: 0 });
+      board.create("arrow", [[0.0, 1.72], [0.3, 1.71]], { ...wire, lastArrow: { type: 2, size: 5 } });
+      label([0.05, -2.2], "delay line, round trip τ");
+    });
+
+    step(sceneStrings("virtual"), () => {
+      for (let k = 0; k < 10; k++) {
+        const ang = Math.PI * (0.85 - k * 0.19);
+        board.create("point", [0.05 + 1.7 * Math.cos(ang), 1.7 * Math.sin(ang)], {
+          fixed: true, name: "", size: 1.5, color: colors.cat[1],
+        });
+      }
+      label([0.05, 2.25], "virtual nodes, θ apart (N = τ/θ)");
+    });
+
+    step(sceneStrings("readout"), () => {
+      board.create("arrow", [[1.75, 0], [3.1, 0]], { ...wire, lastArrow: { type: 2, size: 5 } });
+      board.create("polygon", [[3.1, -0.6], [5.3, -0.6], [5.3, 0.6], [3.1, 0.6]], {
+        borders: { strokeColor: colors.cat[1], strokeWidth: 1.5 },
+        fillColor: colors.cat[1], fillOpacity: 0.2, vertices: { visible: false },
+      });
+      label([4.2, 0], "linear readout");
+      board.create("arrow", [[5.3, 0], [6.5, 0]], { ...wire, lastArrow: { type: 2, size: 5 } });
+      label([6.1, 0.5], "ŷ(t)");
+    });
+  }, {
+    boundingbox: [-6.8, 3, 7, -2.9],
+    title: () => makeStrings("delayLoop")("title"),
+  });
+
+  registerQuiz("reservoirQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      prompt: () => sceneStrings("trainQ"),
+      options: [
+        { text: () => sceneStrings("trReadout"), correct: true },
+        { text: () => sceneStrings("trAll"), correct: false },
+        { text: () => sceneStrings("trRes"), correct: false },
+        { text: () => sceneStrings("trNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fitQ"),
+      options: [
+        { text: () => sceneStrings("ftFit"), correct: true },
+        { text: () => sceneStrings("ftCheap"), correct: false },
+        { text: () => sceneStrings("ftDigital"), correct: false },
+        { text: () => sceneStrings("ftMemory"), correct: false },
+      ],
+    },
+    {
+      // N = τ/θ; values chosen so the division is always exact.
+      prompt: (v) => sceneStrings("virtQ", v),
+      variables: "t=[100,200,400] s=[2,4,5]",
+      answer: "t / s",
+    },
+    {
+      prompt: () => sceneStrings("ridgeQ"),
+      options: [
+        { text: () => sceneStrings("rgIll"), correct: true },
+        { text: () => sceneStrings("rgFast"), correct: false },
+        { text: () => sceneStrings("rgNonlin"), correct: false },
+        { text: () => sceneStrings("rgExact"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("fadeQ"),
+      options: [
+        { text: () => sceneStrings("fmForget"), correct: true },
+        { text: () => sceneStrings("fmRemember"), correct: false },
+        { text: () => sceneStrings("fmLinear"), correct: false },
+        { text: () => sceneStrings("fmPeriodic"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("lamQ"),
+      options: [
+        { text: () => sceneStrings("lgUnder"), correct: true },
+        { text: () => sceneStrings("lgOver"), correct: false },
+        { text: () => sceneStrings("lgExplode"), correct: false },
+        { text: () => sceneStrings("lgSame"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("nonlinQ"),
+      options: [
+        { text: () => sceneStrings("nlRes"), correct: true },
+        { text: () => sceneStrings("nlReadout"), correct: false },
+        { text: () => sceneStrings("nlNoise"), correct: false },
+        { text: () => sceneStrings("nlNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("taskQ"),
+      options: [
+        { text: () => sceneStrings("tkStream"), correct: true },
+        { text: () => sceneStrings("tkPrecise"), correct: false },
+        { text: () => sceneStrings("tkStatic"), correct: false },
+        { text: () => sceneStrings("tkSymbolic"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("costQ"),
+      options: [
+        { text: () => sceneStrings("csSolve"), correct: true },
+        { text: () => sceneStrings("csSame"), correct: false },
+        { text: () => sceneStrings("csMore"), correct: false },
+        { text: () => sceneStrings("csZero"), correct: false },
+      ],
+    },
+    {
+      // N states + 1 bias.
+      prompt: (v) => sceneStrings("weightQ", v),
+      variables: "n=[20:80]",
+      answer: "n + 1",
+    },
+    {
+      prompt: () => sceneStrings("driftQ"),
+      options: [
+        { text: () => sceneStrings("dfRetrain"), correct: true },
+        { text: () => sceneStrings("dfRebuild"), correct: false },
+        { text: () => sceneStrings("dfBackprop"), correct: false },
+        { text: () => sceneStrings("dfNothing"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("maskQ"),
+      options: [
+        { text: () => sceneStrings("mkCollapse"), correct: true },
+        { text: () => sceneStrings("mkNoise"), correct: false },
+        { text: () => sceneStrings("mkUnstable"), correct: false },
+        { text: () => sceneStrings("mkNothing"), correct: false },
+      ],
+    },
+  ]);
+</script>

@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Noise, Precision and Calibration</primer-title>
+
+    <primer-card>
+      <p>
+        Ask a digital INT8 multiplier for <primer-math>73 \times 41</primer-math> a billion times and you
+        get 2993, a billion times. Ask an analog photonic MAC and you get a billion <em>slightly
+        different</em> answers: a distribution, centred (if you have calibrated well) on the truth, with a
+        width set by physics. Digital arithmetic pays for its exactness up front, in the quantisation
+        grid you studied in
+        <primer-ref to="computer-science/deep-learning/inference/quantization-for-inference">quantization
+        for inference</primer-ref> and the rounding model of
+        <primer-ref to="mathematics/numerical-analysis/floating-point-and-error">floating-point
+        error</primer-ref>. Analog arithmetic pays as it goes, in noise — and this lesson is about
+        computing the exchange rate. The currency is the <strong>effective number of bits</strong>
+        (ENOB), and the headline, worth stating before the derivation: every demonstrated analog photonic
+        processor delivers roughly <strong>4 to 8 effective bits</strong>, the cost of each additional
+        bit is <strong>4×</strong> in photons (or time), and the reason photonic AI is viable at all is
+        that inference — uniquely among computing workloads — can often live inside that budget.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>From noise to bits: the ENOB argument</h2>
+      <p>
+        Two noise floors matter at a photodetector. <strong>Shot noise</strong> is the fundamental one:
+        light arrives as photons, photon counts are Poisson-distributed, and a Poisson variable with mean
+        <primer-math>N</primer-math> has variance <primer-math>N</primer-math> — so the power
+        signal-to-noise ratio of a detection event that collects <primer-math>N</primer-math> photons is
+        <primer-math>\mathrm{SNR} = N</primer-math>. <strong>Thermal (Johnson) noise</strong> comes from
+        the receiver electronics; it is a fixed floor, independent of the light, which dominates at low
+        optical power (shot noise takes over at high power). To turn an SNR into bits, borrow the
+        converter engineer's yardstick — an ideal <primer-math>b</primer-math>-bit quantiser has
+        <primer-math>\mathrm{SNR_{dB}} = 6.02\,b + 1.76</primer-math> — and read it backwards:
+      </p>
+      <primer-theorem name="Effective number of bits">
+        <ul>
+          <li>a channel with signal-to-noise ratio <primer-math>\mathrm{SNR_{dB}}</primer-math> carries
+            <primer-math display>\mathrm{ENOB} \;=\; \frac{\mathrm{SNR_{dB}} - 1.76}{6.02}</primer-math>
+            effective bits — the resolution of the ideal quantiser it is equivalent to;</li>
+          <li>for a shot-noise-limited detection of <primer-math>N</primer-math> photons,
+            <primer-math>\mathrm{SNR_{dB}} = 10\log_{10} N</primer-math>, giving
+            <primer-math>\mathrm{ENOB} \approx \tfrac{1}{2}\log_2 N - 0.29</primer-math>;</li>
+          <li>hence each extra bit requires <strong>4× the photons</strong> (6 dB more SNR), and equally,
+            averaging 4× more passes buys exactly one bit;</li>
+          <li>independent noise on the <primer-math>K</primer-math> terms of a dot product adds in
+            quadrature: the accumulated output noise grows as <primer-math>\sqrt{K}</primer-math>.</li>
+        </ul>
+      </primer-theorem>
+      <p>
+        Work the budget at <primer-math>\lambda = 1550</primer-math> nm, where a photon carries
+        <primer-math>1.28\times10^{-19}</primer-math> J. Eight effective bits needs
+        <primer-math>\log_2 N = 2(8 + 0.29) \approx 16.6</primer-math>, i.e.
+        <primer-math>N \approx 10^5</primer-math> photons — about <strong>13 fJ of light per
+        detection</strong>, before any electronics. Four bits needs only
+        <primer-math>N \approx 380</primer-math> photons — <strong>0.05 fJ</strong>. Precision is
+        exponentially expensive; that single fact shapes every design decision in this field, and it is
+        why the energy ledger of lesson 7 will treat "how many bits?" as its first question.
+      </p>
+      <primer-chart scene="shotEnob" caption="Shot-noise-limited effective number of bits versus optical power at the detector, for symbol rates of 10 GS/s and 1 GS/s. The curve is logarithmic: quadrupling the power (or slowing down 4×, which collects 4× the photons per symbol) buys exactly one extra bit. Getting from 4 bits to 8 costs a factor of ~256 in collected energy."></primer-chart>
+    </primer-card>
+
+    <primer-card>
+      <h2>Watch a network drown: noise injection in code</h2>
+      <p>
+        How much of this noise can a neural network actually absorb? Below is a complete, fixed two-layer
+        network — 4 inputs, 6 ReLU hidden units, 3 classes — classifying noisy samples of three prototype
+        patterns. Every single MAC result receives fresh Gaussian noise of standard deviation
+        <primer-math>\sigma</primer-math> (the analog accelerator model: weights and signals are order-1
+        numbers, so <primer-math>\sigma = 0.1</primer-math> loosely mimics a ~3-bit-noisy multiplier).
+        The PRNG is seeded, so your runs are reproducible. Sweep <primer-math>\sigma</primer-math> and
+        watch the accuracy and the output drift:
+      </p>
+      <primer-code run>
+        // Deterministic PRNG (mulberry32) + Box–Muller, so runs reproduce exactly.
+        let seed = 42;
+        function rand(): number {
+          seed = (seed + 0x6d2b79f5) | 0;
+          let t = Math.imul(seed ^ (seed &gt;&gt;&gt; 15), 1 | seed);
+          t = (t + Math.imul(t ^ (t &gt;&gt;&gt; 7), 61 | t)) ^ t;
+          return ((t ^ (t &gt;&gt;&gt; 14)) &gt;&gt;&gt; 0) / 4294967296;
+        }
+        function gauss(): number {
+          return Math.sqrt(-2 * Math.log(Math.max(rand(), 1e-12))) * Math.cos(2 * Math.PI * rand());
+        }
+
+        // Three orthogonal 4-dim prototypes; class c samples cluster around p[c].
+        const p = [ [1, 1, -1, -1], [1, -1, 1, -1], [1, -1, -1, 1] ];
+
+        // Fixed 2-layer net: hidden_i = ReLU(±p_i · x), logit_c = hidden_c − hidden_{c+3}.
+        // (So the clean network computes exactly logit_c = p_c · x — but through real MACs.)
+        const W1 = [ ...p, ...p.map((row) =&gt; row.map((w) =&gt; -w)) ];    // 6×4
+        const W2 = [
+          [1, 0, 0, -1, 0, 0],
+          [0, 1, 0, 0, -1, 0],
+          [0, 0, 1, 0, 0, -1],
+        ];                                                              // 3×6
+
+        function noisyMatvec(W: number[][], x: number[], sigma: number): number[] {
+          return W.map((row) =&gt; {
+            let acc = 0;
+            for (let j = 0; j &lt; row.length; j++) acc += row[j] * x[j] + sigma * gauss(); // noise per MAC
+            return acc;
+          });
+        }
+        const relu = (v: number[]): number[] =&gt; v.map((a) =&gt; (a &gt; 0 ? a : 0));
+        const forward = (x: number[], sigma: number): number[] =&gt;
+          noisyMatvec(W2, relu(noisyMatvec(W1, x, sigma)), sigma);
+        const argmax = (v: number[]): number =&gt; v.indexOf(Math.max(...v));
+
+        // A fixed test set: 300 samples, 100 per class.
+        const data: { x: number[]; label: number }[] = [];
+        for (let c = 0; c &lt; 3; c++)
+          for (let i = 0; i &lt; 100; i++)
+            data.push({ x: p[c].map((a) =&gt; a + 0.5 * gauss()), label: c });
+
+        console.log("sigma   accuracy   rms logit drift");
+        for (const sigma of [0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0]) {
+          let correct = 0, drift2 = 0, count = 0;
+          for (const d of data) {
+            const clean = forward(d.x, 0);
+            const noisy = forward(d.x, sigma);
+            if (argmax(noisy) === d.label) correct++;
+            for (let c = 0; c &lt; 3; c++) { drift2 += (noisy[c] - clean[c]) ** 2; count++; }
+          }
+          const acc = (100 * correct / data.length).toFixed(1);
+          const rms = Math.sqrt(drift2 / count).toFixed(3);
+          console.log(sigma.toFixed(2) + "     " + acc + "%      " + rms);
+        }
+      </primer-code>
+      <p>
+        The shape of the result is the whole story of analog AI hardware. Small
+        <primer-math>\sigma</primer-math> costs essentially nothing — the class margins are wide, and a
+        per-MAC wobble of a few percent vanishes inside them. Then, once the accumulated noise
+        (<primer-math>\sigma\sqrt{K}</primer-math> per dot product, compounding through two layers)
+        becomes comparable to the margin between the top two logits, accuracy falls off a cliff. Networks
+        tolerate low precision <em>up to a workload-dependent threshold</em>, and fail fast beyond it —
+        the same phenomenon that makes INT8, and often INT4, quantisation nearly free for inference while
+        training stays in high precision. An analog accelerator's job is to keep the whole chain, end to
+        end, on the safe side of that cliff.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Calibration: what you can fix, and what you can't</h2>
+      <p>
+        Not all error is noise, and the distinction decides what engineering can do about it.
+        <strong>Systematic error</strong> — fabrication offsets in coupler ratios, phase-shifter
+        miscalibration, thermal crosstalk between neighbours, detector mismatch — is <em>repeatable</em>:
+        the same wrong answer every time. Repeatable means measurable, and measurable means correctable:
+        that is the entire business of
+        <primer-ref soft to="computer-science/photonic-computing/meshes/programming-and-calibrating-meshes">mesh
+        calibration</primer-ref>, and of the ring-locking loops from
+        <primer-ref to="computer-science/photonic-computing/photonic-ai/microring-weight-banks">last
+        lesson</primer-ref>. <strong>Stochastic noise</strong> — shot, thermal, laser intensity noise —
+        is fresh on every pass; no lookup table can subtract it. Your only levers are more photons, more
+        averaging (4× per bit, paid in throughput), or a network trained to shrug it off — which is
+        precisely the "noise-aware training" idea the
+        <primer-ref soft to="computer-science/photonic-computing/photonic-ai/training-photonic-neural-networks">next
+        lesson</primer-ref> develops. The honest engineering summary: calibration moves the error
+        distribution's <em>centre</em> onto the truth; physics fixes its <em>width</em>.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Watch out! Analog noise is not quantization error in disguise">
+      <p>
+        Because both are quoted in "bits", it is tempting to treat a 6-ENOB analog MAC as
+        interchangeable with INT6 arithmetic. They are different animals. Quantisation error is
+        <em>deterministic</em>: the same input always rounds the same way, the network was (or can be)
+        fine-tuned around exactly those roundings, and a quantised model is perfectly repeatable —
+        run it twice, ship it anywhere, same answer. Analog noise is <em>stochastic</em>: the same input
+        gives different outputs on every pass, so a marginal sample near a decision boundary flickers
+        between classes — maddening for testing, certification and any system that must reproduce its
+        decisions. The flip side: averaging <primer-math>m</primer-math> passes improves noise by
+        <primer-math>\sqrt{m}</primer-math> but does nothing whatsoever for quantisation bias, and
+        noise-aware training can flatten the loss landscape against random perturbations far better than
+        against a fixed grid. When a photonic paper reports "8-bit-equivalent accuracy", always ask:
+        equivalent in <em>distribution centre</em>, or per single shot? The two claims differ by exactly
+        the averaging factor — and the averaging factor is paid in throughput, which was the product's
+        selling point.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Where does the odd constant 1.76 come from?">
+      <p>
+        The quantiser yardstick <primer-math>\mathrm{SNR_{dB}} = 6.02\,b + 1.76</primer-math> looks like
+        numerology but is two lines of statistics. A <primer-math>b</primer-math>-bit quantiser spans its
+        full-scale range with steps of size <primer-math>q = \mathrm{FS}/2^b</primer-math>, and rounding
+        scatters each sample uniformly within <primer-math>\pm q/2</primer-math> — a uniform error of
+        variance <primer-math>q^2/12</primer-math>. For a full-scale sine wave (signal power
+        <primer-math>\mathrm{FS}^2/8</primer-math>), the ratio works out to
+        <primer-math>\tfrac{3}{2}\cdot 4^{\,b}</primer-math>; in decibels,
+        <primer-math>10\log_{10}(\tfrac{3}{2}) + b\cdot10\log_{10}4 = 1.76 + 6.02\,b</primer-math>. So
+        "6 dB per bit" is just <primer-math>4^b</primer-math> in logarithmic clothing, and the 1.76 is
+        the sine wave's crest factor — a convention inherited from ADC datasheets. It is a slightly
+        arbitrary yardstick for a neural network's signals, but the field uses it because the ADCs
+        bounding every photonic accelerator are specified with it — and, as lesson 7 will show, those
+        ADCs usually <em>are</em> the accelerator's precision bottleneck.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Where this goes next</h2>
+      <p>
+        We now know the analog substrate's honest resolution: a handful of bits, centred by calibration,
+        widened by physics. The next question is how to make a network <em>at home</em> there. Training on
+        a perfect digital twin and downloading the weights turns out to fail in a characteristic way —
+        and the fixes, from hardware-in-the-loop gradients to physics-aware training, are the subject of
+        the <primer-ref soft to="computer-science/photonic-computing/photonic-ai/training-photonic-neural-networks">next
+        lesson</primer-ref>.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "noiseQuiz@1": {
+          "intro": "ENOB = (SNR_dB − 1.76)/6.02. Shot-noise-limited: SNR_dB = 10·log₁₀N for N photons, ENOB ≈ ½log₂N − 0.29. One extra bit costs 4× photons; K-term dot products accumulate noise ∝ √K.",
+          "fourXQ": "A shot-noise-limited link achieves b effective bits with N photons per symbol. To reach b + {k} bits, N must grow by a factor of…",
+          "snrPhotonsQ": "A detection collects 10^{k} photons at the shot-noise limit. Its power SNR in dB is…",
+          "enobQ": "A photonic MAC chain measures SNR = {s} dB. Its effective number of bits is about…",
+          "enobRight": "{b} bits — from (SNR_dB − 1.76)/6.02",
+          "enobNoOffset": "{b1} bits — that forgot the −1.76 offset",
+          "enobLog": "{b2} bits — that's SNR/10, the log₁₀ of the power ratio",
+          "enobHalf": "{b3} bits — that's SNR/12",
+          "avgQ": "Averaging {m} independent passes of the same analog computation gains how many effective bits?",
+          "accKQ": "Independent noise of deviation σ sits on each term of a {K}-term analog dot product. The accumulated output noise is σ times…",
+          "shotQ": "What is the physical origin of shot noise in a photonic MAC?",
+          "shRight": "Light arrives as discrete photons with Poisson statistics — the variance of the count equals its mean, so SNR grows only as the photon number",
+          "shHeat": "Thermal vibration of the waveguide atoms",
+          "shGun": "Electrical arcing in the detector",
+          "shCal": "Residual miscalibration of the weights",
+          "thermalQ": "Thermal (Johnson) noise in the receiver electronics dominates over shot noise when…",
+          "thRight": "The optical power is low — thermal noise is a fixed electronic floor, while shot noise grows with the light and takes over at high power",
+          "thHigh": "The optical power is high",
+          "thCold": "The chip is cooled below room temperature",
+          "thNever": "Never — shot noise always dominates",
+          "calQ": "Which error can calibration remove, and which can it not?",
+          "calRight": "It removes systematic, repeatable error (fabrication offsets, crosstalk, detector mismatch) but cannot touch stochastic noise, which is fresh on every pass",
+          "calBoth": "Both — a good enough lookup table subtracts noise too",
+          "calNeither": "Neither — calibration only affects the clock speed",
+          "calNoise": "It removes shot noise but not fabrication offsets",
+          "quantVsNoiseQ": "A 6-ENOB analog MAC differs from INT6 digital arithmetic in that…",
+          "qvRight": "Its error is stochastic — the same input gives different outputs each pass, so averaging helps and repeatability is lost; quantisation error is deterministic and repeatable",
+          "qvSame": "There is no difference — bits are bits",
+          "qvWorse": "The analog version is always 6 bits worse",
+          "qvFaster": "Digital INT6 arithmetic is noisier",
+          "toleranceQ": "Where in the deep-learning workload is 4–8-bit precision most tolerable?",
+          "tolRight": "Inference — trained networks absorb small weight and activation errors inside their decision margins, which is why INT8 (often INT4) quantisation costs little accuracy",
+          "tolTrain": "Gradient accumulation during training",
+          "tolAll": "Everywhere equally, including optimiser state",
+          "tolNone": "Nowhere — all deep learning needs 32-bit floats",
+          "cliffQ": "In the noise-injection experiment, accuracy stays high at small σ and then collapses. What sets the location of the cliff?",
+          "clRight": "The point where accumulated noise (∝ σ√K through the layers) becomes comparable to the margin between the top two logits — noise inside the margin is free, noise beyond it flips decisions",
+          "clZero": "The point where σ exceeds exactly 1.0 for any network",
+          "clSeed": "The seed of the random number generator",
+          "clRelu": "The point where ReLU saturates",
+          "demoQ": "Across demonstrated analog photonic processors, the end-to-end effective precision achieved is roughly…",
+          "demoRight": "4–8 bits — set by shot and receiver noise, loss, and the converters, not by any single component",
+          "demoSixteen": "16–32 bits, matching floating point",
+          "demoTwo": "1–2 bits at best",
+          "demoTwelve": "Exactly 12 bits, the ADC standard"
+        }
+      }
+    </script>
+
+    <primer-quiz name="noiseQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/photonic-computing/photonic-ai/the-nonlinearity-problem",
+      "computer-science/deep-learning/inference/quantization-for-inference",
+      "mathematics/numerical-analysis/floating-point-and-error"
+    ],
+    "completedDate": "2026-07-30"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerQuiz } from "primer";
+
+  // ── Shot-limited ENOB vs optical power: N = P·τ/E_photon; ENOB = (10log₁₀N − 1.76)/6.02. ──
+  const E_PHOTON = 1.28e-19;                       // J at 1550 nm
+  const enobAt = (pMicroW, rateHz) => {
+    const photons = Math.max(pMicroW, 0.02) * 1e-6 / rateHz / E_PHOTON;
+    return (10 * Math.log10(photons) - 1.76) / 6.02;
+  };
+  registerCharts(
+    [{
+      name: "shotEnob",
+      f: [
+        (p) => enobAt(p, 10e9),                    // 10 GS/s
+        (p) => enobAt(p, 1e9),                     // 1 GS/s: 10× the photons per symbol
+      ],
+      line: (colors, i) =>
+        i === 0
+          ? { strokeColor: colors.cat[0], strokeWidth: 2.5 }
+          : { strokeColor: colors.cat[1], strokeWidth: 2.5, dash: 2 },
+      legend: ["10 GS/s", "1 GS/s"],
+    }],
+    { xmin: 0, xmax: 100, ymin: 0, ymax: 10,
+      xaxisname: "optical power at detector (µW)", yaxisname: "shot-limited ENOB (bits)" },
+  );
+
+  registerQuiz("noiseQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // +k bits ⇒ 4^k photons.
+      prompt: (v) => sceneStrings("fourXQ", v),
+      variables: "k=[1:3]",
+      answer: "4^k",
+    },
+    {
+      // 10^k photons ⇒ 10k dB.
+      prompt: (v) => sceneStrings("snrPhotonsQ", v),
+      variables: "k=[3:6]",
+      answer: "10*k",
+    },
+    {
+      // ENOB = (s − 1.76)/6.02; s chosen so the answer is (near-)integer.
+      prompt: (v) => sceneStrings("enobQ", v),
+      variables: "s=[38,50,62,74]",
+      options: [
+        { text: (v) => sceneStrings("enobRight", { b: ((v.s - 1.76) / 6.02).toFixed(1) }), correct: true },
+        { text: (v) => sceneStrings("enobNoOffset", { b1: (v.s / 6.02).toFixed(1) }), correct: false },
+        { text: (v) => sceneStrings("enobLog", { b2: (v.s / 10).toFixed(1) }), correct: false },
+        { text: (v) => sceneStrings("enobHalf", { b3: (v.s / 12).toFixed(1) }), correct: false },
+      ],
+    },
+    {
+      // m = 4^t averages ⇒ t extra bits; m computed for the prompt.
+      prompt: (v) => sceneStrings("avgQ", { m: Math.pow(4, v.t) }),
+      variables: "t=[1:3]",
+      answer: "t",
+    },
+    {
+      // K = s² terms ⇒ noise grows by √K = s.
+      prompt: (v) => sceneStrings("accKQ", { K: v.s * v.s }),
+      variables: "s=[4,8,10,20]",
+      answer: "s",
+    },
+    {
+      prompt: () => sceneStrings("shotQ"),
+      options: [
+        { text: () => sceneStrings("shRight"), correct: true },
+        { text: () => sceneStrings("shHeat"), correct: false },
+        { text: () => sceneStrings("shGun"), correct: false },
+        { text: () => sceneStrings("shCal"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("thermalQ"),
+      options: [
+        { text: () => sceneStrings("thRight"), correct: true },
+        { text: () => sceneStrings("thHigh"), correct: false },
+        { text: () => sceneStrings("thCold"), correct: false },
+        { text: () => sceneStrings("thNever"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("calQ"),
+      options: [
+        { text: () => sceneStrings("calRight"), correct: true },
+        { text: () => sceneStrings("calBoth"), correct: false },
+        { text: () => sceneStrings("calNeither"), correct: false },
+        { text: () => sceneStrings("calNoise"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("quantVsNoiseQ"),
+      options: [
+        { text: () => sceneStrings("qvRight"), correct: true },
+        { text: () => sceneStrings("qvSame"), correct: false },
+        { text: () => sceneStrings("qvWorse"), correct: false },
+        { text: () => sceneStrings("qvFaster"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("toleranceQ"),
+      options: [
+        { text: () => sceneStrings("tolRight"), correct: true },
+        { text: () => sceneStrings("tolTrain"), correct: false },
+        { text: () => sceneStrings("tolAll"), correct: false },
+        { text: () => sceneStrings("tolNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("cliffQ"),
+      options: [
+        { text: () => sceneStrings("clRight"), correct: true },
+        { text: () => sceneStrings("clZero"), correct: false },
+        { text: () => sceneStrings("clSeed"), correct: false },
+        { text: () => sceneStrings("clRelu"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("demoQ"),
+      options: [
+        { text: () => sceneStrings("demoRight"), correct: true },
+        { text: () => sceneStrings("demoSixteen"), correct: false },
+        { text: () => sceneStrings("demoTwo"), correct: false },
+        { text: () => sceneStrings("demoTwelve"), correct: false },
+      ],
+    },
+  ]);
+</script>

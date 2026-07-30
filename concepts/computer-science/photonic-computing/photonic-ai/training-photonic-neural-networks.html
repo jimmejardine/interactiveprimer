@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <script src="/dist/boot.js"></script>
+    <primer-title>Training Photonic Neural Networks</primer-title>
+
+    <primer-card>
+      <p>
+        Here is the failure mode that greets everyone who builds their first photonic accelerator. Train
+        a network in simulation — a pristine digital twin of the chip — to 98% accuracy. Compile the
+        weights to phase settings, download them to the hardware, run the test set. Accuracy: 70-something.
+        Nothing is broken; every component is "in spec". The digital twin simply isn't the device. Coupler
+        ratios are a percent off, phase shifters have miscalibrated response curves, neighbouring heaters
+        leak into each other, the activation (lesson 4) has a slightly different shape than the ReLU you
+        trained with, and the whole ensemble drifts with the lab's air conditioning. Each error is small;
+        a deep analog pipeline multiplies them together. <strong>Offline-trained weights degrade on real
+        analog hardware</strong> — reliably, quantitatively, and worse as the system grows. This lesson is
+        about the four families of fixes, which range from "measure the device harder" to the genuinely
+        elegant: making the light itself run
+        <primer-ref to="computer-science/machine-learning/neural-networks/backpropagation">backpropagation</primer-ref>.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>Why small errors become big networks' problems</h2>
+      <p>
+        A mesh implements its matrix through <em>many devices in series</em>: light bound for any output
+        traverses <primer-math>O(N)</primer-math> MZIs, and the matrix entry it realises is a product of
+        every coupler and phase along the way. Independent per-device errors therefore accumulate — in
+        the small-error regime the matrix error grows like
+        <primer-math>\sigma\sqrt{N_{\text{dev}}}</primer-math> for per-device deviation
+        <primer-math>\sigma</primer-math> — until it saturates at "a completely different matrix". The
+        chart below shows this first-order scaling model: slide the mesh size up and watch how the same
+        per-device quality delivers a rapidly worsening matrix.
+      </p>
+      <primer-chart scene="phaseError" caption="Illustrative first-order model of how per-device phase error becomes whole-matrix error: normalised matrix error √(1 − e^(−Nσ²)) against per-device error σ, for a mesh of N devices (slider). The dashed curve shows the same mesh after a self-calibration pass that shrinks the effective σ fourfold. Larger meshes demand quadratically better devices — or training that absorbs the error."></primer-chart>
+      <primer-chart-sliders name="meshSize"></primer-chart-sliders>
+      <p>
+        Read the design consequence off the chart: doubling the mesh size at fixed accuracy demands
+        halving the per-device error — devices must improve <em>quadratically</em> as systems scale. Since
+        device physics will not oblige forever, the alternative is to stop demanding that the hardware
+        match the model, and instead make the <em>training</em> absorb the mismatch. There are four ways,
+        in escalating order of intimacy with the hardware.
+      </p>
+    </primer-card>
+
+    <primer-card>
+      <h2>The four families</h2>
+      <primer-table>
+        <table>
+          <tr><th>Strategy</th><th>Forward pass</th><th>Gradient</th><th>Absorbs static error?</th><th>Absorbs noise/drift?</th></tr>
+          <tr><td>1. Calibrate-then-compile</td><td>—</td><td>Offline, on the twin</td><td>Only what calibration catches</td><td>No</td></tr>
+          <tr><td>2. Hardware-in-the-loop</td><td>On the chip</td><td>Digital backprop from measured outputs/activations</td><td>Yes — the real device is inside the loop</td><td>Partially (it trains on the noise it sees)</td></tr>
+          <tr><td>3. In-situ physical backprop</td><td>On the chip</td><td>Optical — an adjoint field runs backward through the same mesh</td><td>Yes</td><td>Partially</td></tr>
+          <tr><td>4. Physics-aware / noise-aware training</td><td>Simulated, with device model + injected noise</td><td>Offline, through the device model</td><td>Statistically (trains for robustness, not for one device)</td><td>Yes — by finding flat minima</td></tr>
+        </table>
+      </primer-table>
+      <p>
+        <strong>Hardware-in-the-loop</strong> is the workhorse: run the forward pass on the physical chip,
+        measure the outputs (and, where instrumented, the hidden activations), and compute weight updates
+        digitally as if those measurements were the network's true state. Whatever static transformation
+        the hardware actually applies — miscalibration included — is what the gradient sees, so training
+        steers <em>around</em> the device's quirks instead of colliding with them. The catch is
+        throughput: every gradient step spends real chip passes, and the naive version — finite
+        differences, perturbing one parameter at a time — needs <primer-math>P + 1</primer-math> forward
+        passes per step. For a modest mesh with <primer-math>P = 10^4</primer-math> phases and
+        <primer-math>10^4</primer-math> training steps, that is <primer-math>10^8</primer-math> chip
+        evaluations before you have trained anything. The classic escape is <strong>simultaneous
+        perturbation</strong> (SPSA): perturb <em>all</em> parameters at once with a random
+        <primer-math>\pm\delta</primer-math> pattern and estimate the directional gradient from just
+        <strong>two</strong> passes per step, trading pass count for gradient variance. Between those
+        extremes sit the modern physics-aware autodiff methods, which backpropagate through a
+        differentiable model of the device while clamping it to hardware measurements.
+      </p>
+      <p>
+        <strong>Physics-aware training</strong> (family 4) attacks the problem before the hardware is
+        even involved: during digital training, inject into every MAC the noise statistics of lesson 5 and
+        the measured transfer curves of the real components. The optimiser then avoids sharp minima that
+        depend on exact weights and settles into flat basins where perturbations cost little — the same
+        flat-minima logic as quantisation-aware training. The resulting weights are not tuned to any
+        single chip, but they are <em>robust to the whole distribution</em> of chips — which is exactly
+        what you want for manufacturing at volume, where per-unit hardware-in-the-loop fine-tuning is a
+        cost, not a feature.
+      </p>
+    </primer-card>
+
+    <primer-vignette title="Backpropagation, performed by the light itself">
+      <p>
+        The most beautiful idea in this corner of the field is due to Hughes, Fan and colleagues (2018):
+        the mesh can compute its <em>own</em> gradients. Backpropagation's backward pass multiplies by
+        <primer-math>W^{\mathsf T}</primer-math> — and a reciprocal optical mesh, run backwards, applies
+        exactly that transpose. Send the forward field through; then inject the error vector from the
+        <em>output</em> side, so an adjoint field propagates backward through the very same interferometers.
+        At each phase shifter, the gradient of the loss with respect to that phase is proportional to a
+        simple interference term between the local forward and adjoint fields — a quantity readable
+        <em>in place</em> with a small power monitor. Three optical passes and every one of thousands of
+        gradients has been measured, in parallel, by physics — no digital twin, no finite differences,
+        and the measurement automatically includes the device's real imperfections. It remains a
+        laboratory technique (it needs coherent access to both ends and per-device monitors), but as a
+        proof of principle it settles an old question: analog hardware need not outsource its learning
+        to a digital chaperone.
+      </p>
+    </primer-vignette>
+
+    <primer-vignette title="Watch out! You trained the twin, but you shipped the device">
+      <p>
+        The recurring institutional mistake — it has burned real product teams, not just students — is to
+        treat training as a one-time offline event followed by deployment of frozen weights, the way GPU
+        inference works. On analog hardware that pipeline silently assumes three false things: that the
+        digital model matches your <em>specific</em> die (fabrication variation says no), that the match
+        is stable in time (thermal drift says no — lesson 3's rings re-tune continuously for a reason),
+        and that accuracy at deployment equals accuracy measured at bring-up (ageing lasers and shifting
+        bias points say no). A production photonic accelerator is a <em>closed-loop system</em>: it ships
+        with calibration firmware, monitors, and a schedule of re-trims — and its training story must
+        say which family above runs at the factory, which runs in the field, and how often. When a paper
+        reports hardware accuracy, the first-order question is: measured how long after calibration? A
+        number taken five minutes after a full re-trim and a number taken a week later can differ by more
+        than the entire claimed advantage over electronic baselines — and honest papers now report both.
+      </p>
+    </primer-vignette>
+
+    <primer-card>
+      <h2>Where this goes next</h2>
+      <p>
+        Suppose every problem so far is solved: the matvec flies, the nonlinearity is paid for, the noise
+        is budgeted, the training absorbs the hardware's sins. One question remains, and it is the one
+        that decides whether any of this ships: <em>does it actually save energy?</em> The
+        <primer-ref soft to="computer-science/photonic-computing/photonic-ai/energy-per-mac-photonics-vs-electronics">final
+        lesson</primer-ref> of this module draws up the complete energy ledger — laser, modulators,
+        detectors and, above all, the DACs and ADCs — and finds the honest crossover point against a
+        tensor core.
+      </p>
+    </primer-card>
+
+    <script type="application/json" class="scene-strings">
+      {
+        "trainQuiz@1": {
+          "intro": "Finite differences: P+1 chip passes per gradient step for P parameters. SPSA: 2 passes regardless of P. Independent per-device errors accumulate as √(number of devices).",
+          "fdQ": "A mesh has {p} tunable phases. One gradient step by one-at-a-time finite differences needs how many forward passes?",
+          "spsaQ": "The same mesh, {p} phases, trained by simultaneous perturbation (SPSA). Forward passes per gradient step?",
+          "totalQ": "Training runs {s} gradient steps by finite differences on a mesh with {p} phases. Total chip passes?",
+          "scaleQ": "In the small-error regime, every per-device error σ is multiplied by {f}. The whole-matrix error is multiplied by about…",
+          "devQ": "A mesh is scaled up to have {m} times as many independent error sources, at the same per-device σ. The accumulated error grows by a factor of about…",
+          "whyQ": "Why do offline-trained weights lose accuracy when downloaded to a real photonic chip?",
+          "whyRight": "The digital twin is not the device — fabrication offsets, thermal crosstalk, activation-shape mismatch and drift make the physical transformation differ from the trained one, and a deep analog pipeline compounds the differences",
+          "whyBits": "The download process truncates the weights to 8 bits",
+          "whyLight": "Light is too fast for the trained weights to keep up",
+          "whySoft": "Compilers introduce bugs when converting weights to phases",
+          "hilQ": "What does hardware-in-the-loop training absorb that calibrate-then-compile cannot?",
+          "hilRight": "Whatever static transformation the real device actually applies — since the forward pass runs on the chip, the gradient steers around quirks the calibration model never captured",
+          "hilNoise": "Shot noise — the loop subtracts it exactly",
+          "hilSpeed": "The latency of the optical pass",
+          "hilNothing": "Nothing — they are mathematically identical",
+          "adjQ": "In in-situ optical backpropagation (Hughes et al.), how is the gradient at each phase shifter obtained?",
+          "adjRight": "An adjoint error field is sent backward through the same mesh, and the gradient appears as an interference term between the local forward and backward fields, readable in place with a power monitor",
+          "adjCam": "A camera photographs the mesh and a neural network estimates the gradients",
+          "adjFd": "Each phase is perturbed one at a time and the loss re-measured",
+          "adjDig": "The gradients are computed on a GPU from the chip's netlist",
+          "nawQ": "How does noise-aware (physics-aware) training make a network robust to hardware it has never touched?",
+          "nawRight": "Injecting the device's noise statistics and transfer curves during digital training pushes the optimiser into flat minima, where the perturbations any individual chip applies cost little accuracy",
+          "nawZero": "It reduces the physical noise of the chips",
+          "nawMem": "It memorises the noise pattern so it can be subtracted",
+          "nawBig": "It makes the network larger until noise doesn't fit",
+          "precQ": "Why is training harder than inference for a 4–8-ENOB analog substrate?",
+          "prRight": "Gradient signals are small and need dynamic range and precision beyond the analog floor — tiny updates drown in noise, which is why weight updates and optimiser state stay digital in every practical scheme",
+          "prMem": "Training requires storing images, which optics cannot do",
+          "prLoss": "Loss functions cannot be evaluated optically or electronically",
+          "prNone": "It isn't — training and inference have identical precision needs",
+          "deployQ": "A production photonic accelerator should be understood as…",
+          "dpRight": "A closed-loop system — shipped with monitors, calibration firmware and scheduled re-trims, because fabrication spread and drift make one-shot offline training silently wrong",
+          "dpGpu": "A drop-in GPU replacement with frozen weights, trained once offline",
+          "dpFpga": "A device that needs no training at all",
+          "dpCloud": "A system whose weights must be retrained from scratch every second",
+          "reportQ": "A paper reports on-chip accuracy measured minutes after a full calibration. What is the sceptic's first question?",
+          "rpRight": "How the accuracy holds up hours or days later — drift can erode more than the claimed advantage, so accuracy-versus-time-since-calibration is the honest metric",
+          "rpFlops": "How many FLOPs the chip performs",
+          "rpColor": "What wavelength the laser used",
+          "rpCode": "Which programming language the toolchain used"
+        }
+      }
+    </script>
+
+    <primer-quiz name="trainQuiz@1"></primer-quiz>
+  </body>
+</html>
+
+<script type="application/json" class="concept-meta">
+  {
+    "prerequisites": [
+      "computer-science/photonic-computing/photonic-ai/noise-precision-and-calibration",
+      "computer-science/machine-learning/neural-networks/backpropagation"
+    ],
+    "completedDate": "2026-07-30"
+  }
+</script>
+
+<script type="module">
+  import { registerCharts, registerChartSliders, registerQuiz } from "primer";
+
+  // ── Illustrative accumulation model: matrix error √(1 − e^(−Nσ²)) vs per-device σ. ──
+  registerChartSliders("meshSize", [
+    { name: "N", label: "independent error sources N", min: 16, max: 256, step: 16, value: 64 },
+  ]);
+  const matErr = (sigma, N) => Math.sqrt(1 - Math.exp(-N * sigma * sigma));
+  registerCharts(
+    [{
+      name: "phaseError",
+      f: [
+        (s, v) => matErr(s, v.N),           // as fabricated
+        (s, v) => matErr(s / 4, v.N),       // after self-calibration shrinks σ by 4×
+      ],
+      line: (colors, i) =>
+        i === 0
+          ? { strokeColor: colors.cat[0], strokeWidth: 2.5 }
+          : { strokeColor: colors.cat[1], strokeWidth: 2.5, dash: 2 },
+      legend: ["as fabricated", "after calibration (σ/4)"],
+    }],
+    { xmin: 0, xmax: 0.15, ymin: 0, ymax: 1.1,
+      xaxisname: "per-device error σ (rad)", yaxisname: "normalised matrix error" },
+    "meshSize",
+  );
+
+  registerQuiz("trainQuiz@1", ({ sceneStrings }) => [
+    { num_questions: 6, preamble: () => sceneStrings("intro") },
+    {
+      // Finite differences: P+1 passes.
+      prompt: (v) => sceneStrings("fdQ", v),
+      variables: "p=[200:900]",
+      answer: "p + 1",
+    },
+    {
+      // SPSA: always 2.
+      prompt: (v) => sceneStrings("spsaQ", v),
+      variables: "p=[1000:9000]",
+      answer: 2,
+    },
+    {
+      // s steps × (p+1) passes.
+      prompt: (v) => sceneStrings("totalQ", v),
+      variables: "s=[10,20,50] p=[99,199,499]",
+      answer: "s*(p+1)",
+    },
+    {
+      // Linear in σ (small-error regime).
+      prompt: (v) => sceneStrings("scaleQ", v),
+      variables: "f=[2,3,4]",
+      answer: "f",
+    },
+    {
+      // m = s² sources ⇒ error ×√m = s.
+      prompt: (v) => sceneStrings("devQ", { m: v.s * v.s }),
+      variables: "s=[2,3,4,5]",
+      answer: "s",
+    },
+    {
+      prompt: () => sceneStrings("whyQ"),
+      options: [
+        { text: () => sceneStrings("whyRight"), correct: true },
+        { text: () => sceneStrings("whyBits"), correct: false },
+        { text: () => sceneStrings("whyLight"), correct: false },
+        { text: () => sceneStrings("whySoft"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("hilQ"),
+      options: [
+        { text: () => sceneStrings("hilRight"), correct: true },
+        { text: () => sceneStrings("hilNoise"), correct: false },
+        { text: () => sceneStrings("hilSpeed"), correct: false },
+        { text: () => sceneStrings("hilNothing"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("adjQ"),
+      options: [
+        { text: () => sceneStrings("adjRight"), correct: true },
+        { text: () => sceneStrings("adjCam"), correct: false },
+        { text: () => sceneStrings("adjFd"), correct: false },
+        { text: () => sceneStrings("adjDig"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("nawQ"),
+      options: [
+        { text: () => sceneStrings("nawRight"), correct: true },
+        { text: () => sceneStrings("nawZero"), correct: false },
+        { text: () => sceneStrings("nawMem"), correct: false },
+        { text: () => sceneStrings("nawBig"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("precQ"),
+      options: [
+        { text: () => sceneStrings("prRight"), correct: true },
+        { text: () => sceneStrings("prMem"), correct: false },
+        { text: () => sceneStrings("prLoss"), correct: false },
+        { text: () => sceneStrings("prNone"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("deployQ"),
+      options: [
+        { text: () => sceneStrings("dpRight"), correct: true },
+        { text: () => sceneStrings("dpGpu"), correct: false },
+        { text: () => sceneStrings("dpFpga"), correct: false },
+        { text: () => sceneStrings("dpCloud"), correct: false },
+      ],
+    },
+    {
+      prompt: () => sceneStrings("reportQ"),
+      options: [
+        { text: () => sceneStrings("rpRight"), correct: true },
+        { text: () => sceneStrings("rpFlops"), correct: false },
+        { text: () => sceneStrings("rpColor"), correct: false },
+        { text: () => sceneStrings("rpCode"), correct: false },
+      ],
+    },
+  ]);
+</script>
