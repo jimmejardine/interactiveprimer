@@ -329,8 +329,29 @@ function makeChartBoard(
   // A small horizontal margin (6% of the span each side) so the curve doesn't touch the frame —
   // proportional, so it works at any scale (≈40 units on a ±360° window, ≈0.12 on a ±1 window).
   const xPad = (xmax - xmin) * 0.06;
+  // Reserve on-screen HEIGHT for the x-axis labels — the tick numbers and the axis name, which
+  // drawAxes paints BELOW the axis line (which sits at user y=0). Without this, a chart whose ymin
+  // is 0 (or barely negative) puts the axis flush with the board's bottom edge, so the labels render
+  // outside the SVG where `.stage { overflow: hidden }` clips them. `.stage` is a fixed 7:4 box, so
+  // derive its pixel height from the width when getBoundingClientRect isn't laid out yet.
+  const rect = host.getBoundingClientRect();
+  const pxH = rect.height || rect.width * (4 / 7);
+  const ySpan = ymax - ymin;
+  const BOTTOM_PX = 30; // tick numbers (~24px) + the below-right axis name (~26px)
+  const TOP_PX = 8; // a little headroom so a peak / the y-axis name isn't flush with the top
+  let yPadTop: number;
+  let yPadBottom: number;
+  if (pxH > TOP_PX + BOTTOM_PX + 1) {
+    const u = ySpan / (pxH - TOP_PX - BOTTOM_PX); // user-units per pixel with the margins reserved
+    yPadTop = TOP_PX * u;
+    yPadBottom = BOTTOM_PX * u;
+  } else {
+    // Detached / zero-size at init: fall back to a proportional pad (self-scales on resize anyway).
+    yPadTop = ySpan * 0.06;
+    yPadBottom = ySpan * 0.16;
+  }
   const board = JXG.JSXGraph.initBoard(host, {
-    boundingbox: [xmin - xPad, ymax, xmax + xPad, ymin],
+    boundingbox: [xmin - xPad, ymax + yPadTop, xmax + xPad, ymin - yPadBottom],
     keepaspectratio: false,
     axis: false,
     grid: false,
