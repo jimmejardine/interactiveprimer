@@ -39,6 +39,7 @@ import {
 import { getCurrentCourse, setCurrentCourse } from "../course.ts";
 import { loadGraph } from "../graph-data.ts";
 import { confirmDialog } from "../confirm-dialog.ts";
+import { openFeedbackDialog } from "../feedback-dialog.ts";
 import { trapFocus } from "../focus-trap.ts";
 import {
   getUser,
@@ -210,7 +211,7 @@ export class PrimerMenu extends HTMLElement {
           <button type="button" class="nav" data-href="/course-quiz">${t("menu.courseQuiz")}</button>
           <button type="button" class="nav" data-href="/explore">${t("menu.explore")}</button>
           <button type="button" class="nav" data-target="config">${t("menu.config")}<span class="chev" aria-hidden="true">›</span></button>
-          <button type="button" class="nav" data-extern="https://github.com/jimmejardine/interactiveprimer/discussions">${t("menu.feedback")}<span class="chev" aria-hidden="true">↗</span></button>
+          <button type="button" class="nav" data-action="feedback">${t("menu.feedback")}</button>
         </div>
         <div class="menu-view view-config" hidden>
           <button type="button" class="back" data-back="root"><span aria-hidden="true">‹ </span>${t("menu.config")}</button>
@@ -376,6 +377,10 @@ export class PrimerMenu extends HTMLElement {
       else if (b.dataset.extern) b.addEventListener("click", () => {
         window.open(b.dataset.extern as string, "_blank", "noopener");
         setOpen(false);
+      });
+      else if (b.dataset.action === "feedback") b.addEventListener("click", () => {
+        setOpen(false);
+        void openFeedbackDialog();
       });
     }
     for (const b of [...root.querySelectorAll(".back")] as HTMLButtonElement[]) {

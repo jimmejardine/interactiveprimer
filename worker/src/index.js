@@ -20,6 +20,11 @@ const RL_MAX = 5; // max code requests per window
 const SESSION_MS = 90 * 24 * 3600 * 1000; // session lifetime, 90 days
 const SESSION_MAX_AGE = 90 * 24 * 3600; // same, in seconds, for the cookie
 const COOKIE_NAME = "psess";
+const FB_MSG_MIN = 4; // shortest feedback message accepted
+const FB_MSG_MAX = 2000; // longest feedback message accepted
+const FB_URL_MAX = 500; // stored URL is truncated to this
+const FB_RL_MAX = 5; // max feedback submissions per IP per RL_TTL window
+const FB_PAGE_RE = /^[a-z0-9._/-]{1,200}$/; // page ids / pathnames; no "|" (the key delimiter)
 // Unambiguous code alphabet: A–Z minus I and O (24 letters) — no look-alikes.
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ";
 const CODE_LEN = 6;
@@ -31,7 +36,7 @@ const CODE_LEN = 6;
 export default {
   /**
    * @param {Request} request
-   * @param {{ PROGRESS: KVNamespace, AUTH_SECRET: string, RESEND_API_KEY: string, EMAIL_FROM?: string, SITE_ORIGIN?: string }} env
+   * @param {{ PROGRESS: KVNamespace, FEEDBACK: KVNamespace, AUTH_SECRET: string, RESEND_API_KEY: string, EMAIL_FROM?: string, SITE_ORIGIN?: string }} env
    * @param {ExecutionContext} ctx
    */
   async fetch(request, env, ctx) {
@@ -72,6 +77,10 @@ async function route(path, request, env, ctx) {
   if (path === "/api/progress" && m === "GET") return progressGet(request, env);
   if (path === "/api/progress" && m === "PUT") return progressPut(request, env);
   if (path === "/api/progress" && m === "DELETE") return progressDelete(request, env);
+  if (path === "/api/feedback" && m === "POST") return feedbackPost(request, env);
+  if (path === "/api/feedback/summary" && m === "GET") return feedbackSummary(env);
+  if (path === "/api/feedback" && m === "GET") return feedbackGet(request, env);
+  if (path === "/api/feedback" && m === "DELETE") return feedbackDelete(request, env);
   return json({ ok: false, error: "not_found" }, 404);
 }
 
@@ -215,6 +224,114 @@ async function progressDelete(request, env) {
   }
   await env.PROGRESS.delete(sess.uid);
   return json({ ok: true }, 200, { "Set-Cookie": clearCookie() });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Page feedback
+//
+// One KV entry per submission in the dedicated FEEDBACK namespace — never a per-page array, so
+// concurrent submissions can't clobber each other (KV has no atomic read-modify-write). Keys are
+// `fb|<page>|<tsMillis>-<rand>`: "|" cannot appear in a page id, so a prefix list scopes exactly
+// one page (or, with prefix "fb|", everything), and the timestamp in the key lets the summary be
+// computed from keys alone — zero value reads.
+// ---------------------------------------------------------------------------------------------
+
+/** POST /api/feedback { page, url, message } — anonymous, rate-limited; uid-tagged when signed in. */
+async function feedbackPost(request, env) {
+  const body = await readJson(request);
+  const page = typeof (body && body.page) === "string" ? body.page.trim() : "";
+  const message = typeof (body && body.message) === "string" ? body.message.trim() : "";
+  const url = typeof (body && body.url) === "string" ? body.url.slice(0, FB_URL_MAX) : "";
+
+  if (!FB_PAGE_RE.test(page)) return json({ ok: false, error: "bad_page" }, 400);
+  if (message.length < FB_MSG_MIN || message.length > FB_MSG_MAX) {
+    return json({ ok: false, error: "bad_message" }, 400);
+  }
+
+  const ip = request.headers.get("CF-Connecting-IP") || "noip";
+  if ((await bump(env, `rl:fb:${ip}`)) > FB_RL_MAX) {
+    return json({ ok: false, error: "rate_limited" }, 429);
+  }
+
+  // Tag with the anonymous uid when a validly signed session cookie happens to be present.
+  // Signature check only — no doc/salt round-trip; this is a tag, not an authorization.
+  const sess = await authUid(request, env);
+
+  const entry = { page, url, message, createdAt: Date.now() };
+  if (sess) entry.uid = sess.uid;
+  const key = `fb|${page}|${entry.createdAt}-${randomHex(2)}`;
+  await env.FEEDBACK.put(key, JSON.stringify(entry));
+  return json({ ok: true }, 200);
+}
+
+/** GET /api/feedback/summary — every page with feedback: { page, count, first, last }. Unsorted. */
+async function feedbackSummary(env) {
+  const byPage = new Map();
+  for await (const name of listFeedbackKeys(env, "fb|")) {
+    const parsed = parseFeedbackKey(name);
+    if (!parsed) continue;
+    const cur = byPage.get(parsed.page) || { page: parsed.page, count: 0, first: Infinity, last: 0 };
+    cur.count += 1;
+    if (parsed.ts < cur.first) cur.first = parsed.ts;
+    if (parsed.ts > cur.last) cur.last = parsed.ts;
+    byPage.set(parsed.page, cur);
+  }
+  return json({ ok: true, pages: [...byPage.values()] }, 200);
+}
+
+/** GET /api/feedback?page=<id> — all submissions for one page, chronological. */
+async function feedbackGet(request, env) {
+  const page = new URL(request.url).searchParams.get("page") || "";
+  if (!FB_PAGE_RE.test(page)) return json({ ok: false, error: "bad_page" }, 400);
+
+  const items = [];
+  for await (const name of listFeedbackKeys(env, `fb|${page}|`)) {
+    const value = safeParse(await env.FEEDBACK.get(name));
+    if (value) items.push({ key: name, ...value });
+  }
+  items.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  return json({ ok: true, items }, 200);
+}
+
+/** DELETE /api/feedback?key=<kvKey> (one item) or ?page=<id> (everything for the page). */
+async function feedbackDelete(request, env) {
+  const params = new URL(request.url).searchParams;
+  const key = params.get("key") || "";
+  const page = params.get("page") || "";
+
+  if (key) {
+    if (!key.startsWith("fb|")) return json({ ok: false, error: "bad_key" }, 400);
+    await env.FEEDBACK.delete(key);
+    return json({ ok: true, deleted: 1 }, 200);
+  }
+  if (FB_PAGE_RE.test(page)) {
+    let deleted = 0;
+    for await (const name of listFeedbackKeys(env, `fb|${page}|`)) {
+      await env.FEEDBACK.delete(name);
+      deleted += 1;
+    }
+    return json({ ok: true, deleted }, 200);
+  }
+  return json({ ok: false, error: "bad_request" }, 400);
+}
+
+/** Async generator over all FEEDBACK key names under a prefix, following list cursors. */
+async function* listFeedbackKeys(env, prefix) {
+  let cursor;
+  do {
+    const res = await env.FEEDBACK.list({ prefix, cursor });
+    for (const k of res.keys) yield k.name;
+    cursor = res.list_complete ? undefined : res.cursor;
+  } while (cursor);
+}
+
+/** `fb|<page>|<ts>-<rand>` → { page, ts } or null. */
+function parseFeedbackKey(name) {
+  const parts = name.split("|");
+  if (parts.length !== 3 || parts[0] !== "fb") return null;
+  const ts = Number(parts[2].split("-")[0]);
+  if (!Number.isFinite(ts)) return null;
+  return { page: parts[1], ts };
 }
 
 // ---------------------------------------------------------------------------------------------
