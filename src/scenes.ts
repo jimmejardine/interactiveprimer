@@ -295,6 +295,8 @@ export interface GeometryProblemConfig {
     theorems?: string[];
     /** Rule keys that must appear in the generated solution chain. */
     require?: string[];
+    /** Prefer traces that use this many distinct theorems (mixed-family chases). */
+    minDistinctRules?: number;
     pageId?: string;
     tools?: string[];
   };

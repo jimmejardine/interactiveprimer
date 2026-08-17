@@ -287,6 +287,41 @@ test("circle / similar / pythag scaffolds generate a chase that uses the require
   }
 });
 
+test("generateProblem minDistinctRules prefers a mixed-theorem trace", () => {
+  const fig = SCAFFOLDS.isoscelesOnParallels(makeRng(4));
+  const allowed = conceptIdsFor(fig.uses);
+  const prob = generateProblem(fig, allowed, makeRng(11), {
+    minSteps: 3, maxSteps: 6, minDistinctRules: 3, attempts: 160,
+  });
+  assert.ok(prob, "isosceles-on-parallels should yield a mixed chase");
+  const rules = new Set(prob.blanks.map((b) => b.rule));
+  assert.ok(rules.size >= 3, `expected ≥3 distinct rules, got ${[...rules]}`);
+});
+
+test("composite scaffolds generate a chase that uses several families", () => {
+  const cases: Array<[string, number]> = [
+    ["isoscelesOnParallels", 3],
+    ["triangleBetweenParallels", 3],
+    ["nestedSimilar", 2],
+    ["tangentRightPythag", 2],
+  ];
+  for (const [scaffold, minDistinct] of cases) {
+    const fig = SCAFFOLDS[scaffold](makeRng(2));
+    const allowed = conceptIdsFor(fig.uses);
+    const prob = pickAndGenerate(allowed, makeRng(41), {
+      scaffolds: [scaffold],
+      minSteps: 2,
+      maxSteps: 6,
+      minDistinctRules: minDistinct,
+      attempts: 160,
+    });
+    assert.ok(prob, `${scaffold} should generate`);
+    assert.equal(prob.figure.name, scaffold);
+    const rules = new Set(prob.blanks.map((b) => b.rule));
+    assert.ok(rules.size >= minDistinct, `${scaffold} distinct rules ${[...rules]}`);
+  }
+});
+
 test("pickAndGenerate auto-picks a scaffold that can fire the required rule", () => {
   const allowed = conceptIdsFor(["isoscelesBase", "triangleSum"]);
   const prob = pickAndGenerate(allowed, makeRng(17), {

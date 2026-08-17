@@ -250,7 +250,7 @@ page (each engine rule names the lesson `conceptId` that teaches it).
 </script>
 ```
 
-- **`config.generate`**: `{ scaffolds?, minSteps?, maxSteps?, theorems?, require?, pageId?, tools? }`.
+- **`config.generate`**: `{ scaffolds?, minSteps?, maxSteps?, theorems?, require?, minDistinctRules?, pageId?, tools? }`.
   - `theorems` — rule-catalog keys (`"vertical"`, `"triangleSum"`, `"angleAtCentre"`, …). Pins the
     pool; omit to **DAG-gate** (only theorems in this page's prerequisite closure, plus this page).
   - `require` — rule keys that **must** appear in the solution chain (so a new-theorem page cannot
@@ -261,8 +261,11 @@ page (each engine rule names the lesson `conceptId` that teaches it).
     `equilateral`, `quadInterior`, `parallelogram`, `regularPentagon`,
     `centreAndCircumference`, `semicircle`, `sameSegment`, `cyclicQuad`,
     `tangentRadius` (hidden radius — learner draws it), `twoTangents`,
-    `similarPair`, `rightTriangle`.
+    `similarPair`, `rightTriangle`, `isoscelesOnParallels`, `triangleBetweenParallels`,
+    `nestedSimilar`, `tangentRightPythag`.
   - `minSteps` / `maxSteps` — difficulty (default 2–4).
+  - `minDistinctRules` — prefer a chain that uses this many *different* theorems (so a mixed
+    chase cannot collapse to vertical → linear pair → vertical).
   - `pageId` overrides the page id used for DAG gating. v1 generates **angle** chases.
 - **The learner** fills in EVERY unknown angle via on-figure **MathLive `<math-field>`** boxes (angle boxes
   pop the `geometry-angles` keyboard, length boxes `geometry-lengths`), with the highlighted box the final

@@ -357,6 +357,7 @@ export class PrimerGeometryProblem extends HTMLElement {
       minSteps: config.generate.minSteps ?? 2,
       maxSteps: config.generate.maxSteps ?? 4,
       require: config.generate.require,
+      minDistinctRules: config.generate.minDistinctRules,
     });
     this.#problem = problem;
     if (!problem) {

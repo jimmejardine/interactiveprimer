@@ -848,6 +848,195 @@ export function rightTriangle(rng: Rng): Figure {
   };
 }
 
+/**
+ * Isosceles triangle standing on one of two parallels, apex on the other. Base angles reappear
+ * at the apex as alternate interior angles, so a chase mixes isosceles, parallels, and the
+ * triangle sum — not just one family.
+ */
+export function isoscelesOnParallels(rng: Rng): Figure {
+  const alpha = rng.int(40, 70);
+  const apex = 180 - 2 * alpha;
+  const half = 2.6;
+  const h = half * Math.tan(alpha * DEG);
+  const A: Vec = [-half, -1];
+  const B: Vec = [half, -1];
+  const C: Vec = [0, -1 + h];
+  const L: Vec = [C[0] - 3.0, C[1]];
+  const R: Vec = [C[0] + 3.0, C[1]];
+  const points: Record<string, Vec> = { A, B, C, L, R };
+  const edges: Array<[string, string]> = [["A", "B"], ["A", "C"], ["B", "C"], ["L", "R"]];
+  const angles: AngleSlot[] = [
+    { key: "A", vertex: "A", from: "B", to: "C", value: alpha },
+    { key: "B", vertex: "B", from: "C", to: "A", value: alpha },
+    { key: "C", vertex: "C", from: "A", to: "B", value: apex },
+    { key: "LCA", vertex: "C", from: "L", to: "A", value: alpha },
+    { key: "RCB", vertex: "C", from: "B", to: "R", value: alpha },
+  ];
+  const relations = [
+    // Produce the apex via the straight line at C (after the two alternate copies of
+    // the base angles) so a chase has to use isosceles + parallels + a sum — not two
+    // shortcuts that never mention the third family.
+    equal("A", "B", "isoscelesBase"),
+    equal("LCA", "A", "alternateInterior"),
+    equal("RCB", "B", "alternateInterior"),
+    sumTo(["LCA", "C", "RCB"], 180, "linearPair"),
+    sumTo(["A", "B", "C"], 180, "triangleSum"),
+    rel("isoscelesBase", [{ key: "A", coef: 2 }, { key: "C", coef: 1 }], 180),
+    rel("isoscelesBase", [{ key: "B", coef: 2 }, { key: "C", coef: 1 }], 180),
+  ];
+  return {
+    name: "isoscelesOnParallels",
+    uses: ["isoscelesBase", "triangleSum", "alternateInterior", "linearPair"],
+    points, edges, parallels: [[0, 3]],
+    equals: [[1, 2]],
+    angles, relations,
+    boundingbox: [-5.2, C[1] + 0.9, 5.2, -1.9],
+  };
+}
+
+/**
+ * Two parallels cut by two transversals that cross between them. The lower and upper triangles
+ * share a vertical angle at the crossing and matching corresponding angles — a chase has to
+ * switch family (parallels ↔ triangle sum ↔ vertical).
+ */
+export function triangleBetweenParallels(rng: Rng): Figure {
+  let alpha, beta, gamma;
+  do {
+    alpha = rng.int(40, 75);
+    beta = rng.int(40, 75);
+    gamma = 180 - alpha - beta;
+  } while (gamma < 30 || gamma > 100);
+  const h = 3.2;
+  const xh = h / 2;
+  const s = xh / Math.tan(alpha * DEG);
+  const t = xh / Math.tan(beta * DEG);
+  const B: Vec = [-s, 0];
+  const C: Vec = [t, 0];
+  const X: Vec = [0, xh];
+  const T: Vec = [s, h];
+  const U: Vec = [-t, h];
+  const pad = Math.max(s, t) + 1.6;
+  const points: Record<string, Vec> = {
+    B, C, X, T, U,
+    BL: [-pad, 0], BR: [pad, 0],
+    TL: [-pad, h], TR: [pad, h],
+  };
+  const edges: Array<[string, string]> = [["BL", "BR"], ["TL", "TR"], ["B", "T"], ["C", "U"]];
+  const angles: AngleSlot[] = [
+    { key: "B", vertex: "B", from: "C", to: "X", value: alpha },
+    { key: "C", vertex: "C", from: "X", to: "B", value: beta },
+    { key: "Xbot", vertex: "X", from: "B", to: "C", value: gamma },
+    { key: "T", vertex: "T", from: "U", to: "X", value: alpha },
+    { key: "U", vertex: "U", from: "X", to: "T", value: beta },
+    { key: "Xtop", vertex: "X", from: "T", to: "U", value: gamma },
+  ];
+  const relations = [
+    equal("Xbot", "Xtop", "vertical"),
+    equal("B", "T", "alternateInterior"),
+    equal("C", "U", "alternateInterior"),
+    sumTo(["B", "C", "Xbot"], 180, "triangleSum"),
+    sumTo(["T", "U", "Xtop"], 180, "triangleSum"),
+  ];
+  return {
+    name: "triangleBetweenParallels",
+    uses: ["vertical", "alternateInterior", "triangleSum"],
+    points, edges, parallels: [[0, 1]],
+    angles, relations,
+    boundingbox: [-pad - 0.4, h + 0.8, pad + 0.4, -0.8],
+  };
+}
+
+/**
+ * A right triangle with a line parallel to the hypotenuse, cutting the legs — nested similar
+ * triangles (AA + side ratios) plus the triangle sum.
+ */
+export function nestedSimilar(rng: Rng): Figure {
+  const k = rng.pick([2, 3]);
+  const a = 3 * k, b = 4 * k, c = 5 * k;
+  const s = 0.42;
+  const A: Vec = [0, 0];
+  const Bpt: Vec = [a * s, 0];
+  const Cpt: Vec = [0, b * s];
+  const D: Vec = [3 * s, 0];
+  const E: Vec = [0, 4 * s];
+  const points: Record<string, Vec> = { A, B: Bpt, C: Cpt, D, E };
+  const edges: Array<[string, string]> = [["A", "B"], ["A", "C"], ["B", "C"], ["D", "E"]];
+  const angB = Math.round((Math.atan(b / a) * 180) / Math.PI);
+  const angC = 180 - 90 - angB;
+  const angles: AngleSlot[] = [
+    { key: "A", vertex: "A", from: "B", to: "C", value: 90 },
+    { key: "B", vertex: "B", from: "C", to: "A", value: angB },
+    { key: "C", vertex: "C", from: "A", to: "B", value: angC },
+    { key: "ADE", vertex: "D", from: "A", to: "E", value: angB },
+    { key: "AED", vertex: "E", from: "D", to: "A", value: angC },
+  ];
+  const lengths = [
+    { key: "AB", from: "A", to: "B", value: a },
+    { key: "AC", from: "A", to: "C", value: b },
+    { key: "BC", from: "B", to: "C", value: c },
+    { key: "AD", from: "A", to: "D", value: 3 },
+    { key: "AE", from: "A", to: "E", value: 4 },
+    { key: "DE", from: "D", to: "E", value: 5 },
+  ];
+  const relations = [
+    equal("B", "ADE", "similarAA"),
+    equal("C", "AED", "similarAA"),
+    equal("B", "ADE", "corresponding"),
+    equal("C", "AED", "corresponding"),
+    sumTo(["A", "B", "C"], 180, "triangleSum"),
+    sumTo(["A", "ADE", "AED"], 180, "triangleSum"),
+    ratioEq("AB", "AD", "AC", "AE", "similarSides"),
+    ratioEq("AB", "AD", "BC", "DE", "similarSides"),
+  ];
+  return {
+    name: "nestedSimilar",
+    uses: ["similarAA", "similarSides", "corresponding", "triangleSum"],
+    points, edges, parallels: [[2, 3]],
+    lengths, angles, relations,
+    boundingbox: [-1.2, Cpt[1] + 0.8, Bpt[0] + 0.9, -1.0],
+  };
+}
+
+/**
+ * Tangent at T, radius OT (hidden until drawn), external point A: right-angled at T, so
+ * Pythagoras on the three sides. Mixes the tangent theorem with a length chase.
+ */
+export function tangentRightPythag(rng: Rng): Figure {
+  const [a, b, c] = rng.pick([[3, 4, 5], [5, 12, 13], [8, 15, 17], [7, 24, 25]]);
+  const s = 3.4 / c;
+  const O: Vec = [0, 0];
+  const T: Vec = [b * s, 0];
+  const Apt: Vec = [b * s, a * s];
+  const points: Record<string, Vec> = { O, T, A: Apt };
+  const edges: Array<[string, string]> = [["T", "A"], ["O", "A"]];
+  const angO = Math.round((Math.atan(a / b) * 180) / Math.PI);
+  const angles: AngleSlot[] = [
+    { key: "T", vertex: "T", from: "O", to: "A", value: 90 },
+    { key: "O", vertex: "O", from: "T", to: "A", value: angO },
+    { key: "A", vertex: "A", from: "T", to: "O", value: 90 - angO },
+  ];
+  const lengths = [
+    { key: "AT", from: "A", to: "T", value: a },
+    { key: "OT", from: "O", to: "T", value: b },
+    { key: "OA", from: "O", to: "A", value: c },
+  ];
+  const relations = [
+    rel("tangentPerpRadius", [{ key: "T", coef: 1 }], 90),
+    pythagEq("AT", "OT", "OA", "pythagoras"),
+    sumTo(["T", "O", "A"], 180, "triangleSum"),
+  ];
+  return {
+    name: "tangentRightPythag",
+    uses: ["tangentPerpRadius", "pythagoras", "triangleSum"],
+    points, edges, parallels: [],
+    circles: [{ center: "O", r: b * s }],
+    aux: [{ kind: "line", through: ["O", "T"], hint: "Try drawing the radius to the point of contact." }],
+    rights: [{ vertex: "T", from: "O", to: "A" }],
+    lengths, angles, relations,
+    boundingbox: [-b * s - 0.8, a * s + 0.9, b * s + 1.2, -b * s - 0.8],
+  };
+}
+
 /** A scaffold constructor plus the theorem keys it can exercise. */
 export interface ScaffoldSpec {
   name: string;
@@ -876,6 +1065,10 @@ export const SCAFFOLD_LIST: ScaffoldSpec[] = [
   { name: "twoTangents", uses: ["tangentPerpRadius", "twoTangents", "triangleSum"], make: twoTangents },
   { name: "similarPair", uses: ["similarAA", "similarSides"], make: similarPair },
   { name: "rightTriangle", uses: ["pythagoras"], make: rightTriangle },
+  { name: "isoscelesOnParallels", uses: ["isoscelesBase", "triangleSum", "alternateInterior", "linearPair"], make: isoscelesOnParallels },
+  { name: "triangleBetweenParallels", uses: ["vertical", "alternateInterior", "triangleSum"], make: triangleBetweenParallels },
+  { name: "nestedSimilar", uses: ["similarAA", "similarSides", "corresponding", "triangleSum"], make: nestedSimilar },
+  { name: "tangentRightPythag", uses: ["tangentPerpRadius", "pythagoras", "triangleSum"], make: tangentRightPythag },
 ];
 
 /** All scaffolds by name, for the generator to pick from. */

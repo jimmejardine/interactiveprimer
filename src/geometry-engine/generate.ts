@@ -12,7 +12,7 @@
 
 import { forwardChain, traceTarget } from "./chain.ts";
 import type { DerivStep } from "./chain.ts";
-import { anglePos, lengthPos, selectScaffolds, SCAFFOLDS } from "./scaffolds.ts";
+import { anglePos, lengthPos, selectScaffolds, SCAFFOLDS, SCAFFOLD_LIST } from "./scaffolds.ts";
 import type { Figure } from "./scaffolds.ts";
 import type { Rng } from "../rng.ts";
 
@@ -91,6 +91,8 @@ export function generateProblem(
     attempts?: number;
     /** Rule catalog keys that MUST appear in the solution trace. */
     require?: string[];
+    /** Prefer (and, when possible, require) this many distinct rule ids in the trace. */
+    minDistinctRules?: number;
   } = {},
 ): Problem | null {
   const values = valueMap(figure);
@@ -101,7 +103,7 @@ export function generateProblem(
   const needed = minGivensFor(figure, allowed);
   const maxGivens = Math.min(keys.length - 1, Math.max(opts.maxGivens ?? 2, needed));
   const minGivens = Math.min(maxGivens, Math.max(opts.minGivens ?? 1, needed));
-  const { minSteps = 2, maxSteps = 4, attempts = 120, require = [] } = opts;
+  const { minSteps = 2, maxSteps = 4, attempts = 120, require = [], minDistinctRules = 0 } = opts;
   let best: { problem: Problem; dist: number } | null = null;
 
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -118,12 +120,20 @@ export function generateProblem(
     if (require.length && !require.every((r) => trace.some((s) => s.rule === r))) continue;
 
     const problem = buildProblem(figure, givenKeys, trace, target);
-    const len = trace.length;
-    const dist = len < minSteps ? minSteps - len : len > maxSteps ? len - maxSteps : 0;
+    const dist = traceDist(trace, minSteps, maxSteps, minDistinctRules);
     if (dist === 0) return problem;
     if (!best || dist < best.dist) best = { problem, dist };
   }
   return best ? best.problem : null;
+}
+
+/** 0 if the trace is in-band and diverse enough; otherwise how far it misses. */
+function traceDist(trace: DerivStep[], minSteps: number, maxSteps: number, minDistinct: number): number {
+  const len = trace.length;
+  const stepDist = len < minSteps ? minSteps - len : len > maxSteps ? len - maxSteps : 0;
+  const distinct = new Set(trace.map((s) => s.rule)).size;
+  const ruleDist = distinct < minDistinct ? minDistinct - distinct : 0;
+  return stepDist + ruleDist;
 }
 
 /**
@@ -141,31 +151,35 @@ export function pickAndGenerate(
     maxGivens?: number;
     attempts?: number;
     require?: string[];
+    minDistinctRules?: number;
   } = {},
 ): Problem | null {
   const require = opts.require ?? [];
   const explicit = opts.scaffolds && opts.scaffolds !== "auto";
-  const names = explicit
-    ? (opts.scaffolds as string[]).filter((n) => SCAFFOLDS[n])
-    : selectScaffolds(allowed, require).map((s) => s.name);
+  let specs = explicit
+    ? (opts.scaffolds as string[]).filter((n) => SCAFFOLDS[n]).map((n) => SCAFFOLD_LIST.find((s) => s.name === n)!)
+    : selectScaffolds(allowed, require);
   // An explicit list that names no known scaffold is a config error — do NOT
   // silently substitute a different figure family (that used to draw parallel
   // lines on an isosceles page when the bundle was stale).
-  if (!names.length) return null;
+  if (!specs.length) return null;
+  // A diversity request should try figures that actually have that many theorems.
+  const need = opts.minDistinctRules ?? 0;
+  if (!explicit && need >= 2) {
+    const rich = specs.filter((s) => s.uses.length >= need);
+    if (rich.length) specs = rich;
+  }
 
   let best: Problem | null = null;
   let bestDist = Infinity;
+  const names = specs.map((s) => s.name);
   const tries = Math.max(names.length, 4);
   for (let i = 0; i < tries; i++) {
     const name = rng.pick(names);
     const figure = SCAFFOLDS[name](rng);
     const problem = generateProblem(figure, allowed, rng, opts);
     if (!problem) continue;
-    const dist = problem.steps < (opts.minSteps ?? 2)
-      ? (opts.minSteps ?? 2) - problem.steps
-      : problem.steps > (opts.maxSteps ?? 4)
-        ? problem.steps - (opts.maxSteps ?? 4)
-        : 0;
+    const dist = traceDist(problem.blanks, opts.minSteps ?? 2, opts.maxSteps ?? 4, need);
     if (dist === 0) return problem;
     if (dist < bestDist) {
       best = problem;
