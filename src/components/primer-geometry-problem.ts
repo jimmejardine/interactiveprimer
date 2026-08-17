@@ -31,11 +31,12 @@ import { makeRng } from "../rng.ts";
 import { checkAnswer } from "../quiz-vars.ts";
 import { loadMathLive } from "../mathfield.ts";
 import { getMathKeyboard } from "../math-keyboards.ts";
-import { SCAFFOLDS, anglePos } from "../geometry-engine/scaffolds.ts";
-import { generateProblem } from "../geometry-engine/generate.ts";
+import { anglePos } from "../geometry-engine/scaffolds.ts";
+import { raysForInterior } from "../geometry.ts";
+import { pickAndGenerate } from "../geometry-engine/generate.ts";
 import type { Problem } from "../geometry-engine/generate.ts";
 import type { DerivStep } from "../geometry-engine/chain.ts";
-import { RULES } from "../geometry-engine/rules.ts";
+import { RULES, conceptIdsFor } from "../geometry-engine/rules.ts";
 import { buildAdjacency, allowedTheorems } from "../geometry-engine/learned.ts";
 
 /** Cached `dist/graph.json` adjacency (fetched once across all instances). */
@@ -67,6 +68,33 @@ const JUSTIFY: Record<string, (v: number) => string> = {
   isoscelesBase: (v) => `Base angles of an isosceles triangle are equal, so this angle is ${v}°.`,
   exteriorAngle: (v) => `The exterior angle equals the two remote interior angles, so this angle is ${v}°.`,
   anglesAtPoint: (v) => `Angles around a point add to 360°, so this angle is ${v}°.`,
+  equilateral: (v) => `Every angle of an equilateral triangle is 60°, so this angle is ${v}°.`,
+  polygonSum: (v) => `The interior angles of this polygon add to their angle sum, so this angle is ${v}°.`,
+  polygonExterior: (v) => `The exterior angles of a polygon add to 360°, so this angle is ${v}°.`,
+  regularInterior: (v) => `Each interior angle of this regular polygon is the same, so this angle is ${v}°.`,
+  regularCentre: (v) => `Each central angle of this regular polygon is the same, so this angle is ${v}°.`,
+  parallelogramOpposite: (v) => `Opposite angles of a parallelogram are equal, so this angle is ${v}°.`,
+  parallelogramConsecutive: (v) => `Consecutive angles of a parallelogram add to 180°, so this angle is ${v}°.`,
+};
+
+/** Short tray labels (the theorem names the learner is allowed to use). */
+const RULE_LABEL: Record<string, string> = {
+  vertical: "vertically opposite angles",
+  linearPair: "angles on a straight line",
+  corresponding: "corresponding angles",
+  alternateInterior: "alternate interior angles",
+  coInterior: "co-interior angles",
+  anglesAtPoint: "angles around a point",
+  triangleSum: "angles in a triangle",
+  isoscelesBase: "isosceles base angles",
+  exteriorAngle: "exterior angle of a triangle",
+  equilateral: "equilateral triangle (60°)",
+  polygonSum: "interior angle sum of a polygon",
+  polygonExterior: "exterior angles of a polygon",
+  regularInterior: "interior angle of a regular polygon",
+  regularCentre: "central angle of a regular polygon",
+  parallelogramOpposite: "opposite angles of a parallelogram",
+  parallelogramConsecutive: "consecutive angles of a parallelogram",
 };
 
 export class PrimerGeometryProblem extends HTMLElement {
@@ -132,6 +160,8 @@ export class PrimerGeometryProblem extends HTMLElement {
         .prob { display: block; }
         .goal { font-family: var(--primer-font-display, sans-serif); font-weight: 700;
           color: var(--primer-ink, #111); margin: 0 0 0.5rem; text-align: center; }
+        .theorem-tray { display: block; font-family: var(--primer-font-ui, sans-serif); font-weight: 400;
+          font-size: 0.85rem; color: var(--primer-ink-soft, #667); margin-top: 0.25rem; }
         /* The toolbar is a single control bar above the diagram: construction tools (when any) plus the
            always-present Check / Refresh / Restart actions. */
         .toolbar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; justify-content: center;
@@ -287,19 +317,19 @@ export class PrimerGeometryProblem extends HTMLElement {
     this.#toolset = config.generate.tools ?? ["line", "parallel", "equal", "right"];
     const allowed = await this.#allowedPool(config, JXG);
     if (gen !== this.#buildGen) return false;
-    const scaffoldNames = config.generate.scaffolds.filter((n: string) => SCAFFOLDS[n as keyof typeof SCAFFOLDS]);
-    const scaffoldName = rng.pick(scaffoldNames.length ? scaffoldNames : ["parallelTransversal"]);
-    const figure = SCAFFOLDS[scaffoldName as keyof typeof SCAFFOLDS](rng);
-    const problem = generateProblem(figure, allowed, rng, {
+    const problem = pickAndGenerate(allowed, rng, {
+      scaffolds: config.generate.scaffolds,
       minSteps: config.generate.minSteps ?? 2,
       maxSteps: config.generate.maxSteps ?? 4,
+      require: config.generate.require,
     });
     this.#problem = problem;
     if (!problem) {
       stage.querySelector(".overlay")?.replaceChildren();
-      this.#feedback(`<span class="meta">${this.#str("noTheorems", "No relevant theorems learned yet — come back after the lessons above.")}</span>`);
+      this.#feedback(`<span class="meta">${this.#str("noTheorems", "Couldn't build a chase for this page. Try Refresh — if it keeps failing, hard-reload so the latest framework bundle loads.")}</span>`);
       return false;
     }
+    const figure = problem.figure;
     // EVERY non-given angle is fillable — that's how you chase the solution. The engine's chain only
     // supplies the ordered HINTS and which one is the final target.
     const givenKeys = new Set(problem.givens.map((g: any) => g.key));
@@ -342,7 +372,13 @@ export class PrimerGeometryProblem extends HTMLElement {
   async #allowedPool(config: GeometryProblemConfig, _JXG: any) {
     const gen = config.generate ?? { scaffolds: [] };
     const allRuleConcepts = new Set(Object.values(RULES).map((r) => r.conceptId));
-    if (gen.theorems) return new Set(gen.theorems);
+    if (gen.theorems) {
+      // Accept both catalog keys (`isoscelesBase`) and concept ids so a pin never
+      // silently matches nothing (which used to surface as "no theorems learned").
+      const allowed = conceptIdsFor(gen.theorems);
+      for (const t of gen.theorems) allowed.add(t);
+      return allowed;
+    }
     const adj = await loadGraph();
     if (!adj) return allRuleConcepts; // offline / no graph → don't block, allow everything
     const id = gen.pageId ?? pageConceptId();
@@ -387,16 +423,31 @@ export class PrimerGeometryProblem extends HTMLElement {
         strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false,
       });
     }
-    // GIVEN parallel marks: the "these lines are parallel" chevrons the chase relies on. Each parallel
-    // group gets its own number of chevrons (1, 2, …) so distinct groups are distinguishable.
+    // When a side is both parallel and equal-length (a parallelogram), sit the ticks and the
+    // chevrons at different fractions along the edge so they don't stack on the midpoint.
+    const equalSet = new Set((figure.equals ?? []).flat());
+    const parallelSet = new Set((figure.parallels ?? []).flat());
+    const alongAt = (a: [number, number], b: [number, number], t: number): [number, number] => [
+      a[0] + (b[0] - a[0]) * t,
+      a[1] + (b[1] - a[1]) * t,
+    ];
     (figure.parallels ?? []).forEach((group: number[], gi: number) => {
       for (const ei of group) {
         const [p, q] = figure.edges[ei];
         const a = figure.points[p];
         const b = figure.points[q];
-        tools.parallelMark((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, {
+        const t = equalSet.has(ei) ? 0.64 : 0.5;
+        const [x, y] = alongAt(a, b, t);
+        tools.parallelMark(x, y, {
           along: [b[0] - a[0], b[1] - a[1]], count: gi + 1, color: colors.line,
         });
+      }
+    });
+    (figure.equals ?? []).forEach((group: number[], gi: number) => {
+      for (const ei of group) {
+        const [p, q] = figure.edges[ei];
+        const t = parallelSet.has(ei) ? 0.36 : 0.5;
+        tools.tickMark(figure.points[p], figure.points[q], { count: gi + 1, color: colors.line, t });
       }
     });
     // Pickable vertex points (small, faint) for the construction tools.
@@ -410,13 +461,11 @@ export class PrimerGeometryProblem extends HTMLElement {
     const givenKeys = new Set(problem.givens.map((g: any) => g.key));
     for (const ang of figure.angles) {
       const V = figure.points[ang.vertex];
-      const P1 = figure.points[ang.from];
-      const P2 = figure.points[ang.to];
+      // Sweep the stored interior, not the reflex wrap-around JSXGraph would pick from raw from/to.
+      const [P1, P2] = raysForInterior(V, figure.points[ang.from], figure.points[ang.to], ang.value);
       if (givenKeys.has(ang.key)) {
-        // A given: a clear arc + its value, in small ink text.
         tools.angleMark(V, P1, P2, { label: `${ang.value}°`, color: colors.ink, radius: 0.5, fontSize: 12 });
       } else {
-        // A fillable angle: a faint arc to anchor its input box (the target a touch stronger).
         tools.angleMark(V, P1, P2, { color: ang.key === problem.target ? colors.cat[0] : colors.line, radius: 0.5 });
       }
     }
@@ -461,6 +510,13 @@ export class PrimerGeometryProblem extends HTMLElement {
   #renderGoal() {
     const goal = this.#root.querySelector(".goal") as HTMLElement;
     goal.textContent = this.#goal || this.#str("goal", "Chase the angles: fill in any you can work out, ending with the highlighted one.");
+    const uses = this.#problem?.figure.uses ?? [];
+    if (!uses.length) return;
+    const tray = document.createElement("span");
+    tray.className = "theorem-tray";
+    tray.textContent = " " + this.#str("toolkit", "You may use") + ": " +
+      uses.map((r) => RULE_LABEL[r] ?? r).join(" · ") + ".";
+    goal.append(tray);
   }
 
   /** Overlay a small editor at EVERY fillable quantity's position — a MathLive `<math-field>` (its

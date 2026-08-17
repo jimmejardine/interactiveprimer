@@ -121,9 +121,9 @@ export function makeGeometryTools(board: any, colors: { bg: string; ink: string;
    * Equal-length "tick" hatches across the middle of the side `p`→`q` (each a coordinate pair). Use
    * `count: 2`/`3` for a second/third distinct congruent-side group. Returns the hatch elements.
    */
-  const tickMark = (p: Vec, q: Vec, { count = 1, color }: { count?: number; color?: string } = {}): any[] => {
-    const mx = (p[0] + q[0]) / 2;
-    const my = (p[1] + q[1]) / 2;
+  const tickMark = (p: Vec, q: Vec, { count = 1, color, t = 0.5 }: { count?: number; color?: string; t?: number } = {}): any[] => {
+    const mx = p[0] + (q[0] - p[0]) * t;
+    const my = p[1] + (q[1] - p[1]) * t;
     const along = [q[0] - p[0], q[1] - p[1]] as Vec;
     const stroke = color ?? colors.line;
     return tickSegments(mx, my, along, count).map(([a, b]) =>

@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { makeRng } from "../src/rng.ts";
 import { RULES, rel, equal, sumTo, relationHolds } from "../src/geometry-engine/rules.ts";
 import { forwardChain, traceTarget } from "../src/geometry-engine/chain.ts";
-import { parallelTransversal, triangle, SCAFFOLDS, anglePos } from "../src/geometry-engine/scaffolds.ts";
-import { generateProblem } from "../src/geometry-engine/generate.ts";
+import { parallelTransversal, triangle, SCAFFOLDS, SCAFFOLD_LIST, selectScaffolds, anglePos } from "../src/geometry-engine/scaffolds.ts";
+import { generateProblem, pickAndGenerate } from "../src/geometry-engine/generate.ts";
 import { buildAdjacency, prereqClosure, allowedTheorems } from "../src/geometry-engine/learned.ts";
+import { conceptIdsFor } from "../src/geometry-engine/rules.ts";
 
 const allRuleConcepts = () => new Set(Object.values(RULES).map((r) => r.conceptId));
 const allConcepts = () => new Set(Object.values(RULES).map((r) => r.conceptId)); // alias
@@ -50,6 +51,34 @@ test("parallelTransversal: a transversal angle θ and its supplement appear, 8 a
   const arr = [...vals];
   assert.equal(arr.length, 2);
   assert.equal(arr[0] + arr[1], 180);
+});
+
+test("quadInterior corners match the stored interiors and stay convex", () => {
+  const ccw = (V: [number, number], from: [number, number], to: [number, number]) => {
+    const ax = from[0] - V[0], ay = from[1] - V[1];
+    const bx = to[0] - V[0], by = to[1] - V[1];
+    let d = (Math.atan2(ax * by - ay * bx, ax * bx + ay * by) * 180) / Math.PI;
+    if (d < 0) d += 360;
+    return d > 180 ? 360 - d : d;
+  };
+  for (let seed = 1; seed <= 30; seed++) {
+    const fig = SCAFFOLDS.quadInterior(makeRng(seed * 10007));
+    const p = fig.points;
+    const side = (P: [number, number], Q: [number, number], R: [number, number]) =>
+      Math.sign((Q[0] - P[0]) * (R[1] - P[1]) - (Q[1] - P[1]) * (R[0] - P[0]));
+    assert.notEqual(side(p.B, p.D, p.A), side(p.B, p.D, p.C), `seed ${seed}: C must sit opposite A across BD`);
+    for (const a of fig.angles) {
+      const got = ccw(p[a.vertex], p[a.from], p[a.to]);
+      assert.ok(Math.abs(got - a.value) < 1.5, `seed ${seed} ${a.key}: drawn ${got} vs stored ${a.value}`);
+    }
+  }
+});
+
+test("isosceles marks the two equal legs (not the base) as one equals-group", () => {
+  const fig = SCAFFOLDS.isosceles(makeRng(4));
+  assert.deepEqual(fig.equals, [[1, 2]]);
+  assert.deepEqual(fig.edges[1], ["B", "C"]);
+  assert.deepEqual(fig.edges[2], ["C", "A"]);
 });
 
 test("triangle: the three angles sum to 180 and the apex realises them", () => {
@@ -127,6 +156,69 @@ test("generateProblem returns null when the allowed pool derives nothing", () =>
   // Allow only a theorem this figure never uses (triangle sum) → nothing chains.
   const prob = generateProblem(fig, new Set([RULES.triangleSum.conceptId]), makeRng(5));
   assert.equal(prob, null);
+});
+
+test("every scaffold lists a `uses` set that matches SCAFFOLD_LIST", () => {
+  assert.equal(SCAFFOLD_LIST.length, Object.keys(SCAFFOLDS).length);
+  for (const spec of SCAFFOLD_LIST) {
+    const fig = spec.make(makeRng(1));
+    assert.equal(fig.name, spec.name);
+    assert.deepEqual(fig.uses, spec.uses);
+    for (const r of fig.relations) assert.ok(spec.uses.includes(r.rule as any), `${spec.name} emits unused rule ${r.rule}`);
+  }
+});
+
+test("selectScaffolds keeps only figures whose theorems are all allowed", () => {
+  const onlyTri = conceptIdsFor(["triangleSum"]);
+  const names = selectScaffolds(onlyTri).map((s) => s.name);
+  assert.deepEqual(names, ["triangle"]);
+  const iso = selectScaffolds(conceptIdsFor(["isoscelesBase", "triangleSum"]), ["isoscelesBase"]).map((s) => s.name);
+  assert.ok(iso.includes("isosceles"));
+  assert.ok(!iso.includes("triangle"));
+});
+
+test("generateProblem require rejects traces that never fire the requested rule", () => {
+  const fig = parallelTransversal(makeRng(3));
+  const allowed = allRuleConcepts();
+  // This figure has no triangleSum relation, so require: triangleSum cannot be satisfied.
+  const miss = generateProblem(fig, allowed, makeRng(9), { require: ["triangleSum"], attempts: 40 });
+  assert.equal(miss, null);
+  const hit = generateProblem(fig, allowed, makeRng(9), { require: ["corresponding"], minSteps: 1, maxSteps: 6, attempts: 80 });
+  assert.ok(hit);
+  assert.ok(hit.blanks.some((b) => b.rule === "corresponding"));
+});
+
+test("quadInterior chase gives 3 angles and asks for the fourth (polygon sum needs 3 givens)", () => {
+  const allowed = conceptIdsFor(["polygonSum"]);
+  const prob = pickAndGenerate(allowed, makeRng(21), {
+    scaffolds: ["quadInterior"],
+    require: ["polygonSum"],
+    minSteps: 1,
+    maxSteps: 2,
+  });
+  assert.ok(prob, "should build a quadrilateral interior-sum chase");
+  assert.equal(prob.figure.name, "quadInterior");
+  assert.equal(prob.givens.length, 3);
+  assert.equal(prob.blanks.length, 1);
+  assert.equal(prob.blanks[0].rule, "polygonSum");
+});
+
+test("pickAndGenerate with an unknown explicit scaffold returns null (no silent fallback)", () => {
+  const allowed = allRuleConcepts();
+  const miss = pickAndGenerate(allowed, makeRng(1), { scaffolds: ["not-a-real-scaffold"] });
+  assert.equal(miss, null);
+});
+
+test("pickAndGenerate auto-picks a scaffold that can fire the required rule", () => {
+  const allowed = conceptIdsFor(["isoscelesBase", "triangleSum"]);
+  const prob = pickAndGenerate(allowed, makeRng(17), {
+    require: ["isoscelesBase"],
+    minSteps: 1,
+    maxSteps: 4,
+  });
+  assert.ok(prob, "should build an isosceles chase");
+  assert.equal(prob.figure.name, "isosceles");
+  assert.ok(prob.blanks.some((b) => b.rule === "isoscelesBase"));
 });
 
 /* ------------------------------ learned ------------------------------ */

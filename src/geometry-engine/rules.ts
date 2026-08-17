@@ -72,7 +72,45 @@ export const RULES: Record<string, { conceptId: string; justifyKey: string }> = 
     conceptId: "mathematics/geometry/exterior-angle-of-a-triangle",
     justifyKey: "ruleExterior",
   },
+  equilateral: {
+    conceptId: "mathematics/geometry/types-of-triangles",
+    justifyKey: "ruleEquilateral",
+  },
+  polygonSum: {
+    conceptId: "mathematics/geometry/angle-sum-of-polygons",
+    justifyKey: "rulePolygonSum",
+  },
+  polygonExterior: {
+    conceptId: "mathematics/geometry/exterior-angles-of-polygons",
+    justifyKey: "rulePolygonExterior",
+  },
+  regularInterior: {
+    conceptId: "mathematics/geometry/regular-polygons",
+    justifyKey: "ruleRegularInterior",
+  },
+  regularCentre: {
+    conceptId: "mathematics/geometry/regular-polygons",
+    justifyKey: "ruleRegularCentre",
+  },
+  parallelogramOpposite: {
+    conceptId: "mathematics/geometry/properties-of-parallelograms",
+    justifyKey: "rulePgramOpp",
+  },
+  parallelogramConsecutive: {
+    conceptId: "mathematics/geometry/properties-of-parallelograms",
+    justifyKey: "rulePgramConsec",
+  },
 };
+
+/** A catalog key — the name authors pass in `theorems` / `require`. */
+export type RuleId = keyof typeof RULES;
+
+/** Map a list of rule names (or raw concept ids) to the concept ids the chainer gates on. */
+export function conceptIdsFor(theorems: Iterable<string>): Set<string> {
+  const out: Set<string> = new Set();
+  for (const t of theorems) out.add(RULES[t as RuleId]?.conceptId ?? t);
+  return out;
+}
 
 /**
  * Build a tagged relation `Σ coef·value = constant` for a known rule. Throws on an unknown rule so a

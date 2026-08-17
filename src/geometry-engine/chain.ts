@@ -41,7 +41,7 @@ export function forwardChain(
   while (progressed) {
     progressed = false;
     for (const r of relations) {
-      if (!allowedConceptIds.has(r.conceptId)) continue;
+      if (!allowedConceptIds.has(r.conceptId) && !allowedConceptIds.has(r.rule)) continue;
       const unknown = r.terms.filter((t) => !known.has(t.key));
       if (unknown.length !== 1) continue;
       const u = unknown[0];

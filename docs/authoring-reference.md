@@ -240,14 +240,27 @@ page (each engine rule names the lesson `conceptId` that teaches it).
 <script type="module">
   import { registerGeometryProblem } from "primer";
   registerGeometryProblem("angleChase", {
-    generate: { scaffolds: ["parallelTransversal"], minSteps: 2, maxSteps: 4 },
+    generate: {
+      theorems: ["vertical", "linearPair", "triangleSum", "isoscelesBase"],
+      require: ["isoscelesBase"],
+      minSteps: 2,
+      maxSteps: 4,
+    },
   });
 </script>
 ```
 
-- **`config.generate`**: `{ scaffolds: string[], minSteps?, maxSteps?, theorems?, pageId? }`. `scaffolds`
-  are engine scaffold names (v1: `"parallelTransversal"`, `"triangle"`). `theorems` (optional) pins the
-  rule pool explicitly (else DAG-gated); `pageId` overrides the page id. v1 generates **angle** chases.
+- **`config.generate`**: `{ scaffolds?, minSteps?, maxSteps?, theorems?, require?, pageId?, tools? }`.
+  - `theorems` — rule-catalog keys (`"vertical"`, `"triangleSum"`, `"angleAtCentre"`, …). Pins the
+    pool; omit to **DAG-gate** (only theorems in this page's prerequisite closure, plus this page).
+  - `require` — rule keys that **must** appear in the solution chain (so a new-theorem page cannot
+    be solved by falling back to angles-on-a-line).
+  - `scaffolds` — names, or omit / `"auto"` to pick any figure whose `uses` ⊆ the allowed pool
+    (and that can fire `require`). Current scaffolds: `parallelTransversal`, `crossingLines`,
+    `triangle`, `triangleParallelApex`, `triangleExterior`, `triangleExteriors`, `isosceles`,
+    `equilateral`, `quadInterior`, `parallelogram`, `regularPentagon`.
+  - `minSteps` / `maxSteps` — difficulty (default 2–4).
+  - `pageId` overrides the page id used for DAG gating. v1 generates **angle** chases.
 - **The learner** fills in EVERY unknown angle via on-figure **MathLive `<math-field>`** boxes (angle boxes
   pop the `geometry-angles` keyboard, length boxes `geometry-lengths`), with the highlighted box the final
   target; a **construction toolbar** (draw line · mark ∥ · mark = · right ∟ · undo) is available. **Check**

@@ -143,6 +143,25 @@ export function tickSegments(
  * point on the bisector at `labelR` where an angle label sits. The angles are returned as the
  * JSXGraph-friendly bounding directions so the caller can draw `arc`/`sector` elements.
  */
+/** CCW degrees from ray V→from to ray V→to, in [0, 360). */
+export function signedCcwDeg(V: Vec, from: Vec, to: Vec): number {
+  const ax = from[0] - V[0], ay = from[1] - V[1];
+  const bx = to[0] - V[0], by = to[1] - V[1];
+  let d = (Math.atan2(ax * by - ay * bx, ax * bx + ay * by) * 180) / Math.PI;
+  if (d < 0) d += 360;
+  return d;
+}
+
+/**
+ * Order the two adjacent points so a CCW sweep (JSXGraph's `<angle>`) matches `wantDeg`.
+ * Without this, the mark often paints the reflex wrap-around instead of the interior.
+ */
+export function raysForInterior(V: Vec, P: Vec, Q: Vec, wantDeg: number): [Vec, Vec] {
+  const a = signedCcwDeg(V, P, Q);
+  const b = signedCcwDeg(V, Q, P);
+  return Math.abs(a - wantDeg) <= Math.abs(b - wantDeg) ? [P, Q] : [Q, P];
+}
+
 export function angleArcSpec(
   V: Vec,
   P1: Vec,

@@ -287,10 +287,14 @@ export interface GeometryProblemConfig {
    * subset of `"line"`/`"parallel"`/`"equal"`/`"right"` (default all).
    */
   generate?: {
-    scaffolds: string[];
+    /** Scaffold names, or omit / `"auto"` to pick any figure whose theorems are all allowed. */
+    scaffolds?: string[] | "auto";
     minSteps?: number;
     maxSteps?: number;
+    /** Rule catalog keys (e.g. `"triangleSum"`) — pins the pool, skipping DAG gating. */
     theorems?: string[];
+    /** Rule keys that must appear in the generated solution chain. */
+    require?: string[];
     pageId?: string;
     tools?: string[];
   };

@@ -297,7 +297,17 @@
   //    install (dist/precache.json) and keeps content fresh online (see src/sw.ts → /sw.js).
   //    Deferred to `load` so it never competes with the first paint / the framework import above.
   if ("serviceWorker" in navigator) {
+    const host = location.hostname;
+    const isLocal = host === "localhost" || host === "127.0.0.1";
     window.addEventListener("load", () => {
+      // Local `npm run serve` must see a just-rebuilt /dist immediately. A registered SW
+      // stale-serves boot.js and the chase then fails ("no theorems") against a new page.
+      if (isLocal) {
+        navigator.serviceWorker.getRegistrations().then((rs) => {
+          for (const r of rs) void r.unregister();
+        }).catch(() => {});
+        return;
+      }
       navigator.serviceWorker.register("/sw.js").catch(() => {
         /* offline features unavailable — the site still works online */
       });
