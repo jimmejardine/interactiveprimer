@@ -87,10 +87,31 @@ commas OK).
 | Field | Required | Notes |
 |---|---|---|
 | `prerequisites` | no (default `[]`) | Array of full-path ids (the DAG edges). The final edge set is the **union of this list and the inline `<primer-ref>`s** in the prose. The tree has one root, `root`; every concept reaches it through prerequisites. A base concept may omit `prerequisites` (or the whole block) — it auto-attaches to the `orphans` node. |
-| `declaredLevel` | no | Real number. Levels start at 0 and propagate downstream via `max(declared, all prerequisite levels)`. Fractions allowed. |
+| `declaredLevel` | no | Real number ≈ **typical first-encounter age**. Only a handful of **milestone** pages should set this — it flows downstream via `max(declared, all prerequisite levels)`. Never put it on a course page, a mixed-age hub, or every leaf. Fractions allowed. See the altitude scale below. |
 | `completedDate` | no | ISO date `YYYY-MM-DD` — when the lesson content was finished. Omit on stubs. |
 | `needsReviewDate` | no | ISO date — when this concept was flagged as needing review. |
 | `course` | no | Boolean. `true` marks this page as a **course** (see courses in the reference doc). |
+
+### Altitude scale (`declaredLevel`)
+
+The number is a **typical first-encounter age**, not a course index and not a difficulty rank.
+School values follow the IB programmes as a best-effort international average (national systems
+differ by a year or two). Only declare on a **gate** — the first concept at that altitude; everything
+downstream inherits.
+
+| Level | Band | IB / stage | Example gates |
+|---|---|---|---|
+| 0 | Origin | — | `root` only |
+| 5–10 | Primary | PYP | counting (5), addition (6), place value (7), multiplication (8), fractions (9), decimals / primes / 2-D shapes (10) |
+| 11–15 | Lower secondary | MYP | negatives / algebra words / ratio (11), one-step equations / speed (12), Pythagoras (13), quadratic formula / probability / binary (14), functions / right-triangle trig / Newton I (15) |
+| 16–18 | Upper secondary | Diploma | limits / vectors (16), antiderivatives / current (17), complex numbers / first ODEs (18) |
+| 19–22 | Undergraduate | — | proof / linear systems / Big-O / linked lists (19), groups / real numbers / Turing machines (20), topology / compilers / ML / PDEs / Maxwell / SR (21), measure / Schrödinger / P vs NP / the qubit (22) |
+| 23–25 | Masters | — | normed spaces / equivalence principle (23), ZFC (24) |
+| 26–32 | Doctoral / postdoc | — | Feynman diagrams (26) |
+
+Do **not** declare a level on a course page (a course is a path, not an idea) or on a hub that
+mixes ages (e.g. `calculus/calculus`). If a new branch has no milestone in its ancestry it will
+sit at 0 until someone adds a gate.
 
 ## Authoring elements (inside `<primer-card>`)
 

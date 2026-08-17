@@ -31,13 +31,17 @@ dependency — so a prerequisite named in the prose needn't be repeated in the m
 
 ## The levels of knowledge
 
-Every concept also has a **level** — a *real number* that roughly tracks how far up the tree it sits
-(low for the earliest ideas, high for the most advanced; fractional values are allowed, e.g. 2.5, to
-squeeze a concept in between two others). Levels **start at 0** and a page needn't declare one. But when
-a page **does** declare a level it flows downstream: a concept's level is `max(its declared level, the
-level of every prerequisite)`. So a handful of deliberately levelled "milestone" concepts gives the
-whole tree a sense of altitude without hand-labelling every page. Before starting a given level, a
-learner should be comfortable with the levels below it.
+Every concept also has a **level** — a *real number* that is, roughly, the **age at which a typical
+learner first meets the idea**. School-age values follow the International Baccalaureate stages
+(PYP → MYP → Diploma) as a best-effort international average; the 20s are undergraduate then
+masters, and the late 20s–30s are doctoral / postdoc. Fractional values (e.g. 16.5) can squeeze a
+concept between two others.
+
+Levels **start at 0** (the root) and a page needn't declare one. When a page **does** declare a
+level it flows downstream: a concept's level is `max(its declared level, the level of every
+prerequisite)`. Only a handful of **milestone** concepts declare a level — never a course page,
+never every leaf. Before starting a given level, a learner should be comfortable with the levels
+below it.
 
 A concept is identified by its **full path** in the tree (e.g. `arithmetic/addition`) — which is also
 where its page lives under `concepts/`, and how prerequisites reference it.
