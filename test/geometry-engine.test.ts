@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { makeRng } from "../src/rng.ts";
 import { RULES, rel, equal, sumTo, relationHolds } from "../src/geometry-engine/rules.ts";
 import { forwardChain, traceTarget } from "../src/geometry-engine/chain.ts";
-import { parallelTransversal, triangle, SCAFFOLDS, SCAFFOLD_LIST, selectScaffolds, anglePos } from "../src/geometry-engine/scaffolds.ts";
+import { parallelTransversal, triangle, SCAFFOLDS, SCAFFOLD_LIST, selectScaffolds, anglePos, lengthPos } from "../src/geometry-engine/scaffolds.ts";
 import { generateProblem, pickAndGenerate } from "../src/geometry-engine/generate.ts";
 import { buildAdjacency, prereqClosure, allowedTheorems } from "../src/geometry-engine/learned.ts";
 import { conceptIdsFor } from "../src/geometry-engine/rules.ts";
@@ -30,7 +30,10 @@ test("every scaffold emits a SELF-CONSISTENT figure (all relations hold for the 
   for (const make of Object.values(SCAFFOLDS)) {
     for (let seed = 1; seed <= 40; seed++) {
       const fig = make(makeRng(seed * 2654435761));
-      const values = Object.fromEntries(fig.angles.map((a) => [a.key, a.value]));
+      const values = Object.fromEntries([
+        ...fig.angles.map((a) => [a.key, a.value] as const),
+        ...(fig.lengths ?? []).map((L) => [L.key, L.value] as const),
+      ]);
       for (const r of fig.relations) {
         assert.ok(
           relationHolds(r, values),
@@ -79,6 +82,56 @@ test("isosceles marks the two equal legs (not the base) as one equals-group", ()
   assert.deepEqual(fig.equals, [[1, 2]]);
   assert.deepEqual(fig.edges[1], ["B", "C"]);
   assert.deepEqual(fig.edges[2], ["C", "A"]);
+});
+
+test("lengthPos sits off the side, away from the third vertex", () => {
+  const fig = SCAFFOLDS.rightTriangle(makeRng(2));
+  const a = fig.lengths.find((L) => L.key === "a");
+  const pos = lengthPos(fig, a);
+  const P = fig.points[a.from], Q = fig.points[a.to];
+  const mx = (P[0] + Q[0]) / 2, my = (P[1] + Q[1]) / 2;
+  const distToLine = Math.abs((Q[0] - P[0]) * (my - pos[1]) - (Q[1] - P[1]) * (mx - pos[0])) /
+    Math.hypot(Q[0] - P[0], Q[1] - P[1]);
+  assert.ok(distToLine > 0.3, `offset ${distToLine} should clear the stroke`);
+  const C = fig.points.C;
+  const midToC = Math.hypot(mx - C[0], my - C[1]);
+  const posToC = Math.hypot(pos[0] - C[0], pos[1] - C[1]);
+  assert.ok(posToC > midToC, "label should sit outside the triangle, not toward C");
+});
+
+test("lengthPos stays outside the owning triangle, even with a neighbouring figure", () => {
+  const side = (P: [number, number], Q: [number, number], R: [number, number]) =>
+    Math.sign((Q[0] - P[0]) * (R[1] - P[1]) - (Q[1] - P[1]) * (R[0] - P[0]));
+  const thirdsOf = (fig: ReturnType<typeof SCAFFOLDS.similarPair>, from: string, to: string) => {
+    const found = new Set<string>();
+    for (const ang of fig.angles) {
+      const s = new Set([ang.vertex, ang.from, ang.to]);
+      if (s.has(from) && s.has(to) && s.size === 3) {
+        for (const n of s) if (n !== from && n !== to) found.add(n);
+      }
+    }
+    return [...found];
+  };
+  for (const name of ["rightTriangle", "similarPair", "twoTangents"] as const) {
+    for (let seed = 0; seed < 40; seed++) {
+      const fig = SCAFFOLDS[name](makeRng(seed));
+      for (const L of fig.lengths ?? []) {
+        const pos = lengthPos(fig, L);
+        const P = fig.points[L.from], Q = fig.points[L.to];
+        const thirds = thirdsOf(fig, L.from, L.to);
+        assert.ok(thirds.length, `${name} seed ${seed} ${L.key}: side should belong to a triangle`);
+        for (const t of thirds) {
+          const R = fig.points[t];
+          assert.notEqual(side(P, Q, R), 0, `${name} seed ${seed} ${L.key}: ${t} is collinear`);
+          assert.notEqual(
+            side(P, Q, pos),
+            side(P, Q, R),
+            `${name} seed ${seed} ${L.key}: label sits inwards toward ${t}`,
+          );
+        }
+      }
+    }
+  }
 });
 
 test("triangle: the three angles sum to 180 and the apex realises them", () => {
@@ -207,6 +260,31 @@ test("pickAndGenerate with an unknown explicit scaffold returns null (no silent 
   const allowed = allRuleConcepts();
   const miss = pickAndGenerate(allowed, makeRng(1), { scaffolds: ["not-a-real-scaffold"] });
   assert.equal(miss, null);
+});
+
+test("circle / similar / pythag scaffolds generate a chase that uses the required rule", () => {
+  const cases: Array<[string, string[]]> = [
+    ["centreAndCircumference", ["angleAtCentre"]],
+    ["semicircle", ["angleInSemicircle"]],
+    ["sameSegment", ["sameSegment"]],
+    ["cyclicQuad", ["cyclicOpposite"]],
+    ["tangentRadius", ["tangentPerpRadius"]],
+    ["twoTangents", ["twoTangents"]],
+    ["similarPair", ["similarSides"]],
+    ["rightTriangle", ["pythagoras"]],
+  ];
+  for (const [scaffold, require] of cases) {
+    const allowed = conceptIdsFor(SCAFFOLDS[scaffold](makeRng(1)).uses);
+    const prob = pickAndGenerate(allowed, makeRng(33), {
+      scaffolds: [scaffold],
+      require,
+      minSteps: 1,
+      maxSteps: 5,
+    });
+    assert.ok(prob, `${scaffold} should generate`);
+    assert.equal(prob.figure.name, scaffold);
+    assert.ok(require.every((r) => prob.blanks.some((b) => b.rule === r)), `${scaffold} must use ${require}`);
+  }
 });
 
 test("pickAndGenerate auto-picks a scaffold that can fire the required rule", () => {

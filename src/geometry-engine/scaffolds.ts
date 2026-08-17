@@ -11,7 +11,7 @@
  * @module
  */
 
-import { equal, sumTo, rel, RULES } from "./rules.ts";
+import { equal, sumTo, rel, ratioEq, pythagEq, RULES } from "./rules.ts";
 import type { Relation, RuleId } from "./rules.ts";
 import type { Rng } from "../rng.ts";
 
@@ -40,6 +40,14 @@ export interface Figure {
   parallels: number[][];
   /** Groups of equal-length edges (indices into `edges`). */
   equals?: number[][];
+  /** Circles to draw (centre is a point name; radius from `through` or `r`). */
+  circles?: Array<{ center: string; through?: string; r?: number }>;
+  /** Named side lengths the chase can give / ask for. */
+  lengths?: Array<{ key: string; from: string; to: string; value: number }>;
+  /** Hidden constructions the learner may draw to unlock the figure. */
+  aux?: Array<{ kind: "line"; through: [string, string]; hint: string }>;
+  /** Right-angle squares to draw (not chaseable — the 90° is given by the mark). */
+  rights?: Array<{ vertex: string; from: string; to: string }>;
   angles: AngleSlot[];
   relations: Relation[];
   boundingbox: [number, number, number, number];
@@ -536,6 +544,310 @@ export function triangleExteriors(rng: Rng): Figure {
   };
 }
 
+function onCircle(O: Vec, R: number, deg: number): Vec {
+  return [O[0] + R * Math.cos(deg * DEG), O[1] + R * Math.sin(deg * DEG)];
+}
+
+/** Angle (degrees, 0–180) at V between points P and Q. */
+function geomAngle(V: Vec, P: Vec, Q: Vec): number {
+  const ax = P[0] - V[0], ay = P[1] - V[1];
+  const bx = Q[0] - V[0], by = Q[1] - V[1];
+  const cr = ax * by - ay * bx;
+  const dt = ax * bx + ay * by;
+  return Math.abs((Math.atan2(cr, dt) * 180) / Math.PI);
+}
+
+/**
+ * Circle, centre O, chord AB seen from rim point P: ∠AOB = 2∠APB. Radii make △AOB isosceles.
+ */
+export function centreAndCircumference(rng: Rng): Figure {
+  const theta = rng.pick([25, 30, 35, 40]);
+  const R = 2.8;
+  const O: Vec = [0, 0];
+  const mid = 250;
+  const A = onCircle(O, R, mid - theta);
+  const B = onCircle(O, R, mid + theta);
+  const P = onCircle(O, R, 90);
+  const base = 90 - theta;
+  const points: Record<string, Vec> = { O, A, B, P };
+  const edges: Array<[string, string]> = [["O", "A"], ["O", "B"], ["A", "B"], ["P", "A"], ["P", "B"]];
+  const angles: AngleSlot[] = [
+    { key: "AOB", vertex: "O", from: "A", to: "B", value: 2 * theta },
+    { key: "APB", vertex: "P", from: "A", to: "B", value: theta },
+    { key: "OAB", vertex: "A", from: "O", to: "B", value: base },
+    { key: "OBA", vertex: "B", from: "O", to: "A", value: base },
+  ];
+  const relations = [
+    rel("angleAtCentre", [{ key: "AOB", coef: 1 }, { key: "APB", coef: -2 }], 0),
+    equal("OAB", "OBA", "isoscelesBase"),
+    rel("isoscelesBase", [{ key: "OAB", coef: 2 }, { key: "AOB", coef: 1 }], 180),
+    sumTo(["OAB", "OBA", "AOB"], 180, "triangleSum"),
+  ];
+  return {
+    name: "centreAndCircumference",
+    uses: ["angleAtCentre", "isoscelesBase", "triangleSum"],
+    points, edges, parallels: [], equals: [[0, 1]],
+    circles: [{ center: "O", r: R }],
+    angles, relations, boundingbox: [-3.6, 3.6, 3.6, -3.4],
+  };
+}
+
+/** Diameter AB, P on the circle: ∠APB = 90°. */
+export function semicircle(rng: Rng): Figure {
+  const t = rng.pick([60, 70, 80, 100, 110, 120]);
+  const R = 2.8;
+  const O: Vec = [0, 0];
+  const A: Vec = [-R, 0];
+  const B: Vec = [R, 0];
+  const P = onCircle(O, R, t);
+  const angA = Math.round(t / 2);
+  const angB = 90 - angA;
+  const points: Record<string, Vec> = { O, A, B, P };
+  const edges: Array<[string, string]> = [["A", "B"], ["A", "P"], ["B", "P"]];
+  const angles: AngleSlot[] = [
+    { key: "P", vertex: "P", from: "A", to: "B", value: 90 },
+    { key: "A", vertex: "A", from: "P", to: "B", value: angA },
+    { key: "B", vertex: "B", from: "P", to: "A", value: angB },
+  ];
+  const relations = [
+    rel("angleInSemicircle", [{ key: "P", coef: 1 }], 90),
+    sumTo(["A", "B", "P"], 180, "triangleSum"),
+  ];
+  return {
+    name: "semicircle",
+    uses: ["angleInSemicircle", "triangleSum"],
+    points, edges, parallels: [],
+    circles: [{ center: "O", r: R }],
+    angles, relations, boundingbox: [-3.6, 3.4, 3.6, -1.4],
+  };
+}
+
+/** Chord AB seen from two rim points P, Q on the same arc: ∠APB = ∠AQB. */
+export function sameSegment(rng: Rng): Figure {
+  const theta = rng.pick([25, 30, 35, 40]);
+  const R = 2.8;
+  const O: Vec = [0, 0];
+  const A = onCircle(O, R, 210);
+  const B = onCircle(O, R, 210 + 2 * theta);
+  const P = onCircle(O, R, 80);
+  const Q = onCircle(O, R, 130);
+  const points: Record<string, Vec> = { O, A, B, P, Q };
+  const edges: Array<[string, string]> = [["A", "B"], ["P", "A"], ["P", "B"], ["Q", "A"], ["Q", "B"]];
+  const apb = Math.round(geomAngle(P, A, B));
+  const aqb = Math.round(geomAngle(Q, A, B));
+  // Force the theorem's equality (geometry is exact half-arc; rounding can drift 1°).
+  const thetaUse = theta;
+  const angles: AngleSlot[] = [
+    { key: "APB", vertex: "P", from: "A", to: "B", value: thetaUse },
+    { key: "AQB", vertex: "Q", from: "A", to: "B", value: thetaUse },
+  ];
+  void apb;
+  void aqb;
+  const relations = [equal("APB", "AQB", "sameSegment")];
+  return {
+    name: "sameSegment",
+    uses: ["sameSegment"],
+    points, edges, parallels: [],
+    circles: [{ center: "O", r: R }],
+    angles, relations, boundingbox: [-3.6, 3.6, 3.6, -3.4],
+  };
+}
+
+/** Cyclic quadrilateral: opposite interiors sum to 180°. */
+export function cyclicQuad(rng: Rng): Figure {
+  const R = 2.8;
+  const O: Vec = [0, 0];
+  // Even arcs so opposite inscribed interiors (half the opposite arc) are integers.
+  let w: number, x: number, y: number, z: number;
+  do {
+    w = rng.pick([60, 70, 80, 90]);
+    x = rng.pick([70, 80, 90, 100]);
+    y = rng.pick([80, 90, 100]);
+    z = 360 - w - x - y;
+  } while (z < 60 || z > 120);
+  const degs = [0, w, w + x, w + x + y];
+  const [A, B, C, D] = degs.map((d) => onCircle(O, R, d));
+  const points: Record<string, Vec> = { O, A, B, C, D };
+  const edges: Array<[string, string]> = [["A", "B"], ["B", "C"], ["C", "D"], ["D", "A"]];
+  const a = (x + y) / 2;
+  const b = (y + z) / 2;
+  const c = (z + w) / 2;
+  const d = (w + x) / 2;
+  const angles: AngleSlot[] = [
+    { key: "A", vertex: "A", from: "D", to: "B", value: a },
+    { key: "B", vertex: "B", from: "A", to: "C", value: b },
+    { key: "C", vertex: "C", from: "B", to: "D", value: c },
+    { key: "D", vertex: "D", from: "C", to: "A", value: d },
+  ];
+  const relations = [
+    sumTo(["A", "C"], 180, "cyclicOpposite"),
+    sumTo(["B", "D"], 180, "cyclicOpposite"),
+    sumTo(["A", "B", "C", "D"], 360, "polygonSum"),
+  ];
+  return {
+    name: "cyclicQuad",
+    uses: ["cyclicOpposite", "polygonSum"],
+    points, edges, parallels: [],
+    circles: [{ center: "O", r: R }],
+    angles, relations, boundingbox: [-3.6, 3.6, 3.6, -3.6],
+  };
+}
+
+/**
+ * Radius OT hidden as an auxiliary line; tangent through T. △OTA is right-angled at T.
+ */
+export function tangentRadius(rng: Rng): Figure {
+  const beta = rng.pick([25, 30, 35, 40]); // angle at O
+  const R = 2.6;
+  const O: Vec = [0, 0];
+  const T: Vec = [R, 0];
+  const h = R * Math.tan(beta * DEG);
+  const A: Vec = [R, h];
+  const points: Record<string, Vec> = { O, T, A };
+  const edges: Array<[string, string]> = [["T", "A"]]; // OT is aux — not drawn until constructed
+  const angles: AngleSlot[] = [
+    { key: "T", vertex: "T", from: "O", to: "A", value: 90 },
+    { key: "O", vertex: "O", from: "T", to: "A", value: beta },
+    { key: "A", vertex: "A", from: "T", to: "O", value: 90 - beta },
+  ];
+  const relations = [
+    rel("tangentPerpRadius", [{ key: "T", coef: 1 }], 90),
+    sumTo(["T", "O", "A"], 180, "triangleSum"),
+  ];
+  return {
+    name: "tangentRadius",
+    uses: ["tangentPerpRadius", "triangleSum"],
+    points, edges, parallels: [],
+    circles: [{ center: "O", r: R }],
+    aux: [{ kind: "line", through: ["O", "T"], hint: "Try drawing the radius to the point of contact." }],
+    angles, relations, boundingbox: [-3.2, Math.max(h, 1.2) + 1.2, 3.6, -3.2],
+  };
+}
+
+/** Two tangents from an external point: right angles at the contacts, equal angles at E. */
+export function twoTangents(rng: Rng): Figure {
+  const beta = rng.pick([20, 25, 30]); // half-angle at E
+  const R = 2.2;
+  const OE = R / Math.sin(beta * DEG);
+  const O: Vec = [0, 0];
+  const E: Vec = [OE, 0];
+  const S: Vec = [R * Math.sin(beta * DEG), R * Math.cos(beta * DEG)];
+  const T: Vec = [R * Math.sin(beta * DEG), -R * Math.cos(beta * DEG)];
+  const atO = 90 - beta;
+  const points: Record<string, Vec> = { O, E, S, T };
+  const edges: Array<[string, string]> = [["O", "S"], ["O", "T"], ["E", "S"], ["E", "T"], ["O", "E"]];
+  const angles: AngleSlot[] = [
+    { key: "S", vertex: "S", from: "O", to: "E", value: 90 },
+    { key: "T", vertex: "T", from: "O", to: "E", value: 90 },
+    { key: "OSE", vertex: "O", from: "S", to: "E", value: atO },
+    { key: "OTE", vertex: "O", from: "T", to: "E", value: atO },
+    { key: "SEO", vertex: "E", from: "S", to: "O", value: beta },
+    { key: "TEO", vertex: "E", from: "T", to: "O", value: beta },
+    { key: "SET", vertex: "E", from: "S", to: "T", value: 2 * beta },
+  ];
+  const se = Math.hypot(S[0] - E[0], S[1] - E[1]);
+  const lengths = [
+    { key: "ES", from: "E", to: "S", value: Math.round(se * 100) / 100 },
+    { key: "ET", from: "E", to: "T", value: Math.round(se * 100) / 100 },
+  ];
+  const relations = [
+    rel("tangentPerpRadius", [{ key: "S", coef: 1 }], 90),
+    rel("tangentPerpRadius", [{ key: "T", coef: 1 }], 90),
+    equal("SEO", "TEO", "twoTangents"),
+    equal("ES", "ET", "twoTangents"),
+    sumTo(["S", "OSE", "SEO"], 180, "triangleSum"),
+    sumTo(["T", "OTE", "TEO"], 180, "triangleSum"),
+    rel("twoTangents", [{ key: "SET", coef: 1 }, { key: "SEO", coef: -1 }, { key: "TEO", coef: -1 }], 0),
+  ];
+  return {
+    name: "twoTangents",
+    uses: ["tangentPerpRadius", "twoTangents", "triangleSum"],
+    points, edges, parallels: [], equals: [[0, 1], [2, 3]],
+    circles: [{ center: "O", r: R }],
+    lengths, angles, relations,
+    boundingbox: [-3.0, 3.4, OE + 1.0, -3.4],
+  };
+}
+
+/** A 3-4-5 triangle and its 2× copy — AA plus corresponding-side ratios. */
+export function similarPair(rng: Rng): Figure {
+  const k = rng.pick([2, 3]);
+  const a = 3, b = 4, c = 5;
+  const scale = 0.45;
+  const A: Vec = [-4.4, -1.4];
+  const B: Vec = [A[0] + a * scale * k, A[1]];
+  const C: Vec = [A[0], A[1] + b * scale * k];
+  const D: Vec = [0.6, -1.4];
+  const E: Vec = [D[0] + a * scale, D[1]];
+  const F: Vec = [D[0], D[1] + b * scale];
+  const points: Record<string, Vec> = { A, B, C, D, E, F };
+  const edges: Array<[string, string]> = [["A", "B"], ["B", "C"], ["C", "A"], ["D", "E"], ["E", "F"], ["F", "D"]];
+  const angles: AngleSlot[] = [
+    { key: "A", vertex: "A", from: "B", to: "C", value: 90 },
+    { key: "B", vertex: "B", from: "A", to: "C", value: Math.round((Math.atan(b / a) * 180) / Math.PI) },
+    { key: "C", vertex: "C", from: "A", to: "B", value: Math.round((Math.atan(a / b) * 180) / Math.PI) },
+    { key: "D", vertex: "D", from: "E", to: "F", value: 90 },
+    { key: "E", vertex: "E", from: "D", to: "F", value: Math.round((Math.atan(b / a) * 180) / Math.PI) },
+    { key: "F", vertex: "F", from: "D", to: "E", value: Math.round((Math.atan(a / b) * 180) / Math.PI) },
+  ];
+  // Snap C and F so A+B+C = 180 exactly after rounding.
+  angles[2].value = 180 - angles[0].value - angles[1].value;
+  angles[5].value = angles[2].value;
+  const lengths = [
+    { key: "AB", from: "A", to: "B", value: a * k },
+    { key: "AC", from: "A", to: "C", value: b * k },
+    { key: "BC", from: "B", to: "C", value: c * k },
+    { key: "DE", from: "D", to: "E", value: a },
+    { key: "DF", from: "D", to: "F", value: b },
+    { key: "EF", from: "E", to: "F", value: c },
+  ];
+  const relations = [
+    equal("A", "D", "similarAA"),
+    equal("B", "E", "similarAA"),
+    equal("C", "F", "similarAA"),
+    ratioEq("AB", "DE", "AC", "DF", "similarSides"),
+    ratioEq("AB", "DE", "BC", "EF", "similarSides"),
+    ratioEq("AC", "DF", "BC", "EF", "similarSides"),
+  ];
+  return {
+    name: "similarPair",
+    uses: ["similarAA", "similarSides"],
+    points, edges, parallels: [],
+    lengths, angles, relations,
+    boundingbox: [-5.2, C[1] + 0.8, E[0] + 1.2, -2.2],
+  };
+}
+
+/** A right triangle with a Pythagorean-triple side chase. */
+export function rightTriangle(rng: Rng): Figure {
+  const [a, b, c] = rng.pick([[3, 4, 5], [5, 12, 13], [6, 8, 10], [8, 15, 17], [7, 24, 25], [9, 12, 15]]);
+  const s = 4.2 / c;
+  const Cpt: Vec = [-2.0, -1.3];
+  const Apt: Vec = [Cpt[0] + a * s, Cpt[1]];
+  const Bpt: Vec = [Cpt[0], Cpt[1] + b * s];
+  const points: Record<string, Vec> = { C: Cpt, A: Apt, B: Bpt };
+  const edges: Array<[string, string]> = [["C", "A"], ["C", "B"], ["A", "B"]];
+  const angA = Math.round((Math.atan(b / a) * 180) / Math.PI);
+  const angles: AngleSlot[] = [
+    { key: "A", vertex: "A", from: "C", to: "B", value: angA },
+    { key: "B", vertex: "B", from: "C", to: "A", value: 90 - angA },
+  ];
+  const lengths = [
+    { key: "a", from: "C", to: "A", value: a },
+    { key: "b", from: "C", to: "B", value: b },
+    { key: "c", from: "A", to: "B", value: c },
+  ];
+  const relations = [pythagEq("a", "b", "c", "pythagoras")];
+  return {
+    name: "rightTriangle",
+    uses: ["pythagoras"],
+    points, edges, parallels: [],
+    rights: [{ vertex: "C", from: "A", to: "B" }],
+    lengths, angles, relations,
+    boundingbox: [-2.8, Bpt[1] + 0.9, Apt[0] + 0.9, -2.1],
+  };
+}
+
 /** A scaffold constructor plus the theorem keys it can exercise. */
 export interface ScaffoldSpec {
   name: string;
@@ -556,6 +868,14 @@ export const SCAFFOLD_LIST: ScaffoldSpec[] = [
   { name: "parallelogram", uses: ["parallelogramOpposite", "parallelogramConsecutive"], make: parallelogram },
   { name: "regularPentagon", uses: ["regularCentre", "regularInterior", "isoscelesBase", "triangleSum"], make: regularPentagon },
   { name: "triangleExteriors", uses: ["polygonExterior", "linearPair", "triangleSum"], make: triangleExteriors },
+  { name: "centreAndCircumference", uses: ["angleAtCentre", "isoscelesBase", "triangleSum"], make: centreAndCircumference },
+  { name: "semicircle", uses: ["angleInSemicircle", "triangleSum"], make: semicircle },
+  { name: "sameSegment", uses: ["sameSegment"], make: sameSegment },
+  { name: "cyclicQuad", uses: ["cyclicOpposite", "polygonSum"], make: cyclicQuad },
+  { name: "tangentRadius", uses: ["tangentPerpRadius", "triangleSum"], make: tangentRadius },
+  { name: "twoTangents", uses: ["tangentPerpRadius", "twoTangents", "triangleSum"], make: twoTangents },
+  { name: "similarPair", uses: ["similarAA", "similarSides"], make: similarPair },
+  { name: "rightTriangle", uses: ["pythagoras"], make: rightTriangle },
 ];
 
 /** All scaffolds by name, for the generator to pick from. */
@@ -576,6 +896,59 @@ export function selectScaffolds(
     if (!s.uses.every((r) => allowedConceptIds.has(RULES[r].conceptId))) return false;
     return need.every((r) => s.uses.includes(r as RuleId));
   });
+}
+
+/** Vertices of a triangle (or right-angle mark) that has `from`–`to` as a side. */
+function thirdVertices(fig: Figure, from: string, to: string): string[] {
+  const found = new Set<string>();
+  const consider = (a: string, b: string, c: string) => {
+    const s = new Set([a, b, c]);
+    if (s.has(from) && s.has(to) && s.size === 3) {
+      for (const n of s) if (n !== from && n !== to) found.add(n);
+    }
+  };
+  for (const ang of fig.angles) consider(ang.vertex, ang.from, ang.to);
+  for (const rt of fig.rights ?? []) consider(rt.vertex, rt.from, rt.to);
+  const adj = new Map<string, Set<string>>();
+  const link = (a: string, b: string) => {
+    if (!adj.has(a)) adj.set(a, new Set());
+    adj.get(a)!.add(b);
+  };
+  for (const [a, b] of fig.edges) { link(a, b); link(b, a); }
+  for (const name of adj.get(from) ?? []) {
+    if (name !== to && adj.get(to)?.has(name)) found.add(name);
+  }
+  return [...found];
+}
+
+/**
+ * Midpoint of a named side, nudged perpendicularly *outwards* so a length label or fill-in box
+ * sits off the stroke and off any tick / parallel marks. "Outwards" is away from the third
+ * vertex of the triangle that owns the side — not "away from the nearest point on the board",
+ * which on a two-figure page (similar pair, two tangents) can point *into* the triangle.
+ */
+export function lengthPos(fig: Figure, len: { from: string; to: string }, r = 0.42): Vec {
+  const P = fig.points[len.from];
+  const Q = fig.points[len.to];
+  const mx = (P[0] + Q[0]) / 2;
+  const my = (P[1] + Q[1]) / 2;
+  const dx = Q[0] - P[0], dy = Q[1] - P[1];
+  const m = Math.hypot(dx, dy) || 1;
+  let nx = -dy / m, ny = dx / m;
+  const sideOf = (R: Vec) => Math.sign(nx * (R[0] - mx) + ny * (R[1] - my));
+  let vote = 0;
+  for (const name of thirdVertices(fig, len.from, len.to)) {
+    const R = fig.points[name];
+    if (R) vote += sideOf(R);
+  }
+  if (vote === 0) {
+    for (const [name, R] of Object.entries(fig.points)) {
+      if (name === len.from || name === len.to) continue;
+      vote += sideOf(R);
+    }
+  }
+  if (vote > 0) { nx = -nx; ny = -ny; }
+  return [mx + nx * r, my + ny * r];
 }
 
 /**

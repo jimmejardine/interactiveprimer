@@ -258,7 +258,10 @@ page (each engine rule names the lesson `conceptId` that teaches it).
   - `scaffolds` — names, or omit / `"auto"` to pick any figure whose `uses` ⊆ the allowed pool
     (and that can fire `require`). Current scaffolds: `parallelTransversal`, `crossingLines`,
     `triangle`, `triangleParallelApex`, `triangleExterior`, `triangleExteriors`, `isosceles`,
-    `equilateral`, `quadInterior`, `parallelogram`, `regularPentagon`.
+    `equilateral`, `quadInterior`, `parallelogram`, `regularPentagon`,
+    `centreAndCircumference`, `semicircle`, `sameSegment`, `cyclicQuad`,
+    `tangentRadius` (hidden radius — learner draws it), `twoTangents`,
+    `similarPair`, `rightTriangle`.
   - `minSteps` / `maxSteps` — difficulty (default 2–4).
   - `pageId` overrides the page id used for DAG gating. v1 generates **angle** chases.
 - **The learner** fills in EVERY unknown angle via on-figure **MathLive `<math-field>`** boxes (angle boxes

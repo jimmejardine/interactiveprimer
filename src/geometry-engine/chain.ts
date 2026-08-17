@@ -12,6 +12,38 @@
 
 import type { Relation } from "./rules.ts";
 
+/** Isolate the single unknown in `r` given `known`, or null if it isn't one-unknown-ready. */
+function solveRelation(r: Relation, known: Map<string, number>): { key: string; value: number } | null {
+  const unknown = r.terms.filter((t) => !known.has(t.key));
+  if (unknown.length !== 1) return null;
+  const u = unknown[0];
+  if (r.kind === "ratio") {
+    const [a, b, c, d] = r.terms.map((t) => t.key);
+    const A = known.get(a), B = known.get(b), C = known.get(c), D = known.get(d);
+    // a/b = c/d
+    if (u.key === a && B !== undefined && C !== undefined && D !== undefined && D !== 0) return { key: a, value: (B * C) / D };
+    if (u.key === b && A !== undefined && C !== undefined && D !== undefined && C !== 0) return { key: b, value: (A * D) / C };
+    if (u.key === c && A !== undefined && B !== undefined && D !== undefined && B !== 0) return { key: c, value: (A * D) / B };
+    if (u.key === d && A !== undefined && B !== undefined && C !== undefined && A !== 0) return { key: d, value: (B * C) / A };
+    return null;
+  }
+  if (r.kind === "pythag") {
+    const [a, b, c] = r.terms.map((t) => t.key);
+    const A = known.get(a), B = known.get(b), C = known.get(c);
+    if (u.key === c && A !== undefined && B !== undefined) return { key: c, value: Math.sqrt(A * A + B * B) };
+    if (u.key === a && B !== undefined && C !== undefined && C * C >= B * B) return { key: a, value: Math.sqrt(C * C - B * B) };
+    if (u.key === b && A !== undefined && C !== undefined && C * C >= A * A) return { key: b, value: Math.sqrt(C * C - A * A) };
+    return null;
+  }
+  if (u.coef === 0) return null;
+  let s = r.constant;
+  for (const t of r.terms) {
+    if (t === u) continue;
+    s -= t.coef * (known.get(t.key) as number);
+  }
+  return { key: u.key, value: s / u.coef };
+}
+
 export interface DerivStep {
   produces: string;
   value: number;
@@ -42,24 +74,16 @@ export function forwardChain(
     progressed = false;
     for (const r of relations) {
       if (!allowedConceptIds.has(r.conceptId) && !allowedConceptIds.has(r.rule)) continue;
-      const unknown = r.terms.filter((t) => !known.has(t.key));
-      if (unknown.length !== 1) continue;
-      const u = unknown[0];
-      if (u.coef === 0) continue;
-      let s = r.constant;
-      for (const t of r.terms) {
-        if (t === u) continue;
-        s -= t.coef * (known.get(t.key) as number);
-      }
-      const value = s / u.coef;
-      known.set(u.key, value);
+      const solved = solveRelation(r, known);
+      if (!solved) continue;
+      known.set(solved.key, solved.value);
       steps.push({
-        produces: u.key,
-        value,
+        produces: solved.key,
+        value: solved.value,
         rule: r.rule,
         conceptId: r.conceptId,
         justifyKey: r.justifyKey,
-        premises: r.terms.filter((t) => t !== u).map((t) => t.key),
+        premises: r.terms.filter((t) => t.key !== solved.key).map((t) => t.key),
         relation: r,
       });
       progressed = true;

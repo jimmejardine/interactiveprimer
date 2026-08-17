@@ -31,7 +31,7 @@ import { makeRng } from "../rng.ts";
 import { checkAnswer } from "../quiz-vars.ts";
 import { loadMathLive } from "../mathfield.ts";
 import { getMathKeyboard } from "../math-keyboards.ts";
-import { anglePos } from "../geometry-engine/scaffolds.ts";
+import { anglePos, lengthPos } from "../geometry-engine/scaffolds.ts";
 import { raysForInterior } from "../geometry.ts";
 import { pickAndGenerate } from "../geometry-engine/generate.ts";
 import type { Problem } from "../geometry-engine/generate.ts";
@@ -75,6 +75,15 @@ const JUSTIFY: Record<string, (v: number) => string> = {
   regularCentre: (v) => `Each central angle of this regular polygon is the same, so this angle is ${v}°.`,
   parallelogramOpposite: (v) => `Opposite angles of a parallelogram are equal, so this angle is ${v}°.`,
   parallelogramConsecutive: (v) => `Consecutive angles of a parallelogram add to 180°, so this angle is ${v}°.`,
+  angleAtCentre: (v) => `The angle at the centre is twice the angle at the circumference, so this angle is ${v}°.`,
+  angleInSemicircle: (v) => `The angle in a semicircle is 90°, so this angle is ${v}°.`,
+  sameSegment: (v) => `Angles in the same segment are equal, so this angle is ${v}°.`,
+  cyclicOpposite: (v) => `Opposite angles of a cyclic quadrilateral add to 180°, so this angle is ${v}°.`,
+  tangentPerpRadius: (v) => `A tangent is perpendicular to the radius, so this angle is ${v}°.`,
+  twoTangents: (v) => `The two tangents from a point are equal, so this is ${v}.`,
+  similarAA: (v) => `Corresponding angles of similar triangles are equal, so this angle is ${v}°.`,
+  similarSides: (v) => `Corresponding sides of similar triangles are proportional, so this length is ${v}.`,
+  pythagoras: (v) => `By Pythagoras, this side is ${v}.`,
 };
 
 /** Short tray labels (the theorem names the learner is allowed to use). */
@@ -95,6 +104,15 @@ const RULE_LABEL: Record<string, string> = {
   regularCentre: "central angle of a regular polygon",
   parallelogramOpposite: "opposite angles of a parallelogram",
   parallelogramConsecutive: "consecutive angles of a parallelogram",
+  angleAtCentre: "angle at the centre",
+  angleInSemicircle: "angle in a semicircle",
+  sameSegment: "angles in the same segment",
+  cyclicOpposite: "opposite angles of a cyclic quadrilateral",
+  tangentPerpRadius: "tangent ⊥ radius",
+  twoTangents: "two tangents from a point",
+  similarAA: "similar triangles (AA)",
+  similarSides: "corresponding sides of similar triangles",
+  pythagoras: "Pythagoras",
 };
 
 export class PrimerGeometryProblem extends HTMLElement {
@@ -118,6 +136,7 @@ export class PrimerGeometryProblem extends HTMLElement {
   /** Current construction tool. */ #tool: string = "answer";
   /** Construction tools the toolbar offers (besides the always-present Fill in / Undo). */ #toolset: string[] = ["line", "parallel", "equal", "right"];
   /** Learner-created elements (for undo/reset). */ #added: any[] = [];
+  /** Aux constructions the learner has drawn (keys `"A|B"`). */ #auxUnlocked: Set<string> = new Set();
   /** Pickable points for the tools. */ #picks: { x: number; y: number; el: any }[] = [];
   /** First point chosen by the line tool. */ #pendingPoint: any = null;
   #resizeObs: ResizeObserver | null = null;
@@ -276,6 +295,7 @@ export class PrimerGeometryProblem extends HTMLElement {
     this.#badges = [];
     this.#marks = { parallel: { pending: null, count: 0 }, equal: { pending: null, count: 0 } };
     this.#added = [];
+    this.#auxUnlocked = new Set();
     this.#picks = [];
     this.#pendingPoint = null;
     this.#solved = false;
@@ -333,9 +353,14 @@ export class PrimerGeometryProblem extends HTMLElement {
     // EVERY non-given angle is fillable — that's how you chase the solution. The engine's chain only
     // supplies the ordered HINTS and which one is the final target.
     const givenKeys = new Set(problem.givens.map((g: any) => g.key));
-    this.#fillable = figure.angles
-      .filter((a: any) => !givenKeys.has(a.key))
-      .map((a: any) => ({ key: a.key, value: a.value, pos: anglePos(figure, a), isTarget: a.key === problem.target, kind: "angle" as const }));
+    this.#fillable = [
+      ...figure.angles
+        .filter((a: any) => !givenKeys.has(a.key))
+        .map((a: any) => ({ key: a.key, value: a.value, pos: anglePos(figure, a), isTarget: a.key === problem.target, kind: "angle" as const })),
+      ...(figure.lengths ?? [])
+        .filter((L: any) => !givenKeys.has(L.key))
+        .map((L: any) => ({ key: L.key, value: L.value, pos: lengthPos(figure, L), isTarget: L.key === problem.target, kind: "length" as const })),
+    ];
     this.#hintByKey = new Map(problem.blanks.map((b: any) => [b.key, b]));
     this.#explainByKey = new Map();
     for (const f of this.#fillable) {
@@ -345,6 +370,9 @@ export class PrimerGeometryProblem extends HTMLElement {
         (r: any) => allowed.has(r.conceptId) && r.terms.some((t: any) => t.key === f.key),
       );
       this.#explainByKey.set(f.key, { rule: reln ? reln.rule : null, value: f.value });
+    }
+    if ((figure.aux ?? []).length && !this.#toolset.includes("line")) {
+      this.#toolset = ["line", ...this.#toolset];
     }
     this.#drawBoardFigure(stage, JXG, figure, problem);
     return true;
@@ -423,6 +451,18 @@ export class PrimerGeometryProblem extends HTMLElement {
         strokeColor: colors.line, strokeWidth: 2, fixed: true, highlight: false,
       });
     }
+    for (const c of figure.circles ?? []) {
+      const O = figure.points[c.center];
+      const r = c.through
+        ? Math.hypot(O[0] - figure.points[c.through][0], O[1] - figure.points[c.through][1])
+        : c.r;
+      board.create("circle", [O, r], {
+        strokeColor: colors.line, strokeWidth: 2, fillOpacity: 0, fixed: true, highlight: false,
+      });
+    }
+    for (const rt of figure.rights ?? []) {
+      tools.rightAngle(figure.points[rt.vertex], figure.points[rt.from], figure.points[rt.to], { color: colors.line });
+    }
     // When a side is both parallel and equal-length (a parallelogram), sit the ticks and the
     // chevrons at different fractions along the edge so they don't stack on the midpoint.
     const equalSet = new Set((figure.equals ?? []).flat());
@@ -468,6 +508,12 @@ export class PrimerGeometryProblem extends HTMLElement {
       } else {
         tools.angleMark(V, P1, P2, { color: ang.key === problem.target ? colors.cat[0] : colors.line, radius: 0.5 });
       }
+    }
+    const givenLen = new Set(problem.givens.map((g: any) => g.key));
+    for (const L of figure.lengths ?? []) {
+      if (!givenLen.has(L.key)) continue;
+      const at = lengthPos(figure, L);
+      tools.label(at, String(L.value), { style: "given", fontSize: 14 });
     }
     board.update();
     this.#wireBoardTools(board);
@@ -609,14 +655,29 @@ export class PrimerGeometryProblem extends HTMLElement {
       this.#markAngles(items, true);
       this.#feedback(`<span class="ok">✓ ${this.#str("solved", "Solved! Every step checks out.")}</span>` + this.#explainHtml(items));
     } else if (wrong.length) {
-      // Explain EVERY wrong angle, badge each one, and colour-match the explanations.
       this.#markAngles(wrong, false);
-      this.#feedback(`<span class="bad">✗ ${this.#str("notYet", "Not yet —")}</span> ${this.#str("review", "these angles need another look:", { noun: this.#noun() })}` + this.#explainHtml(wrong));
+      const auxHint = this.#lockedAuxHint();
+      const lead = auxHint
+        ? `<span class="bad">✗ ${this.#str("notYet", "Not yet —")}</span> ${auxHint}`
+        : `<span class="bad">✗ ${this.#str("notYet", "Not yet —")}</span> ${this.#str("review", "these angles need another look:", { noun: this.#noun() })}`;
+      this.#feedback(lead + this.#explainHtml(wrong));
     } else if (!targetFilled) {
-      this.#feedback(`<span class="bad">${this.#str("fillTarget", "Fill in the highlighted angle to finish.", { noun: this.#noun() })}</span>`);
+      const auxHint = this.#lockedAuxHint();
+      this.#feedback(`<span class="bad">${auxHint || this.#str("fillTarget", "Fill in the highlighted angle to finish.", { noun: this.#noun() })}</span>`);
     }
     this.dispatchEvent(new CustomEvent("primer:problem-graded", { bubbles: true, detail: { solved: this.#solved } }));
     return this.#solved;
+  }
+
+  /** Hint for a still-hidden auxiliary construction, or null if none / already drawn. */
+  #lockedAuxHint(): string | null {
+    const fig = this.#problem?.figure;
+    if (!fig?.aux?.length) return null;
+    for (const aux of fig.aux) {
+      const key = aux.through.slice().sort().join("|");
+      if (!this.#auxUnlocked.has(key)) return aux.hint;
+    }
+    return null;
   }
 
   /** The ordered, labelled solution steps to colour-code on solve: the engine's chain for a generated
@@ -750,9 +811,31 @@ export class PrimerGeometryProblem extends HTMLElement {
         straightFirst: false, straightLast: true, strokeColor: colors.cat[1], strokeWidth: 1.5, dash: 2, fixed: true, highlight: false,
       });
       this.#added.push(line);
+      this.#unlockAux(this.#pendingPoint, pick, board);
     }
     this.#pendingPoint = null;
     board.update();
+  }
+
+  /** If the new segment matches a hidden aux (e.g. the radius), reveal it and remember it. */
+  #unlockAux(p: { x: number; y: number }, q: { x: number; y: number }, board: any) {
+    const fig = this.#problem?.figure;
+    if (!fig?.aux?.length) return;
+    const near = (pt: [number, number], hit: { x: number; y: number }) => Math.hypot(pt[0] - hit.x, pt[1] - hit.y) < 0.45;
+    for (const aux of fig.aux) {
+      const A = fig.points[aux.through[0]] as [number, number];
+      const B = fig.points[aux.through[1]] as [number, number];
+      const match = (near(A, p) && near(B, q)) || (near(A, q) && near(B, p));
+      if (!match) continue;
+      const key = aux.through.slice().sort().join("|");
+      if (this.#auxUnlocked.has(key)) continue;
+      this.#auxUnlocked.add(key);
+      const colors = themeColors();
+      const seg = board.create("segment", [A, B], {
+        strokeColor: colors.cat[0], strokeWidth: 2, fixed: true, highlight: false,
+      });
+      this.#added.push(seg);
+    }
   }
 
   /**

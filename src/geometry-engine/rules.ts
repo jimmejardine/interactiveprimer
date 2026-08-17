@@ -20,13 +20,21 @@ export interface Term {
   coef: number;
 }
 
-/** Asserts `Σ term.coef · value(term.key) = constant`. */
+/**
+ * `linear` (default): `Σ coef·value = constant`.
+ * `ratio`: terms `[a,b,c,d]` mean `a/b = c/d`.
+ * `pythag`: terms `[a,b,c]` mean `a² + b² = c²` (c the hypotenuse).
+ */
+export type RelationKind = "linear" | "ratio" | "pythag";
+
+/** Asserts a one-unknown-solvable relation over named quantities. */
 export interface Relation {
   rule: string;
   conceptId: string;
   justifyKey: string;
   terms: Term[];
   constant: number;
+  kind?: RelationKind;
   refs?: Record<string, any>;
 }
 
@@ -100,6 +108,42 @@ export const RULES: Record<string, { conceptId: string; justifyKey: string }> = 
     conceptId: "mathematics/geometry/properties-of-parallelograms",
     justifyKey: "rulePgramConsec",
   },
+  angleAtCentre: {
+    conceptId: "mathematics/geometry/angle-at-the-centre",
+    justifyKey: "ruleCentre",
+  },
+  angleInSemicircle: {
+    conceptId: "mathematics/geometry/angle-in-a-semicircle",
+    justifyKey: "ruleSemicircle",
+  },
+  sameSegment: {
+    conceptId: "mathematics/geometry/angles-in-the-same-segment",
+    justifyKey: "ruleSameSegment",
+  },
+  cyclicOpposite: {
+    conceptId: "mathematics/geometry/cyclic-quadrilaterals",
+    justifyKey: "ruleCyclicOpp",
+  },
+  tangentPerpRadius: {
+    conceptId: "mathematics/geometry/tangents-to-a-circle",
+    justifyKey: "ruleTangentPerp",
+  },
+  twoTangents: {
+    conceptId: "mathematics/geometry/tangents-to-a-circle",
+    justifyKey: "ruleTwoTangents",
+  },
+  similarAA: {
+    conceptId: "mathematics/geometry/similar-triangles",
+    justifyKey: "ruleSimilarAA",
+  },
+  similarSides: {
+    conceptId: "mathematics/geometry/similar-triangles",
+    justifyKey: "ruleSimilarSides",
+  },
+  pythagoras: {
+    conceptId: "mathematics/geometry/pythagorean-theorem",
+    justifyKey: "rulePythagoras",
+  },
 };
 
 /** A catalog key — the name authors pass in `theorems` / `require`. */
@@ -133,12 +177,32 @@ export function sumTo(keys: string[], total: number, rule: keyof typeof RULES & 
   return rel(rule, keys.map((key) => ({ key, coef: 1 })), total);
 }
 
+/** Corresponding-side proportion `a/b = c/d`. */
+export function ratioEq(a: string, b: string, c: string, d: string, rule: keyof typeof RULES & string): Relation {
+  return { ...rel(rule, [a, b, c, d].map((key) => ({ key, coef: 1 })), 0), kind: "ratio" };
+}
+
+/** Pythagoras `a² + b² = c²` (c the hypotenuse). */
+export function pythagEq(a: string, b: string, c: string, rule: keyof typeof RULES & string): Relation {
+  return { ...rel(rule, [a, b, c].map((key) => ({ key, coef: 1 })), 0), kind: "pythag" };
+}
+
 /**
  * Evaluate whether a relation holds for a value map (used by scaffolds/tests to assert a figure is
  * self-consistent: every emitted relation must be true of the figure's ground-truth angle values).
  */
 export function relationHolds(r: Relation, values: Map<string, number> | Record<string, number>): boolean {
   const get = (k: string) => (values instanceof Map ? values.get(k) : values[k]);
+  if (r.kind === "ratio") {
+    const [a, b, c, d] = r.terms.map((t) => get(t.key));
+    if ([a, b, c, d].some((v) => v === undefined || v === 0)) return false;
+    return Math.abs((a as number) / (b as number) - (c as number) / (d as number)) < 1e-6;
+  }
+  if (r.kind === "pythag") {
+    const [a, b, c] = r.terms.map((t) => get(t.key));
+    if ([a, b, c].some((v) => v === undefined)) return false;
+    return Math.abs((a as number) ** 2 + (b as number) ** 2 - (c as number) ** 2) < 1e-6;
+  }
   let s = 0;
   for (const t of r.terms) {
     const v = get(t.key);

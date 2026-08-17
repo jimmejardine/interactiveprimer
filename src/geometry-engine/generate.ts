@@ -12,7 +12,7 @@
 
 import { forwardChain, traceTarget } from "./chain.ts";
 import type { DerivStep } from "./chain.ts";
-import { anglePos, selectScaffolds, SCAFFOLDS } from "./scaffolds.ts";
+import { anglePos, lengthPos, selectScaffolds, SCAFFOLDS } from "./scaffolds.ts";
 import type { Figure } from "./scaffolds.ts";
 import type { Rng } from "../rng.ts";
 
@@ -35,7 +35,21 @@ export interface Problem {
 }
 
 function valueMap(fig: Figure): Map<string, number> {
-  return new Map(fig.angles.map((a) => [a.key, a.value]));
+  const m = new Map(fig.angles.map((a) => [a.key, a.value]));
+  for (const L of fig.lengths ?? []) m.set(L.key, L.value);
+  return m;
+}
+
+function quantityKeys(fig: Figure): string[] {
+  return [...fig.angles.map((a) => a.key), ...(fig.lengths ?? []).map((L) => L.key)];
+}
+
+function quantityPos(fig: Figure, key: string): [number, number] {
+  const ang = fig.angles.find((a) => a.key === key);
+  if (ang) return anglePos(fig, ang);
+  const len = fig.lengths?.find((L) => L.key === key);
+  if (len) return lengthPos(fig, len);
+  return [0, 0];
 }
 
 /** Fewest known angles needed to fire any allowed relation (largest relation size − 1). */
@@ -80,7 +94,7 @@ export function generateProblem(
   } = {},
 ): Problem | null {
   const values = valueMap(figure);
-  const keys = figure.angles.map((a) => a.key);
+  const keys = quantityKeys(figure);
   // A 4-term sum (quad interior = 360°) cannot fire until 3 angles are known. Raise the
   // given-count floor/ceiling to whatever the largest allowed relation needs, or the
   // generator returns null and the UI says "no theorems learned".
@@ -165,12 +179,11 @@ export function pickAndGenerate(
  * Assemble the `Problem` shape from a chosen givens set + the ordered solution trace.
  */
 function buildProblem(figure: Figure, givenKeys: string[], trace: DerivStep[], target: string): Problem {
-  const byKey = new Map(figure.angles.map((a) => [a.key, a]));
-  const pos = (k: string) => anglePos(figure, byKey.get(k) as any);
+  const values = valueMap(figure);
   const givens = givenKeys.map((k) => ({
     key: k,
-    value: (byKey.get(k) as any).value,
-    pos: pos(k),
+    value: values.get(k) as number,
+    pos: quantityPos(figure, k),
   }));
   const blanks = trace.map((s) => ({
     key: s.produces,
@@ -179,7 +192,7 @@ function buildProblem(figure: Figure, givenKeys: string[], trace: DerivStep[], t
     justifyKey: s.justifyKey,
     rule: s.rule,
     premises: s.premises,
-    pos: pos(s.produces),
+    pos: quantityPos(figure, s.produces),
   }));
   return { figure, givens, blanks, target, steps: trace.length };
 }
