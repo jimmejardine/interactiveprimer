@@ -32,6 +32,7 @@ import { checkAnswer } from "../quiz-vars.ts";
 import { loadMathLive } from "../mathfield.ts";
 import { getMathKeyboard } from "../math-keyboards.ts";
 import { anglePos, lengthPos } from "../geometry-engine/scaffolds.ts";
+import { layoutCallouts, leaderEndpoints } from "./overlay-callouts.ts";
 import { raysForInterior } from "../geometry.ts";
 import { pickAndGenerate } from "../geometry-engine/generate.ts";
 import type { Problem } from "../geometry-engine/generate.ts";
@@ -120,13 +121,17 @@ export class PrimerGeometryProblem extends HTMLElement {
   /** Raw JSXGraph namespace (for Coords + freeBoard). */ #jsx: any = null;
   #problem: Problem | null = null;
   /** fillable angle key → its `<math-field>` (or fallback `<input>`). */ #inputs: Map<string, any> = new Map();
-  /** Every non-given quantity the learner can fill. */ #fillable: Array<{ key: string; value: number; pos: [number, number]; isTarget: boolean; kind: "angle" | "length" }> = [];
+  /** Every non-given quantity the learner can fill. `pos` is the box's home; `tip` is where a
+   *  leader line points (the angle mark / side) when crowding pushes the box off the figure. */
+  #fillable: Array<{ key: string; value: number; pos: [number, number]; tip: [number, number]; isTarget: boolean; kind: "angle" | "length" }> = [];
+  /** Last screen-pixel centres of the overlay boxes (for step badges). */ #boxScreen: Map<string, { x: number; y: number }> = new Map();
+  /** Key of the fill-in currently focused, so a rebuilt leader can stay highlighted. */ #focusedKey: string | null = null;
   /** Whether MathLive loaded (else fall back to plain text boxes). */ #mathlive: boolean = false;
   /** chain step keyed by produced angle, for hints. */ #hintByKey: Map<string, DerivStep> = new Map();
   /** A theorem explanation for EVERY fillable angle (chain step if on the path, else any determining relation). */ #explainByKey: Map<string, { rule: string | null; value: number }> = new Map();
   /** Per-blank explanation text for AUTHORED problems. */ #hintText: Map<string, string> = new Map();
   /** The goal sentence (authored problems set their own). */ #goal: string = "";
-  /** Numbered step badges shown on solve. */ #badges: Array<{ el: HTMLElement; pos: [number, number] }> = [];
+  /** Numbered step badges shown on solve (follow the box, not the original mark). */ #badges: Array<{ el: HTMLElement; key: string }> = [];
   /** Marking-tool group state. */ #marks: { parallel: { pending: any; count: number }; equal: { pending: any; count: number } } = { parallel: { pending: null, count: 0 }, equal: { pending: null, count: 0 } };
   #onTheme: (() => void) | null = null;
   #stopWaiting: (() => void) | null = null;
@@ -209,6 +214,12 @@ export class PrimerGeometryProblem extends HTMLElement {
         .board { position: absolute; inset: 0; }
         .stage svg { display: block; width: 100% !important; height: 100% !important; }
         .overlay { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+        /* Leader lines from a pulled-off box back to its angle/side. Theme ink, not a hardcoded grey. */
+        .overlay .leaders { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+        .overlay .leaders line { stroke: var(--primer-ink-soft, #667); stroke-width: 1; fill: none; }
+        .overlay .leaders circle { fill: var(--primer-ink-soft, #667); }
+        .overlay .leaders .active line { stroke: var(--primer-accent, #4d5bd1); stroke-width: 1.6; }
+        .overlay .leaders .active circle { fill: var(--primer-accent, #4d5bd1); }
         /* Fillable boxes: the diagram backdrop (--primer-viz-bg) equals --primer-surface in every
            theme, so a "surface" fill would vanish. Use the recessed control surface (distinct from the
            backdrop) plus a soft lift so each box reads clearly against the figure — but stays quieter
@@ -223,6 +234,8 @@ export class PrimerGeometryProblem extends HTMLElement {
           background: color-mix(in srgb, var(--primer-control-bg, #f1ede4) 30%, transparent);
           color: var(--primer-ink, #111); pointer-events: auto; }
         .overlay input { padding: 0 0.1rem; }
+        /* Pulled-off boxes sit in empty space — give them a solid control fill so they don't look washed out. */
+        .overlay input.pulled, .overlay math-field.mf.pulled { background: var(--primer-control-bg, #f1ede4); }
         /* MathLive box: keep it compact, sans-serif glyphs, and hide the in-field menu / keyboard
            toggles (the module keyboard pops up on focus instead). */
         .overlay math-field.mf { padding: 0; min-height: 0.95rem; --smart-fence-opacity: 0;
@@ -288,6 +301,8 @@ export class PrimerGeometryProblem extends HTMLElement {
     const overlay = stage.querySelector(".overlay") as HTMLElement;
     overlay.replaceChildren();
     this.#inputs.clear();
+    this.#boxScreen.clear();
+    this.#focusedKey = null;
     this.#fillable = [];
     this.#hintByKey = new Map();
     this.#explainByKey = new Map();
@@ -356,10 +371,18 @@ export class PrimerGeometryProblem extends HTMLElement {
     this.#fillable = [
       ...figure.angles
         .filter((a: any) => !givenKeys.has(a.key))
-        .map((a: any) => ({ key: a.key, value: a.value, pos: anglePos(figure, a), isTarget: a.key === problem.target, kind: "angle" as const })),
+        .map((a: any) => {
+          const pos = anglePos(figure, a);
+          // Tip sits on the angle mark (r ≈ 0.4) so a leader points at the corner, not the
+          // triangle's centre — which is where anglePos(r=0.95) collapses on a small figure.
+          return { key: a.key, value: a.value, pos, tip: anglePos(figure, a, 0.4), isTarget: a.key === problem.target, kind: "angle" as const };
+        }),
       ...(figure.lengths ?? [])
         .filter((L: any) => !givenKeys.has(L.key))
-        .map((L: any) => ({ key: L.key, value: L.value, pos: lengthPos(figure, L), isTarget: L.key === problem.target, kind: "length" as const })),
+        .map((L: any) => {
+          const pos = lengthPos(figure, L);
+          return { key: L.key, value: L.value, pos, tip: pos, isTarget: L.key === problem.target, kind: "length" as const };
+        }),
     ];
     this.#hintByKey = new Map(problem.blanks.map((b: any) => [b.key, b]));
     this.#explainByKey = new Map();
@@ -389,7 +412,7 @@ export class PrimerGeometryProblem extends HTMLElement {
     board.update();
     const blanks = spec.blanks ?? [];
     this.#fillable = blanks.map((b: any, i: number) => ({
-      key: `b${i}`, value: b.answer, pos: b.pos, isTarget: b.target ?? i === 0, kind: b.kind ?? "angle",
+      key: `b${i}`, value: b.answer, pos: b.pos, tip: b.tip ?? b.pos, isTarget: b.target ?? i === 0, kind: b.kind ?? "angle",
     }));
     this.#hintText = new Map(blanks.map((b: any, i: number) => [`b${i}`, b.hint ?? ""]));
     this.#goal = spec.goal ?? "";
@@ -571,6 +594,10 @@ export class PrimerGeometryProblem extends HTMLElement {
   #placeFields(overlay: HTMLElement) {
     overlay.replaceChildren();
     this.#inputs.clear();
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "leaders");
+    svg.setAttribute("aria-hidden", "true");
+    overlay.append(svg);
     const haveMf = this.#mathlive && typeof customElements !== "undefined" && !!customElements.get("math-field");
     for (const f of this.#fillable) {
       const kb = f.kind === "length" ? "geometry-lengths" : "geometry-angles";
@@ -590,6 +617,7 @@ export class PrimerGeometryProblem extends HTMLElement {
     const layout = getMathKeyboard(kb);
     mf.addEventListener("input", () => mf.classList.remove("right", "wrong"));
     mf.addEventListener("focusin", () => {
+      this.#setLeaderActive(f.key, true);
       // Render typed content in the sans-serif MATH variant (CSS can't reach MathLive's glyph font).
       // Applied while the cursor is collapsed so the next inserted digits inherit it.
       try { mf.applyStyle?.({ variant: "sans-serif" }); } catch { /* not mounted yet */ }
@@ -599,7 +627,10 @@ export class PrimerGeometryProblem extends HTMLElement {
       vk.editToolbar = "none";
       vk.show();
     });
-    mf.addEventListener("focusout", () => { (globalThis as any).mathVirtualKeyboard?.hide(); });
+    mf.addEventListener("focusout", () => {
+      this.#setLeaderActive(f.key, false);
+      (globalThis as any).mathVirtualKeyboard?.hide();
+    });
     return mf;
   }
 
@@ -613,6 +644,8 @@ export class PrimerGeometryProblem extends HTMLElement {
     input.setAttribute("aria-label", this.#str("blankLabel", "unknown angle", { noun: this.#noun() }));
     input.dataset.key = f.key;
     input.addEventListener("input", () => { input.classList.remove("right", "wrong"); });
+    input.addEventListener("focusin", () => this.#setLeaderActive(f.key, true));
+    input.addEventListener("focusout", () => this.#setLeaderActive(f.key, false));
     return input;
   }
 
@@ -743,7 +776,7 @@ export class PrimerGeometryProblem extends HTMLElement {
       badge.textContent = String(i + 1);
       badge.style.background = c;
       overlay.append(badge);
-      this.#badges.push({ el: badge, pos: f.pos });
+      this.#badges.push({ el: badge, key: f.key });
     });
     this.#syncOverlay();
   }
@@ -912,33 +945,108 @@ export class PrimerGeometryProblem extends HTMLElement {
   /* ------------------------------ overlay ----------------------------- */
 
   /**
-   * Position each blank input over its angle, converting user coords → board pixels using only
-   * guaranteed board properties (origin + unitX/unitY, which already encode the keep-aspect scaling).
-   * Wrapped so a transient bad state (board mid-rebuild) can never throw out of an event handler.
+   * Position each blank input. Isolated boxes sit on their mark; a crowded pile is pushed off
+   * the figure with a leader line back to the angle/side (see overlay-callouts.ts). User coords
+   * → board pixels via origin + unitX/unitY. Wrapped so a transient bad state (board mid-rebuild)
+   * can never throw out of an event handler.
    */
   #syncOverlay() {
     try {
       const board = this.#board;
-      if (!board || !board.origin) return;
+      if (!board || !board.origin || !this.#inputs.size) return;
       const ox = board.origin.scrCoords[1];
       const oy = board.origin.scrCoords[2];
       const ux = board.unitX;
       const uy = board.unitY;
-      const byKey = new Map(this.#fillable.map((f) => [f.key, f]));
+      if (!ux || !uy) return;
+      const overlay = this.#root.querySelector(".overlay") as HTMLElement | null;
+      if (!overlay) return;
+      const stageW = overlay.clientWidth;
+      const stageH = overlay.clientHeight;
+      if (stageW < 2 || stageH < 2) return;
+
+      const sample = this.#inputs.values().next().value as HTMLElement | undefined;
+      const rect = sample?.getBoundingClientRect();
+      const boxW = rect && rect.width > 2 ? rect.width : 30;
+      const boxH = rect && rect.height > 2 ? rect.height : 16;
+
+      const anchors = this.#fillable.map((f) => ({
+        key: f.key,
+        ax: ox + f.pos[0] * ux,
+        ay: oy - f.pos[1] * uy,
+        ox: ox + f.tip[0] * ux,
+        oy: oy - f.tip[1] * uy,
+      }));
+      const placed = layoutCallouts(anchors, {
+        stageW, stageH, boxW, boxH,
+        // ~0.85 user-units: a small similar-triangle's marks pile up (~0.3–0.75 apart) and
+        // cluster; a large triangle's marks (~1.0+) and the two figures stay separate.
+        clusterPx: Math.max(boxW + 8, 0.85 * ux),
+      });
+      const byPlace = new Map(placed.map((p) => [p.key, p]));
+      this.#boxScreen.clear();
       for (const [key, input] of this.#inputs) {
-        const f = byKey.get(key);
-        if (!f) continue;
-        input.style.left = `${ox + f.pos[0] * ux}px`;
-        input.style.top = `${oy - f.pos[1] * uy}px`;
+        const p = byPlace.get(key);
+        if (!p) continue;
+        input.style.left = `${p.x}px`;
+        input.style.top = `${p.y}px`;
+        input.classList.toggle("pulled", p.pulled);
+        this.#boxScreen.set(key, { x: p.x, y: p.y });
       }
-      // Step badges sit just up-and-left of their box.
-      for (const { el, pos } of this.#badges) {
-        el.style.left = `${ox + pos[0] * ux - 15}px`;
-        el.style.top = `${oy - pos[1] * uy - 12}px`;
+      this.#paintLeaders(overlay, placed, ox, oy, ux, uy, boxW, boxH);
+      for (const { el, key } of this.#badges) {
+        const p = this.#boxScreen.get(key);
+        if (!p) continue;
+        el.style.left = `${p.x - 15}px`;
+        el.style.top = `${p.y - 12}px`;
       }
     } catch {
       /* board mid-rebuild / freed — skip this frame */
     }
+  }
+
+  /** Draw (or clear) the SVG leaders for every box that was pulled off its mark. */
+  #paintLeaders(
+    overlay: HTMLElement,
+    placed: Array<{ key: string; x: number; y: number; pulled: boolean }>,
+    ox: number, oy: number, ux: number, uy: number,
+    boxW: number, boxH: number,
+  ) {
+    const svg = overlay.querySelector(".leaders") as SVGSVGElement | null;
+    if (!svg) return;
+    svg.setAttribute("viewBox", `0 0 ${overlay.clientWidth} ${overlay.clientHeight}`);
+    svg.replaceChildren();
+    const NS = "http://www.w3.org/2000/svg";
+    const byKey = new Map(this.#fillable.map((f) => [f.key, f]));
+    for (const p of placed) {
+      if (!p.pulled) continue;
+      const f = byKey.get(p.key);
+      if (!f) continue;
+      const tipX = ox + f.tip[0] * ux;
+      const tipY = oy - f.tip[1] * uy;
+      const ep = leaderEndpoints(p.x, p.y, tipX, tipY, boxW, boxH);
+      if (!ep) continue;
+      const g = document.createElementNS(NS, "g");
+      g.setAttribute("data-key", p.key);
+      if (p.key === this.#focusedKey) g.setAttribute("class", "active");
+      const line = document.createElementNS(NS, "line");
+      line.setAttribute("x1", String(ep.x1));
+      line.setAttribute("y1", String(ep.y1));
+      line.setAttribute("x2", String(ep.x2));
+      line.setAttribute("y2", String(ep.y2));
+      const dot = document.createElementNS(NS, "circle");
+      dot.setAttribute("cx", String(tipX));
+      dot.setAttribute("cy", String(tipY));
+      dot.setAttribute("r", "2.4");
+      g.append(line, dot);
+      svg.append(g);
+    }
+  }
+
+  #setLeaderActive(key: string, on: boolean) {
+    this.#focusedKey = on ? key : this.#focusedKey === key ? null : this.#focusedKey;
+    const g = this.#root.querySelector(`.leaders [data-key="${CSS.escape(key)}"]`);
+    g?.classList.toggle("active", on);
   }
 
   #awaitRegistration(root: ShadowRoot, name: string) {
