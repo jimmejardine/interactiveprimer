@@ -96,6 +96,7 @@ const es: Record<string, string> = {
   "geometryProblem.toolRight": "Recto ∟",
   "geometryProblem.toolUndo": "Deshacer",
   "geometryProblem.restart": "Reiniciar",
+  "geometryProblem.hint": "Pista",
   "geometryProblem.goal": "Persigue los ángulos: rellena los que puedas deducir, terminando con el resaltado.",
   "geometryProblem.blankLabel": "{noun} desconocido",
   "geometryProblem.solved": "¡Resuelto! Todos los pasos son correctos.",

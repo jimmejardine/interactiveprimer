@@ -97,6 +97,7 @@ const en: Record<string, string> = {
   "geometryProblem.toolRight": "Right ∟",
   "geometryProblem.toolUndo": "Undo",
   "geometryProblem.restart": "Restart",
+  "geometryProblem.hint": "Hint",
   "geometryProblem.goal": "Chase the angles: fill in any you can work out, ending with the highlighted one.",
   "geometryProblem.blankLabel": "unknown {noun}",
   "geometryProblem.solved": "Solved! Every step checks out.",

@@ -94,6 +94,7 @@ const nl: Record<string, string> = {
   "geometryProblem.toolRight": "Recht ∟",
   "geometryProblem.toolUndo": "Ongedaan maken",
   "geometryProblem.restart": "Opnieuw beginnen",
+  "geometryProblem.hint": "Hint",
   "geometryProblem.goal": "Jaag op de hoeken: vul alle hoeken in die je kunt uitrekenen, en eindig met de gemarkeerde.",
   "geometryProblem.blankLabel": "onbekende {noun}",
   "geometryProblem.solved": "Opgelost! Elke stap klopt.",

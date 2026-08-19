@@ -87,35 +87,6 @@ const JUSTIFY: Record<string, (v: number) => string> = {
   pythagoras: (v) => `By Pythagoras, this side is ${v}.`,
 };
 
-/** Short tray labels (the theorem names the learner is allowed to use). */
-const RULE_LABEL: Record<string, string> = {
-  vertical: "vertically opposite angles",
-  linearPair: "angles on a straight line",
-  corresponding: "corresponding angles",
-  alternateInterior: "alternate interior angles",
-  coInterior: "co-interior angles",
-  anglesAtPoint: "angles around a point",
-  triangleSum: "angles in a triangle",
-  isoscelesBase: "isosceles base angles",
-  exteriorAngle: "exterior angle of a triangle",
-  equilateral: "equilateral triangle (60°)",
-  polygonSum: "interior angle sum of a polygon",
-  polygonExterior: "exterior angles of a polygon",
-  regularInterior: "interior angle of a regular polygon",
-  regularCentre: "central angle of a regular polygon",
-  parallelogramOpposite: "opposite angles of a parallelogram",
-  parallelogramConsecutive: "consecutive angles of a parallelogram",
-  angleAtCentre: "angle at the centre",
-  angleInSemicircle: "angle in a semicircle",
-  sameSegment: "angles in the same segment",
-  cyclicOpposite: "opposite angles of a cyclic quadrilateral",
-  tangentPerpRadius: "tangent ⊥ radius",
-  twoTangents: "two tangents from a point",
-  similarAA: "similar triangles (AA)",
-  similarSides: "corresponding sides of similar triangles",
-  pythagoras: "Pythagoras",
-};
-
 export class PrimerGeometryProblem extends HTMLElement {
   #board: any = null;
   /** Raw JSXGraph namespace (for Coords + freeBoard). */ #jsx: any = null;
@@ -184,14 +155,23 @@ export class PrimerGeometryProblem extends HTMLElement {
         .prob { display: block; }
         .goal { font-family: var(--primer-font-display, sans-serif); font-weight: 700;
           color: var(--primer-ink, #111); margin: 0 0 0.5rem; text-align: center; }
-        .theorem-tray { display: block; font-family: var(--primer-font-ui, sans-serif); font-weight: 400;
-          font-size: 0.85rem; color: var(--primer-ink-soft, #667); margin-top: 0.25rem; }
+        .goal[hidden] { display: none; }
         /* The toolbar is a single control bar above the diagram: construction tools (when any) plus the
-           always-present Check / Refresh / Restart actions. */
+           always-present Check / Refresh / Restart / Hint actions. */
         .toolbar { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; justify-content: center;
           margin-bottom: 0; padding: 0.4rem; border-radius: 0.5rem 0.5rem 0 0;
           background: var(--primer-control-bg, #f1ede4); border: 1px solid var(--primer-control-border, #ccc);
           border-bottom: none; font-family: var(--primer-font-ui, sans-serif); }
+        .theorem-tray { flex: 1 1 100%; display: none; text-align: center;
+          font-family: var(--primer-font-ui, sans-serif); font-weight: 400;
+          font-size: 0.85rem; color: var(--primer-ink-soft, #667); }
+        .theorem-tray.is-open { display: block; }
+        .theorem-tray a.concept-ref { color: var(--primer-accent, #4d5bd1);
+          text-decoration: underline; text-decoration-style: dotted;
+          text-underline-offset: 0.15em; text-decoration-thickness: 1px; }
+        .theorem-tray a.concept-ref:hover { text-decoration-style: solid; }
+        .theorem-tray .concept-ref-icon { margin-left: 0.25em; font-size: 0.92em;
+          color: var(--primer-ink, #111); text-decoration: none; }
         .tools { display: contents; } /* tool buttons flow inline beside the action buttons */
         .toolbar button { padding: 0.25rem 0.6rem; border-radius: 0.35rem; font-size: 0.85rem;
           border: 1px solid var(--primer-control-border, #ccc);
@@ -270,12 +250,14 @@ export class PrimerGeometryProblem extends HTMLElement {
         .meta { color: var(--primer-ink-soft, #667); }
       </style>
       <div class="prob">
-        <p class="goal"></p>
+        <p class="goal" hidden></p>
         <div class="toolbar" part="toolbar">
           <span class="tools"></span>
           <button class="check" type="button">${t("quiz.check")}</button>
           <button class="refresh" type="button">${t("geometry.refresh")}</button>
           <button class="reset" type="button">${this.#str("restart", "Restart")}</button>
+          <button class="hint" type="button" aria-expanded="false">${this.#str("hint", "Hint")}</button>
+          <div class="theorem-tray"></div>
         </div>
         <div class="stage" part="stage"><div class="board"></div><div class="overlay"></div></div>
         <p class="feedback" role="status" aria-live="polite"></p>
@@ -576,17 +558,44 @@ export class PrimerGeometryProblem extends HTMLElement {
     }
   }
 
-  /** Show the goal sentence — an authored problem's own goal, else the default angle-chase prompt. */
+  /** Optional authored goal (hidden for generated chases). Wire the toolbar Hint to the theorem tray. */
   #renderGoal() {
     const goal = this.#root.querySelector(".goal") as HTMLElement;
-    goal.textContent = this.#goal || this.#str("goal", "Chase the angles: fill in any you can work out, ending with the highlighted one.");
+    if (this.#goal) {
+      goal.hidden = false;
+      goal.textContent = this.#goal;
+    } else {
+      goal.hidden = true;
+      goal.textContent = "";
+    }
+    const tray = this.#root.querySelector(".theorem-tray") as HTMLElement;
+    const btn = this.#root.querySelector(".hint") as HTMLButtonElement;
     const uses = this.#problem?.figure.uses ?? [];
-    if (!uses.length) return;
-    const tray = document.createElement("span");
-    tray.className = "theorem-tray";
-    tray.textContent = " " + this.#str("toolkit", "You may use") + ": " +
-      uses.map((r) => RULE_LABEL[r] ?? r).join(" · ") + ".";
-    goal.append(tray);
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    for (const r of uses) {
+      const id = RULES[r as keyof typeof RULES]?.conceptId;
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+    tray.replaceChildren();
+    tray.classList.remove("is-open");
+    if (!ids.length) { btn.hidden = true; return; }
+    ids.forEach((id, i) => {
+      if (i) tray.append(" · ");
+      const ref = document.createElement("primer-ref");
+      ref.setAttribute("soft", "");
+      ref.setAttribute("to", id);
+      tray.append(ref);
+    });
+    const reveal = () => {
+      tray.classList.add("is-open");
+      btn.setAttribute("aria-expanded", "true");
+    };
+    btn.hidden = false;
+    btn.setAttribute("aria-expanded", "false");
+    btn.onclick = reveal;
   }
 
   /** Overlay a small editor at EVERY fillable quantity's position — a MathLive `<math-field>` (its
