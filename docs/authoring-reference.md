@@ -262,7 +262,8 @@ page (each engine rule names the lesson `conceptId` that teaches it).
     `centreAndCircumference`, `semicircle`, `sameSegment`, `cyclicQuad`,
     `tangentRadius` (hidden radius — learner draws it), `twoTangents`,
     `similarPair`, `rightTriangle`, `isoscelesOnParallels`, `triangleBetweenParallels`,
-    `nestedSimilar`, `tangentRightPythag`.
+    `nestedSimilar`, `tangentRightPythag`, `chordTheorems`, `semicircleIso`,
+    `cyclicWithTriangle`, `parallelogramDiagonal`.
   - `minSteps` / `maxSteps` — difficulty (default 2–4).
   - `minDistinctRules` — prefer a chain that uses this many *different* theorems (so a mixed
     chase cannot collapse to vertical → linear pair → vertical).

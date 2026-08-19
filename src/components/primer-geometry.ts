@@ -80,6 +80,9 @@ export class PrimerGeometry extends HTMLElement {
   /** The big-play overlay button (cached: `#build` clears the stage, so the
    * same node — with its listener — is re-appended over the freshly-rendered board each build). */
   #bigPlay: HTMLElement | null = null;
+  /** `<details>` that hides this figure (a vignette) — re-fit the board when it opens. */
+  #revealHost: HTMLDetailsElement | null = null;
+  #onReveal: (() => void) | null = null;
 
   connectedCallback() {
     const root = this.shadowRoot ?? attachShared(this);
@@ -177,12 +180,22 @@ export class PrimerGeometry extends HTMLElement {
 
     this.#onTheme = () => void this.#build(root);
     document.addEventListener("theme-change", this.#onTheme);
+    this.#onReveal = () => {
+      try {
+        this.#board?.resizeContainer?.();
+        this.#board?.update?.();
+      } catch {
+        /* board mid-rebuild */
+      }
+    };
     void this.#build(root);
   }
 
   disconnectedCallback() {
     if (this.#onTheme) document.removeEventListener("theme-change", this.#onTheme);
     this.#onTheme = null;
+    this.#revealHost?.removeEventListener("toggle", this.#onReveal!);
+    this.#revealHost = null;
     this.#cancelWait();
     this.#stopPlay();
     this.#dispose();
@@ -261,6 +274,13 @@ export class PrimerGeometry extends HTMLElement {
 
       this.#renderBar();
       this.#emit();
+      // A figure inside a collapsed <primer-vignette> is sized 0 until the panel opens.
+      const host = this.closest("details");
+      if (host !== this.#revealHost) {
+        this.#revealHost?.removeEventListener("toggle", this.#onReveal!);
+        this.#revealHost = host;
+        this.#revealHost?.addEventListener("toggle", this.#onReveal!);
+      }
 
       // External sliders: subscribe so the figure re-plots on change (functional coords read live).
       const group = entry.opts.sliders;

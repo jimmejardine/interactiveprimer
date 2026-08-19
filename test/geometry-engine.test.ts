@@ -304,6 +304,10 @@ test("composite scaffolds generate a chase that uses several families", () => {
     ["triangleBetweenParallels", 3],
     ["nestedSimilar", 2],
     ["tangentRightPythag", 2],
+    ["chordTheorems", 3],
+    ["semicircleIso", 2],
+    ["cyclicWithTriangle", 2],
+    ["parallelogramDiagonal", 2],
   ];
   for (const [scaffold, minDistinct] of cases) {
     const fig = SCAFFOLDS[scaffold](makeRng(2));

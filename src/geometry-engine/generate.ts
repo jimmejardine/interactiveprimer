@@ -172,10 +172,13 @@ export function pickAndGenerate(
 
   let best: Problem | null = null;
   let bestDist = Infinity;
-  const names = specs.map((s) => s.name);
+  // Walk the eligible figures in a fresh order so a mixed page's circle
+  // scaffolds are not starved by the first parallel figure that fits. Repeat
+  // if the list is short (a single-scaffold page still gets several rolls).
+  const names = shuffled(specs.map((s) => s.name), rng);
   const tries = Math.max(names.length, 4);
   for (let i = 0; i < tries; i++) {
-    const name = rng.pick(names);
+    const name = names[i % names.length];
     const figure = SCAFFOLDS[name](rng);
     const problem = generateProblem(figure, allowed, rng, opts);
     if (!problem) continue;

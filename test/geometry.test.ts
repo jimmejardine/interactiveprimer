@@ -9,6 +9,8 @@ import {
   quadrantWedges,
   tickSegments,
   angleArcSpec,
+  raysForInterior,
+  signedCcwDeg,
 } from "../src/geometry.ts";
 
 const D = Math.PI / 180;
@@ -98,6 +100,20 @@ test("applyStepVisibility reveals step i iff i < current, honouring intended vis
 
   applyStepVisibility(steps, 3); // all revealed
   assert.equal(c.visible, true);
+});
+
+test("raysForInterior picks the short sweep, not the reflex (circle-mix ∠OAB)", () => {
+  // mixCircle: A on the rim, O the centre, B the other chord end — raw [O, A, B] is ~300° CCW.
+  const deg = Math.PI / 180;
+  const at = (d: number): [number, number] => [2.6 * Math.cos(d * deg), 2.6 * Math.sin(d * deg)];
+  const O: [number, number] = [0, 0];
+  const A = at(220);
+  const B = at(280);
+  const long = signedCcwDeg(A, O, B);
+  assert.ok(long > 180, `raw O→B at A should be the reflex, got ${long}`);
+  const [from, to] = raysForInterior(A, O, B, 60);
+  const got = signedCcwDeg(A, from, to);
+  assert.ok(Math.abs(got - 60) < 2, `interior sweep should be ~60°, got ${got}`);
 });
 
 /* ------------------------- geometry-tool math ------------------------- */

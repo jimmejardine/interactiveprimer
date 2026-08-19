@@ -11,7 +11,7 @@
  * @module
  */
 
-import { chevronArrowheads, quadrantWedges, tickSegments, angleArcSpec } from "./geometry.ts";
+import { chevronArrowheads, quadrantWedges, tickSegments, angleArcSpec, raysForInterior, signedCcwDeg } from "./geometry.ts";
 import { drawAxes } from "./graph-axes.ts";
 import type { AxesOptions } from "./graph-axes.ts";
 
@@ -140,13 +140,18 @@ export function makeGeometryTools(board: any, colors: { bg: string; ink: string;
     vertex: Vec,
     p1: Vec,
     p2: Vec,
-    { count = 1, label: text, color, radius = 0.5, fontSize = 13 }: { count?: number; label?: string; color?: string; radius?: number; fontSize?: number } = {},
+    { count = 1, label: text, color, radius = 0.5, fontSize = 13, wantDeg }: { count?: number; label?: string; color?: string; radius?: number; fontSize?: number; wantDeg?: number } = {},
   ) => {
     const stroke = color ?? colors.line;
-    const spec = angleArcSpec(vertex, p1, p2, count, { r: radius });
+    // JSXGraph's <angle> sweeps CCW from the first ray to the second — the raw p1,p2
+    // order often paints the reflex. Default to the interior (≤180°) unless the caller
+    // names a specific size (same fix as the generated chase).
+    const want = wantDeg ?? Math.min(signedCcwDeg(vertex, p1, p2), signedCcwDeg(vertex, p2, p1));
+    const [from, to] = raysForInterior(vertex, p1, p2, want);
+    const spec = angleArcSpec(vertex, from, to, count, { r: radius });
     const V = ipt(vertex);
-    const A = ipt(p1);
-    const B = ipt(p2);
+    const A = ipt(from);
+    const B = ipt(to);
     const arcs = spec.radii.map((r) =>
       board.create("angle", [A, V, B], {
         radius: r,
@@ -178,7 +183,8 @@ export function makeGeometryTools(board: any, colors: { bg: string; ink: string;
    */
   const rightAngle = (vertex: Vec, p1: Vec, p2: Vec, { color }: { color?: string } = {}) => {
     const stroke = color ?? colors.line;
-    return board.create("angle", [ipt(p1), ipt(vertex), ipt(p2)], {
+    const [from, to] = raysForInterior(vertex, p1, p2, 90);
+    return board.create("angle", [ipt(from), ipt(vertex), ipt(to)], {
       orthoType: "square",
       radius: 0.4,
       fillColor: stroke,

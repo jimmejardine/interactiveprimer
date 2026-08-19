@@ -871,6 +871,8 @@ export function isoscelesOnParallels(rng: Rng): Figure {
     { key: "C", vertex: "C", from: "A", to: "B", value: apex },
     { key: "LCA", vertex: "C", from: "L", to: "A", value: alpha },
     { key: "RCB", vertex: "C", from: "B", to: "R", value: alpha },
+    { key: "LCB", vertex: "C", from: "L", to: "B", value: 180 - alpha },
+    { key: "RCA", vertex: "C", from: "R", to: "A", value: 180 - alpha },
   ];
   const relations = [
     // Produce the apex via the straight line at C (after the two alternate copies of
@@ -879,6 +881,8 @@ export function isoscelesOnParallels(rng: Rng): Figure {
     equal("A", "B", "isoscelesBase"),
     equal("LCA", "A", "alternateInterior"),
     equal("RCB", "B", "alternateInterior"),
+    sumTo(["A", "LCB"], 180, "coInterior"),
+    sumTo(["B", "RCA"], 180, "coInterior"),
     sumTo(["LCA", "C", "RCB"], 180, "linearPair"),
     sumTo(["A", "B", "C"], 180, "triangleSum"),
     rel("isoscelesBase", [{ key: "A", coef: 2 }, { key: "C", coef: 1 }], 180),
@@ -886,7 +890,7 @@ export function isoscelesOnParallels(rng: Rng): Figure {
   ];
   return {
     name: "isoscelesOnParallels",
-    uses: ["isoscelesBase", "triangleSum", "alternateInterior", "linearPair"],
+    uses: ["isoscelesBase", "triangleSum", "alternateInterior", "coInterior", "linearPair"],
     points, edges, parallels: [[0, 3]],
     equals: [[1, 2]],
     angles, relations,
@@ -1037,6 +1041,169 @@ export function tangentRightPythag(rng: Rng): Figure {
   };
 }
 
+/**
+ * Chord AB seen from the centre and from two points on the same remaining arc. The centre
+ * angle is twice each circumference angle, those two are equal (same segment), and the
+ * radii make △AOB isosceles — a circle-theorem mix, not a lone inscribed-angle fact.
+ */
+export function chordTheorems(rng: Rng): Figure {
+  const theta = rng.pick([25, 30, 35, 40]);
+  const R = 2.8;
+  const O: Vec = [0, 0];
+  const mid = 250;
+  const A = onCircle(O, R, mid - theta);
+  const B = onCircle(O, R, mid + theta);
+  const P = onCircle(O, R, 90);
+  const Q = onCircle(O, R, 135);
+  const base = 90 - theta;
+  const points: Record<string, Vec> = { O, A, B, P, Q };
+  const edges: Array<[string, string]> = [
+    ["O", "A"], ["O", "B"], ["A", "B"], ["P", "A"], ["P", "B"], ["Q", "A"], ["Q", "B"],
+  ];
+  const angles: AngleSlot[] = [
+    { key: "AOB", vertex: "O", from: "A", to: "B", value: 2 * theta },
+    { key: "APB", vertex: "P", from: "A", to: "B", value: theta },
+    { key: "AQB", vertex: "Q", from: "A", to: "B", value: theta },
+    { key: "OAB", vertex: "A", from: "O", to: "B", value: base },
+    { key: "OBA", vertex: "B", from: "O", to: "A", value: base },
+  ];
+  const relations = [
+    rel("angleAtCentre", [{ key: "AOB", coef: 1 }, { key: "APB", coef: -2 }], 0),
+    rel("angleAtCentre", [{ key: "AOB", coef: 1 }, { key: "AQB", coef: -2 }], 0),
+    equal("APB", "AQB", "sameSegment"),
+    equal("OAB", "OBA", "isoscelesBase"),
+    rel("isoscelesBase", [{ key: "OAB", coef: 2 }, { key: "AOB", coef: 1 }], 180),
+    sumTo(["OAB", "OBA", "AOB"], 180, "triangleSum"),
+  ];
+  return {
+    name: "chordTheorems",
+    uses: ["angleAtCentre", "sameSegment", "isoscelesBase", "triangleSum"],
+    points, edges, parallels: [], equals: [[0, 1]],
+    circles: [{ center: "O", r: R }],
+    angles, relations, boundingbox: [-3.6, 3.6, 3.6, -3.4],
+  };
+}
+
+/** Diameter AB + rim point P + radius OP: semicircle, isosceles radii, triangle sum. */
+export function semicircleIso(rng: Rng): Figure {
+  const t = rng.pick([60, 70, 80, 100, 110, 120]);
+  const R = 2.8;
+  const O: Vec = [0, 0];
+  const A: Vec = [-R, 0];
+  const B: Vec = [R, 0];
+  const P = onCircle(O, R, t);
+  const angA = Math.round(t / 2);
+  const angB = 90 - angA;
+  const points: Record<string, Vec> = { O, A, B, P };
+  const edges: Array<[string, string]> = [["A", "B"], ["A", "P"], ["B", "P"], ["O", "P"], ["O", "A"], ["O", "B"]];
+  const angles: AngleSlot[] = [
+    { key: "P", vertex: "P", from: "A", to: "B", value: 90 },
+    { key: "A", vertex: "A", from: "P", to: "B", value: angA },
+    { key: "B", vertex: "B", from: "P", to: "A", value: angB },
+    { key: "OPA", vertex: "P", from: "O", to: "A", value: angA },
+    { key: "OPB", vertex: "P", from: "O", to: "B", value: angB },
+    { key: "AOP", vertex: "O", from: "A", to: "P", value: 180 - 2 * angA },
+  ];
+  const relations = [
+    rel("angleInSemicircle", [{ key: "P", coef: 1 }], 90),
+    equal("A", "OPA", "isoscelesBase"),
+    equal("B", "OPB", "isoscelesBase"),
+    sumTo(["A", "B", "P"], 180, "triangleSum"),
+    sumTo(["A", "OPA", "AOP"], 180, "triangleSum"),
+    rel("isoscelesBase", [{ key: "A", coef: 2 }, { key: "AOP", coef: 1 }], 180),
+  ];
+  return {
+    name: "semicircleIso",
+    uses: ["angleInSemicircle", "isoscelesBase", "triangleSum"],
+    points, edges, parallels: [],
+    equals: [[3, 4, 5]],
+    circles: [{ center: "O", r: R }],
+    rights: [{ vertex: "P", from: "A", to: "B" }],
+    angles, relations, boundingbox: [-3.6, 3.4, 3.6, -1.6],
+  };
+}
+
+/** Cyclic quad plus triangle ABC on a diagonal — opposite angles and a triangle sum. */
+export function cyclicWithTriangle(rng: Rng): Figure {
+  const R = 2.8;
+  const O: Vec = [0, 0];
+  let w: number, x: number, y: number, z: number;
+  do {
+    w = rng.pick([60, 70, 80, 90]);
+    x = rng.pick([70, 80, 90, 100]);
+    y = rng.pick([80, 90, 100]);
+    z = 360 - w - x - y;
+  } while (z < 60 || z > 120);
+  const degs = [0, w, w + x, w + x + y];
+  const [A, B, C, D] = degs.map((d) => onCircle(O, R, d));
+  const points: Record<string, Vec> = { O, A, B, C, D };
+  const a = (x + y) / 2;
+  const b = (y + z) / 2;
+  const c = (z + w) / 2;
+  const d = (w + x) / 2;
+  const bac = Math.round(geomAngle(A, B, C));
+  const bca = 180 - b - bac;
+  const edges: Array<[string, string]> = [["A", "B"], ["B", "C"], ["C", "D"], ["D", "A"], ["A", "C"]];
+  const angles: AngleSlot[] = [
+    { key: "A", vertex: "A", from: "D", to: "B", value: a },
+    { key: "B", vertex: "B", from: "A", to: "C", value: b },
+    { key: "C", vertex: "C", from: "B", to: "D", value: c },
+    { key: "D", vertex: "D", from: "C", to: "A", value: d },
+    { key: "BAC", vertex: "A", from: "B", to: "C", value: bac },
+    { key: "BCA", vertex: "C", from: "B", to: "A", value: bca },
+  ];
+  const relations = [
+    sumTo(["A", "C"], 180, "cyclicOpposite"),
+    sumTo(["B", "D"], 180, "cyclicOpposite"),
+    sumTo(["BAC", "B", "BCA"], 180, "triangleSum"),
+    sumTo(["A", "B", "C", "D"], 360, "polygonSum"),
+  ];
+  return {
+    name: "cyclicWithTriangle",
+    uses: ["cyclicOpposite", "triangleSum", "polygonSum"],
+    points, edges, parallels: [],
+    circles: [{ center: "O", r: R }],
+    angles, relations, boundingbox: [-3.6, 3.6, 3.6, -3.6],
+  };
+}
+
+/** Parallelogram with a diagonal: opposite/consecutive facts plus a triangle sum. */
+export function parallelogramDiagonal(rng: Rng): Figure {
+  const theta = rng.pick([50, 55, 60, 65, 70, 75, 80]);
+  const co = 180 - theta;
+  const A: Vec = [-2.4, -1.3];
+  const B: Vec = [1.8, -1.3];
+  const L = 2.6;
+  const D: Vec = [A[0] + L * Math.cos(theta * DEG), A[1] + L * Math.sin(theta * DEG)];
+  const C: Vec = [B[0] + D[0] - A[0], B[1] + D[1] - A[1]];
+  const bac = Math.round(geomAngle(A, B, C));
+  const bca = 180 - co - bac;
+  const points: Record<string, Vec> = { A, B, C, D };
+  const edges: Array<[string, string]> = [["A", "B"], ["B", "C"], ["C", "D"], ["D", "A"], ["A", "C"]];
+  const angles: AngleSlot[] = [
+    { key: "A", vertex: "A", from: "B", to: "D", value: theta },
+    { key: "B", vertex: "B", from: "C", to: "A", value: co },
+    { key: "C", vertex: "C", from: "D", to: "B", value: theta },
+    { key: "D", vertex: "D", from: "A", to: "C", value: co },
+    { key: "BAC", vertex: "A", from: "B", to: "C", value: bac },
+    { key: "BCA", vertex: "C", from: "B", to: "A", value: bca },
+  ];
+  const relations = [
+    equal("A", "C", "parallelogramOpposite"),
+    equal("B", "D", "parallelogramOpposite"),
+    sumTo(["A", "B"], 180, "parallelogramConsecutive"),
+    sumTo(["B", "C"], 180, "parallelogramConsecutive"),
+    sumTo(["BAC", "B", "BCA"], 180, "triangleSum"),
+  ];
+  return {
+    name: "parallelogramDiagonal",
+    uses: ["parallelogramOpposite", "parallelogramConsecutive", "triangleSum"],
+    points, edges, parallels: [[0, 2], [1, 3]], equals: [[0, 2], [1, 3]],
+    angles, relations,
+    boundingbox: [-3.4, C[1] + 0.9, C[0] + 1.1, -2.1],
+  };
+}
+
 /** A scaffold constructor plus the theorem keys it can exercise. */
 export interface ScaffoldSpec {
   name: string;
@@ -1065,10 +1232,14 @@ export const SCAFFOLD_LIST: ScaffoldSpec[] = [
   { name: "twoTangents", uses: ["tangentPerpRadius", "twoTangents", "triangleSum"], make: twoTangents },
   { name: "similarPair", uses: ["similarAA", "similarSides"], make: similarPair },
   { name: "rightTriangle", uses: ["pythagoras"], make: rightTriangle },
-  { name: "isoscelesOnParallels", uses: ["isoscelesBase", "triangleSum", "alternateInterior", "linearPair"], make: isoscelesOnParallels },
+  { name: "isoscelesOnParallels", uses: ["isoscelesBase", "triangleSum", "alternateInterior", "coInterior", "linearPair"], make: isoscelesOnParallels },
   { name: "triangleBetweenParallels", uses: ["vertical", "alternateInterior", "triangleSum"], make: triangleBetweenParallels },
   { name: "nestedSimilar", uses: ["similarAA", "similarSides", "corresponding", "triangleSum"], make: nestedSimilar },
   { name: "tangentRightPythag", uses: ["tangentPerpRadius", "pythagoras", "triangleSum"], make: tangentRightPythag },
+  { name: "chordTheorems", uses: ["angleAtCentre", "sameSegment", "isoscelesBase", "triangleSum"], make: chordTheorems },
+  { name: "semicircleIso", uses: ["angleInSemicircle", "isoscelesBase", "triangleSum"], make: semicircleIso },
+  { name: "cyclicWithTriangle", uses: ["cyclicOpposite", "triangleSum", "polygonSum"], make: cyclicWithTriangle },
+  { name: "parallelogramDiagonal", uses: ["parallelogramOpposite", "parallelogramConsecutive", "triangleSum"], make: parallelogramDiagonal },
 ];
 
 /** All scaffolds by name, for the generator to pick from. */
