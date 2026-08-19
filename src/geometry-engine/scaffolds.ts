@@ -1204,6 +1204,287 @@ export function parallelogramDiagonal(rng: Rng): Figure {
   };
 }
 
+/**
+ * A parallelogram inscribed in a circle is a rectangle: diagonal AC is a diameter.
+ * The chase mixes angle-in-a-semicircle, parallelogram opposite/consecutive, the
+ * triangle sum, and alternate-interior angles along the diagonal. Corners are not
+ * stamped as given right angles — the 90° has to be produced.
+ */
+export function cyclicParallelogram(rng: Rng): Figure {
+  const theta = rng.pick([25, 30, 35, 40]);
+  const w = 2.5;
+  const h = w * Math.tan(theta * DEG);
+  const A: Vec = [-w, -h];
+  const B: Vec = [w, -h];
+  const C: Vec = [w, h];
+  const D: Vec = [-w, h];
+  const O: Vec = [0, 0];
+  const R = Math.hypot(w, h);
+  const co = 90 - theta;
+  const points: Record<string, Vec> = { O, A, B, C, D };
+  const edges: Array<[string, string]> = [["A", "B"], ["B", "C"], ["C", "D"], ["D", "A"], ["A", "C"]];
+  const angles: AngleSlot[] = [
+    { key: "DAB", vertex: "A", from: "B", to: "D", value: 90 },
+    { key: "ABC", vertex: "B", from: "C", to: "A", value: 90 },
+    { key: "BCD", vertex: "C", from: "D", to: "B", value: 90 },
+    { key: "ADC", vertex: "D", from: "A", to: "C", value: 90 },
+    { key: "BAC", vertex: "A", from: "B", to: "C", value: theta },
+    { key: "BCA", vertex: "C", from: "B", to: "A", value: co },
+    { key: "CAD", vertex: "A", from: "C", to: "D", value: co },
+    { key: "ACD", vertex: "C", from: "A", to: "D", value: theta },
+  ];
+  const relations = [
+    rel("angleInSemicircle", [{ key: "ABC", coef: 1 }], 90),
+    rel("angleInSemicircle", [{ key: "ADC", coef: 1 }], 90),
+    sumTo(["BAC", "ABC", "BCA"], 180, "triangleSum"),
+    sumTo(["CAD", "ADC", "ACD"], 180, "triangleSum"),
+    equal("DAB", "BCD", "parallelogramOpposite"),
+    equal("ABC", "ADC", "parallelogramOpposite"),
+    sumTo(["DAB", "ABC"], 180, "parallelogramConsecutive"),
+    sumTo(["ABC", "BCD"], 180, "parallelogramConsecutive"),
+    sumTo(["DAB", "BCD"], 180, "cyclicOpposite"),
+    sumTo(["ABC", "ADC"], 180, "cyclicOpposite"),
+    equal("BAC", "ACD", "alternateInterior"),
+    equal("CAD", "BCA", "alternateInterior"),
+  ];
+  return {
+    name: "cyclicParallelogram",
+    uses: [
+      "angleInSemicircle", "cyclicOpposite",
+      "parallelogramOpposite", "parallelogramConsecutive",
+      "triangleSum", "alternateInterior",
+    ],
+    points, edges, parallels: [[0, 2], [1, 3]], equals: [[0, 2], [1, 3]],
+    circles: [{ center: "O", r: R }],
+    angles, relations,
+    boundingbox: [-w - 1.0, h + 1.0, w + 1.0, -h - 1.0],
+  };
+}
+
+/**
+ * A rhombus always has an incircle. Tangents from a vertex are equal, the radius is
+ * perpendicular to each side, and the corners still obey the parallelogram laws — so
+ * a chase has to switch between parallelogram, tangent, and triangle-sum facts.
+ */
+export function rhombusIncircle(rng: Rng): Figure {
+  const theta = rng.pick([50, 60, 70]);
+  const half = theta / 2;
+  const a = 2.8;
+  const b = a * Math.tan(half * DEG);
+  const O: Vec = [0, 0];
+  const A: Vec = [-a, 0];
+  const C: Vec = [a, 0];
+  const B: Vec = [0, b];
+  const D: Vec = [0, -b];
+  const den = a * a + b * b;
+  const P: Vec = [-(a * b * b) / den, (a * a * b) / den];
+  const S: Vec = [-(a * b * b) / den, -(a * a * b) / den];
+  const r = (a * b) / Math.sqrt(den);
+  const atO = 90 - half;
+  const co = 180 - theta;
+  const points: Record<string, Vec> = { O, A, B, C, D, P, S };
+  const edges: Array<[string, string]> = [
+    ["A", "B"], ["B", "C"], ["C", "D"], ["D", "A"], ["O", "P"], ["O", "S"], ["O", "A"],
+  ];
+  const angles: AngleSlot[] = [
+    { key: "A", vertex: "A", from: "D", to: "B", value: theta },
+    { key: "B", vertex: "B", from: "A", to: "C", value: co },
+    { key: "C", vertex: "C", from: "B", to: "D", value: theta },
+    { key: "D", vertex: "D", from: "C", to: "A", value: co },
+    { key: "P", vertex: "P", from: "O", to: "A", value: 90 },
+    { key: "S", vertex: "S", from: "O", to: "A", value: 90 },
+    { key: "OAP", vertex: "A", from: "O", to: "B", value: half },
+    { key: "OAS", vertex: "A", from: "D", to: "O", value: half },
+    { key: "AOP", vertex: "O", from: "A", to: "P", value: atO },
+    { key: "AOS", vertex: "O", from: "S", to: "A", value: atO },
+  ];
+  const relations = [
+    equal("A", "C", "parallelogramOpposite"),
+    equal("B", "D", "parallelogramOpposite"),
+    sumTo(["A", "B"], 180, "parallelogramConsecutive"),
+    sumTo(["B", "C"], 180, "parallelogramConsecutive"),
+    rel("tangentPerpRadius", [{ key: "P", coef: 1 }], 90),
+    rel("tangentPerpRadius", [{ key: "S", coef: 1 }], 90),
+    equal("OAP", "OAS", "twoTangents"),
+    rel("twoTangents", [{ key: "A", coef: 1 }, { key: "OAP", coef: -1 }, { key: "OAS", coef: -1 }], 0),
+    sumTo(["P", "OAP", "AOP"], 180, "triangleSum"),
+    sumTo(["S", "OAS", "AOS"], 180, "triangleSum"),
+  ];
+  return {
+    name: "rhombusIncircle",
+    uses: [
+      "parallelogramOpposite", "parallelogramConsecutive",
+      "tangentPerpRadius", "twoTangents", "triangleSum",
+    ],
+    points, edges, parallels: [[0, 2], [1, 3]], equals: [[0, 1, 2, 3]],
+    circles: [{ center: "O", r }],
+    angles, relations,
+    boundingbox: [-a - 0.9, b + 0.9, a + 0.9, -b - 0.9],
+  };
+}
+
+/**
+ * Isosceles trapezoid ABCD (so cyclic, with AB ∥ DC). Diagonal AC gives △ABC and
+ * △ADC; BAC = BDC (same segment). A chase has to use parallels, a circle theorem,
+ * and a triangle sum — polygon-sum is not a third family here (it follows from
+ * the two cyclic-opposite pairs).
+ */
+export function triangleCircumSameSegment(rng: Rng): Figure {
+  const theta = rng.pick([55, 60, 65, 70, 75]);
+  const top = 180 - theta;
+  const w = 2.7;
+  const h = 2.3;
+  const over = h / Math.tan(theta * DEG);
+  const Dpt: Vec = [-w, 0];
+  const Cpt: Vec = [w, 0];
+  const Apt: Vec = [-w + over, h];
+  const Bpt: Vec = [w - over, h];
+  const k = ((w - over) ** 2 + h * h - w * w) / (2 * h);
+  const O: Vec = [0, k];
+  const r = Math.hypot(w, k);
+  const bac = Math.round(geomAngle(Apt, Bpt, Cpt));
+  const bca = 180 - top - bac;
+  const bdc = bac;
+  const cbd = 180 - theta - bdc;
+  const points: Record<string, Vec> = { O, A: Apt, B: Bpt, C: Cpt, D: Dpt };
+  const edges: Array<[string, string]> = [
+    ["A", "B"], ["B", "C"], ["C", "D"], ["D", "A"], ["A", "C"], ["B", "D"],
+  ];
+  const angles: AngleSlot[] = [
+    { key: "A", vertex: "A", from: "D", to: "B", value: top },
+    { key: "B", vertex: "B", from: "A", to: "C", value: top },
+    { key: "C", vertex: "C", from: "B", to: "D", value: theta },
+    { key: "D", vertex: "D", from: "C", to: "A", value: theta },
+    { key: "BAC", vertex: "A", from: "B", to: "C", value: bac },
+    { key: "BCA", vertex: "C", from: "B", to: "A", value: bca },
+    { key: "BDC", vertex: "D", from: "B", to: "C", value: bdc },
+    { key: "CBD", vertex: "B", from: "C", to: "D", value: cbd },
+  ];
+  const relations = [
+    sumTo(["A", "D"], 180, "coInterior"),
+    sumTo(["B", "C"], 180, "coInterior"),
+    sumTo(["A", "C"], 180, "cyclicOpposite"),
+    sumTo(["B", "D"], 180, "cyclicOpposite"),
+    equal("BAC", "BDC", "sameSegment"),
+    sumTo(["BAC", "B", "BCA"], 180, "triangleSum"),
+    sumTo(["BDC", "C", "CBD"], 180, "triangleSum"),
+  ];
+  return {
+    name: "triangleCircumSameSegment",
+    uses: ["coInterior", "cyclicOpposite", "sameSegment", "triangleSum"],
+    points, edges, parallels: [[0, 2]], equals: [[1, 3]],
+    circles: [{ center: "O", r }],
+    angles, relations,
+    boundingbox: [-w - 0.8, Math.max(h, k + r) + 0.4, w + 0.8, Math.min(0, k - r) - 0.6],
+  };
+}
+
+/**
+ * △ABC with fourth vertex E completing parallelogram ABCE. Opposite/consecutive
+ * parallelogram facts sit next to the triangle sum, and AB ∥ EC gives alternate
+ * interiors on the diagonal — three families in one picture.
+ */
+export function parallelogramOnTriangle(rng: Rng): Figure {
+  let a: number, b: number, c: number;
+  do {
+    a = rng.int(40, 75);
+    b = rng.int(40, 75);
+    c = 180 - a - b;
+  } while (c < 35 || c > 95);
+  const L = 5.2;
+  const ta = Math.tan(a * DEG);
+  const tb = Math.tan(b * DEG);
+  const cx = (L * tb) / (ta + tb);
+  const cy = ta * cx;
+  const A: Vec = [-L / 2, 0];
+  const B: Vec = [L / 2, 0];
+  const Cpt: Vec = [-L / 2 + cx, cy];
+  const E: Vec = [A[0] + Cpt[0] - B[0], A[1] + Cpt[1] - B[1]];
+  const pA = 180 - b;
+  const points: Record<string, Vec> = { A, B, C: Cpt, E };
+  const edges: Array<[string, string]> = [["A", "B"], ["B", "C"], ["C", "E"], ["E", "A"], ["A", "C"]];
+  const angles: AngleSlot[] = [
+    { key: "A", vertex: "A", from: "B", to: "C", value: a },
+    { key: "B", vertex: "B", from: "C", to: "A", value: b },
+    { key: "C", vertex: "C", from: "A", to: "B", value: c },
+    { key: "EAB", vertex: "A", from: "E", to: "B", value: pA },
+    { key: "BCE", vertex: "C", from: "B", to: "E", value: pA },
+    { key: "AEC", vertex: "E", from: "A", to: "C", value: b },
+    { key: "CAE", vertex: "A", from: "C", to: "E", value: c },
+    { key: "ACE", vertex: "C", from: "A", to: "E", value: a },
+  ];
+  const relations = [
+    sumTo(["B", "EAB"], 180, "parallelogramConsecutive"),
+    equal("EAB", "BCE", "parallelogramOpposite"),
+    equal("B", "AEC", "parallelogramOpposite"),
+    equal("A", "ACE", "alternateInterior"),
+    equal("CAE", "C", "alternateInterior"),
+    sumTo(["A", "B", "C"], 180, "triangleSum"),
+    sumTo(["CAE", "AEC", "ACE"], 180, "triangleSum"),
+  ];
+  const xs = [A[0], B[0], Cpt[0], E[0]];
+  const ys = [A[1], B[1], Cpt[1], E[1]];
+  return {
+    name: "parallelogramOnTriangle",
+    uses: ["parallelogramOpposite", "parallelogramConsecutive", "alternateInterior", "triangleSum"],
+    points, edges, parallels: [[0, 2], [1, 3]], equals: [[0, 2], [1, 3]],
+    angles, relations,
+    boundingbox: [Math.min(...xs) - 0.9, Math.max(...ys) + 0.9, Math.max(...xs) + 0.9, Math.min(...ys) - 0.9],
+  };
+}
+
+/**
+ * Isosceles △ABC inscribed in its circumcircle, tangent at the apex. The tangent is
+ * parallel to the base, so the chase mixes tangent ⊥ radius, isosceles / triangle sum,
+ * and alternate-interior angles between the tangent and BC.
+ */
+export function isoscelesCyclicTangent(rng: Rng): Figure {
+  const beta = rng.pick([50, 55, 60, 65, 70]);
+  const apex = 180 - 2 * beta;
+  const R = 2.8;
+  const O: Vec = [0, 0];
+  const Apt = onCircle(O, R, 90);
+  const Bpt = onCircle(O, R, 270 - apex);
+  const Cpt = onCircle(O, R, 270 + apex);
+  const L: Vec = [-3.4, R];
+  const Rg: Vec = [3.4, R];
+  const bao = 90 - beta;
+  const points: Record<string, Vec> = { O, A: Apt, B: Bpt, C: Cpt, L, R: Rg };
+  const edges: Array<[string, string]> = [["A", "B"], ["B", "C"], ["C", "A"], ["L", "R"], ["O", "A"], ["O", "B"]];
+  const angles: AngleSlot[] = [
+    { key: "A", vertex: "A", from: "B", to: "C", value: apex },
+    { key: "B", vertex: "B", from: "C", to: "A", value: beta },
+    { key: "C", vertex: "C", from: "A", to: "B", value: beta },
+    { key: "TAO", vertex: "A", from: "L", to: "O", value: 90 },
+    { key: "LAB", vertex: "A", from: "L", to: "B", value: beta },
+    { key: "RAC", vertex: "A", from: "C", to: "R", value: beta },
+    { key: "BAO", vertex: "A", from: "B", to: "O", value: bao },
+    { key: "OBA", vertex: "B", from: "O", to: "A", value: bao },
+    { key: "AOB", vertex: "O", from: "A", to: "B", value: 180 - 2 * bao },
+  ];
+  const relations = [
+    rel("tangentPerpRadius", [{ key: "TAO", coef: 1 }], 90),
+    rel("tangentPerpRadius", [{ key: "LAB", coef: 1 }, { key: "BAO", coef: 1 }], 90),
+    equal("B", "C", "isoscelesBase"),
+    rel("isoscelesBase", [{ key: "B", coef: 2 }, { key: "A", coef: 1 }], 180),
+    equal("BAO", "OBA", "isoscelesBase"),
+    rel("isoscelesBase", [{ key: "BAO", coef: 2 }, { key: "AOB", coef: 1 }], 180),
+    sumTo(["A", "B", "C"], 180, "triangleSum"),
+    sumTo(["BAO", "OBA", "AOB"], 180, "triangleSum"),
+    equal("LAB", "B", "alternateInterior"),
+    equal("RAC", "C", "alternateInterior"),
+  ];
+  return {
+    name: "isoscelesCyclicTangent",
+    uses: ["tangentPerpRadius", "isoscelesBase", "triangleSum", "alternateInterior"],
+    points, edges, parallels: [[1, 3]],
+    equals: [[0, 2], [4, 5]],
+    circles: [{ center: "O", r: R }],
+    angles, relations,
+    boundingbox: [-3.6, R + 0.7, 3.6, Math.min(Bpt[1], Cpt[1]) - 0.8],
+  };
+}
+
 /** A scaffold constructor plus the theorem keys it can exercise. */
 export interface ScaffoldSpec {
   name: string;
@@ -1240,6 +1521,11 @@ export const SCAFFOLD_LIST: ScaffoldSpec[] = [
   { name: "semicircleIso", uses: ["angleInSemicircle", "isoscelesBase", "triangleSum"], make: semicircleIso },
   { name: "cyclicWithTriangle", uses: ["cyclicOpposite", "triangleSum", "polygonSum"], make: cyclicWithTriangle },
   { name: "parallelogramDiagonal", uses: ["parallelogramOpposite", "parallelogramConsecutive", "triangleSum"], make: parallelogramDiagonal },
+  { name: "cyclicParallelogram", uses: ["angleInSemicircle", "cyclicOpposite", "parallelogramOpposite", "parallelogramConsecutive", "triangleSum", "alternateInterior"], make: cyclicParallelogram },
+  { name: "rhombusIncircle", uses: ["parallelogramOpposite", "parallelogramConsecutive", "tangentPerpRadius", "twoTangents", "triangleSum"], make: rhombusIncircle },
+  { name: "triangleCircumSameSegment", uses: ["coInterior", "cyclicOpposite", "sameSegment", "triangleSum"], make: triangleCircumSameSegment },
+  { name: "parallelogramOnTriangle", uses: ["parallelogramOpposite", "parallelogramConsecutive", "alternateInterior", "triangleSum"], make: parallelogramOnTriangle },
+  { name: "isoscelesCyclicTangent", uses: ["tangentPerpRadius", "isoscelesBase", "triangleSum", "alternateInterior"], make: isoscelesCyclicTangent },
 ];
 
 /** All scaffolds by name, for the generator to pick from. */

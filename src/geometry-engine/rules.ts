@@ -149,6 +149,55 @@ export const RULES: Record<string, { conceptId: string; justifyKey: string }> = 
 /** A catalog key — the name authors pass in `theorems` / `require`. */
 export type RuleId = keyof typeof RULES;
 
+/**
+ * Neighbourhood a theorem belongs to. `minFamilies` scores these, not rule ids — so
+ * isosceles + triangle-sum + linear-pair is still one family (triangle), not three.
+ * Glue (`vertical`, `linearPair`, `anglesAtPoint`) is untagged and does not count.
+ */
+export type RuleFamily =
+  | "parallels"
+  | "triangle"
+  | "polygon"
+  | "parallelogram"
+  | "circle"
+  | "similar"
+  | "length";
+
+export const RULE_FAMILY: Partial<Record<RuleId, RuleFamily>> = {
+  corresponding: "parallels",
+  coInterior: "parallels",
+  alternateInterior: "parallels",
+  triangleSum: "triangle",
+  isoscelesBase: "triangle",
+  exteriorAngle: "triangle",
+  equilateral: "triangle",
+  polygonSum: "polygon",
+  polygonExterior: "polygon",
+  regularInterior: "polygon",
+  regularCentre: "polygon",
+  parallelogramOpposite: "parallelogram",
+  parallelogramConsecutive: "parallelogram",
+  angleAtCentre: "circle",
+  angleInSemicircle: "circle",
+  sameSegment: "circle",
+  cyclicOpposite: "circle",
+  tangentPerpRadius: "circle",
+  twoTangents: "circle",
+  similarAA: "similar",
+  similarSides: "similar",
+  pythagoras: "length",
+};
+
+/** Distinct theorem neighbourhoods used by `rules` (glue omitted). */
+export function familiesOf(rules: Iterable<string>): Set<RuleFamily> {
+  const out = new Set<RuleFamily>();
+  for (const r of rules) {
+    const f = RULE_FAMILY[r as RuleId];
+    if (f) out.add(f);
+  }
+  return out;
+}
+
 /** Map a list of rule names (or raw concept ids) to the concept ids the chainer gates on. */
 export function conceptIdsFor(theorems: Iterable<string>): Set<string> {
   const out: Set<string> = new Set();

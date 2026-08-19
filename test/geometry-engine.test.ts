@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { makeRng } from "../src/rng.ts";
-import { RULES, rel, equal, sumTo, relationHolds } from "../src/geometry-engine/rules.ts";
+import { RULES, RULE_FAMILY, familiesOf, rel, equal, sumTo, relationHolds } from "../src/geometry-engine/rules.ts";
 import { forwardChain, traceTarget } from "../src/geometry-engine/chain.ts";
 import { parallelTransversal, triangle, SCAFFOLDS, SCAFFOLD_LIST, selectScaffolds, anglePos, lengthPos } from "../src/geometry-engine/scaffolds.ts";
 import { generateProblem, pickAndGenerate } from "../src/geometry-engine/generate.ts";
@@ -12,6 +12,21 @@ const allRuleConcepts = () => new Set(Object.values(RULES).map((r) => r.conceptI
 const allConcepts = () => new Set(Object.values(RULES).map((r) => r.conceptId)); // alias
 
 /* ------------------------------- rules ------------------------------- */
+
+test("familiesOf ignores glue and buckets theorem neighbourhoods", () => {
+  assert.equal(familiesOf(["vertical", "linearPair", "anglesAtPoint"]).size, 0);
+  assert.deepEqual([...familiesOf(["isoscelesBase", "triangleSum", "linearPair"])], ["triangle"]);
+  const mix = familiesOf(["parallelogramOpposite", "angleInSemicircle", "triangleSum"]);
+  assert.equal(mix.size, 3);
+  assert.ok(mix.has("parallelogram") && mix.has("circle") && mix.has("triangle"));
+});
+
+test("every catalog rule is family-tagged or glue", () => {
+  const glue = new Set(["vertical", "linearPair", "anglesAtPoint"]);
+  for (const k of Object.keys(RULES)) {
+    assert.ok(glue.has(k) || RULE_FAMILY[k as keyof typeof RULE_FAMILY], `${k} needs RULE_FAMILY or glue`);
+  }
+});
 
 test("rel/equal/sumTo build tagged linear relations; relationHolds evaluates them", () => {
   const e = equal("a", "b", "vertical");
@@ -86,7 +101,9 @@ test("isosceles marks the two equal legs (not the base) as one equals-group", ()
 
 test("lengthPos sits off the side, away from the third vertex", () => {
   const fig = SCAFFOLDS.rightTriangle(makeRng(2));
+  assert.ok(fig.lengths);
   const a = fig.lengths.find((L) => L.key === "a");
+  assert.ok(a);
   const pos = lengthPos(fig, a);
   const P = fig.points[a.from], Q = fig.points[a.to];
   const mx = (P[0] + Q[0]) / 2, my = (P[1] + Q[1]) / 2;
@@ -323,6 +340,52 @@ test("composite scaffolds generate a chase that uses several families", () => {
     assert.equal(prob.figure.name, scaffold);
     const rules = new Set(prob.blanks.map((b) => b.rule));
     assert.ok(rules.size >= minDistinct, `${scaffold} distinct rules ${[...rules]}`);
+  }
+});
+
+test("mash-up scaffolds span three families and generate a mixed chase", () => {
+  const names = [
+    "cyclicParallelogram",
+    "rhombusIncircle",
+    "triangleCircumSameSegment",
+    "parallelogramOnTriangle",
+    "isoscelesCyclicTangent",
+  ] as const;
+  for (const name of names) {
+    const fig = SCAFFOLDS[name](makeRng(2));
+    assert.ok(familiesOf(fig.uses).size >= 3, `${name} uses ${[...familiesOf(fig.uses)]}`);
+    const prob = pickAndGenerate(conceptIdsFor(fig.uses), makeRng(41), {
+      scaffolds: [name],
+      minSteps: 2,
+      maxSteps: 6,
+      minDistinctRules: 3,
+      minFamilies: 3,
+      attempts: 200,
+    });
+    assert.ok(prob, `${name} should generate`);
+    assert.equal(prob.figure.name, name);
+    const fams = familiesOf(prob.blanks.map((b) => b.rule));
+    assert.ok(fams.size >= 3, `${name} trace families ${[...fams]} rules ${prob.blanks.map((b) => b.rule)}`);
+  }
+});
+
+test("pickAndGenerate minFamilies skips one-neighbourhood scaffolds on an explicit list", () => {
+  const allowed = allRuleConcepts();
+  for (let seed = 1; seed <= 12; seed++) {
+    const prob = pickAndGenerate(allowed, makeRng(seed * 17), {
+      scaffolds: ["equilateral", "cyclicParallelogram", "rhombusIncircle", "parallelogramOnTriangle"],
+      minSteps: 3,
+      maxSteps: 6,
+      minDistinctRules: 3,
+      minFamilies: 3,
+      attempts: 80,
+    });
+    assert.ok(prob, `seed ${seed} should generate`);
+    assert.notEqual(prob.figure.name, "equilateral");
+    assert.ok(
+      familiesOf(prob.blanks.map((b) => b.rule)).size >= 3,
+      `seed ${seed} ${prob.figure.name} families ${[...familiesOf(prob.blanks.map((b) => b.rule))]}`,
+    );
   }
 });
 

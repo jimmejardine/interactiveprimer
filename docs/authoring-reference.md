@@ -250,7 +250,7 @@ page (each engine rule names the lesson `conceptId` that teaches it).
 </script>
 ```
 
-- **`config.generate`**: `{ scaffolds?, minSteps?, maxSteps?, theorems?, require?, minDistinctRules?, pageId?, tools? }`.
+- **`config.generate`**: `{ scaffolds?, minSteps?, maxSteps?, theorems?, require?, minDistinctRules?, minFamilies?, pageId?, tools? }`.
   - `theorems` — rule-catalog keys (`"vertical"`, `"triangleSum"`, `"angleAtCentre"`, …). Pins the
     pool; omit to **DAG-gate** (only theorems in this page's prerequisite closure, plus this page).
   - `require` — rule keys that **must** appear in the solution chain (so a new-theorem page cannot
@@ -263,10 +263,15 @@ page (each engine rule names the lesson `conceptId` that teaches it).
     `tangentRadius` (hidden radius — learner draws it), `twoTangents`,
     `similarPair`, `rightTriangle`, `isoscelesOnParallels`, `triangleBetweenParallels`,
     `nestedSimilar`, `tangentRightPythag`, `chordTheorems`, `semicircleIso`,
-    `cyclicWithTriangle`, `parallelogramDiagonal`.
+    `cyclicWithTriangle`, `parallelogramDiagonal`, `cyclicParallelogram`, `rhombusIncircle`,
+    `triangleCircumSameSegment`, `parallelogramOnTriangle`, `isoscelesCyclicTangent`.
   - `minSteps` / `maxSteps` — difficulty (default 2–4).
   - `minDistinctRules` — prefer a chain that uses this many *different* theorems (so a mixed
     chase cannot collapse to vertical → linear pair → vertical).
+  - `minFamilies` — prefer a chain that visits this many *neighbourhoods* (parallels / triangle /
+    circle / parallelogram / similar / polygon / length). Glue (`vertical`, `linearPair`,
+    `anglesAtPoint`) does not count. An explicit `scaffolds` list is filtered to figures whose
+    `uses` already span that many families when any remain.
   - `pageId` overrides the page id used for DAG gating. v1 generates **angle** chases.
 - **The learner** fills in EVERY unknown angle via on-figure **MathLive `<math-field>`** boxes (angle boxes
   pop the `geometry-angles` keyboard, length boxes `geometry-lengths`), with the highlighted box the final

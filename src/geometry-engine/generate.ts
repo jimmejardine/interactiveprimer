@@ -13,7 +13,8 @@
 import { forwardChain, traceTarget } from "./chain.ts";
 import type { DerivStep } from "./chain.ts";
 import { anglePos, lengthPos, selectScaffolds, SCAFFOLDS, SCAFFOLD_LIST } from "./scaffolds.ts";
-import type { Figure } from "./scaffolds.ts";
+import type { Figure, ScaffoldSpec } from "./scaffolds.ts";
+import { familiesOf } from "./rules.ts";
 import type { Rng } from "../rng.ts";
 
 export interface Blank {
@@ -93,6 +94,8 @@ export function generateProblem(
     require?: string[];
     /** Prefer (and, when possible, require) this many distinct rule ids in the trace. */
     minDistinctRules?: number;
+    /** Prefer traces that visit this many theorem neighbourhoods (triangle / circle / …). */
+    minFamilies?: number;
   } = {},
 ): Problem | null {
   const values = valueMap(figure);
@@ -103,7 +106,10 @@ export function generateProblem(
   const needed = minGivensFor(figure, allowed);
   const maxGivens = Math.min(keys.length - 1, Math.max(opts.maxGivens ?? 2, needed));
   const minGivens = Math.min(maxGivens, Math.max(opts.minGivens ?? 1, needed));
-  const { minSteps = 2, maxSteps = 4, attempts = 120, require = [], minDistinctRules = 0 } = opts;
+  const {
+    minSteps = 2, maxSteps = 4, attempts = 120, require = [],
+    minDistinctRules = 0, minFamilies = 0,
+  } = opts;
   let best: { problem: Problem; dist: number } | null = null;
 
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -120,7 +126,7 @@ export function generateProblem(
     if (require.length && !require.every((r) => trace.some((s) => s.rule === r))) continue;
 
     const problem = buildProblem(figure, givenKeys, trace, target);
-    const dist = traceDist(trace, minSteps, maxSteps, minDistinctRules);
+    const dist = traceDist(trace, minSteps, maxSteps, minDistinctRules, minFamilies);
     if (dist === 0) return problem;
     if (!best || dist < best.dist) best = { problem, dist };
   }
@@ -128,12 +134,27 @@ export function generateProblem(
 }
 
 /** 0 if the trace is in-band and diverse enough; otherwise how far it misses. */
-function traceDist(trace: DerivStep[], minSteps: number, maxSteps: number, minDistinct: number): number {
+function traceDist(
+  trace: Array<{ rule: string }>,
+  minSteps: number,
+  maxSteps: number,
+  minDistinct: number,
+  minFamilies = 0,
+): number {
   const len = trace.length;
   const stepDist = len < minSteps ? minSteps - len : len > maxSteps ? len - maxSteps : 0;
-  const distinct = new Set(trace.map((s) => s.rule)).size;
+  const rules = trace.map((s) => s.rule);
+  const distinct = new Set(rules).size;
   const ruleDist = distinct < minDistinct ? minDistinct - distinct : 0;
-  return stepDist + ruleDist;
+  const fams = familiesOf(rules).size;
+  const famDist = fams < minFamilies ? minFamilies - fams : 0;
+  return stepDist + ruleDist + famDist;
+}
+
+function scaffoldRichEnough(s: ScaffoldSpec, minDistinct: number, minFamilies: number): boolean {
+  if (minDistinct > 0 && s.uses.length < minDistinct) return false;
+  if (minFamilies > 0 && familiesOf(s.uses).size < minFamilies) return false;
+  return true;
 }
 
 /**
@@ -152,6 +173,7 @@ export function pickAndGenerate(
     attempts?: number;
     require?: string[];
     minDistinctRules?: number;
+    minFamilies?: number;
   } = {},
 ): Problem | null {
   const require = opts.require ?? [];
@@ -163,10 +185,12 @@ export function pickAndGenerate(
   // silently substitute a different figure family (that used to draw parallel
   // lines on an isosceles page when the bundle was stale).
   if (!specs.length) return null;
-  // A diversity request should try figures that actually have that many theorems.
+  // Prefer figures that can actually span the requested diversity — including
+  // on an explicit mixed-page list, otherwise equilateral wins the shuffle.
   const need = opts.minDistinctRules ?? 0;
-  if (!explicit && need >= 2) {
-    const rich = specs.filter((s) => s.uses.length >= need);
+  const needFam = opts.minFamilies ?? 0;
+  if (need > 0 || needFam > 0) {
+    const rich = specs.filter((s) => scaffoldRichEnough(s, need, needFam));
     if (rich.length) specs = rich;
   }
 
@@ -182,7 +206,7 @@ export function pickAndGenerate(
     const figure = SCAFFOLDS[name](rng);
     const problem = generateProblem(figure, allowed, rng, opts);
     if (!problem) continue;
-    const dist = traceDist(problem.blanks, opts.minSteps ?? 2, opts.maxSteps ?? 4, need);
+    const dist = traceDist(problem.blanks, opts.minSteps ?? 2, opts.maxSteps ?? 4, need, needFam);
     if (dist === 0) return problem;
     if (dist < bestDist) {
       best = problem;

@@ -340,6 +340,7 @@ export class PrimerGeometryProblem extends HTMLElement {
       maxSteps: config.generate.maxSteps ?? 4,
       require: config.generate.require,
       minDistinctRules: config.generate.minDistinctRules,
+      minFamilies: config.generate.minFamilies,
     });
     this.#problem = problem;
     if (!problem) {

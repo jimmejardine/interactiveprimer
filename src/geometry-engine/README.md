@@ -5,7 +5,8 @@ A pure, unit-tested forward-chaining engine that generates "apply-the-theorem" p
 declares which catalog rules it can exercise, `rules.ts` is the theorem catalog (each a tagged
 linear relation over angles), `chain.ts` forward-chains the allowed rules from the givens,
 `generate.ts` picks a scaffold + target + givens whose closure reaches the target in a bounded
-number of steps (and can **require** a named rule, or a minimum number of *distinct* rules), and `learned.ts`
+number of steps (and can **require** a named rule, a minimum number of *distinct* rules, or a
+minimum number of theorem *families* — triangle / circle / parallelogram / …), and `learned.ts`
 gates the theorem pool by the page's prerequisite closure — or by an explicit `theorems` list of
 rule keys. Relations may be linear (angles), a side ratio, or Pythagoras. A scaffold can hide an
 auxiliary line (`aux`) until the learner draws it. Authors can omit `scaffolds` and let the

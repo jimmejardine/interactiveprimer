@@ -297,6 +297,8 @@ export interface GeometryProblemConfig {
     require?: string[];
     /** Prefer traces that use this many distinct theorems (mixed-family chases). */
     minDistinctRules?: number;
+    /** Prefer traces that visit this many theorem neighbourhoods (triangle / circle / …). */
+    minFamilies?: number;
     pageId?: string;
     tools?: string[];
   };
