@@ -214,6 +214,9 @@ export interface QuizConfig {
    * heading. Route translatable prose through `sceneStrings` (so the string resolves per
    * locale); may contain inline `$…$` LaTeX. */
   preamble?: string | (() => string);
+  /** Keep the bank's authored order (no random draw). Used when later questions are
+   * meant to be harder than earlier ones. */
+  ordered?: boolean;
 }
 
 /** One random variable parsed from a question's `variables` spec. */

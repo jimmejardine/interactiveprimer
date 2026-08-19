@@ -9,6 +9,10 @@ import {
   quadrantWedges,
   tickSegments,
   angleArcSpec,
+  angleMarkLayout,
+  ANGLE_MARK_R,
+  ANGLE_MARK_R0,
+  ANGLE_MARK_DR,
   raysForInterior,
   signedCcwDeg,
 } from "../src/geometry.ts";
@@ -198,4 +202,52 @@ test("angleArcSpec: count gives that many concentric radii, gap apart", () => {
     s.radii.map((r) => Math.round(r * 100) / 100),
     [0.5, 0.6, 0.7],
   );
+});
+
+test("angleMarkLayout: a lone angle keeps the default radius and line colour", () => {
+  const cat = ["#c0", "#c1", "#c2"];
+  const layout = angleMarkLayout(
+    [{ key: "A", vertex: "A", value: 70 }],
+    { cat, line: "#line", ink: "#ink" },
+  );
+  assert.deepEqual(layout.get("A"), { radius: ANGLE_MARK_R, color: "#line" });
+});
+
+test("angleMarkLayout: a lone target uses cat[0]", () => {
+  const layout = angleMarkLayout(
+    [{ key: "A", vertex: "A", value: 70 }],
+    { target: "A", cat: ["#c0", "#c1"], line: "#line", ink: "#ink" },
+  );
+  assert.equal(layout.get("A")?.color, "#c0");
+});
+
+test("angleMarkLayout: crowded vertex — smaller angle inner, all marks take cat", () => {
+  const layout = angleMarkLayout(
+    [
+      { key: "DAB", vertex: "A", value: 90 },
+      { key: "BAC", vertex: "A", value: 35 },
+      { key: "CAD", vertex: "A", value: 55 },
+    ],
+    { givenKeys: ["BAC"], target: "DAB", cat: ["#c0", "#c1", "#c2"], line: "#line", ink: "#ink" },
+  );
+  assert.equal(layout.get("BAC")?.radius, ANGLE_MARK_R0);
+  assert.equal(layout.get("CAD")?.radius, ANGLE_MARK_R0 + ANGLE_MARK_DR);
+  assert.ok(layout.get("BAC")!.radius < layout.get("CAD")!.radius);
+  // A 90° is a small square/arc, not the outer fan of the nested corner.
+  assert.ok(layout.get("DAB")!.radius < layout.get("CAD")!.radius);
+  assert.equal(layout.get("DAB")?.color, "#c0"); // target first
+  assert.equal(layout.get("BAC")?.color, "#c1");
+  assert.equal(layout.get("CAD")?.color, "#c2");
+});
+
+test("angleMarkLayout: different vertices do not steal each other's radii", () => {
+  const layout = angleMarkLayout(
+    [
+      { key: "A", vertex: "A", value: 50 },
+      { key: "B", vertex: "B", value: 60 },
+    ],
+    { cat: ["#c0"], line: "#line", ink: "#ink" },
+  );
+  assert.equal(layout.get("A")?.radius, ANGLE_MARK_R);
+  assert.equal(layout.get("B")?.radius, ANGLE_MARK_R);
 });

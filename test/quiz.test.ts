@@ -132,6 +132,21 @@ test("a variable multiple-choice question is a re-instantiable template", () => 
   assert.ok(quiz.questions.every((q) => q.kind === "choice"));
 });
 
+test("generateQuiz ordered keeps the bank's authored order", () => {
+  const bank = [
+    { problem: "mixQ1" },
+    { problem: "mixQ2" },
+    { problem: "mixQ3" },
+    { problem: "mixQ4" },
+    { problem: "mixQ5" },
+  ];
+  const quiz = generateQuiz(bank, 5, seededRng(99), { ordered: true });
+  assert.deepEqual(
+    quiz.questions.map((q) => (q as { scene: string }).scene),
+    ["mixQ1", "mixQ2", "mixQ3", "mixQ4", "mixQ5"],
+  );
+});
+
 test("generateQuiz picks distinct questions, capped at bank size", () => {
   const bank: QuizQuestion[] = [
     { prompt: "Q1", options: [{ text: "a", correct: true }, { text: "b", correct: false }] },

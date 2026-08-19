@@ -198,6 +198,62 @@ export function angleArcSpec(
   };
 }
 
+/** Solo mark radius; crowded vertices start here and step out. */
+export const ANGLE_MARK_R = 0.5;
+export const ANGLE_MARK_R0 = 0.30;
+export const ANGLE_MARK_DR = 0.12;
+/** Quarter-circles for a 90° stay small — they are not nested “outer” fans. */
+const RIGHT_ARC_R = 0.28;
+
+/**
+ * Per-angle radius and colour so several marks at one vertex don't sit on the same arc.
+ * Smaller angles take the inner radius (nested corners). A crowd takes `cat` in order,
+ * with the target first so it stays `cat[0]` — labels and leader-dots use the same colour.
+ */
+export function angleMarkLayout(
+  angles: Array<{ key: string; vertex: string; value: number }>,
+  opts: {
+    givenKeys?: Iterable<string>;
+    target?: string;
+    cat: string[];
+    line: string;
+    ink: string;
+  },
+): Map<string, { radius: number; color: string }> {
+  const given = new Set(opts.givenKeys ?? []);
+  const byVertex = new Map<string, typeof angles>();
+  for (const a of angles) {
+    const g = byVertex.get(a.vertex);
+    if (g) g.push(a);
+    else byVertex.set(a.vertex, [a]);
+  }
+  const out = new Map<string, { radius: number; color: string }>();
+  for (const group of byVertex.values()) {
+    const crowded = group.length >= 2;
+    const ordered = group.slice().sort((a, b) => a.value - b.value || a.key.localeCompare(b.key));
+    const colorOf = new Map<string, string>();
+    const colorOrder = ordered.slice().sort((a, b) => {
+      const at = a.key === opts.target ? 0 : 1;
+      const bt = b.key === opts.target ? 0 : 1;
+      return at - bt || a.key.localeCompare(b.key);
+    });
+    colorOrder.forEach((a, i) => colorOf.set(a.key, opts.cat[i % opts.cat.length] ?? opts.line));
+    ordered.forEach((a, i) => {
+      const isRight = Math.abs(a.value - 90) < 0.5;
+      const radius = isRight
+        ? RIGHT_ARC_R
+        : crowded ? ANGLE_MARK_R0 + i * ANGLE_MARK_DR : ANGLE_MARK_R;
+      const color = crowded
+        ? (colorOf.get(a.key) ?? opts.line)
+        : given.has(a.key)
+          ? opts.ink
+          : (a.key === opts.target ? opts.cat[0] ?? opts.line : opts.line);
+      out.set(a.key, { radius, color });
+    });
+  }
+  return out;
+}
+
 /**
  * Screen quadrant a direction points into: "ur" (x+,y+), "ul" (x−,y+), "ll" (x−,y−), "lr" (x+,y−).
  * JSXGraph user coords have y pointing UP, so this matches what the eye sees. Boundary angles round

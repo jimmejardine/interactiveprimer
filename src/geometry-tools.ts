@@ -181,12 +181,12 @@ export function makeGeometryTools(board: any, colors: { bg: string; ink: string;
   /**
    * The right-angle square at `vertex` between the rays to `p1` and `p2` (coordinate pairs).
    */
-  const rightAngle = (vertex: Vec, p1: Vec, p2: Vec, { color }: { color?: string } = {}) => {
+  const rightAngle = (vertex: Vec, p1: Vec, p2: Vec, { color, radius = 0.16 }: { color?: string; radius?: number } = {}) => {
     const stroke = color ?? colors.line;
     const [from, to] = raysForInterior(vertex, p1, p2, 90);
     return board.create("angle", [ipt(from), ipt(vertex), ipt(to)], {
       orthoType: "square",
-      radius: 0.4,
+      radius,
       fillColor: stroke,
       fillOpacity: 0.001,
       strokeColor: stroke,

@@ -276,7 +276,9 @@ registers a family sharing one domain+range — no board boilerplate. Markup is 
   Put **≥10 questions in the bank** (only ~5 drawn per attempt, `num_questions` defaults to 5) so *which*
   questions appear rotates. A fixed hard-coded list is the exception, not the norm.
 - **Config item** (optional **first** entry, recognised by no `options`/`answer`): `{ num_questions,
-  preamble }`. Route a translatable `preamble` through `sceneStrings` (an all-maths quiz needs none).
+  preamble, ordered }`. Route a translatable `preamble` through `sceneStrings` (an all-maths quiz
+  needs none). `ordered: true` keeps the bank's authored order (a difficulty ramp) instead of drawing
+  at random.
 - **`variables`** — space-separated `name=[…]`; the bracket picks the kind: `[lo:hi]` integer, `[lo;hi]`
   real (3 dp), `[v1,v2,…]` a choice. Negatives ok (`[-5:5]`). Tokens are **whitespace-free** (the spec splits
   on spaces), so a choice **value** can't contain a space — write `_` for a space and it renders as one

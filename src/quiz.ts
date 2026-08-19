@@ -77,7 +77,8 @@ function isProgram(q: AuthoredQuestion): boolean {
  * Split a builder's returned array into an optional config object + the question bank. The
  * builder may return a CONFIG object as its FIRST item — recognized by having neither `options`
  * nor `answer` (so it isn't a question). It carries quiz-level settings: `num_questions` (how many
- * to draw) and `preamble` (an instructions sentence shown under the heading). When the first item
+ * to draw), `preamble` (an instructions sentence shown under the heading), and `ordered` (keep
+ * the bank's authored order). When the first item
  * is a real question, there's no config and the whole array is the bank.
  */
 export function extractConfig(
@@ -177,25 +178,42 @@ export function generateQuestion(question: AuthoredQuestion, rng: Rng): Generate
  * quiz is built from as many as were possible. Throws on an empty bank, or if NOTHING could be built;
  * other errors (a malformed question) propagate so authoring mistakes surface.
  */
-export function generateQuiz(bank: AuthoredQuestion[], count: number, rng: Rng): GeneratedQuiz {
+export function generateQuiz(
+  bank: AuthoredQuestion[],
+  count: number,
+  rng: Rng,
+  opts: { ordered?: boolean } = {},
+): GeneratedQuiz {
   if (bank.length === 0) throw new Error("Cannot generate a quiz from an empty bank");
 
-  const pool = bank.slice(); // live working copy: statics are spliced out on pick; templates stay
   const questions: GeneratedQuestion[] = [];
 
-  while (questions.length < count && pool.length > 0) {
-    const i = Math.floor(rng() * pool.length);
-    const candidate = pool[i];
-    try {
-      questions.push(generateQuestion(candidate, rng));
-      // A static is used once → remove it. A template stays so it can be drawn again.
-      if (!isTemplate(candidate)) pool.splice(i, 1);
-    } catch (err) {
-      if (err instanceof ConstraintError) {
-        pool.splice(i, 1); // unsatisfiable — drop it (even a template) and draw another
-        continue;
+  if (opts.ordered) {
+    for (const candidate of bank) {
+      if (questions.length >= count) break;
+      try {
+        questions.push(generateQuestion(candidate, rng));
+      } catch (err) {
+        if (err instanceof ConstraintError) continue;
+        throw err;
       }
-      throw err; // malformed question, etc. — surface it
+    }
+  } else {
+    const pool = bank.slice(); // live working copy: statics are spliced out on pick; templates stay
+    while (questions.length < count && pool.length > 0) {
+      const i = Math.floor(rng() * pool.length);
+      const candidate = pool[i];
+      try {
+        questions.push(generateQuestion(candidate, rng));
+        // A static is used once → remove it. A template stays so it can be drawn again.
+        if (!isTemplate(candidate)) pool.splice(i, 1);
+      } catch (err) {
+        if (err instanceof ConstraintError) {
+          pool.splice(i, 1); // unsatisfiable — drop it (even a template) and draw another
+          continue;
+        }
+        throw err; // malformed question, etc. — surface it
+      }
     }
   }
 

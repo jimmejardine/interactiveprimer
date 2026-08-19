@@ -51,6 +51,7 @@ export class PrimerQuiz extends HTMLElement {
   #bank: AuthoredQuestion[] = [];
   /** How many questions to draw (from the builder's config item; default 5). */
   #count: number = 5;
+  /** When true, keep the bank's authored order (progressive difficulty). */ #ordered = false;
   /** An instructions sentence shown under the heading (from the config). */
   #preamble: string | null = null;
   /** A loaded CortexJS ComputeEngine (for equivalence grading), or null. */
@@ -101,6 +102,7 @@ export class PrimerQuiz extends HTMLElement {
     this.#bank = questions;
     const n = Number(config.num_questions);
     this.#count = Number.isFinite(n) && n > 0 ? n : 5;
+    this.#ordered = !!config.ordered;
     this.#preamble = typeof config.preamble === "function" ? config.preamble() : (config.preamble ?? null);
     if (this.#bank.length === 0) {
       root.innerHTML = `<div class="card"><p class="meta">${t("quiz.empty")}</p></div>`;
@@ -142,7 +144,7 @@ export class PrimerQuiz extends HTMLElement {
   #start(root: ShadowRoot) {
     let quiz: GeneratedQuiz;
     try {
-      quiz = generateQuiz(this.#bank, this.#count, Math.random);
+      quiz = generateQuiz(this.#bank, this.#count, Math.random, { ordered: this.#ordered });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       reportError(`primer-quiz:${this.getAttribute("name") ?? ""}`, err);

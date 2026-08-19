@@ -33,7 +33,7 @@ import { loadMathLive } from "../mathfield.ts";
 import { getMathKeyboard } from "../math-keyboards.ts";
 import { anglePos, lengthPos } from "../geometry-engine/scaffolds.ts";
 import { layoutCallouts, leaderEndpoints } from "./overlay-callouts.ts";
-import { raysForInterior } from "../geometry.ts";
+import { raysForInterior, angleMarkLayout } from "../geometry.ts";
 import { pickAndGenerate } from "../geometry-engine/generate.ts";
 import type { Problem } from "../geometry-engine/generate.ts";
 import type { DerivStep } from "../geometry-engine/chain.ts";
@@ -94,7 +94,10 @@ export class PrimerGeometryProblem extends HTMLElement {
   /** fillable angle key → its `<math-field>` (or fallback `<input>`). */ #inputs: Map<string, any> = new Map();
   /** Every non-given quantity the learner can fill. `pos` is the box's home; `tip` is where a
    *  leader line points (the angle mark / side) when crowding pushes the box off the figure. */
-  #fillable: Array<{ key: string; value: number; pos: [number, number]; tip: [number, number]; isTarget: boolean; kind: "angle" | "length" }> = [];
+  #fillable: Array<{
+    key: string; value: number; pos: [number, number]; tip: [number, number];
+    isTarget: boolean; kind: "angle" | "length"; color?: string;
+  }> = [];
   /** Last screen-pixel centres of the overlay boxes (for step badges). */ #boxScreen: Map<string, { x: number; y: number }> = new Map();
   /** Key of the fill-in currently focused, so a rebuilt leader can stay highlighted. */ #focusedKey: string | null = null;
   /** Whether MathLive loaded (else fall back to plain text boxes). */ #mathlive: boolean = false;
@@ -197,7 +200,7 @@ export class PrimerGeometryProblem extends HTMLElement {
         /* Leader lines from a pulled-off box back to its angle/side. Theme ink, not a hardcoded grey. */
         .overlay .leaders { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
         .overlay .leaders line { stroke: var(--primer-ink-soft, #667); stroke-width: 1; fill: none; }
-        .overlay .leaders circle { fill: var(--primer-ink-soft, #667); }
+        .overlay .leaders circle { fill: var(--leader-dot, var(--primer-ink-soft, #667)); }
         .overlay .leaders .active line { stroke: var(--primer-accent, #4d5bd1); stroke-width: 1.6; }
         .overlay .leaders .active circle { fill: var(--primer-accent, #4d5bd1); }
         /* Fillable boxes: the diagram backdrop (--primer-viz-bg) equals --primer-surface in every
@@ -212,7 +215,7 @@ export class PrimerGeometryProblem extends HTMLElement {
           /* 30%-opaque fill so the figure shows through; opaque fallback for engines without color-mix. */
           background: var(--primer-control-bg, #f1ede4);
           background: color-mix(in srgb, var(--primer-control-bg, #f1ede4) 30%, transparent);
-          color: var(--primer-ink, #111); pointer-events: auto; }
+          color: var(--angle-ink, var(--primer-ink, #111)); pointer-events: auto; }
         .overlay input { padding: 0 0.1rem; }
         /* Pulled-off boxes sit in empty space — give them a solid control fill so they don't look washed out. */
         .overlay input.pulled, .overlay math-field.mf.pulled { background: var(--primer-control-bg, #f1ede4); }
@@ -506,14 +509,36 @@ export class PrimerGeometryProblem extends HTMLElement {
     }
 
     const givenKeys = new Set(problem.givens.map((g: any) => g.key));
+    const squaredAt = new Set((figure.rights ?? []).map((rt: { vertex: string }) => rt.vertex));
+    const mark = angleMarkLayout(figure.angles, {
+      givenKeys, target: problem.target, cat: colors.cat, line: colors.line, ink: colors.ink,
+    });
     for (const ang of figure.angles) {
       const V = figure.points[ang.vertex];
       // Sweep the stored interior, not the reflex wrap-around JSXGraph would pick from raw from/to.
       const [P1, P2] = raysForInterior(V, figure.points[ang.from], figure.points[ang.to], ang.value);
-      if (givenKeys.has(ang.key)) {
-        tools.angleMark(V, P1, P2, { label: `${ang.value}°`, color: colors.ink, radius: 0.5, fontSize: 12 });
-      } else {
-        tools.angleMark(V, P1, P2, { color: ang.key === problem.target ? colors.cat[0] : colors.line, radius: 0.5 });
+      const st = mark.get(ang.key);
+      const radius = st?.radius ?? 0.5;
+      const isRight = Math.abs(ang.value - 90) < 0.5;
+      if (isRight && givenKeys.has(ang.key)) {
+        // Textbook given: a small square, not a quarter-circle with a "90°" label.
+        if (!squaredAt.has(ang.vertex)) {
+          tools.rightAngle(V, P1, P2, { color: st?.color ?? colors.ink });
+          squaredAt.add(ang.vertex);
+        }
+      } else if (!(isRight && squaredAt.has(ang.vertex))) {
+        if (givenKeys.has(ang.key)) {
+          tools.angleMark(V, P1, P2, {
+            label: `${ang.value}°`, color: st?.color ?? colors.ink, radius, fontSize: 12,
+          });
+        } else {
+          tools.angleMark(V, P1, P2, { color: st?.color ?? colors.line, radius });
+        }
+      }
+      const f = this.#fillable.find((x) => x.key === ang.key);
+      if (f) {
+        f.tip = anglePos(figure, ang, radius);
+        f.color = st?.color;
       }
     }
     const givenLen = new Set(problem.givens.map((g: any) => g.key));
@@ -625,13 +650,17 @@ export class PrimerGeometryProblem extends HTMLElement {
     mf.className = `mf${f.isTarget ? " target" : ""}`;
     mf.setAttribute("aria-label", this.#str("blankLabel", "unknown angle", { noun: this.#noun() }));
     mf.dataset.key = f.key;
+    if (f.color) {
+      mf.style.setProperty("--angle-ink", f.color);
+      mf.style.color = f.color;
+    }
     const layout = getMathKeyboard(kb);
     mf.addEventListener("input", () => mf.classList.remove("right", "wrong"));
     mf.addEventListener("focusin", () => {
       this.#setLeaderActive(f.key, true);
       // Render typed content in the sans-serif MATH variant (CSS can't reach MathLive's glyph font).
       // Applied while the cursor is collapsed so the next inserted digits inherit it.
-      try { mf.applyStyle?.({ variant: "sans-serif" }); } catch { /* not mounted yet */ }
+      try { mf.applyStyle?.({ variant: "sans-serif", ...(f.color ? { color: f.color } : {}) }); } catch { /* not mounted yet */ }
       const vk = (globalThis as any).mathVirtualKeyboard;
       if (!vk) return;
       if (layout) vk.layouts = [layout];
@@ -654,6 +683,10 @@ export class PrimerGeometryProblem extends HTMLElement {
     input.className = f.isTarget ? "target" : "";
     input.setAttribute("aria-label", this.#str("blankLabel", "unknown angle", { noun: this.#noun() }));
     input.dataset.key = f.key;
+    if (f.color) {
+      input.style.setProperty("--angle-ink", f.color);
+      input.style.color = f.color;
+    }
     input.addEventListener("input", () => { input.classList.remove("right", "wrong"); });
     input.addEventListener("focusin", () => this.#setLeaderActive(f.key, true));
     input.addEventListener("focusout", () => this.#setLeaderActive(f.key, false));
@@ -1040,6 +1073,7 @@ export class PrimerGeometryProblem extends HTMLElement {
       const g = document.createElementNS(NS, "g");
       g.setAttribute("data-key", p.key);
       if (p.key === this.#focusedKey) g.setAttribute("class", "active");
+      if (f.color) g.style.setProperty("--leader-dot", f.color);
       const line = document.createElementNS(NS, "line");
       line.setAttribute("x1", String(ep.x1));
       line.setAttribute("y1", String(ep.y1));
