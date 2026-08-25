@@ -22,7 +22,10 @@
  * The **`run`** attribute (JS/TS only) adds Code/Output tabs + a Run button: it transpiles the TS to JS
  * (sucrase, src/transpile.ts) and runs it in a sandboxed QuickJS-WASM engine (src/quickjs.ts + src/run-js.ts),
  * both lazy-loaded on first Run, and shows the captured `console` output (no DOM/network; a ~1 s timeout
- * kills infinite loops).
+ * kills infinite loops). The default 1 s timeout is tight for genuinely compute-heavy examples (a Monte
+ * Carlo simulation, say) — raise it with an optional **`timeout`** attribute, in seconds:
+ * `<primer-code run timeout="5">`. Only raise it for a block that actually needs the extra budget; leave
+ * everything else on the 1 s default so a real infinite loop still fails fast.
  *
  * Authoring caveat: because the body is parsed as HTML, `<`, `>` and `&` in the code MUST be
  * HTML-escaped (`&lt;` `&gt;` `&amp;`) — e.g. `if (x &lt; 10)`.
@@ -43,6 +46,7 @@ export class PrimerCode extends HTMLElement {
   #code: string = "";
   #lang: string = "typescript";
   #running: boolean = false;
+  #timeoutMs: number | undefined = undefined;
 
   connectedCallback() {
     const lang = this.getAttribute("lang") || "typescript";
@@ -51,6 +55,11 @@ export class PrimerCode extends HTMLElement {
     const code = dedent(this.textContent || "");
     this.#code = code;
     this.#lang = lang;
+    // Optional per-block override of the sandbox's execution-time limit, in seconds (default ~1s, see
+    // src/run-js.ts). Only meaningful on a runnable block; a missing/invalid value falls back to the default.
+    const timeoutAttr = this.getAttribute("timeout");
+    const timeoutSec = timeoutAttr === null ? NaN : Number(timeoutAttr);
+    this.#timeoutMs = Number.isFinite(timeoutSec) && timeoutSec > 0 ? timeoutSec * 1000 : undefined;
     const root = this.shadowRoot ?? attachShared(this);
     root.innerHTML = `
       <style>
@@ -186,7 +195,7 @@ export class PrimerCode extends HTMLElement {
         out.innerHTML = `<span class="err">${esc(t("program.loadError"))}</span>`;
         return;
       }
-      const res = runJs(mod, js);
+      const res = runJs(mod, js, this.#timeoutMs !== undefined ? { timeoutMs: this.#timeoutMs } : undefined);
       let html = res.output.map(esc).join("\n");
       if (res.error) html += (html ? "\n" : "") + `<span class="err">${esc(res.error)}</span>`;
       if (!html) html = `<span class="muted">${esc(t("code.noOutput"))}</span>`;
