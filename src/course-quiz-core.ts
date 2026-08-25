@@ -78,6 +78,15 @@ export function isQuestion(item: any): boolean {
 }
 
 /**
+ * A placement-friendly question: multiple-choice or free-text, not a geometry-problem or
+ * write-a-program exercise (those take too long to sit in a situating quiz).
+ */
+export function isLightQuestion(item: any): boolean {
+  if (!item || item.problem || item.program) return false;
+  return Array.isArray(item.options) || item.answer !== undefined;
+}
+
+/**
  * Weighted concept sampler: draw probability ∝ 1/(1+stars) over the eligible concepts (0 stars →
  * highest, 10 → lowest); within a concept, questions draw without replacement until the bank
  * exhausts, then the (reshuffled) bank repeats — template questions re-instantiate with fresh

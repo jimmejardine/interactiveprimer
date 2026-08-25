@@ -36,6 +36,11 @@ import { initWikiLookup } from "./wiki-selection.ts";
 
 /** Build the page shell once the DOM is ready. */
 async function render(): Promise<void> {
+  // App-shell pages (/get-started, /course-quiz, …) own their layout. Harvesting a lesson
+  // script can load this module as a side-effect of the concept bundle — never wrap those
+  // pages as a nameless concept with a star row.
+  if (!conceptIdFromPath()) return;
+
   const body = document.body;
 
   // Reconcile the synchronously-set theme (boot.js) with storage — this also loads the

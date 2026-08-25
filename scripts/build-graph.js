@@ -215,6 +215,7 @@ async function main() {
       if (parsed.course) {
         meta.courseMembers = [id, ...extractCourseMembers(html).filter((r) => r !== id)];
       }
+      if (/<primer-quiz\b/.test(html)) meta.hasQuiz = true;
       concepts.push(meta);
       // Stash this page's forward refs; they're reversed onto their targets below.
       const fwd = extractForwardRefs(html).filter((r) => r !== id);

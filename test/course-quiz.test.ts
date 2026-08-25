@@ -11,6 +11,7 @@ import {
   prefixQuestionRefs,
   rekeySceneStrings,
   isQuestion,
+  isLightQuestion,
   makeSampler,
   type HarvestedQuestion,
 } from "../src/course-quiz-core.ts";
@@ -78,6 +79,9 @@ test("isQuestion separates questions from the leading config item", () => {
   assert.equal(isQuestion({ prompt: "?", options: [{ text: "a", correct: true }] }), true);
   assert.equal(isQuestion({ prompt: "?", answer: 6 }), true);
   assert.equal(isQuestion({ prompt: "?", answer: 0 }), true); // falsy-but-defined answer counts
+  assert.equal(isLightQuestion({ prompt: "?", answer: 0 }), true);
+  assert.equal(isLightQuestion({ problem: "p" }), false);
+  assert.equal(isLightQuestion({ program: "q" }), false);
   assert.equal(isQuestion({ problem: "p" }), true);
   assert.equal(isQuestion({ program: "p" }), true);
   assert.equal(isQuestion(null), false);

@@ -42,6 +42,8 @@ export interface ConceptMeta {
   /** When true, this page is a *course*: a curated path whose member concepts the build
    * harvests from its inline `<primer-ref>`s (see `courseMembers`). */
   course?: boolean;
+  /** True when the page authors a `<primer-quiz>` (set by the graph build, not by authors). */
+  hasQuiz?: boolean;
   /** Legacy: previously set on translation overlays; overlays now carry a trailing
    * `<!-- sourceHash: … -->` comment instead (see scripts/i18n-check.js). */
   sourceHash?: string;

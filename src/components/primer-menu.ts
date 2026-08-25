@@ -207,6 +207,7 @@ export class PrimerMenu extends HTMLElement {
       <div class="panel" role="menu">
         <div class="menu-view view-root">
           <button type="button" class="nav" data-href="/">${t("menu.home")}</button>
+          <button type="button" class="nav" data-href="/get-started">${t("menu.getStarted")}</button>
           <button type="button" class="nav" data-href="/course">${t("menu.course")}</button>
           <button type="button" class="nav" data-href="/course-quiz">${t("menu.courseQuiz")}</button>
           <button type="button" class="nav" data-href="/explore">${t("menu.explore")}</button>

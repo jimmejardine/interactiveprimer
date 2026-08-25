@@ -41,6 +41,9 @@ test("conceptIdFromPath derives the id from a /concepts/<id>.html path", () => {
   assert.equal(conceptIdFromPath("/concepts/arithmetic/addition.html"), "arithmetic/addition");
   assert.equal(conceptIdFromPath("/concepts/root.html"), "root");
   assert.equal(conceptIdFromPath("/not/a/concept"), "");
+  assert.equal(conceptIdFromPath("/get-started"), "");
+  assert.equal(conceptIdFromPath("/course-quiz"), "");
+  assert.equal(conceptIdFromPath("/course"), "");
 });
 
 test("parseConceptMeta rejects non-numeric or non-finite levels", () => {

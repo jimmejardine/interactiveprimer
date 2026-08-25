@@ -227,6 +227,7 @@ const shell = [
   ...assetShell.sort(),
   "/offline",
   "/course-quiz",
+  "/get-started",
   "/site.webmanifest",
   "/images/icons/favicon.ico",
   "/images/icons/favicon-32x32.png",
