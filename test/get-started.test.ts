@@ -1,5 +1,6 @@
 /**
- * Tests for src/get-started-core.ts — pool filter and the smattering → climb → probe scheduler.
+ * Tests for src/get-started-core.ts — pool filter and the per-branch smattering → ascent →
+ * frontier scheduler, plus cross-session seeding from prior confidence history.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -17,8 +18,11 @@ import {
   branchOf,
   pickInBand,
   isCeilingNode,
+  primaryBranches,
+  priorFrontier,
   type ProbeNode,
-  SMATTERING,
+  type PlacementState,
+  type BranchState,
   MAX_FRONTIER,
   MISS_THRESHOLD,
 } from "../src/get-started-core.ts";
@@ -54,6 +58,35 @@ function mathsPool(): ProbeNode[] {
   ];
 }
 
+/** Force every branch except `branch` into "done" so pickNext is forced onto just that one. */
+function isolateBranch(state: PlacementState, branch: string, overrides: Partial<BranchState> = {}): PlacementState {
+  const branches: Record<string, BranchState> = {};
+  for (const b of state.branchOrder) {
+    branches[b] =
+      b === branch
+        ? {
+            targetLevel: 12,
+            frontier: null,
+            consecutiveHits: 0,
+            consecutiveMisses: 0,
+            probesUsed: 0,
+            frontierCount: 0,
+            subPhase: "ascent",
+            ...overrides,
+          }
+        : {
+            targetLevel: 0,
+            frontier: 0,
+            consecutiveHits: 0,
+            consecutiveMisses: 0,
+            probesUsed: 0,
+            frontierCount: 0,
+            subPhase: "done",
+          };
+  }
+  return { ...state, branches };
+}
+
 test("schoolPool keeps quiz-bearing school lessons in one field", () => {
   const pool = schoolPool(mathsPool(), "mathematics");
   const ids = pool.map((n) => n.id);
@@ -84,50 +117,60 @@ test("branchOf is the second path segment", () => {
   assert.equal(branchOf("physics/waves"), "waves");
 });
 
-test("phase A smattering uses different branches near startingLevel", () => {
+test("primaryBranches ranks by pool size, ties broken alphabetically", () => {
   const pool = schoolPool(mathsPool(), "mathematics");
-  let state = startState("mathematics", 12, 3);
-  const exclude = new Set<string>();
-  const ids: string[] = [];
-  for (let i = 0; i < SMATTERING; i++) {
-    const pick = pickNext(state, pool, exclude, always0);
-    if (!("id" in pick)) break;
-    ids.push(pick.id);
-    exclude.add(pick.id);
-    const level = pool.find((n) => n.id === pick.id)!.level;
-    state = applyAnswer(state, pick.id, level, true);
-  }
-  const branches = new Set(ids.map(branchOf));
-  assert.ok(branches.size >= 2, `expected ≥2 branches, got ${[...branches]}`);
-  assert.equal(state.phase, "ascent");
+  const order = primaryBranches(pool, 3);
+  assert.equal(order.length, 3);
+  assert.deepEqual(order, [...order].sort((a, b) => {
+    const count = (b: string) => pool.filter((n) => branchOf(n.id) === b).length;
+    return count(b) - count(a) || a.localeCompare(b);
+  }));
 });
 
-test("one miss does not freeze the frontier; two misses in the band do", () => {
+test("every primary branch gets a first probe before any branch repeats", () => {
   const pool = schoolPool(mathsPool(), "mathematics");
-  let state = startState("mathematics", 16, 5);
-  state = { ...state, phase: "ascent", targetLevel: 13, probes: [], consecutiveHits: 0, consecutiveMisses: 0 };
+  let state = startState("mathematics", 12, 3, pool);
   const exclude = new Set<string>();
+  const seenBranches: string[] = [];
+  for (let i = 0; i < state.branchOrder.length; i++) {
+    const pick = pickNext(state, pool, exclude, always0);
+    assert.ok("id" in pick, `expected a pick at step ${i}`);
+    const id = (pick as { id: string }).id;
+    seenBranches.push(branchOf(id));
+    exclude.add(id);
+    const level = pool.find((n) => n.id === id)!.level;
+    state = applyAnswer(state, id, level, true);
+  }
+  assert.equal(new Set(seenBranches).size, seenBranches.length, "no branch repeats within the first sweep");
+});
+
+test("one miss does not freeze a branch's frontier; two misses in the band do", () => {
+  const pool = schoolPool(mathsPool(), "mathematics");
+  let state = startState("mathematics", 16, 5, pool);
+  state = isolateBranch(state, "algebra", { targetLevel: 12 });
+  const exclude = new Set<string>();
+
   const miss1 = pickNext(state, pool, exclude, always0);
   assert.equal("id" in miss1, true);
   const id1 = (miss1 as { id: string }).id;
   exclude.add(id1);
   state = applyAnswer(state, id1, pool.find((n) => n.id === id1)!.level, false);
-  assert.equal(state.phase, "ascent", "a single unlucky miss must not flip the session");
-  assert.equal(state.consecutiveMisses, 1);
+  assert.equal(state.branches.algebra.subPhase, "ascent", "a single unlucky miss must not flip the branch");
+  assert.equal(state.branches.algebra.consecutiveMisses, 1);
 
   const miss2 = pickNext(state, pool, exclude, always0);
   assert.equal("id" in miss2, true);
   const id2 = (miss2 as { id: string }).id;
   const lv2 = pool.find((n) => n.id === id2)!.level;
   state = applyAnswer(state, id2, lv2, false);
-  assert.equal(state.phase, "frontier");
-  assert.ok(state.consecutiveMisses >= MISS_THRESHOLD);
+  assert.equal(state.branches.algebra.subPhase, "frontier");
+  assert.ok(state.branches.algebra.consecutiveMisses >= MISS_THRESHOLD);
 });
 
-test("two hits at a band step the climb up", () => {
+test("two hits at a band step that branch's climb up", () => {
   const pool = schoolPool(mathsPool(), "mathematics");
-  let state = startState("mathematics", 16, 5);
-  state = { ...state, phase: "ascent", targetLevel: 11, probes: [] };
+  let state = startState("mathematics", 16, 5, pool);
+  state = isolateBranch(state, "algebra", { targetLevel: 11 });
   const exclude = new Set<string>();
   for (let i = 0; i < 2; i++) {
     const pick = pickNext(state, pool, exclude, always0);
@@ -136,40 +179,31 @@ test("two hits at a band step the climb up", () => {
     exclude.add(id);
     state = applyAnswer(state, id, pool.find((n) => n.id === id)!.level, true);
   }
-  assert.equal(state.phase, "ascent");
-  assert.ok(state.targetLevel > 11);
+  assert.equal(state.branches.algebra.subPhase, "ascent");
+  assert.ok(state.branches.algebra.targetLevel > 11);
 });
 
-test("frontier samples unused branches then finishes", () => {
+test("a branch's frontier phase broadens then finishes", () => {
   const pool = schoolPool(mathsPool(), "mathematics");
-  let state = startState("mathematics", 14, 3);
-  state = {
-    ...state,
-    phase: "frontier",
-    frontier: 13,
-    frontierCount: 0,
-    probes: [{ id: "mathematics/geometry/pythagoras", level: 13, correct: false }],
-  };
-  const exclude = new Set(state.probes.map((p) => p.id));
+  let state = startState("mathematics", 14, 3, pool);
+  state = isolateBranch(state, "geometry", { subPhase: "frontier", frontier: 13, targetLevel: 13, probesUsed: 3 });
+  const exclude = new Set<string>();
   let n = 0;
-  while (state.phase !== "done" && n < 20) {
+  while (n < 20) {
     const pick = pickNext(state, pool, exclude, rng([0.1, 0.7, 0.3, 0.9]));
-    if ("done" in pick) {
-      state = { ...state, phase: "done" };
-      break;
-    }
+    if ("done" in pick) break;
     exclude.add(pick.id);
-    const level = pool.find((n) => n.id === pick.id)?.level ?? 13;
+    const level = pool.find((x) => x.id === pick.id)?.level ?? 13;
     state = applyAnswer(state, pick.id, level, n % 2 === 0);
     n++;
   }
-  assert.ok(state.frontierCount >= MAX_FRONTIER || state.phase === "done" || n > 0);
+  assert.ok(state.branches.geometry.frontierCount >= MAX_FRONTIER || state.branches.geometry.subPhase === "done" || n > 0);
 });
 
 test("ungated level-0 is not sampled for a young/low-confidence user", () => {
   const school = schoolPool(mathsPool(), "mathematics");
   const ceil = ceilingPool(mathsPool(), "mathematics");
-  let state = startState("mathematics", 8, 1);
+  let state = startState("mathematics", 8, 1, school);
   const exclude = new Set<string>();
   for (let i = 0; i < 8; i++) {
     const pick = pickNext(state, school, exclude, always0, ceil);
@@ -190,20 +224,54 @@ test("pickInBand prefers a declared-level gate", () => {
   assert.equal(pick?.id, "mathematics/algebra/words");
 });
 
+test("pickInBand's weightOf can deprioritise a high-star (already-known) concept", () => {
+  const pool = [node("mathematics/algebra/one-step", 12), node("mathematics/algebra/other", 12)];
+  const weightOf = (id: string) => (id === "mathematics/algebra/one-step" ? 0.001 : 1);
+  for (const r of [0.01, 0.99]) {
+    const pick = pickInBand(pool, new Set(), 12, new Set(), () => r, 1, weightOf);
+    assert.equal(pick?.id, "mathematics/algebra/other");
+  }
+});
+
+test("priorFrontier folds lifetime stars (above the known-threshold) into a per-branch level map", () => {
+  const pool = schoolPool(mathsPool(), "mathematics");
+  const entries = [
+    { id: "mathematics/algebra/one-step", stars: 7 },
+    { id: "mathematics/algebra/words", stars: 2 }, // below threshold — ignored
+    { id: "mathematics/geometry/pythagoras", stars: 9 },
+    { id: "mathematics/not-a-real-concept", stars: 10 }, // not in pool — ignored
+  ];
+  const prior = priorFrontier(entries, pool);
+  assert.equal(prior.algebra, 12);
+  assert.equal(prior.geometry, 13);
+  assert.equal(prior.statistics, undefined);
+});
+
+test("startState seeds a branch with prior history just above its known ceiling", () => {
+  const pool = schoolPool(mathsPool(), "mathematics");
+  const cold = startState("mathematics", 12, 3, pool);
+  const warm = startState("mathematics", 12, 3, pool, { algebra: 12 });
+  assert.ok(warm.branches.algebra.targetLevel > cold.branches.algebra.targetLevel);
+  assert.equal(warm.branches.algebra.targetLevel, 13);
+});
+
 test("summarise reports per-branch strongTo and starts on the weakest", () => {
   const pool = schoolPool(mathsPool(), "mathematics");
   const byId = new Map(mathsPool().map((n) => [n.id, n]));
-  const state = startState("mathematics", 13, 3);
-  const done = {
+  let state = startState("mathematics", 13, 3, pool);
+  state = {
     ...state,
-    phase: "done" as const,
-    frontier: 13,
+    branches: {
+      ...state.branches,
+      geometry: { ...state.branches.geometry, subPhase: "done", frontier: 13 },
+      algebra: { ...state.branches.algebra, subPhase: "done", frontier: 13 },
+    },
     probes: [
       { id: "mathematics/geometry/pythagoras", level: 13, correct: false },
       { id: "mathematics/algebra/one-step", level: 12, correct: true },
     ],
   };
-  const summary = summarise(done, pool, byId, () => 0);
+  const summary = summarise(state, pool, byId, () => 0);
   assert.equal(summary.frontier, 13);
   assert.ok(summary.startHere.includes("mathematics/geometry/pythagoras"));
   const geom = summary.branches.find((b) => b.branch === "geometry");

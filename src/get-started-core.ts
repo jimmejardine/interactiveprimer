@@ -1,17 +1,24 @@
 /**
- * Pure placement scheduler for /get-started: filter the school-age pool in one field, then
- * pick the next concept to probe (smattering → climb → probe) and summarise a per-branch
- * frontier. DOM-free so node:test can drive it.
+ * Pure placement scheduler for /get-started: filter the school-age pool in one field, run each of
+ * the field's PRIMARY branches through its own smattering → ascent → frontier cycle on a shared
+ * sub-budget (so a 25-question session maps BOTH how far a learner has climbed AND how wide that
+ * knowledge spreads, instead of one global target level for the whole subject), and summarise a
+ * per-branch frontier plus matching school courses. DOM-free so node:test can drive it.
  *
  * Level 0 / ungrounded concepts are a "beyond the ceiling" pool — mixed beginner stubs and
- * ungated advanced pages — and are only sampled after the learner has cleared the leveled ramp.
+ * ungated advanced pages — and are only sampled after every branch has cleared the leveled ramp.
+ *
+ * Repeat-session memory: {@link priorFrontier} folds the learner's LIFETIME confidence history
+ * (from every past /get-started run and ordinary lesson quiz) into a per-branch "already known to
+ * about level X" map. {@link startState} takes that as `prior` and seeds each branch's starting
+ * target just above what history says the learner has already cleared, so a second run explores
+ * new ground instead of re-asking the same questions from scratch.
  * @module
  */
 
 export type Field = "mathematics" | "physics" | "computer-science";
 /** 1 = never studied … 5 = very confident. */
 export type Confidence = 1 | 2 | 3 | 4 | 5;
-export type Phase = "smattering" | "ascent" | "frontier" | "done";
 
 export interface ProbeNode {
   id: string;
@@ -33,18 +40,28 @@ export interface Probe {
   correct: boolean;
 }
 
+/** One branch's own mini placement run, ticking through the same shape the old global state did. */
+export interface BranchState {
+  targetLevel: number;
+  /** Frozen miss-altitude once ascent ends; null until then. */
+  frontier: number | null;
+  consecutiveHits: number;
+  consecutiveMisses: number;
+  probesUsed: number;
+  frontierCount: number;
+  subPhase: "ascent" | "frontier" | "done";
+}
+
 export interface PlacementState {
   field: Field;
   age: number;
   confidence: Confidence;
-  phase: Phase;
   probes: Probe[];
-  /** Frozen miss-altitude once climb ends; null until then. */
-  frontier: number | null;
-  consecutiveHits: number;
-  consecutiveMisses: number;
-  targetLevel: number;
-  frontierCount: number;
+  /** Primary branches for this session, largest pool first — fixed at start. */
+  branchOrder: string[];
+  /** Question budget per branch (smattering + ascent + up to MAX_FRONTIER frontier probes). */
+  perBranchBudget: number;
+  branches: Record<string, BranchState>;
 }
 
 export interface BranchReport {
@@ -70,13 +87,25 @@ export interface PlacementSummary {
   courses: CourseMatch[];
 }
 
-export const SMATTERING = 4;
+/** A lifetime confidence-store entry, trimmed to what {@link priorFrontier} needs. */
+export interface HistoryEntry {
+  id: string;
+  stars: number;
+}
+
 export const MAX_QUESTIONS = 25;
 export const MAX_FRONTIER = 8;
 export const SCHOOL_MIN = 5;
 export const SCHOOL_MAX = 18;
-/** Rolling window: this many misses (or a ≤50% pass rate over ≥3) opens the frontier. */
+/** Rolling window: this many misses (or a ≤50% pass rate over ≥3) opens a branch's frontier. */
 export const MISS_THRESHOLD = 2;
+/** At most this many branches get their own tracked sub-budget; the rest fold into the ceiling
+ *  pool's broadening once every primary branch is done. */
+export const PRIMARY_BRANCH_CAP = 8;
+/** Even split across many branches still gets each one at least this many questions. */
+export const MIN_PER_BRANCH_BUDGET = 3;
+/** Stars at/above this count as "the learner already knows this" when seeding a repeat session. */
+export const PRIOR_KNOWN_STARS = 5;
 
 export const LOW_BAND: Record<Field, [number, number]> = {
   mathematics: [5, 7],
@@ -113,14 +142,54 @@ export function schoolPool(nodes: readonly ProbeNode[], field: Field): ProbeNode
   );
 }
 
-/** Ungated extra-hard pool — only after the leveled ramp is cleared. */
+/** Ungated extra-hard pool — only after every branch's leveled ramp is cleared. */
 export function ceilingPool(nodes: readonly ProbeNode[], field: Field): ProbeNode[] {
   return nodes.filter((n) => inField(n, field) && isCeilingNode(n));
 }
 
 /**
- * Where to begin the smattering: age as a first guess, nudged by self-rating, then a little
- * younger so the first cards still feel like a warm-up.
+ * This field's branches ranked by how many school-pool concepts they hold, largest first — the
+ * ones substantial enough to deserve their own tracked climb. Ties break alphabetically so the
+ * order (and therefore test expectations) is deterministic.
+ */
+export function primaryBranches(pool: readonly ProbeNode[], cap = PRIMARY_BRANCH_CAP): string[] {
+  const counts = new Map<string, number>();
+  for (const n of pool) {
+    const b = branchOf(n.id);
+    counts.set(b, (counts.get(b) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, cap)
+    .map(([b]) => b);
+}
+
+/**
+ * Fold lifetime confidence history into a per-branch "already comfortable up to about level X"
+ * map, restricted to concepts the learner has actually shown some mastery of (`stars >=
+ * PRIOR_KNOWN_STARS`). Concepts with no known level (not in `pool`, e.g. from a different field or
+ * since retired) are ignored. Used to seed a repeat session past ground already covered.
+ */
+export function priorFrontier(
+  entries: readonly HistoryEntry[],
+  pool: readonly ProbeNode[],
+): Record<string, number> {
+  const levelOf = new Map(pool.map((n) => [n.id, n.level]));
+  const out: Record<string, number> = {};
+  for (const e of entries) {
+    if (e.stars < PRIOR_KNOWN_STARS) continue;
+    const level = levelOf.get(e.id);
+    if (level == null) continue;
+    const b = branchOf(e.id);
+    out[b] = out[b] == null ? level : Math.max(out[b], level);
+  }
+  return out;
+}
+
+/**
+ * Where to begin a branch's climb: age as a first guess, nudged by self-rating, then a little
+ * younger so the first cards still feel like a warm-up. A branch with prior history (see
+ * {@link priorFrontier}) starts just above what it already covers instead, in {@link startState}.
  */
 export function startingLevel(age: number, confidence: Confidence, field: Field): number {
   const a = clampAge(age);
@@ -129,26 +198,42 @@ export function startingLevel(age: number, confidence: Confidence, field: Field)
   return Math.max(floor, Math.min(16, a + nudge - 1));
 }
 
-export function startState(field: Field, age: number, confidence: Confidence): PlacementState {
-  const target = startingLevel(age, confidence, field);
-  return {
-    field,
-    age: clampAge(age),
-    confidence,
-    phase: "smattering",
-    probes: [],
-    frontier: null,
-    consecutiveHits: 0,
-    consecutiveMisses: 0,
-    targetLevel: target,
-    frontierCount: 0,
-  };
-}
-
-function recentBranches(state: PlacementState, n = 2): Set<string> {
-  const out = new Set<string>();
-  for (const p of state.probes.slice(-n)) out.add(branchOf(p.id));
-  return out;
+export function startState(
+  field: Field,
+  age: number,
+  confidence: Confidence,
+  pool: readonly ProbeNode[],
+  prior: Record<string, number> = {},
+): PlacementState {
+  const base = startingLevel(age, confidence, field);
+  const branchOrder = primaryBranches(pool);
+  const perBranchBudget = Math.max(
+    MIN_PER_BRANCH_BUDGET,
+    Math.floor(MAX_QUESTIONS / Math.max(1, branchOrder.length)),
+  );
+  const branches: Record<string, BranchState> = {};
+  for (const b of branchOrder) {
+    // Branches have very different natural ranges (arithmetic tops out young; calculus starts
+    // old) and can be sparse/bimodal (a small gap in the middle with nothing near the shared
+    // age/confidence guess) — snap to the branch's OWN nearest real concept level, not just a
+    // clamped range, so the very first probe is always guaranteed to land exactly on something.
+    const branchLevels = pool.filter((n) => branchOf(n.id) === b).map((n) => n.level);
+    const nearestLevel = branchLevels.reduce((closest, lvl) =>
+      Math.abs(lvl - base) < Math.abs(closest - base) ? lvl : closest,
+    );
+    const seed = prior[b];
+    branches[b] = {
+      // A branch with established history starts just above its known ceiling, not from scratch.
+      targetLevel: seed != null ? Math.min(SCHOOL_MAX, Math.round(seed) + 1) : nearestLevel,
+      frontier: null,
+      consecutiveHits: 0,
+      consecutiveMisses: 0,
+      probesUsed: 0,
+      frontierCount: 0,
+      subPhase: "ascent",
+    };
+  }
+  return { field, age: clampAge(age), confidence, probes: [], branchOrder, perBranchBudget, branches };
 }
 
 function pickOne<T>(items: T[], rng: Rng): T | null {
@@ -157,8 +242,11 @@ function pickOne<T>(items: T[], rng: Rng): T | null {
 }
 
 /**
- * Prefer a declared-level gate in-band, then anything in-band, rotating off recently used
- * branches when possible.
+ * Prefer a declared-level gate in-band, then anything in-band. `avoidBranches` still lets a
+ * caller rotate away from a branch when it hands in a mixed-branch pool (e.g. the ceiling pool);
+ * within one branch's own pool it's normally passed empty. `weightOf` biases the draw — used to
+ * favour concepts with no confidence history over ones already well-established from a past
+ * session, mirroring course-quiz's inverse-star sampler (default: every candidate weighs the same).
  */
 export function pickInBand(
   pool: readonly ProbeNode[],
@@ -167,6 +255,7 @@ export function pickInBand(
   avoidBranches: Set<string>,
   rng: Rng,
   width = 0.85,
+  weightOf: (id: string) => number = () => 1,
 ): ProbeNode | null {
   const inBand = (w: number) =>
     pool.filter((n) => !exclude.has(n.id) && Math.abs(n.level - target) <= w);
@@ -176,7 +265,15 @@ export function pickInBand(
   const fresh = band.filter((n) => !avoidBranches.has(branchOf(n.id)));
   const pool2 = fresh.length ? fresh : band;
   const gates = pool2.filter((n) => n.declaredLevel != null);
-  return pickOne(gates.length ? gates : pool2, rng);
+  const candidates = gates.length ? gates : pool2;
+  const weights = candidates.map((n) => Math.max(0.0001, weightOf(n.id)));
+  const total = weights.reduce((a, b) => a + b, 0);
+  let r = rng() * total;
+  for (let i = 0; i < candidates.length; i++) {
+    r -= weights[i]!;
+    if (r <= 0) return candidates[i]!;
+  }
+  return candidates[candidates.length - 1] ?? null;
 }
 
 function ascentStep(confidence: Confidence, consecutiveHits: number): number {
@@ -184,16 +281,40 @@ function ascentStep(confidence: Confidence, consecutiveHits: number): number {
   return Math.min(3, base + (consecutiveHits >= 2 ? 1 : 0));
 }
 
+/** Every primary branch has cleared the top of the school ramp — time to reach for the ceiling pool. */
 function useCeiling(state: PlacementState): boolean {
-  const L = state.frontier ?? state.targetLevel;
-  return L >= SCHOOL_MAX - 0.2;
+  return state.branchOrder.every((b) => {
+    const bs = state.branches[b]!;
+    const L = bs.frontier ?? bs.targetLevel;
+    return L >= SCHOOL_MAX - 0.2;
+  });
+}
+
+/** The first branch still in play, in `branchOrder`. Null once every branch is done. */
+function currentBranch(state: PlacementState): string | null {
+  for (const b of state.branchOrder) if (state.branches[b]!.subPhase !== "done") return b;
+  return null;
 }
 
 export type PickResult = { done: true } | { id: string };
 
+/** The first branch that hasn't been probed at all yet — breadth takes priority over depth. */
+function unseededBranch(state: PlacementState): string | null {
+  for (const b of state.branchOrder) {
+    const bs = state.branches[b]!;
+    if (bs.subPhase !== "done" && bs.probesUsed === 0) return b;
+  }
+  return null;
+}
+
 /**
- * Next concept to probe, or `{ done: true }`. `exclude` is probed ids plus harvest-failures
- * the page does not want to retry. `ceiling` is the ungated extra-hard pool.
+ * Next concept to probe, or `{ done: true }`. BREADTH FIRST: every branch gets one probe before
+ * any branch gets a second (the "smattering" the whole subject gets up front). Once every branch
+ * has at least one probe, round-robins through `branchOrder` in order — each branch spends the
+ * rest of its own sub-budget climbing (ascent) then broadening around a found frontier, before
+ * handing off to the next branch once its budget runs out; only once every branch is done does the
+ * ungated ceiling pool open up. `exclude` is probed ids plus harvest-failures the caller does not
+ * want to retry.
  */
 export function pickNext(
   state: PlacementState,
@@ -201,62 +322,33 @@ export function pickNext(
   exclude: Set<string>,
   rng: Rng = Math.random,
   ceiling: readonly ProbeNode[] = [],
+  weightOf: (id: string) => number = () => 1,
 ): PickResult {
-  if (state.phase === "done" || state.probes.length >= MAX_QUESTIONS) return { done: true };
+  if (state.probes.length >= MAX_QUESTIONS) return { done: true };
 
-  if (state.phase === "smattering") {
-    const lo = Math.max(LOW_BAND[state.field][0], state.targetLevel - 2);
-    const hi = state.targetLevel + 1.5;
-    const used = new Set(state.probes.map((p) => branchOf(p.id)));
-    const fresh = pool.filter(
-      (n) => n.level >= lo && n.level <= hi && !exclude.has(n.id) && !used.has(branchOf(n.id)),
-    );
-    const fallback = pool.filter((n) => n.level >= lo && n.level <= hi + 1 && !exclude.has(n.id));
-    const pick = pickInBand(fresh.length ? fresh : fallback, exclude, state.targetLevel, used, rng, 2);
-    if (pick) return { id: pick.id };
-    return pickNext({ ...state, phase: "ascent" }, pool, exclude, rng, ceiling);
-  }
-
-  if (state.phase === "ascent") {
-    const pick = pickInBand(pool, exclude, state.targetLevel, recentBranches(state), rng);
-    if (pick) return { id: pick.id };
+  const branch = unseededBranch(state) ?? currentBranch(state);
+  if (!branch) {
     if (useCeiling(state) && ceiling.length) {
       const c = pickOne(ceiling.filter((n) => !exclude.has(n.id)), rng);
       if (c) return { id: c.id };
     }
-    return pickNext(
-      { ...state, phase: "frontier", frontier: state.targetLevel, frontierCount: 0 },
-      pool,
-      exclude,
-      rng,
-      ceiling,
-    );
+    return { done: true };
   }
 
-  // frontier — broaden around L, and allow the ungated pool once the ramp is cleared.
-  if (state.frontierCount >= MAX_FRONTIER) return { done: true };
-  const L = state.frontier ?? state.targetLevel;
-  const used = new Set(state.probes.map((p) => branchOf(p.id)));
-  const band = pool.filter(
-    (n) => !exclude.has(n.id) && n.level >= L - 3 && n.level <= L + 4 && !used.has(branchOf(n.id)),
-  );
-  const pick = pickInBand(
-    band.length ? band : pool.filter((n) => !exclude.has(n.id) && Math.abs(n.level - L) <= 4),
-    exclude,
-    L,
-    used,
-    rng,
-    4,
-  );
+  const bs = state.branches[branch]!;
+  const branchPool = pool.filter((n) => branchOf(n.id) === branch);
+  const inFrontier = bs.subPhase === "frontier";
+  const target = inFrontier ? bs.frontier ?? bs.targetLevel : bs.targetLevel;
+  // Wide on the branch's very first probe (a fresh look), tight while climbing, wide again once
+  // broadening around a found frontier.
+  const width = inFrontier ? 4 : bs.probesUsed === 0 ? 2 : 0.85;
+  const pick = pickInBand(branchPool, exclude, target, new Set(), rng, width, weightOf);
   if (pick) return { id: pick.id };
-  if (useCeiling(state)) {
-    const c = pickOne(
-      ceiling.filter((n) => !exclude.has(n.id) && !used.has(branchOf(n.id))),
-      rng,
-    );
-    if (c) return { id: c.id };
-  }
-  return { done: true };
+
+  // Nothing left to ask in this branch right now (band exhausted or excluded out) — retire it and
+  // move on to the next branch in this same call, so a thin branch never stalls the session.
+  const branches = { ...state.branches, [branch]: { ...bs, subPhase: "done" as const } };
+  return pickNext({ ...state, branches }, pool, exclude, rng, ceiling, weightOf);
 }
 
 function bandStats(probes: Probe[], target: number, width = 1.5): { n: number; misses: number } {
@@ -264,65 +356,78 @@ function bandStats(probes: Probe[], target: number, width = 1.5): { n: number; m
   return { n: band.length, misses: band.filter((p) => !p.correct).length };
 }
 
-/** Fold one graded probe into the state (does not pick the next id). */
-export function applyAnswer(state: PlacementState, id: string, level: number, correct: boolean): PlacementState {
-  const next: PlacementState = {
-    ...state,
-    probes: [...state.probes, { id, level, correct }],
-  };
-  if (next.probes.length >= MAX_QUESTIONS) {
-    next.phase = "done";
-    if (next.frontier == null) next.frontier = estimateFrontier(next);
-    return next;
-  }
-
-  if (state.phase === "smattering") {
-    if (next.probes.length >= SMATTERING) {
-      next.phase = "ascent";
-      next.consecutiveHits = 0;
-      next.consecutiveMisses = 0;
-    }
-    return next;
-  }
-
-  if (state.phase === "ascent") {
-    if (correct) {
-      next.consecutiveHits = state.consecutiveHits + 1;
-      next.consecutiveMisses = 0;
-      if (next.consecutiveHits >= 2) {
-        next.targetLevel = Math.min(SCHOOL_MAX, state.targetLevel + ascentStep(state.confidence, next.consecutiveHits));
-        next.consecutiveHits = 0;
-      }
-    } else {
-      next.consecutiveHits = 0;
-      next.consecutiveMisses = state.consecutiveMisses + 1;
-      const { n, misses } = bandStats(next.probes, state.targetLevel);
-      const drop = next.consecutiveMisses >= MISS_THRESHOLD || (n >= 3 && misses / n >= 0.5);
-      if (drop) {
-        next.phase = "frontier";
-        next.frontier = Math.min(...next.probes.filter((p) => !p.correct).map((p) => p.level));
-        next.frontierCount = 0;
-      }
-    }
-    return next;
-  }
-
-  if (state.phase === "frontier") {
-    next.frontierCount = state.frontierCount + 1;
-    if (next.frontierCount >= MAX_FRONTIER) {
-      next.phase = "done";
-      next.frontier = estimateFrontier(next);
-    }
-    return next;
-  }
-  return next;
-}
-
-export function estimateFrontier(state: PlacementState): number {
-  if (state.frontier != null) return state.frontier;
-  const hits = state.probes.filter((p) => p.correct);
+function estimateBranchFrontier(bs: BranchState, branchProbes: Probe[], state: PlacementState): number {
+  if (bs.frontier != null) return bs.frontier;
+  const hits = branchProbes.filter((p) => p.correct);
   if (hits.length === 0) return startingLevel(state.age, state.confidence, state.field);
   return Math.max(...hits.map((p) => p.level));
+}
+
+/** Fold one graded probe into the state (does not pick the next id). */
+export function applyAnswer(state: PlacementState, id: string, level: number, correct: boolean): PlacementState {
+  const probes: Probe[] = [...state.probes, { id, level, correct }];
+  const branch = branchOf(id);
+  const bsOld = state.branches[branch];
+  // A probe outside any tracked branch (shouldn't normally happen — pickNext only hands out ids
+  // from branchOrder's own pools plus the ceiling pool) still gets recorded, just with no branch
+  // bookkeeping to update.
+  if (!bsOld) return { ...state, probes };
+
+  let bs: BranchState = { ...bsOld, probesUsed: bsOld.probesUsed + 1 };
+  const branchProbes = probes.filter((p) => branchOf(p.id) === branch);
+
+  if (bs.subPhase === "ascent") {
+    if (correct) {
+      bs.consecutiveHits += 1;
+      bs.consecutiveMisses = 0;
+      if (bs.consecutiveHits >= 2) {
+        bs.targetLevel = Math.min(SCHOOL_MAX, bs.targetLevel + ascentStep(state.confidence, bs.consecutiveHits));
+        bs.consecutiveHits = 0;
+      }
+    } else {
+      bs.consecutiveHits = 0;
+      bs.consecutiveMisses += 1;
+      const { n, misses } = bandStats(branchProbes, bs.targetLevel);
+      const drop = bs.consecutiveMisses >= MISS_THRESHOLD || (n >= 3 && misses / n >= 0.5);
+      if (drop) {
+        bs.subPhase = "frontier";
+        bs.frontier = Math.min(...branchProbes.filter((p) => !p.correct).map((p) => p.level));
+        bs.frontierCount = 0;
+      }
+    }
+    if (bs.subPhase === "ascent" && bs.probesUsed >= state.perBranchBudget) {
+      bs.subPhase = "done";
+      bs.frontier = estimateBranchFrontier(bs, branchProbes, state);
+    }
+  } else if (bs.subPhase === "frontier") {
+    bs.frontierCount += 1;
+    if (bs.frontierCount >= MAX_FRONTIER || bs.probesUsed >= state.perBranchBudget + MAX_FRONTIER) {
+      bs.subPhase = "done";
+    }
+  }
+
+  return { ...state, probes, branches: { ...state.branches, [branch]: bs } };
+}
+
+function median(nums: number[]): number | null {
+  if (nums.length === 0) return null;
+  const s = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 === 1 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+}
+
+/** The session's overall altitude: the median across every tracked branch's own frontier (falls
+ *  back to the age/confidence starting guess when nothing was probed at all). */
+export function estimateFrontier(state: PlacementState): number {
+  const vals: number[] = [];
+  for (const b of state.branchOrder) {
+    const bs = state.branches[b]!;
+    const branchProbes = state.probes.filter((p) => branchOf(p.id) === b);
+    if (branchProbes.length === 0 && bs.frontier == null) continue;
+    vals.push(bs.frontier ?? estimateBranchFrontier(bs, branchProbes, state));
+  }
+  if (vals.length === 0) return startingLevel(state.age, state.confidence, state.field);
+  return median(vals) ?? vals[0]!;
 }
 
 export function branchReport(probes: Probe[]): { status: BranchReport["status"]; strongTo: number | null } {
@@ -373,13 +478,6 @@ export function pathAltitude(leaf: string): number | null {
     return p === 1 ? 5 : p === 2 ? 7 : p === 3 ? 9 : p === 4 ? 11 : null;
   }
   return null;
-}
-
-function median(nums: number[]): number | null {
-  if (nums.length === 0) return null;
-  const s = [...nums].sort((a, b) => a - b);
-  const mid = Math.floor(s.length / 2);
-  return s.length % 2 === 1 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
 }
 
 /** Median altitude of a course's lesson members (skips nested courses and ungated nodes). */

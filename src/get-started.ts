@@ -8,7 +8,7 @@
 
 import { getLocale, t } from "./i18n.ts";
 import { generateQuestion } from "./quiz.ts";
-import { readEntry, recordAnswers } from "./confidence-store.ts";
+import { readEntry, recordAnswers, allEntries } from "./confidence-store.ts";
 import { setCurrentCourse } from "./course.ts";
 import { safeGet, safeSet } from "./storage.ts";
 import "./components/primer-quiz-stream.ts";
@@ -27,11 +27,19 @@ import {
   applyAnswer,
   summarise,
   branchOf,
+  priorFrontier,
 } from "./get-started-core.ts";
 
 const WIZARD_KEY = "primer:get-started";
+const SNAPSHOT_KEY = (field: Field) => `primer:get-started:${field}`;
+/** Below this age the wizard swaps in simpler copy and offers a read-aloud button. */
+const YOUNG_AGE_THRESHOLD = 8;
 const FIELDS: Field[] = ["mathematics", "physics", "computer-science"];
 const CONF_RUNGS: Confidence[] = [1, 2, 3, 4, 5];
+const AGE_MIN = 5;
+const AGE_MAX = 18;
+/** The one middle tick label kept when the slider's ticks thin out to just three on a narrow screen. */
+const AGE_MID = Math.round((AGE_MIN + AGE_MAX) / 2);
 
 export async function mountGetStarted(root: HTMLElement, { byId }: { byId: Map<string, any> }): Promise<void> {
   const locale = getLocale();
@@ -58,7 +66,7 @@ export async function mountGetStarted(root: HTMLElement, { byId }: { byId: Map<s
 
   root.innerHTML = "";
   const head = el("header", "dash-head", `<h1 class="dash-title">${esc(t("getstarted.heading"))}</h1>
-    <p class="dash-sub">${esc(t("getstarted.lead"))}</p>`);
+    <p class="dash-sub" id="gs-lead">${esc(t("getstarted.lead"))}</p>`);
   const intake = el("section", "card gs-intake");
   const quizWrap = el("div", "gs-quiz");
   quizWrap.hidden = true;
@@ -89,45 +97,90 @@ export async function mountGetStarted(root: HTMLElement, { byId }: { byId: Map<s
 
   intake.innerHTML = `
     <fieldset class="gs-field">
-      <legend>${esc(t("getstarted.fieldLegend"))}</legend>
-      <div class="gs-chips" id="gs-field">
-        ${FIELDS.map((f) => `<button type="button" class="chip cq-mode" data-value="${f}">${esc(t("getstarted.field." + f))}</button>`).join("")}
-      </div>
-    </fieldset>
-    <fieldset class="gs-field">
-      <legend>${esc(t("getstarted.ageLegend"))}</legend>
+      <legend id="gs-age-legend">${esc(t("getstarted.ageLegend"))}</legend>
       <div class="gs-age-row">
-        <label class="gs-age-label">${esc(t("getstarted.ageLabel"))}
-          <input id="gs-age-range" type="range" min="5" max="18" step="1" value="${ageSet ? age : 12}">
-          <input id="gs-age" type="number" min="5" max="18" inputmode="numeric" ${ageSet ? `value="${age}"` : ""} aria-label="${esc(t("getstarted.ageLabel"))}">
+        <label class="gs-age-label">
+          <span class="gs-age-label-text">${esc(t("getstarted.ageLabel"))}</span>
+          <span class="gs-age-slider">
+            <input id="gs-age-range" type="range" min="${AGE_MIN}" max="${AGE_MAX}" step="1" value="${ageSet ? age : 12}">
+            <span class="gs-age-ticks" aria-hidden="true">${Array.from(
+              { length: AGE_MAX - AGE_MIN + 1 },
+              (_, i) => AGE_MIN + i,
+            )
+              .map((n) => {
+                const cls = ["gs-tick", n === AGE_MIN || n === AGE_MAX ? "gs-tick-edge" : "", n === AGE_MID ? "gs-tick-mid" : ""]
+                  .filter(Boolean)
+                  .join(" ");
+                return `<span class="${cls}">${esc(n === AGE_MAX ? t("getstarted.ageMax") : String(n))}</span>`;
+              })
+              .join("")}</span>
+          </span>
         </label>
-        <button type="button" class="chip cq-mode" data-age="adult">${esc(t("getstarted.ageAdult"))}</button>
-        <button type="button" class="chip cq-mode" data-age="skip">${esc(t("getstarted.ageSkip"))}</button>
       </div>
     </fieldset>
     <fieldset class="gs-field">
-      <legend>${esc(t("getstarted.confLegend"))}</legend>
-      <div class="gs-chips" id="gs-conf">
-        ${CONF_RUNGS.map((n) => `<button type="button" class="chip cq-mode" data-value="${n}">${esc(t("getstarted.conf." + n))}</button>`).join("")}
+      <legend id="gs-field-legend">${esc(t("getstarted.fieldLegend"))}</legend>
+      <div class="gs-subject-grid" id="gs-field">
+        ${FIELDS.map(
+          (f) =>
+            `<button type="button" class="gs-subject-card" data-value="${f}" aria-pressed="false">` +
+            `<img src="/concepts/${f}/${f}.png" alt="" loading="lazy">` +
+            `<span>${esc(t("getstarted.field." + f))}</span></button>`,
+        ).join("")}
       </div>
     </fieldset>
-    <p><button type="button" class="gs-go" id="gs-go" disabled>${esc(t("getstarted.go"))}</button></p>`;
+    <fieldset class="gs-field">
+      <legend id="gs-conf-legend">${esc(t("getstarted.confLegend"))}</legend>
+      <div class="gs-conf-grid" id="gs-conf">
+        ${CONF_RUNGS.map(
+          (n) =>
+            `<button type="button" class="gs-conf-card" data-value="${n}" aria-pressed="false">` +
+            `<img src="/images/knowledge-level/knowledge-level-${n}.png" alt="" loading="lazy">` +
+            `<span>${esc(t("getstarted.conf." + n))}</span></button>`,
+        ).join("")}
+      </div>
+    </fieldset>
+    <p>
+      <button type="button" class="gs-go" id="gs-go" disabled>${esc(t("getstarted.go"))}</button>
+    </p>`;
 
   const fieldBox = intake.querySelector("#gs-field") as HTMLElement;
   const confBox = intake.querySelector("#gs-conf") as HTMLElement;
-  const ageInput = intake.querySelector("#gs-age") as HTMLInputElement;
   const ageRange = intake.querySelector("#gs-age-range") as HTMLInputElement;
   const goBtn = intake.querySelector("#gs-go") as HTMLButtonElement;
+  const leadEl = head.querySelector("#gs-lead") as HTMLElement;
+  const fieldLegendEl = intake.querySelector("#gs-field-legend") as HTMLElement;
+  const confLegendEl = intake.querySelector("#gs-conf-legend") as HTMLElement;
   const ready = () => {
     goBtn.disabled = !(field && confidence && ageSet);
   };
+  // A learner too young to read a wizard fluently gets simpler copy throughout (once age is set).
+  const isYoung = () => ageSet && age < YOUNG_AGE_THRESHOLD;
+  const applyCopy = () => {
+    const young = isYoung();
+    leadEl.textContent = t(young ? "getstarted.young.lead" : "getstarted.lead");
+    fieldLegendEl.textContent = t(young ? "getstarted.young.fieldLegend" : "getstarted.fieldLegend");
+    confLegendEl.textContent = t(young ? "getstarted.young.confLegend" : "getstarted.confLegend");
+    for (const f of FIELDS) {
+      // Target the label <span>, not the button itself — the button also holds an <img>, and
+      // overwriting its textContent would silently delete the image.
+      const label = fieldBox.querySelector(`button[data-value="${f}"] span`) as HTMLElement | null;
+      if (label) label.textContent = t(young ? `getstarted.young.field.${f}` : `getstarted.field.${f}`);
+    }
+    for (const n of CONF_RUNGS) {
+      const label = confBox.querySelector(`button[data-value="${n}"] span`) as HTMLElement | null;
+      if (label) label.textContent = t(young ? `getstarted.young.conf.${n}` : `getstarted.conf.${n}`);
+    }
+    goBtn.textContent = t(young ? "getstarted.young.go" : "getstarted.go");
+  };
   if (field) paintChips(fieldBox, field);
   if (confidence) paintChips(confBox, String(confidence));
+  applyCopy();
   const setAge = (n: number) => {
     age = n;
     ageSet = true;
-    ageInput.value = String(n);
     ageRange.value = String(n);
+    applyCopy();
     ready();
   };
   fieldBox.addEventListener("click", (e) => {
@@ -144,25 +197,7 @@ export async function mountGetStarted(root: HTMLElement, { byId }: { byId: Map<s
     paintChips(confBox, String(confidence));
     ready();
   });
-  const onAgeInput = (src: HTMLInputElement) => {
-    const n = Number(src.value);
-    if (Number.isFinite(n) && n >= 5 && n <= 18) setAge(n);
-    else {
-      ageSet = false;
-      ready();
-    }
-  };
-  ageInput.addEventListener("input", () => onAgeInput(ageInput));
-  ageRange.addEventListener("input", () => onAgeInput(ageRange));
-  intake.querySelectorAll<HTMLButtonElement>("button[data-age]").forEach((b) => {
-    b.addEventListener("click", () => {
-      setAge(b.dataset.age === "adult" ? 18 : 14);
-      intake.querySelectorAll<HTMLButtonElement>("button[data-age]").forEach((x) => {
-        x.classList.toggle("is-active", x === b);
-        x.setAttribute("aria-pressed", x === b ? "true" : "false");
-      });
-    });
-  });
+  ageRange.addEventListener("input", () => setAge(Number(ageRange.value)));
 
   goBtn.addEventListener("click", () => {
     if (!field || !confidence || !ageSet) return;
@@ -181,12 +216,23 @@ export async function mountGetStarted(root: HTMLElement, { byId }: { byId: Map<s
       quizWrap.innerHTML = `<p class="muted">${esc(t("getstarted.empty"))}</p>`;
       return;
     }
+    // Repeat-session memory: fold LIFETIME confidence history for this field (from every past
+    // /get-started run and ordinary lesson quiz — not just this session) into a per-branch "already
+    // known to about level X" map, so a second run starts past ground already covered instead of
+    // re-asking it from scratch.
+    const prior = priorFrontier(
+      allEntries().filter((e) => e.id.startsWith(`${f}/`)),
+      pool,
+    );
+    // Sampling still favours whatever the learner hasn't shown mastery of yet, even within a
+    // branch's own band — mirrors course-quiz's inverse-star weighting.
+    const weightOf = (id: string) => 1 / (1 + Math.max(0, readEntry(id)?.stars ?? 0));
     const manifest = await (await fetch("/dist/asset-manifest.json")).json();
     // Use the app bundle (not the concept `primer` entry): that entry side-effect-runs render.ts.
     const bundleUrl = location.origin + (manifest.app ?? manifest.primer);
     const cache = new Map<string, HarvestedQuestion[]>();
     const exclude = new Set<string>();
-    let state: PlacementState = startState(f, a, c);
+    let state: PlacementState = startState(f, a, c, pool, prior);
 
     // harvestPage() captures a page's registrations via document-level CustomEvents and binds the
     // quiz builder to ITS OWN parsed doc — safe only when harvests run one at a time (as
@@ -233,7 +279,7 @@ export async function mountGetStarted(root: HTMLElement, { byId }: { byId: Map<s
     const prefetch = (s: PlacementState, id: string, level: number) => {
       for (const ok of [true, false]) {
         const next = applyAnswer(s, id, level, ok);
-        const p = pickNext(next, pool, new Set([...exclude, id]), Math.random, ceiling);
+        const p = pickNext(next, pool, new Set([...exclude, id]), Math.random, ceiling, weightOf);
         if ("id" in p) void harvest(p.id);
       }
     };
@@ -249,7 +295,7 @@ export async function mountGetStarted(root: HTMLElement, { byId }: { byId: Map<s
 
     const showNext = async (): Promise<void> => {
       for (let attempt = 0; attempt < 12; attempt++) {
-        const pick = pickNext(state, pool, exclude, Math.random, ceiling);
+        const pick = pickNext(state, pool, exclude, Math.random, ceiling, weightOf);
         if ("done" in pick) {
           finish();
           return;
@@ -304,6 +350,39 @@ export async function mountGetStarted(root: HTMLElement, { byId }: { byId: Map<s
       : state.field === "physics" ? "physics/physics"
         : "mathematics/mathematics";
     const branchLabel = (b: string) => b.replace(/-/g, " ");
+
+    // Cross-session progress: compare this run's per-branch frontier against the last snapshot for
+    // this field, then persist a fresh one (merging in any branch this run didn't touch) — this is
+    // what makes repeat runs visibly "remember" what they learned last time, not just internally.
+    interface Snapshot { date?: string; branches?: Record<string, number> }
+    let prevSnap: Snapshot = {};
+    try {
+      prevSnap = (JSON.parse(safeGet(SNAPSHOT_KEY(state.field)) || "{}") ?? {}) as Snapshot;
+    } catch {
+      prevSnap = {};
+    }
+    const progressLines: string[] = [];
+    for (const b of s.branches) {
+      if (b.strongTo == null) continue;
+      const prev = prevSnap.branches?.[b.branch];
+      if (prev != null && b.strongTo > prev) {
+        progressLines.push(
+          t("getstarted.progressLine", { branch: branchLabel(b.branch), from: String(prev), to: String(b.strongTo) }),
+        );
+      }
+    }
+    const newBranches: Record<string, number> = { ...prevSnap.branches };
+    for (const b of s.branches) if (b.strongTo != null) newBranches[b.branch] = b.strongTo;
+    safeSet(
+      SNAPSHOT_KEY(state.field),
+      JSON.stringify({ date: new Date().toISOString().slice(0, 10), branches: newBranches } satisfies Snapshot),
+    );
+    const progressBlock = progressLines.length
+      ? `<div class="gs-progress-since">
+           <h3>${esc(t("getstarted.progressTitle", { date: prevSnap.date ?? "" }))}</h3>
+           <ul>${progressLines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>
+         </div>`
+      : "";
     const chips = s.branches
       .map((b) => {
         const label = branchLabel(b.branch);
@@ -350,6 +429,7 @@ export async function mountGetStarted(root: HTMLElement, { byId }: { byId: Map<s
     summary.innerHTML = `
       <h2>${esc(t("getstarted.summaryTitle"))}</h2>
       <p>${esc(t("getstarted.frontier", { n: String(s.frontier), field: t("getstarted.field." + state.field) }))}</p>
+      ${progressBlock}
       ${courseBlock}
       <div class="gs-branches">${chips || `<span class="muted">${esc(t("getstarted.noBranches"))}</span>`}</div>
       <h3>${esc(t("getstarted.startHere"))}</h3>
