@@ -65,14 +65,16 @@ export async function mountGetStarted(root: HTMLElement, { byId }: { byId: Map<s
   }));
 
   root.innerHTML = "";
-  const head = el("header", "dash-head", `<h1 class="dash-title">${esc(t("getstarted.heading"))}</h1>
+  const introCard = el("section", "card gs-intro", `
+    <img class="card-image" src="/images/knowledge-level/getting-started.png" alt="" loading="lazy">
+    <h1 class="dash-title">${esc(t("getstarted.heading"))}</h1>
     <p class="dash-sub" id="gs-lead">${esc(t("getstarted.lead"))}</p>`);
   const intake = el("section", "card gs-intake");
   const quizWrap = el("div", "gs-quiz");
   quizWrap.hidden = true;
   const summary = el("section", "card gs-summary");
   summary.hidden = true;
-  root.append(head, intake, quizWrap, summary);
+  root.append(introCard, intake, quizWrap, summary);
 
   // ---- intake ------------------------------------------------------------------------------------
   let saved: { field?: Field; age?: number; confidence?: Confidence } = {};
@@ -148,7 +150,7 @@ export async function mountGetStarted(root: HTMLElement, { byId }: { byId: Map<s
   const confBox = intake.querySelector("#gs-conf") as HTMLElement;
   const ageRange = intake.querySelector("#gs-age-range") as HTMLInputElement;
   const goBtn = intake.querySelector("#gs-go") as HTMLButtonElement;
-  const leadEl = head.querySelector("#gs-lead") as HTMLElement;
+  const leadEl = introCard.querySelector("#gs-lead") as HTMLElement;
   const fieldLegendEl = intake.querySelector("#gs-field-legend") as HTMLElement;
   const confLegendEl = intake.querySelector("#gs-conf-legend") as HTMLElement;
   const ready = () => {

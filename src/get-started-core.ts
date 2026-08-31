@@ -50,6 +50,10 @@ export interface BranchState {
   probesUsed: number;
   frontierCount: number;
   subPhase: "ascent" | "frontier" | "done";
+  /** This branch's own ascent budget (on top of which it can still broaden up to MAX_FRONTIER more
+   *  once it reaches "frontier") — smaller for branches with strong prior history, see {@link
+   *  branchBudget}. */
+  budget: number;
 }
 
 export interface PlacementState {
@@ -59,8 +63,6 @@ export interface PlacementState {
   probes: Probe[];
   /** Primary branches for this session, largest pool first — fixed at start. */
   branchOrder: string[];
-  /** Question budget per branch (smattering + ascent + up to MAX_FRONTIER frontier probes). */
-  perBranchBudget: number;
   branches: Record<string, BranchState>;
 }
 
@@ -151,37 +153,67 @@ export function ceilingPool(nodes: readonly ProbeNode[], field: Field): ProbeNod
  * This field's branches ranked by how many school-pool concepts they hold, largest first — the
  * ones substantial enough to deserve their own tracked climb. Ties break alphabetically so the
  * order (and therefore test expectations) is deterministic.
+ *
+ * When there are more substantial branches than `cap`, a `prior` map (see {@link priorFrontier})
+ * rotates coverage across repeat sessions: branches with no prior entry yet (never explored to
+ * even partial confidence) take priority over ones that already do, so a subject with more
+ * branches than the cap doesn't probe the same largest-N branches forever while smaller ones never
+ * get adaptive coverage. A first-ever session (empty `prior`) is unaffected — every branch ties on
+ * "unseen" so pool size alone decides, same as before.
  */
-export function primaryBranches(pool: readonly ProbeNode[], cap = PRIMARY_BRANCH_CAP): string[] {
+export function primaryBranches(
+  pool: readonly ProbeNode[],
+  cap = PRIMARY_BRANCH_CAP,
+  prior: Record<string, number> = {},
+): string[] {
   const counts = new Map<string, number>();
   for (const n of pool) {
     const b = branchOf(n.id);
     counts.set(b, (counts.get(b) ?? 0) + 1);
   }
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, cap)
-    .map(([b]) => b);
+  const bySize = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (bySize.length <= cap) return bySize.map(([b]) => b);
+  const unseen = bySize.filter(([b]) => prior[b] == null);
+  const seen = bySize.filter(([b]) => prior[b] != null);
+  return [...unseen, ...seen].slice(0, cap).map(([b]) => b);
 }
 
 /**
- * Fold lifetime confidence history into a per-branch "already comfortable up to about level X"
- * map, restricted to concepts the learner has actually shown some mastery of (`stars >=
- * PRIOR_KNOWN_STARS`). Concepts with no known level (not in `pool`, e.g. from a different field or
- * since retired) are ignored. Used to seed a repeat session past ground already covered.
+ * Fold lifetime confidence history into a per-branch seed level, used to start a repeat session
+ * past ground already covered instead of from an age-only cold guess. A branch with a concept at
+ * or above `PRIOR_KNOWN_STARS` is seeded from the highest such level (the learner has shown real
+ * mastery there). A branch with only WEAKER touches (some stars, but none crossing the threshold)
+ * still nudges the seed — scaled by how convincing the strongest partial touch is
+ * (`stars / PRIOR_KNOWN_STARS`) — continuous with the "known" case at the threshold: a touch near 0
+ * stars seeds just below the touched level (re-probe close by), a touch near `PRIOR_KNOWN_STARS`
+ * stars seeds almost like a fully "known" skip-ahead. Concepts with no known level (not in `pool`,
+ * e.g. from a different field or since retired) are ignored.
  */
 export function priorFrontier(
   entries: readonly HistoryEntry[],
   pool: readonly ProbeNode[],
 ): Record<string, number> {
   const levelOf = new Map(pool.map((n) => [n.id, n.level]));
-  const out: Record<string, number> = {};
+  const byBranch = new Map<string, { level: number; stars: number }[]>();
   for (const e of entries) {
-    if (e.stars < PRIOR_KNOWN_STARS) continue;
+    if (e.stars <= 0) continue;
     const level = levelOf.get(e.id);
     if (level == null) continue;
     const b = branchOf(e.id);
-    out[b] = out[b] == null ? level : Math.max(out[b], level);
+    const list = byBranch.get(b) ?? [];
+    list.push({ level, stars: e.stars });
+    byBranch.set(b, list);
+  }
+  const out: Record<string, number> = {};
+  for (const [b, items] of byBranch) {
+    const known = items.filter((i) => i.stars >= PRIOR_KNOWN_STARS);
+    if (known.length) {
+      out[b] = Math.max(...known.map((i) => i.level));
+      continue;
+    }
+    const best = items.reduce((a, c) => (c.stars > a.stars ? c : a));
+    const frac = Math.min(1, best.stars / PRIOR_KNOWN_STARS);
+    out[b] = best.level - 1 + frac;
   }
   return out;
 }
@@ -198,6 +230,22 @@ export function startingLevel(age: number, confidence: Confidence, field: Field)
   return Math.max(floor, Math.min(16, a + nudge - 1));
 }
 
+/**
+ * A branch's own ascent budget: the even per-branch share, scaled down toward
+ * `MIN_PER_BRANCH_BUDGET` the closer its prior seed sits to the school ceiling — a branch already
+ * proven near the top only needs a light check-in, freeing the rest of the session's MAX_QUESTIONS
+ * cap for branches with less (or no) history. No explicit redistribution is needed: `pickNext`'s
+ * round-robin already hands off to the next branch once one finishes, and MAX_QUESTIONS is what
+ * actually ends the session — shrinking a known branch's budget just means it finishes sooner.
+ */
+function branchBudget(field: Field, evenShare: number, prior?: number): number {
+  if (prior == null) return evenShare;
+  const [floor] = LOW_BAND[field];
+  const coverage = Math.min(1, Math.max(0, (prior - floor) / (SCHOOL_MAX - floor)));
+  const reduced = evenShare * (1 - coverage) + MIN_PER_BRANCH_BUDGET * coverage;
+  return Math.max(MIN_PER_BRANCH_BUDGET, Math.round(reduced));
+}
+
 export function startState(
   field: Field,
   age: number,
@@ -206,8 +254,8 @@ export function startState(
   prior: Record<string, number> = {},
 ): PlacementState {
   const base = startingLevel(age, confidence, field);
-  const branchOrder = primaryBranches(pool);
-  const perBranchBudget = Math.max(
+  const branchOrder = primaryBranches(pool, PRIMARY_BRANCH_CAP, prior);
+  const evenShare = Math.max(
     MIN_PER_BRANCH_BUDGET,
     Math.floor(MAX_QUESTIONS / Math.max(1, branchOrder.length)),
   );
@@ -225,6 +273,7 @@ export function startState(
     branches[b] = {
       // A branch with established history starts just above its known ceiling, not from scratch.
       targetLevel: seed != null ? Math.min(SCHOOL_MAX, Math.round(seed) + 1) : nearestLevel,
+      budget: branchBudget(field, evenShare, seed),
       frontier: null,
       consecutiveHits: 0,
       consecutiveMisses: 0,
@@ -233,7 +282,7 @@ export function startState(
       subPhase: "ascent",
     };
   }
-  return { field, age: clampAge(age), confidence, probes: [], branchOrder, perBranchBudget, branches };
+  return { field, age: clampAge(age), confidence, probes: [], branchOrder, branches };
 }
 
 function pickOne<T>(items: T[], rng: Rng): T | null {
@@ -395,13 +444,13 @@ export function applyAnswer(state: PlacementState, id: string, level: number, co
         bs.frontierCount = 0;
       }
     }
-    if (bs.subPhase === "ascent" && bs.probesUsed >= state.perBranchBudget) {
+    if (bs.subPhase === "ascent" && bs.probesUsed >= bs.budget) {
       bs.subPhase = "done";
       bs.frontier = estimateBranchFrontier(bs, branchProbes, state);
     }
   } else if (bs.subPhase === "frontier") {
     bs.frontierCount += 1;
-    if (bs.frontierCount >= MAX_FRONTIER || bs.probesUsed >= state.perBranchBudget + MAX_FRONTIER) {
+    if (bs.frontierCount >= MAX_FRONTIER || bs.probesUsed >= bs.budget + MAX_FRONTIER) {
       bs.subPhase = "done";
     }
   }

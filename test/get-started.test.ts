@@ -25,6 +25,7 @@ import {
   type BranchState,
   MAX_FRONTIER,
   MISS_THRESHOLD,
+  MIN_PER_BRANCH_BUDGET,
 } from "../src/get-started-core.ts";
 import { isLightQuestion, isQuestion } from "../src/course-quiz-core.ts";
 
@@ -66,6 +67,7 @@ function isolateBranch(state: PlacementState, branch: string, overrides: Partial
       b === branch
         ? {
             targetLevel: 12,
+            budget: state.branches[b]?.budget ?? MIN_PER_BRANCH_BUDGET,
             frontier: null,
             consecutiveHits: 0,
             consecutiveMisses: 0,
@@ -76,6 +78,7 @@ function isolateBranch(state: PlacementState, branch: string, overrides: Partial
           }
         : {
             targetLevel: 0,
+            budget: 0,
             frontier: 0,
             consecutiveHits: 0,
             consecutiveMisses: 0,
@@ -125,6 +128,22 @@ test("primaryBranches ranks by pool size, ties broken alphabetically", () => {
     const count = (b: string) => pool.filter((n) => branchOf(n.id) === b).length;
     return count(b) - count(a) || a.localeCompare(b);
   }));
+});
+
+test("primaryBranches rotates coverage: an unseen branch displaces a covered larger one", () => {
+  // 4 branches, "big" the largest by far — with no prior history, size alone decides (unchanged).
+  const pool = [
+    ...Array.from({ length: 5 }, (_, i) => node(`mathematics/big/n${i}`, 10)),
+    ...Array.from({ length: 2 }, (_, i) => node(`mathematics/medium/n${i}`, 10)),
+    node("mathematics/small/n0", 10),
+    node("mathematics/tiny/n0", 10),
+  ];
+  assert.deepEqual(primaryBranches(pool, 2), ["big", "medium"]);
+  // "big" and "small" already have prior history; "medium" and "tiny" have none yet — despite
+  // being smaller than "big", the unseen pair displaces it so a repeat session's adaptive coverage
+  // rotates onto ground a prior run never got to, instead of probing the same largest branches
+  // forever.
+  assert.deepEqual(primaryBranches(pool, 2, { big: 15, small: 10 }), ["medium", "tiny"]);
 });
 
 test("every primary branch gets a first probe before any branch repeats", () => {
@@ -247,12 +266,29 @@ test("priorFrontier folds lifetime stars (above the known-threshold) into a per-
   assert.equal(prior.statistics, undefined);
 });
 
+test("priorFrontier blends a partial (below-threshold) touch when a branch has no known concept", () => {
+  const pool = schoolPool(mathsPool(), "mathematics");
+  // statistics has only one pool concept (pictograms, level 7) and no stars>=PRIOR_KNOWN_STARS
+  // anywhere in the branch — the seed should nudge up from a partial touch, not be ignored outright
+  // (the all-or-nothing behavior) and not jump a full level ahead either (the "known" behavior).
+  const prior = priorFrontier([{ id: "mathematics/statistics/pictograms", stars: 2 }], pool);
+  assert.equal(prior.statistics, 7 - 1 + 2 / 5);
+  assert.ok(prior.statistics > 6 && prior.statistics < 7);
+});
+
 test("startState seeds a branch with prior history just above its known ceiling", () => {
   const pool = schoolPool(mathsPool(), "mathematics");
   const cold = startState("mathematics", 12, 3, pool);
   const warm = startState("mathematics", 12, 3, pool, { algebra: 12 });
   assert.ok(warm.branches.algebra.targetLevel > cold.branches.algebra.targetLevel);
   assert.equal(warm.branches.algebra.targetLevel, 13);
+});
+
+test("a branch with strong prior coverage gets a smaller budget than an unseen branch", () => {
+  const pool = schoolPool(mathsPool(), "mathematics");
+  const state = startState("mathematics", 12, 3, pool, { algebra: 16 });
+  assert.ok(state.branches.algebra.budget < state.branches.geometry.budget);
+  assert.ok(state.branches.algebra.budget >= MIN_PER_BRANCH_BUDGET);
 });
 
 test("summarise reports per-branch strongTo and starts on the weakest", () => {
