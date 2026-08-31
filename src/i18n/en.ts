@@ -349,8 +349,8 @@ const en: Record<string, string> = {
   "getstarted.young.conf.4": "Lots of it",
   "getstarted.young.conf.5": "I'm great at it!",
   "getstarted.young.go": "Let's go!",
-  "landing.tilePlace": "Find your place",
-  "landing.tilePlaceDesc": "A short quiz that situates you in school maths, physics or computer science.",
+  "landing.tilePlace": "Getting started",
+  "landing.tilePlaceDesc": "Not sure where to start? A quick quiz finds your knowledge frontier in school maths, physics or computer science, so you can dive in at the level that's just right for you.",
 
   "dash.docTitle": "My Progress — Interactive Primer",
   "dash.loading": "Loading your progress…",
