@@ -38,6 +38,7 @@ const en: Record<string, string> = {
   "landing.tileStats": "Visitor stats",
   "landing.tileStatsDesc": "A public dashboard of how many people are climbing the tree.",
   "landing.footer": "Made with <span aria-label=\"love\">💚</span> in Amsterdam on",
+  "landing.license": "Concepts are licensed under <a href=\"https://github.com/jimmejardine/interactiveprimer/blob/main/LICENSE-CONTENT.md\" target=\"_blank\" rel=\"noopener\">CC BY-SA 4.0</a>, code under <a href=\"https://github.com/jimmejardine/interactiveprimer/blob/main/LICENSE\" target=\"_blank\" rel=\"noopener\">AGPL-3.0</a>.",
 
   "concept.confidence.prompt": "How confident are you with this concept?",
   "feedback.needsAttention": "This page needs attention",
