@@ -19,6 +19,21 @@ export const SEARCH_BOX_CSS = `
      viewport's top-left (mirroring the top-right hamburger); default flows in-place. */
   .cg-search--overlay { position: absolute; top: 0.7rem; left: 0.7rem; z-index: 5; }
   .cg-search--fixed { position: fixed; top: 0.75rem; left: 0.75rem; z-index: 1000; width: min(8.5rem, 29vw); }
+  /* Fixed top-left BAR: an optional back button + the search box, side by side (the PWA/standalone
+     case has no browser chrome, so this is the only way back). The search box inside it uses
+     placement "inline" — the bar itself carries the fixed positioning. */
+  .cg-search-bar--fixed { position: fixed; top: 0.75rem; left: 0.75rem; z-index: 1000; display: flex; align-items: center; gap: 0.4rem; }
+  .cg-search-bar--fixed .cg-search { width: min(8.5rem, 29vw); }
+  .cg-back-btn {
+    flex: 0 0 auto; display: grid; place-items: center;
+    width: 2.6rem; height: 2.6rem; padding: 0; border: none; border-radius: var(--primer-radius, 0.7rem);
+    background: var(--primer-surface, #fff); color: var(--primer-ink, #111);
+    box-shadow: var(--primer-shadow-md, 0 2px 8px rgba(0, 0, 0, 0.12));
+    cursor: pointer;
+  }
+  .cg-back-btn:hover { transform: translateY(-1px); }
+  .cg-back-btn:focus-visible { outline: 2px solid var(--primer-accent, #46e); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { .cg-back-btn:hover { transform: none; } }
   .cg-search-input {
     width: 100%; box-sizing: border-box; font: inherit; font-size: 0.92rem;
     padding: 0.5rem 0.7rem; border-radius: var(--primer-radius, 0.6rem);
@@ -59,6 +74,27 @@ export const SEARCH_BOX_CSS = `
 
 /** The shield image marking a course in the result list. */
 const SHIELD = '<img src="/images/course_shield.png" alt="" aria-hidden="true">';
+
+const BACK_SVG =
+  '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" width="20" height="20">' +
+  '<path d="M15 4 7 12l8 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
+  "</svg>";
+
+/**
+ * Create a standalone "go back" button (browser-back equivalent) — for the PWA/standalone case,
+ * which has no browser chrome and so no other way back. Caller places it (e.g. beside a fixed
+ * search box) and provides the label; clicking calls `history.back()`.
+ */
+export function makeBackButton(label: string): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "cg-back-btn";
+  btn.setAttribute("aria-label", label);
+  btn.title = label;
+  btn.innerHTML = BACK_SVG;
+  btn.addEventListener("click", () => history.back());
+  return btn;
+}
 
 /** Distinguishes element ids across multiple boxes on one page (explorer + two pathways). */
 let seq = 0;

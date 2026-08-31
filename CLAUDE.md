@@ -4,6 +4,9 @@
 - **Full API reference** for the rarely-used elements (manim, low-level & 3-D charts, geometry-problem,
   program exercises, video, the geometry toolkit, courses, localization overlays, the a11y checklist,
   helper list) lives in **`docs/authoring-reference.md`** — read it on demand. This file is the lean core.
+- **A worked example** combining most elements in one real page (cards, math, a vignette, a theorem,
+  runnable code, a chart, 3-D chart, geometry figure, geometry problem, video) lives at
+  `concepts/instructors/pages.html` — a concrete, valid pattern to copy from.
 
 A page is a single `.html` file under `concepts/`; there is **no build step**.
 

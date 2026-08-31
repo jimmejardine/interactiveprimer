@@ -33,8 +33,8 @@ const en: Record<string, string> = {
   "landing.tileExploreDesc": "Every concept as one interactive graph you can drag, zoom, and dive into.",
   "landing.tileRoot": "Start at the root",
   "landing.tileRootDesc": "The single page from which the whole tree grows.",
-  "landing.tileInstructors": "For instructors",
-  "landing.tileInstructorsDesc": "What concept pages are, and how to build your own lessons.",
+  "landing.tileInstructors": "For schools & teachers",
+  "landing.tileInstructorsDesc": "Free, open-source, no sign-up — syllabus-matched lessons your class can start today.",
   "landing.tileStats": "Visitor stats",
   "landing.tileStatsDesc": "A public dashboard of how many people are climbing the tree.",
   "landing.footer": "Made with <span aria-label=\"love\">💚</span> in Amsterdam on",
@@ -147,6 +147,8 @@ const en: Record<string, string> = {
 
   "search.concepts": "Search concepts…",
   "search.courses": "Search courses…",
+
+  "nav.back": "Back",
 
   "ref.todo": "todo",
   "ref.todoTitle": "Planned — not written yet",

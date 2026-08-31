@@ -30,7 +30,7 @@ import { getConceptMeta, conceptIdFromPath } from "./concept-meta.ts";
 import { initTheme } from "./theme.ts";
 import { initLocale, getLocale, DEFAULT_LOCALE, t, type LocaleId } from "./i18n.ts";
 import { loadGraph } from "./graph-data.ts";
-import { mountConceptSearch as mountConceptSearchBox, SEARCH_BOX_CSS } from "./concept-search-box.ts";
+import { mountConceptSearch as mountConceptSearchBox, makeBackButton, SEARCH_BOX_CSS } from "./concept-search-box.ts";
 import { runProgressMigration } from "./progress-migration.ts";
 import { initWikiLookup } from "./wiki-selection.ts";
 
@@ -178,11 +178,24 @@ async function render(): Promise<void> {
 }
 
 /**
- * Mount the fixed top-left search box once on a lesson page. Loads the graph for the concept-name
+ * Whether the page is running as an installed PWA (standalone display mode) rather than in an
+ * ordinary browser tab. Installed apps have no browser chrome — no visible back button — so this
+ * gates the in-page back button below (a normal tab already has one; adding a second is clutter).
+ */
+function isStandalone(): boolean {
+  return (
+    (typeof matchMedia === "function" && matchMedia("(display-mode: standalone)").matches) ||
+    (navigator as Navigator & { standalone?: boolean }).standalone === true
+  );
+}
+
+/**
+ * Mount the fixed top-left search box (and, when running as an installed PWA with somewhere to go
+ * back to, a back button beside it) once on a lesson page. Loads the graph for the concept-name
  * list; selecting a result navigates to that concept.
  */
 async function mountConceptSearch(body: HTMLElement, locale: string): Promise<void> {
-  if (body.querySelector(".cg-search")) return; // already mounted
+  if (body.querySelector(".cg-search-bar--fixed")) return; // already mounted
   if (!document.getElementById("concept-search-style")) {
     const s = document.createElement("style");
     s.id = "concept-search-style";
@@ -191,10 +204,16 @@ async function mountConceptSearch(body: HTMLElement, locale: string): Promise<vo
   }
   const graph = await loadGraph().catch(() => null);
   if (!graph) return; // no graph → no search (the page is otherwise fine)
-  mountConceptSearchBox(body, {
+
+  const bar = document.createElement("div");
+  bar.className = "cg-search-bar--fixed";
+  if (isStandalone() && history.length > 1) bar.appendChild(makeBackButton(t("nav.back")));
+  body.appendChild(bar);
+
+  mountConceptSearchBox(bar, {
     byId: graph.byId,
     locale,
-    placement: "fixed",
+    placement: "inline",
     onSelect: (id: string) => {
       window.location.href = `/concepts/${id}`;
     },

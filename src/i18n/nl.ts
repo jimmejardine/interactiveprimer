@@ -145,6 +145,8 @@ const nl: Record<string, string> = {
   "search.concepts": "Concepten zoeken…",
   "search.courses": "Cursussen zoeken…",
 
+  "nav.back": "Terug",
+
   "ref.todo": "nog te doen",
   "ref.todoTitle": "Gepland — nog niet geschreven",
 

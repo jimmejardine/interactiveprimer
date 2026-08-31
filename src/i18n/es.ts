@@ -145,6 +145,8 @@ const es: Record<string, string> = {
   "search.concepts": "Buscar conceptos…",
   "search.courses": "Buscar cursos…",
 
+  "nav.back": "Atrás",
+
   "ref.todo": "pendiente",
   "ref.todoTitle": "Planificado — aún sin escribir",
 
